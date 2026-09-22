@@ -292,9 +292,17 @@ async fn pump(
     }
 }
 
-/// Directory handed to lanes. Phase 0 uses the repo the app was launched from.
+/// Directory handed to lanes: the repository the app was launched from.
+///
+/// `tauri dev` starts the binary inside `src-tauri/`, so the plain working
+/// directory would point agents at the wrong folder. Walk up to the nearest
+/// `.git`; without one, the working directory itself.
 fn workspace_root() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    cwd.ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(PathBuf::from)
+        .unwrap_or(cwd)
 }
 
 /// Open the event store: `ORCHESTRA_DB` if set, else `orchestra.db` in the
