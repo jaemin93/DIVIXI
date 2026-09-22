@@ -550,35 +550,39 @@ class Store {
     this.busy = true;
     this.lastError = "";
     const agent = this.agent;
+
+    // Show the message the moment Enter is pressed. The run gets its real id
+    // when the core answers; until then it carries a pending id, and events
+    // that arrive for the real id first are routed to it by `apply`.
+    const pending: Run = {
+      id: `pending-${Date.now()}`,
+      lane: "conductor",
+      agent,
+      prompt: text,
+      status: "connecting",
+      startedAt: Date.now(),
+      message: "",
+      plan: [],
+      toolCount: 0,
+      loaded: true,
+      thought: "",
+      tools: [],
+      transcript: [],
+      segments: [],
+    };
+    this.runs.push(pending);
+
     try {
       const id = await invoke<string>("conductor_prompt", { prompt: text, agent });
-      // The core emits the first events before this call returns, and
-      // `apply` creates a placeholder run for them. Fill that in rather than
-      // pushing a second run with the same id, which would sit empty forever.
-      const existing = this.runs.find((r) => r.id === id);
-      if (existing) {
-        existing.lane = "conductor";
-        existing.agent = agent;
-        existing.prompt = text;
-        return;
+      const run = this.runs.find((r) => r === pending || r.id === id);
+      if (run) {
+        run.id = id;
+        run.lane = "conductor";
+        run.agent = agent;
+        run.prompt = text;
       }
-      this.runs.push({
-        id,
-        lane: "conductor",
-        agent,
-        prompt: text,
-        status: "connecting",
-        startedAt: Date.now(),
-        message: "",
-        plan: [],
-        toolCount: 0,
-        loaded: true,
-        thought: "",
-        tools: [],
-        transcript: [],
-        segments: [],
-      });
     } catch (err) {
+      this.runs = this.runs.filter((r) => r !== pending);
       this.busy = false;
       this.lastError = String(err);
     }
@@ -587,6 +591,11 @@ class Store {
   /** Fold one live lane event into the run it belongs to, creating lane runs on first sight. */
   apply(env: Envelope) {
     let run = this.runs.find((r) => r.id === env.run);
+    if (!run && env.lane === "conductor") {
+      // The conductor turn we just sent, still waiting for its id.
+      run = this.runs.find((r) => r.lane === "conductor" && r.id.startsWith("pending-"));
+      if (run) run.id = env.run;
+    }
     if (!run) {
       // A lane the conductor opened: the core registered it, we have not.
       // Show it now; the prompt text comes with the summary on reload.
