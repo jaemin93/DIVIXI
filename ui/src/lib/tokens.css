@@ -77,6 +77,21 @@
   --mono: "IBM Plex Mono", ui-monospace, monospace;
   --sans: "IBM Plex Sans", system-ui, sans-serif;
   --serif: "Newsreader", Georgia, serif;
+
+  /* Conversation text: the user's bubbles and agent prose. Set from
+     settings via data-chat-font on <html>. */
+  --chat-fs: 15px;
+  --chat-lh: 1.55;
+}
+
+:root[data-chat-font="s"] {
+  --chat-fs: 13px;
+  --chat-lh: 1.55;
+}
+
+:root[data-chat-font="l"] {
+  --chat-fs: 18px;
+  --chat-lh: 1.5;
 }
 
 * {

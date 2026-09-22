@@ -111,6 +111,21 @@ export type View = "track" | "settings";
 /** What the user asked for; `system` follows the OS. */
 export type ThemePref = "system" | "dark" | "light";
 
+/** Conversation text size. */
+export type ChatFont = "s" | "m" | "l";
+
+/** Settings sections, in the settings column. */
+export type SettingsSection = "overview" | "appearance" | "chat" | "agents" | "about";
+
+/** Mirrors the `app_info` command. */
+export type AppInfo = {
+  version: string;
+  db_path: string;
+  adapters_dir: string;
+  workspace: string;
+  runs: number;
+};
+
 const scheme = typeof window !== "undefined" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
 
 /** Mirrors the `agent_download` event payload. */
@@ -136,6 +151,11 @@ class Store {
   railCollapsed = $state(false);
   /** Second column (tracks and their lanes) shown. Persisted. */
   trackListOpen = $state(true);
+  /** Which settings section is open. */
+  settingsSection = $state<SettingsSection>("overview");
+  /** Conversation text size. Persisted. */
+  chatFont = $state<ChatFont>("m");
+  info = $state<AppInfo | null>(null);
   runs = $state<Run[]>([]);
   /** Run id whose lane detail is open in the inspector; "" means closed. */
   inspecting = $state("");
@@ -202,6 +222,32 @@ class Store {
     }
   }
 
+  /** Open settings on a section. */
+  openSettings(section: SettingsSection = "overview") {
+    this.settingsSection = section;
+    this.view = "settings";
+    void this.loadInfo();
+  }
+
+  async loadInfo() {
+    try {
+      this.info = await invoke<AppInfo>("app_info");
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Conversation text size; persisted, applied through a root attribute. */
+  async setChatFont(size: ChatFont) {
+    this.chatFont = size;
+    document.documentElement.dataset.chatFont = size;
+    try {
+      await invoke("set_setting", { key: "chat_font", value: size });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
   /** Show or hide the track list column; persisted. */
   async setTrackList(open: boolean) {
     this.trackListOpen = open;
@@ -218,17 +264,20 @@ class Store {
       if (this.themePref === "system") this.applyTheme();
     });
     try {
-      const [summaries, agents, theme, rail, tracklist] = await Promise.all([
+      const [summaries, agents, theme, rail, tracklist, chatFont] = await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<AgentStatus[] | null>("agent_statuses"),
         invoke<string | null>("get_setting", { key: "theme" }),
         invoke<string | null>("get_setting", { key: "rail" }),
         invoke<string | null>("get_setting", { key: "tracklist" }),
+        invoke<string | null>("get_setting", { key: "chat_font" }),
       ]);
       if (theme === "system" || theme === "dark" || theme === "light") this.themePref = theme;
       this.applyTheme();
       this.railCollapsed = rail === "collapsed";
       this.trackListOpen = tracklist !== "closed";
+      if (chatFont === "s" || chatFont === "m" || chatFont === "l") this.chatFont = chatFont;
+      document.documentElement.dataset.chatFont = this.chatFont;
       this.runs = summaries.map(fromSummary);
       // The core closes runs left live by a previous process, so nothing
       // restored can be in flight.

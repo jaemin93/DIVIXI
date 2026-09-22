@@ -14,7 +14,7 @@
   <button class="btn" onclick={() => store.toggleTheme()}>
     {store.theme === "dk" ? "LIGHT" : "DARK"}
   </button>
-  <button class="btn" class:on={store.view === "settings"} onclick={() => (store.view = store.view === "settings" ? "track" : "settings")}>
+  <button class="btn" class:on={store.view === "settings"} onclick={() => (store.view === "settings" ? (store.view = "track") : store.openSettings("overview"))}>
     설정
   </button>
   <span class="mono agents">

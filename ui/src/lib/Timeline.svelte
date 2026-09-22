@@ -154,8 +154,8 @@
 
   .bubble p {
     margin: 0;
-    font-size: 16px;
-    line-height: 1.55;
+    font-size: var(--chat-fs);
+    line-height: var(--chat-lh);
     color: var(--txt);
   }
 
@@ -276,7 +276,7 @@
   }
 
   .v {
-    font-size: 13px;
+    font-size: calc(var(--chat-fs) - 2px);
     line-height: 1.75;
     color: var(--body);
   }

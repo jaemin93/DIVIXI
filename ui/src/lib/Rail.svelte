@@ -31,8 +31,8 @@
   ];
 
   const secondary: Item[] = [
-    { id: "agents", icon: "agents", label: "Agents", go: () => (store.view = "settings") },
-    { id: "settings", icon: "settings", label: "설정", go: () => (store.view = "settings") },
+    { id: "agents", icon: "agents", label: "Agents", go: () => store.openSettings("agents") },
+    { id: "settings", icon: "settings", label: "설정", go: () => store.openSettings("overview") },
   ];
 
   const collapsed = $derived(store.railCollapsed);

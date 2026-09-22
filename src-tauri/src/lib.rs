@@ -31,6 +31,8 @@ const AGENTS_META: &str = "agents";
 /// Process-wide state.
 pub struct AppState {
     store: Store,
+    /// Where the store lives, for the settings page.
+    db_path: String,
     /// Where downloaded ACP servers live (`<app data>/adapters`).
     adapters_dir: PathBuf,
     /// Last detection result, mirrored from the store for quick lookups.
@@ -167,6 +169,28 @@ fn search_runs(state: State<'_, AppState>, query: String) -> Result<Vec<SearchHi
 #[tauri::command]
 fn agent_statuses(state: State<'_, AppState>) -> Result<Option<Vec<AgentStatus>>, String> {
     state.load_agents()
+}
+
+/// Facts about this install, for the settings overview.
+#[derive(Clone, serde::Serialize)]
+struct AppInfo {
+    version: String,
+    db_path: String,
+    adapters_dir: String,
+    workspace: String,
+    runs: usize,
+}
+
+#[tauri::command]
+fn app_info(state: State<'_, AppState>) -> Result<AppInfo, String> {
+    let runs = state.store.runs().map_err(|e| e.to_string())?.len();
+    Ok(AppInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        db_path: state.db_path.clone(),
+        adapters_dir: state.adapters_dir.display().to_string(),
+        workspace: workspace_root().display().to_string(),
+        runs,
+    })
 }
 
 /// Namespace for user preferences in the store's `meta` table.
@@ -328,20 +352,20 @@ fn workspace_root() -> PathBuf {
 
 /// Open the event store: `ORCHESTRA_DB` if set, else `orchestra.db` in the
 /// platform app-data directory.
-fn open_store(data_dir: &std::path::Path) -> anyhow::Result<Store> {
+fn open_store(data_dir: &std::path::Path) -> anyhow::Result<(Store, String)> {
     if let Some(explicit) = std::env::var_os(DB_ENV) {
         if explicit == ":memory:" {
             tracing::warn!("{DB_ENV}=:memory: — nothing will persist");
-            return Store::in_memory();
+            return Ok((Store::in_memory()?, ":memory:".to_string()));
         }
         let path = PathBuf::from(explicit);
         tracing::info!(path = %path.display(), "opening event store");
-        return Store::open(path);
+        return Ok((Store::open(&path)?, path.display().to_string()));
     }
 
     let path = data_dir.join("orchestra.db");
     tracing::info!(path = %path.display(), "opening event store");
-    Store::open(path)
+    Ok((Store::open(&path)?, path.display().to_string()))
 }
 
 /// Entry point shared by the desktop binary.
@@ -358,14 +382,16 @@ pub fn run() {
             download_agent,
             get_setting,
             set_setting,
+            app_info,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let store = open_store(&data_dir)?;
+            let (store, db_path) = open_store(&data_dir)?;
             let adapters_dir = data_dir.join("adapters");
             app.manage(AppState {
                 store,
+                db_path,
                 adapters_dir,
                 agents: Mutex::new(None),
             });

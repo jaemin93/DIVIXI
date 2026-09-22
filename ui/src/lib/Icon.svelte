@@ -8,7 +8,11 @@
     | "agents"
     | "settings"
     | "collapse"
-    | "expand";
+    | "expand"
+    | "overview"
+    | "look"
+    | "chat"
+    | "info";
 </script>
 
 <script lang="ts">
@@ -43,6 +47,14 @@
     <path d="M9 3L4 8l5 5M12 3v10" />
   {:else if name === "expand"}
     <path d="M7 3l5 5-5 5M4 3v10" />
+  {:else if name === "overview"}
+    <rect x="2.5" y="2.5" width="11" height="11" /><path d="M2.5 6.5h11M6.5 6.5v7" />
+  {:else if name === "look"}
+    <circle cx="8" cy="8" r="5.5" /><path d="M8 2.5v11" /><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor" stroke="none" />
+  {:else if name === "chat"}
+    <path d="M2.5 3h11v7h-6l-3 3v-3h-2z" />
+  {:else if name === "info"}
+    <circle cx="8" cy="8" r="5.5" /><path d="M8 7v4M8 5v.5" />
   {/if}
 </svg>
 
