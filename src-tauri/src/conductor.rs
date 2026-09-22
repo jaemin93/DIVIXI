@@ -254,6 +254,7 @@ fn session_options(state: &AppState, agent: &str, mcp: Option<&McpServer>) -> Se
                 }]
             })
             .unwrap_or_default(),
+        resume: None,
     }
 }
 
@@ -396,13 +397,21 @@ pub async fn conductor_prompt(
                 drop(old);
             }
             let spec = st.spec_for(&agent)?;
-            let opts = session_options(&st, &agent, Some(&st.mcp));
-            tracing::info!(agent = %agent, mcp = %st.mcp.url(), "opening conductor session");
+            let mut opts = session_options(&st, &agent, Some(&st.mcp));
+            // Bring back the conductor this agent had last time, with its memory.
+            let key = format!("conductor_session:{agent}");
+            opts.resume = st.store.get_meta(&key).ok().flatten();
+            tracing::info!(agent = %agent, mcp = %st.mcp.url(), resume = ?opts.resume, "opening conductor session");
             let session = AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?;
+            let resumed = session.resumed();
+            if let Err(err) = st.store.set_meta(&key, session.session_id()) {
+                tracing::warn!(%err, "could not remember conductor session id");
+            }
             *guard = Some(Live {
                 agent: agent.clone(),
                 session: Arc::new(session),
-                turns: 0,
+                // A resumed session already had its preamble.
+                turns: if resumed { 1 } else { 0 },
             });
         }
         let live = guard.as_mut().expect("conductor session just ensured");

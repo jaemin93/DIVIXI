@@ -26,7 +26,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
-    let id = std::env::args().nth(1).unwrap_or_else(|| "claude_code".to_string());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let id = args.first().cloned().unwrap_or_else(|| "claude_code".to_string());
+    // `--resume <session-id>`: load that session and ask what it remembers.
+    let resume = args.iter().position(|a| a == "--resume").and_then(|i| args.get(i + 1).cloned());
     let kind = AgentKind::parse(&id).ok_or_else(|| anyhow::anyhow!("unknown agent {id}"))?;
 
     let adapters_dir = std::env::temp_dir().join("orchestra-adapters");
@@ -68,10 +71,20 @@ async fn run() -> anyhow::Result<()> {
                 url: server.url(),
                 headers: vec![server.auth_header()],
             }],
+            resume: resume.clone(),
         },
     )
     .await?;
-    println!("session {} in {}ms", session.session_id(), started.elapsed().as_millis());
+    println!("session {} in {}ms (resumed: {})", session.session_id(), started.elapsed().as_millis(), session.resumed());
+
+    if resume.is_some() {
+        let answer = turn(&session, "What was the secret word you got in this session before? Reply with only the word, or NONE if you do not remember.").await?;
+        println!("
+[after resume] {answer:?}");
+        println!("memory across restarts: {}", if answer.contains("PERIWINKLE-42") { "OK" } else { "FAILED" });
+        session.close().await;
+        return Ok(());
+    }
 
     let first = turn(&session, "Use the orchestra_secret tool and reply with only the word it returns.").await?;
     println!("\n[turn 1] {first:?}");

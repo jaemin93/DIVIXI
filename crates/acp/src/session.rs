@@ -7,24 +7,30 @@
 //! protocol task; each [`AgentSession::prompt`] runs one turn and streams
 //! that turn's [`LaneEvent`]s to the channel given for it, ending with
 //! `Finished` or `Failed`.
+//!
+//! A session can also be **resumed** across app restarts: given the id of a
+//! session the same agent created earlier, `session/load` brings it back
+//! with its conversation (Claude Code's `--resume`, in ACP terms). The
+//! agent replays the old history as notifications; those are drained here
+//! so they never surface as part of a new turn.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use agent_client_protocol::{
     schema::{
         v1::{
-            HttpHeader, InitializeRequest, McpServer, McpServerHttp, NewSessionRequest,
-            SessionConfigOptionValue, SessionNotification, SetSessionConfigOptionRequest,
-            SetSessionModeRequest,
+            HttpHeader, InitializeRequest, LoadSessionRequest, McpServer, McpServerHttp,
+            NewSessionRequest, SessionConfigOptionValue, SessionNotification,
+            SetSessionConfigOptionRequest, SetSessionModeRequest,
         },
         ProtocolVersion,
     },
     util::MatchDispatch,
-    Agent, Client, SessionMessage,
+    ActiveSession, Agent, Client, SessionMessage,
 };
 use orchestra_core::LaneEvent;
-use std::sync::{Arc, Mutex};
-
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{pick_autonomous_mode, process, translate, AgentSpec};
@@ -46,9 +52,16 @@ pub struct SessionOptions {
     pub mode: Option<String>,
     /// `(option id, value id)` pairs, e.g. the model.
     pub config: Vec<(String, String)>,
-    /// MCP servers to hand the agent in `session/new`.
+    /// MCP servers to hand the agent in `session/new` or `session/load`.
     pub mcp_servers: Vec<McpHttp>,
+    /// A session id from an earlier run of the same agent to bring back with
+    /// its history. When loading fails, a fresh session is opened instead and
+    /// [`AgentSession::resumed`] says so.
+    pub resume: Option<String>,
 }
+
+/// How long to wait for more replayed history after `session/load`.
+const REPLAY_QUIET: Duration = Duration::from_millis(400);
 
 /// One turn's request: the text and where its events go.
 struct Turn {
@@ -57,116 +70,143 @@ struct Turn {
     done: oneshot::Sender<anyhow::Result<()>>,
 }
 
+/// What the session task reports once the session exists.
+struct Ready {
+    session_id: String,
+    resumed: bool,
+}
+
 /// A live session. Dropping it ends the session and kills the agent.
 pub struct AgentSession {
     turns: mpsc::Sender<Turn>,
     session_id: String,
+    resumed: bool,
     task: tokio::task::JoinHandle<()>,
 }
 
+type ReadyTx = oneshot::Sender<anyhow::Result<Ready>>;
+
 impl AgentSession {
-    /// Launch the agent, initialize, create a session and apply mode and
-    /// options. Resolves once the session exists, so a failure to start
-    /// (auth, bad adapter) is reported here, not on the first prompt.
+    /// Launch the agent, initialize, create (or load) a session and apply
+    /// mode and options. Resolves once the session exists, so a failure to
+    /// start (auth, bad adapter) is reported here, not on the first prompt.
     pub async fn open(agent: &AgentSpec, opts: SessionOptions) -> anyhow::Result<Self> {
         let (process, transport) = process::spawn(agent)?;
         let (turn_tx, mut turn_rx) = mpsc::channel::<Turn>(1);
-        let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<String>>();
+        let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<Ready>>();
         let opts_for_task = opts.clone();
 
         let task = tokio::spawn(async move {
-            let ready: Arc<Mutex<Option<oneshot::Sender<anyhow::Result<String>>>>> = Arc::new(Mutex::new(Some(ready_tx)));
+            let ready: Arc<Mutex<Option<ReadyTx>>> = Arc::new(Mutex::new(Some(ready_tx)));
             let ready_inner = ready.clone();
             let outcome = Client
                 .builder()
                 .name("orchestra-session")
                 .connect_with(transport, async move |cx| {
-                    let _init = cx
+                    let init = cx
                         .send_request(InitializeRequest::new(ProtocolVersion::V1))
                         .block_task()
                         .await?;
+                    let can_load = init.agent_capabilities.load_session;
 
-                    let mcp: Vec<McpServer> = opts_for_task
-                        .mcp_servers
-                        .iter()
+                    let mcp = |o: &SessionOptions| -> Vec<McpServer> {
+                        o.mcp_servers
+                            .iter()
+                            .map(|m| {
+                                let mut http = McpServerHttp::new(m.name.clone(), m.url.clone());
+                                http.headers = m
+                                    .headers
+                                    .iter()
+                                    .map(|(n, v)| HttpHeader::new(n.clone(), v.clone()))
+                                    .collect();
+                                McpServer::Http(http)
+                            })
+                            .collect()
+                    };
+
+                    // Bring an earlier session back, or open a fresh one.
+                    let mut resumed = false;
+                    let mut session: Option<ActiveSession<'static, Agent>> = None;
+                    if let Some(id) = opts_for_task.resume.clone().filter(|_| can_load) {
+                        let request = LoadSessionRequest::new(id.clone(), opts_for_task.cwd.clone())
+                            .mcp_servers(mcp(&opts_for_task));
+                        match cx.load_session_from(request).block_task().start_session().await {
+                            Ok(restored) => {
+                                let mut s = restored.into_session();
+                                let replayed = drain_replay(&mut s).await;
+                                tracing::info!(session = %id, replayed, "resumed agent session");
+                                resumed = true;
+                                session = Some(s);
+                            }
+                            Err(err) => {
+                                tracing::warn!(session = %id, %err, "session/load failed; opening a fresh session");
+                            }
+                        }
+                    }
+                    let mut session = match session {
+                        Some(s) => s,
+                        None => {
+                            let request = NewSessionRequest::new(opts_for_task.cwd.clone())
+                                .mcp_servers(mcp(&opts_for_task));
+                            cx.build_session_from(request).block_task().start_session().await?
+                        }
+                    };
+
+                    let session_id = session.session_id().clone();
+                    let available: Vec<(String, String)> = session
+                        .modes()
                         .map(|m| {
-                            let mut http = McpServerHttp::new(m.name.clone(), m.url.clone());
-                            http.headers = m
-                                .headers
+                            m.available_modes
                                 .iter()
-                                .map(|(n, v)| HttpHeader::new(n.clone(), v.clone()))
-                                .collect();
-                            McpServer::Http(http)
+                                .map(|x| (x.id.to_string(), x.name.clone()))
+                                .collect()
                         })
-                        .collect();
-                    let request = NewSessionRequest::new(opts_for_task.cwd.clone()).mcp_servers(mcp);
+                        .unwrap_or_default();
+                    let current = session.modes().map(|m| m.current_mode_id.to_string());
+                    tracing::info!(?available, ?current, "session modes");
+                    if let Some(wanted) = opts_for_task.mode.clone().or_else(|| pick_autonomous_mode(&available)) {
+                        if current.as_deref() != Some(wanted.as_str()) {
+                            tracing::info!(mode = %wanted, "setting session mode");
+                            session
+                                .connection()
+                                .send_request_to(Agent, SetSessionModeRequest::new(session_id.clone(), wanted))
+                                .block_task()
+                                .await?;
+                        }
+                    }
+                    for (option, value) in &opts_for_task.config {
+                        tracing::info!(option, value, "setting session option");
+                        let request = SetSessionConfigOptionRequest::new(
+                            session_id.clone(),
+                            option.clone(),
+                            SessionConfigOptionValue::ValueId { value: value.clone().into() },
+                        );
+                        if let Err(err) = session.connection().send_request_to(Agent, request).block_task().await {
+                            tracing::warn!(option, value, %err, "agent rejected session option");
+                        }
+                    }
 
-                    let mode = opts_for_task.mode.clone();
-                    let config = opts_for_task.config.clone();
-                    let ready = ready_inner.lock().ok().and_then(|mut r| r.take());
-                    cx.build_session_from(request)
-                        .block_task()
-                        .run_until(async move |mut session| {
-                            let session_id = session.session_id().clone();
+                    if let Some(ready) = ready_inner.lock().ok().and_then(|mut r| r.take()) {
+                        let _ = ready.send(Ok(Ready {
+                            session_id: format!("{session_id}"),
+                            resumed,
+                        }));
+                    }
 
-                            let available: Vec<(String, String)> = session
-                                .modes()
-                                .map(|m| {
-                                    m.available_modes
-                                        .iter()
-                                        .map(|x| (x.id.to_string(), x.name.clone()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            let current = session.modes().map(|m| m.current_mode_id.to_string());
-                            tracing::info!(?available, ?current, "session modes");
-                            if let Some(wanted) = mode.or_else(|| pick_autonomous_mode(&available)) {
-                                if current.as_deref() != Some(wanted.as_str()) {
-                                    tracing::info!(mode = %wanted, "setting session mode");
-                                    session
-                                        .connection()
-                                        .send_request_to(Agent, SetSessionModeRequest::new(session_id.clone(), wanted))
-                                        .block_task()
-                                        .await?;
-                                }
-                            }
-                            for (option, value) in &config {
-                                tracing::info!(option, value, "setting session option");
-                                let request = SetSessionConfigOptionRequest::new(
-                                    session_id.clone(),
-                                    option.clone(),
-                                    SessionConfigOptionValue::ValueId { value: value.clone().into() },
-                                );
-                                if let Err(err) =
-                                    session.connection().send_request_to(Agent, request).block_task().await
-                                {
-                                    tracing::warn!(option, value, %err, "agent rejected session option");
-                                }
-                            }
-
-                            if let Some(ready) = ready {
-                                let _ = ready.send(Ok(format!("{session_id}")));
-                            }
-
-                            // Turn loop: one prompt at a time, until the handle is dropped.
-                            while let Some(turn) = turn_rx.recv().await {
-                                let result = run_turn(&mut session, &turn.text, &turn.tx).await;
-                                match &result {
-                                    Ok(()) => {}
-                                    Err(err) => {
-                                        let _ = turn.tx.send(LaneEvent::Failed { error: err.to_string() });
-                                    }
-                                }
-                                let fatal = result.is_err();
-                                let _ = turn.done.send(result);
-                                if fatal {
-                                    // The connection is in an unknown state; end the session.
-                                    return Err(agent_client_protocol::Error::internal_error());
-                                }
-                            }
-                            Ok(())
-                        })
-                        .await
+                    // Turn loop: one prompt at a time, until the handle is dropped.
+                    while let Some(turn) = turn_rx.recv().await {
+                        let result = run_turn(&mut session, &turn.text, &turn.tx).await;
+                        if let Err(err) = &result {
+                            let _ = turn.tx.send(LaneEvent::Failed { error: err.to_string() });
+                        }
+                        let fatal = result.is_err();
+                        let _ = turn.done.send(result);
+                        if fatal {
+                            // The connection is in an unknown state; end the session.
+                            return Err(agent_client_protocol::Error::internal_error());
+                        }
+                    }
+                    Ok(())
                 })
                 .await;
 
@@ -184,9 +224,10 @@ impl AgentSession {
         });
 
         match ready_rx.await {
-            Ok(Ok(session_id)) => Ok(Self {
+            Ok(Ok(ready)) => Ok(Self {
                 turns: turn_tx,
-                session_id,
+                session_id: ready.session_id,
+                resumed: ready.resumed,
                 task,
             }),
             Ok(Err(err)) => {
@@ -200,9 +241,14 @@ impl AgentSession {
         }
     }
 
-    /// The agent's session id.
+    /// The agent's session id. Persist it to resume later.
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Whether this session was brought back from an earlier one.
+    pub fn resumed(&self) -> bool {
+        self.resumed
     }
 
     /// Run one turn. Events stream to `tx` and end with `Finished` or
@@ -225,8 +271,21 @@ impl AgentSession {
     }
 }
 
+/// Consume the history an agent replays after `session/load`. Returns how
+/// many messages were dropped. The replay has no end marker; a quiet gap
+/// is taken as the end.
+async fn drain_replay(session: &mut ActiveSession<'_, Agent>) -> usize {
+    let mut n = 0;
+    loop {
+        match tokio::time::timeout(REPLAY_QUIET, session.read_update()).await {
+            Ok(Ok(_)) => n += 1,
+            Ok(Err(_)) | Err(_) => return n,
+        }
+    }
+}
+
 async fn run_turn(
-    session: &mut agent_client_protocol::ActiveSession<'_, Agent>,
+    session: &mut ActiveSession<'_, Agent>,
     text: &str,
     tx: &mpsc::UnboundedSender<LaneEvent>,
 ) -> anyhow::Result<()> {

@@ -506,6 +506,7 @@ async fn run_lane_inner(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyho
             mode: spec.mode.clone(),
             config: spec.config.clone(),
             mcp_servers: Vec::new(),
+            resume: None,
         },
     )
     .await?;
