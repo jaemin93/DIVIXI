@@ -2,6 +2,7 @@
   import { store, agentLabel } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
+  import { t } from "./i18n.svelte";
 
   let draft = $state("");
   let agentOpen = $state(false);
@@ -46,23 +47,23 @@
       type="text"
       bind:value={draft}
       disabled={store.busy}
-      placeholder={store.busy ? "레인이 실행 중입니다…" : "레인에 태스크 보내기"}
-      aria-label="레인에 태스크 보내기"
+      placeholder={store.busy ? t("composer.busy") : t("composer.placeholder")}
+      aria-label={t("composer.placeholder")}
     />
-    <button class="btn send" type="submit" disabled={store.busy || !draft.trim()} aria-label="보내기">→</button>
+    <button class="btn send" type="submit" disabled={store.busy || !draft.trim()} aria-label={t("composer.send")}>→</button>
   </form>
 
   <div class="status">
     <!-- agent -->
     <Popover bind:open={agentOpen} width={260}>
       {#snippet trigger()}
-        <button class="chip" onclick={() => (agentOpen = !agentOpen)} title="이 런을 실행할 에이전트" aria-haspopup="listbox" aria-expanded={agentOpen}>
+        <button class="chip" onclick={() => (agentOpen = !agentOpen)} title={t("composer.agentTitle")} aria-haspopup="listbox" aria-expanded={agentOpen}>
           <Icon name="bot" size={14} />
           <span class="mono">{agentLabel(store.agent)}</span>
         </button>
       {/snippet}
-      <div class="mlab ph">에이전트</div>
-      <div class="list" role="listbox" aria-label="에이전트">
+      <div class="mlab ph">{t("composer.agent")}</div>
+      <div class="list" role="listbox" aria-label={t("composer.agent")}>
         {#each store.agents ?? [] as a (a.kind)}
           <button
             class="opt"
@@ -97,21 +98,21 @@
     <!-- context -->
     <Popover bind:open={contextOpen} align="right" width={280}>
       {#snippet trigger()}
-        <button class="ctx" onclick={() => (contextOpen = !contextOpen)} title="컨텍스트 사용량" aria-expanded={contextOpen}>
+        <button class="ctx" onclick={() => (contextOpen = !contextOpen)} title={t("composer.contextTitle")} aria-expanded={contextOpen}>
           <span class="bar"><span class="fill" style="width: {pct}%"></span></span>
         </button>
       {/snippet}
-      <div class="mlab ph">컨텍스트</div>
+      <div class="mlab ph">{t("composer.context")}</div>
       <div class="kv mono">
         {#if ctx}
-          <div class="row"><span class="dim">사용</span><span>{k(ctx.used)} / {k(ctx.size)} 토큰</span></div>
-          <div class="row"><span class="dim">비율</span><span>{pct.toFixed(1)}%</span></div>
+          <div class="row"><span class="dim">{t("composer.used")}</span><span>{t("composer.tokens", { used: k(ctx.used), size: k(ctx.size) })}</span></div>
+          <div class="row"><span class="dim">{t("composer.ratio")}</span><span>{pct.toFixed(1)}%</span></div>
           {#if ctx.cost != null}
-            <div class="row"><span class="dim">비용</span><span>{ctx.cost.toFixed(4)} {ctx.currency ?? ""}</span></div>
+            <div class="row"><span class="dim">{t("composer.cost")}</span><span>{ctx.cost.toFixed(4)} {ctx.currency ?? ""}</span></div>
           {/if}
-          <div class="row"><span class="dim">출처</span><span>{store.activeRun ? "실행 중인 런" : "마지막 런"}</span></div>
+          <div class="row"><span class="dim">{t("composer.source")}</span><span>{store.activeRun ? t("composer.liveRun") : t("composer.lastRun")}</span></div>
         {:else}
-          <div class="row dim">아직 런이 없습니다.</div>
+          <div class="row dim">{t("composer.noRuns")}</div>
         {/if}
       </div>
     </Popover>
@@ -119,14 +120,14 @@
     <!-- model -->
     <Popover bind:open={modelOpen} align="right" width={360}>
       {#snippet trigger()}
-        <button class="chip" onclick={() => (modelOpen = !modelOpen)} title="이 에이전트의 모델" aria-haspopup="listbox" aria-expanded={modelOpen}>
+        <button class="chip" onclick={() => (modelOpen = !modelOpen)} title={t("composer.modelTitle")} aria-haspopup="listbox" aria-expanded={modelOpen}>
           <span class="mono">{store.modelName || "default"}</span>
         </button>
       {/snippet}
-      <input class="filter" type="text" bind:value={filter} placeholder="입력하여 필터" aria-label="모델 필터" />
-      <div class="list" role="listbox" aria-label="모델">
+      <input class="filter" type="text" bind:value={filter} placeholder={t("composer.filter")} aria-label={t("composer.modelFilter")} />
+      <div class="list" role="listbox" aria-label={t("composer.model")}>
         {#if !store.modelOption}
-          <div class="mono dim ph">이 에이전트는 모델 선택을 제공하지 않습니다. 다시 감지하면 갱신됩니다.</div>
+          <div class="mono dim ph">{t("composer.noModels")}</div>
         {/if}
         {#each choices as c (c.id)}
           <button
@@ -154,7 +155,7 @@
           <span class="dim">{store.modelOption.name}</span>
           <span class="grow"></span>
           {#if store.models[store.agent]}
-            <button class="link" onclick={() => store.setModel(store.agent, "")}>에이전트 기본값으로</button>
+            <button class="link" onclick={() => store.setModel(store.agent, "")}>{t("composer.defaultModel")}</button>
           {/if}
         </div>
       {/if}

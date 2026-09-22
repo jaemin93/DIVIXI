@@ -2,6 +2,7 @@
   import { store, agentLabel } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import SplitHandle from "./SplitHandle.svelte";
+  import { t } from "./i18n.svelte";
 
   /**
    * Second column: every track, each unfolding into its lanes.
@@ -16,7 +17,7 @@
   const tracks = $derived([
     {
       id: "acp",
-      name: "ACP 브리지",
+      name: t("track.placeholderName"),
       runs: store.runs.length,
       live: !!store.activeRun,
       lanes: store.laneNames.map((name) => {
@@ -38,37 +39,37 @@
 </script>
 
 <aside style="width: {store.trackListWidth}px">
-  <SplitHandle edge="right" width={store.trackListWidth} min={200} max={480} reset={264} label="Tracks 열 너비" onchange={(px, persist) => store.setTrackListWidth(px, persist)} />
+  <SplitHandle edge="right" width={store.trackListWidth} min={200} max={480} reset={264} label={t("tracks.width")} onchange={(px, persist) => store.setTrackListWidth(px, persist)} />
   <div class="head">
-    <span class="mlab">Tracks</span>
+    <span class="mlab">{t("tracks.title")}</span>
     <span class="grow"></span>
-    <button class="btn new" disabled title="곧: 낙서에서 승격하거나 직접 만들기">+ TRACK</button>
-    <button class="x" onclick={() => store.setTrackList(false)} aria-label="목록 닫기" title="목록 닫기">
+    <button class="btn new" disabled title={t("tracks.newSoon")}>{t("tracks.new")}</button>
+    <button class="x" onclick={() => store.setTrackList(false)} aria-label={t("tracks.close")} title={t("tracks.close")}>
       <Icon name="collapse" />
     </button>
   </div>
 
-  <input class="search" type="text" bind:value={query} placeholder="Track 검색" aria-label="Track 검색" />
+  <input class="search" type="text" bind:value={query} placeholder={t("tracks.search")} aria-label={t("tracks.search")} />
 
   <div class="list">
-    {#each shown as t (t.id)}
+    {#each shown as tr (tr.id)}
       <div class="track" class:on={store.view === "track"}>
         <button
           class="chev mono"
-          onclick={() => (open = { ...open, [t.id]: !open[t.id] })}
-          aria-label={open[t.id] ? "레인 접기" : "레인 펼치기"}
+          onclick={() => (open = { ...open, [tr.id]: !open[tr.id] })}
+          aria-label={open[tr.id] ? t("tracks.foldLanes") : t("tracks.unfoldLanes")}
         >
-          {open[t.id] ? "▾" : "▸"}
+          {open[tr.id] ? "▾" : "▸"}
         </button>
         <button class="pick" onclick={() => (store.view = "track")}>
-          <span class="dot" class:pulse={t.live} style="background: {t.live ? 'var(--ok)' : 'var(--idle)'}"></span>
-          <span class="name">{t.name}</span>
-          <span class="mono count">{t.runs}</span>
+          <span class="dot" class:pulse={tr.live} style="background: {tr.live ? 'var(--ok)' : 'var(--idle)'}"></span>
+          <span class="name">{tr.name}</span>
+          <span class="mono count">{tr.runs}</span>
         </button>
       </div>
 
-      {#if open[t.id]}
-        {#each t.lanes as lane (lane.name)}
+      {#if open[tr.id]}
+        {#each tr.lanes as lane (lane.name)}
           <button class="lane" class:on={store.view === "lane" && store.openLane === lane.name} onclick={() => store.openLaneView(lane.name)}>
             <span
               class="dot"
@@ -83,7 +84,7 @@
       {/if}
     {/each}
     {#if shown.length === 0}
-      <div class="mono empty">없음</div>
+      <div class="mono empty">{t("tracks.none")}</div>
     {/if}
   </div>
 </aside>

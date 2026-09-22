@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store, type Run } from "./store.svelte";
   import SplitHandle from "./SplitHandle.svelte";
+  import { t } from "./i18n.svelte";
 
   let { run }: { run: Run } = $props();
   let tab = $state<"transcript" | "output" | "tools">("transcript");
@@ -22,19 +23,19 @@
     min={320}
     max={Math.max(360, Math.floor(window.innerWidth * 0.6))}
     reset={430}
-    label="레인 패널 너비"
+    label={t("inspector.width")}
     onchange={(px, persist) => store.setInspectorWidth(px, persist)}
   />
   <div class="head">
     <span class="mlab">LANE / {run.lane}</span>
     <span class="mono id">{run.id}</span>
     <span class="grow"></span>
-    <button class="btn x" onclick={() => (store.inspecting = "")} aria-label="인스펙터 닫기">✕</button>
+    <button class="btn x" onclick={() => (store.inspecting = "")} aria-label={t("inspector.close")}>✕</button>
   </div>
 
   <div class="membrane">
-    <div class="mlab-sm acc">↑ MEMBRANE</div>
-    <div class="note">이 아래는 Track 컨텍스트에 올라가지 않습니다. 필요할 때만 내려옵니다.</div>
+    <div class="mlab-sm acc">{t("inspector.membrane")}</div>
+    <div class="note">{t("inspector.membraneNote")}</div>
   </div>
 
   <div class="tabs">
@@ -50,7 +51,7 @@
         <div class="mono tl" style="color: {tones[line.tone]}">{line.label} · {line.text}</div>
       {/each}
       {#if run.transcript.length === 0}
-        <div class="mono ts">아직 없음</div>
+        <div class="mono ts">{t("inspector.nothingYet")}</div>
       {/if}
     {:else if tab === "output"}
       {#if run.thought}
@@ -58,7 +59,7 @@
         <pre class="dimtext">{run.thought}</pre>
       {/if}
       <div class="mlab-sm">MESSAGE</div>
-      <pre>{run.message || "(없음)"}</pre>
+      <pre>{run.message || t("inspector.none")}</pre>
     {:else}
       {#each run.tools as tool (tool.id)}
         <div class="toolrow mono">
@@ -68,7 +69,7 @@
         </div>
       {/each}
       {#if run.tools.length === 0}
-        <div class="mono ts">툴 호출 없음</div>
+        <div class="mono ts">{t("inspector.noTools")}</div>
       {/if}
     {/if}
   </div>

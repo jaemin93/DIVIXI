@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
+  import { t } from "./i18n.svelte";
 
   /**
    * The window's own chrome. The OS title bar is off (`decorations: false`),
@@ -33,10 +34,10 @@
 <div class="chrome" data-tauri-drag-region>
   <span class="grow" data-tauri-drag-region></span>
   <div class="controls">
-    <button class="wc" onclick={() => win.minimize()} aria-label="최소화" title="최소화">
+    <button class="wc" onclick={() => win.minimize()} aria-label={t("win.minimize")} title={t("win.minimize")}>
       <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor" stroke-width="1" /></svg>
     </button>
-    <button class="wc" onclick={() => win.toggleMaximize()} aria-label={maximized ? "이전 크기로" : "최대화"} title={maximized ? "이전 크기로" : "최대화"}>
+    <button class="wc" onclick={() => win.toggleMaximize()} aria-label={maximized ? t("win.restore") : t("win.maximize")} title={maximized ? t("win.restore") : t("win.maximize")}>
       {#if maximized}
         <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1">
           <rect x="0.5" y="2.5" width="7" height="7" /><path d="M2.5 2.5v-2h7v7h-2" />
@@ -47,7 +48,7 @@
         </svg>
       {/if}
     </button>
-    <button class="wc close" onclick={() => win.close()} aria-label="닫기" title="닫기">
+    <button class="wc close" onclick={() => win.close()} aria-label={t("win.close")} title={t("win.close")}>
       <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" stroke="currentColor" stroke-width="1"><path d="M0 0l10 10M10 0L0 10" /></svg>
     </button>
   </div>

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { i18n, systemLang, t, type Lang, type LangPref } from "./i18n.svelte";
 
 /** Mirrors `orchestra_core::LaneEvent` — serde tags it with `kind`. */
 export type LaneEvent =
@@ -133,8 +134,8 @@ export type Run = {
 
 export type View = "track" | "settings" | "lane";
 
-/** Prefix of conductor prompts Orchestra injects itself (lane reports). */
-export const REPORT_PREFIX = "[레인 보고]";
+/** Prefix of conductor prompts Orchestra injects itself (lane reports). Language-neutral. */
+export const REPORT_PREFIX = "[lane-report]";
 
 /** What the user asked for; `system` follows the OS. */
 export type ThemePref = "system" | "dark" | "light";
@@ -195,6 +196,8 @@ class Store {
   chatFont = $state<ChatFont>("s");
   /** Interface typeface. Persisted. */
   uiFont = $state<UiFont>("sans");
+  /** Interface language preference. Persisted; "system" follows the OS. */
+  langPref = $state<LangPref>("system");
   /** Native webview zoom in percent. Persisted. */
   zoom = $state(100);
   info = $state<AppInfo | null>(null);
@@ -348,6 +351,23 @@ class Store {
     }
   }
 
+  /** The language in effect. */
+  get lang(): Lang {
+    return i18n.lang;
+  }
+
+  /** Choose the interface language; persisted, applied at once. */
+  async setLang(pref: LangPref) {
+    this.langPref = pref;
+    i18n.lang = pref === "system" ? systemLang() : pref;
+    document.documentElement.lang = i18n.lang;
+    try {
+      await invoke("set_setting", { key: "language", value: pref });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
   /** Interface typeface; persisted, applied through a root attribute. */
   async setUiFont(font: UiFont) {
     this.uiFont = font;
@@ -407,7 +427,7 @@ class Store {
       if (this.themePref === "system") this.applyTheme();
     });
     try {
-      const [summaries, agents, theme, rail, tracklist, chatFont, models, inspectorWidth, railWidth, trackListWidth, uiFont, zoom] =
+      const [summaries, agents, theme, rail, tracklist, chatFont, models, inspectorWidth, railWidth, trackListWidth, uiFont, zoom, language] =
         await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<AgentStatus[] | null>("agent_statuses"),
@@ -421,7 +441,11 @@ class Store {
         invoke<string | null>("get_setting", { key: "tracklist_width" }),
         invoke<string | null>("get_setting", { key: "ui_font" }),
         invoke<string | null>("get_setting", { key: "zoom" }),
+        invoke<string | null>("get_setting", { key: "language" }),
       ]);
+      if (language === "system" || language === "ko" || language === "en") this.langPref = language;
+      i18n.lang = this.langPref === "system" ? systemLang() : this.langPref;
+      document.documentElement.lang = i18n.lang;
       if (uiFont === "sans" || uiFont === "mono" || uiFont === "system" || uiFont === "serif") this.uiFont = uiFont;
       document.documentElement.dataset.uiFont = this.uiFont;
       const z = Number(zoom);
@@ -487,14 +511,14 @@ class Store {
 
   /** Run the agent's own ACP login flow. May open a browser. */
   async login(agent: AgentId, method?: string) {
-    await this.workOn(agent, "로그인 중", () => invoke<AgentStatus>("login_agent", { agent, method: method ?? null }));
+    await this.workOn(agent, t("agents.loggingIn"), () => invoke<AgentStatus>("login_agent", { agent, method: method ?? null }));
   }
 
   /** Fetch the agent's ACP server (Antigravity). Progress arrives as events. */
   async download(agent: AgentId) {
     this.downloads = { ...this.downloads, [agent]: { agent, phase: "downloading", received: 0, total: null } };
     try {
-      await this.workOn(agent, "다운로드 중", () => invoke<AgentStatus>("download_agent", { agent }));
+      await this.workOn(agent, t("agents.downloading"), () => invoke<AgentStatus>("download_agent", { agent }));
     } finally {
       const { [agent]: _done, ...rest } = this.downloads;
       this.downloads = rest;
@@ -588,7 +612,7 @@ class Store {
     this.runs.push(pending);
 
     try {
-      const id = await invoke<string>("conductor_prompt", { prompt: text, agent });
+      const id = await invoke<string>("conductor_prompt", { prompt: text, agent, lang: i18n.lang });
       const run = this.runs.find((r) => r === pending || r.id === id);
       if (run) {
         run.id = id;

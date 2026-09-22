@@ -3,6 +3,7 @@
   import Icon, { type IconName } from "./Icon.svelte";
   import Mark from "./Mark.svelte";
   import SplitHandle from "./SplitHandle.svelte";
+  import { t, type Key } from "./i18n.svelte";
 
   /**
    * The rail's map. Adding a feature is one entry here: an icon, a label,
@@ -12,13 +13,13 @@
    * The rail is only ever one level deep; lists (tracks, lanes, agents)
    * live in the column it opens, like Kiro Crew's session panel.
    */
-  type Item = { id: string; icon: IconName; label: string; soon?: boolean; go?: () => void };
+  type Item = { id: string; icon: IconName; label: Key; soon?: boolean; go?: () => void };
 
   const primary: Item[] = [
     {
       id: "tracks",
       icon: "tracks",
-      label: "Tracks",
+      label: "rail.tracks",
       go: () => {
         // Second click on the active item folds the list away.
         if ((store.view === "track" || store.view === "lane") && store.trackListOpen) store.setTrackList(false);
@@ -28,12 +29,12 @@
         }
       },
     },
-    { id: "drafts", icon: "draft", label: "Drafts", soon: true },
-    { id: "wrapup", icon: "wrapup", label: "Wrap-up", soon: true },
+    { id: "drafts", icon: "draft", label: "rail.drafts", soon: true },
+    { id: "wrapup", icon: "wrapup", label: "rail.wrapup", soon: true },
   ];
 
   const secondary: Item[] = [
-    { id: "settings", icon: "settings", label: "설정", go: () => store.openSettings("overview") },
+    { id: "settings", icon: "settings", label: "rail.settings", go: () => store.openSettings("overview") },
   ];
 
   const collapsed = $derived(store.railCollapsed);
@@ -52,7 +53,7 @@
 
 <nav class:collapsed style={collapsed ? undefined : `width: ${store.railWidth}px`}>
   {#if !collapsed}
-    <SplitHandle edge="right" width={store.railWidth} min={160} max={320} reset={200} label="사이드바 너비" onchange={(px, persist) => store.setRailWidth(px, persist)} />
+    <SplitHandle edge="right" width={store.railWidth} min={160} max={320} reset={200} label={t("rail.width")} onchange={(px, persist) => store.setRailWidth(px, persist)} />
   {/if}
   <div class="top">
     <span class="brand" title="Orchestra"><Mark size={14} live={store.busy} />{#if !collapsed}<span class="mono name">ORCHESTRA</span>{/if}</span>
@@ -60,8 +61,8 @@
     <button
       class="toggle"
       onclick={() => store.setRail(!collapsed)}
-      title={collapsed ? "사이드 패널 펼치기" : "사이드 패널 접기"}
-      aria-label={collapsed ? "사이드 패널 펼치기" : "사이드 패널 접기"}
+      title={collapsed ? t("rail.expand") : t("rail.collapse")}
+      aria-label={collapsed ? t("rail.expand") : t("rail.collapse")}
       aria-expanded={!collapsed}
     >
       <Icon name={collapsed ? "expand" : "collapse"} />
@@ -74,14 +75,14 @@
       class:active={active(item)}
       class:soon={item.soon}
       disabled={item.soon}
-      title={collapsed ? item.label : undefined}
+      title={collapsed ? t(item.label) : undefined}
       onclick={item.go}
     >
       <Icon name={item.icon} />
       {#if !collapsed}
-        <span class="label">{item.label}</span>
+        <span class="label">{t(item.label)}</span>
         {#if item.soon}
-          <span class="mono tag">soon</span>
+          <span class="mono tag">{t("rail.soon")}</span>
         {:else if badge(item)}
           <span class="mono count">{badge(item)}</span>
         {/if}

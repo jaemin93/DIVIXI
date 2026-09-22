@@ -36,8 +36,9 @@ use crate::{pump, workspace_root, AppState};
 pub const CONDUCTOR_LANE: &str = "conductor";
 
 /// Prefix of conductor prompts that Orchestra itself injects (lane reports).
-/// The timeline shows these as system lines, not as the human speaking.
-pub const REPORT_PREFIX: &str = "[레인 보고]";
+/// Language-neutral; the timeline shows these as system lines, not as the
+/// human speaking, and the preamble tells the conductor what it means.
+pub const REPORT_PREFIX: &str = "[lane-report]";
 
 /// A lane run waits at most this long for the agent to finish a turn.
 const LANE_TURN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -66,14 +67,17 @@ pub struct Sessions {
     pub conductor_busy: std::sync::atomic::AtomicBool,
 }
 
-/// What the conductor is told once, at the start of its session.
-fn preamble() -> String {
-    r#"당신은 Orchestra의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 레인(lane)이라는 별도의 에이전트 세션에 맡깁니다.
+/// What the conductor is told once, at the start of its session, in the
+/// interface language. Only the wording differs; the rules are the same.
+fn preamble(lang: &str) -> String {
+    if lang.starts_with("ko") {
+        return format!(
+            r#"당신은 Orchestra의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 레인(lane)이라는 별도의 에이전트 세션에 맡깁니다.
 
 규칙:
 - 사람의 메시지가 질문이나 잡담이면 직접 답합니다. 레인을 열지 않습니다.
 - 코드를 읽거나 고치거나 조사하는 일처럼 실제 작업이 필요하면 `spawn_lane`으로 레인을 열어 맡깁니다. 레인 이름은 짧은 영문 소문자(예: fix-parser)로 짓고, task에는 레인이 혼자 끝낼 수 있을 만큼 구체적으로 적습니다.
-- `spawn_lane`과 `ask_lane`은 레인이 일을 받는 즉시 돌아옵니다. 결과를 기다리지 말고, 사람에게 무엇을 맡겼는지 한 문장으로 알린 뒤 턴을 끝냅니다. 레인이 끝나면 `[레인 보고]`로 시작하는 메시지가 당신에게 옵니다. 그때 무슨 일이 있었는지 한두 문단으로 사람에게 설명합니다. 보고를 그대로 붙여넣지 말고 요점만 말합니다.
+- `spawn_lane`과 `ask_lane`은 레인이 일을 받는 즉시 돌아옵니다. 결과를 기다리지 말고, 사람에게 무엇을 맡겼는지 한 문장으로 알린 뒤 턴을 끝냅니다. 레인이 끝나면 `{REPORT_PREFIX}`로 시작하는 메시지가 당신에게 옵니다. 그때 무슨 일이 있었는지 한두 문단으로 사람에게 설명합니다. 보고를 그대로 붙여넣지 말고 요점만 말합니다.
 - 같은 레인에 이어서 시킬 일은 `ask_lane`으로 보냅니다. 레인은 이전 대화를 기억합니다. 어떤 레인이 열려 있고 무엇을 하는 중인지는 `lane_status`로 봅니다.
 - 도구가 오류를 돌려주면 오류 문구에 적힌 대로 한 번만 다시 시도하고, 그래도 안 되면 사람에게 무엇이 막혔는지 말합니다. 같은 도구를 반복해서 부르지 않습니다.
 - 사람이 결정해야 할 일(되돌리기 어려운 변경, 여러 갈래 중 선택)은 스스로 정하지 말고 선택지를 제시하고 묻습니다. 사람이 정하면 `record_decision`으로 남깁니다.
@@ -81,7 +85,23 @@ fn preamble() -> String {
 
 지금 작업 디렉터리는 사람이 연 저장소입니다. 레인도 같은 디렉터리에서 일합니다.
 "#
-    .to_string()
+        );
+    }
+    format!(
+        r#"You are Orchestra's conductor. You are the only one who talks to the human; real work is delegated to lanes, which are separate agent sessions.
+
+Rules:
+- If the human's message is a question or small talk, answer it yourself. Do not open a lane.
+- If real work is needed (reading, changing or investigating code), open a lane with `spawn_lane`. Name it short and lowercase (e.g. fix-parser) and make the task specific enough for the lane to finish alone.
+- `spawn_lane` and `ask_lane` return as soon as the lane has the task. Do not wait for the result: tell the human in one sentence what you delegated and end your turn. When the lane finishes, a message starting with `{REPORT_PREFIX}` reaches you. Then explain to the human in a paragraph or two what happened. Do not paste the report; give the gist.
+- Follow-ups for the same lane go through `ask_lane`; the lane remembers its earlier turns. `lane_status` shows which lanes are open and what they are doing.
+- If a tool returns an error, retry once as the message suggests; if that fails, tell the human what is blocked. Never call the same tool repeatedly.
+- Decisions that belong to the human (hard-to-undo changes, a choice between directions) are not yours to make: present the options and ask. Once the human decides, record it with `record_decision`.
+- Speak English. Short and clear.
+
+The working directory is the repository the human opened. Lanes work in the same directory.
+"#
+    )
 }
 
 /// Build the MCP tools that give the conductor its hands. Each captures the
@@ -441,7 +461,8 @@ async fn report_to_conductor(app: AppHandle, lane: String, run: String) {
         tracing::warn!(%lane, %run, "no conductor session to report to");
         return;
     };
-    if let Err(err) = conductor_turn(app.clone(), text, agent).await {
+    let lang = state.store.get_meta("setting:language").ok().flatten().unwrap_or_default();
+    if let Err(err) = conductor_turn(app.clone(), text, agent, lang).await {
         tracing::warn!(%lane, %run, %err, "could not deliver lane report to the conductor");
     }
 }
@@ -449,10 +470,11 @@ async fn report_to_conductor(app: AppHandle, lane: String, run: String) {
 /// Send one message to the conductor, opening (or resuming) its session on
 /// first use or when the chosen agent changed. Returns the conductor run
 /// id; the turn continues in the background and streams under that id.
-pub async fn conductor_turn(app: AppHandle, prompt: String, agent: String) -> Result<String, String> {
+/// `lang` picks the preamble's language on a fresh session.
+pub async fn conductor_turn(app: AppHandle, prompt: String, agent: String, lang: String) -> Result<String, String> {
     let st = app.state::<AppState>();
     if st.sessions.conductor_busy.swap(true, Ordering::SeqCst) {
-        return Err("지휘자가 아직 응답 중입니다".to_string());
+        return Err("conductor is still responding".to_string());
     }
 
     let outcome: Result<String, String> = async {
@@ -497,7 +519,7 @@ pub async fn conductor_turn(app: AppHandle, prompt: String, agent: String) -> Re
             .begin_run(CONDUCTOR_LANE, &agent, &prompt, &workspace_root().display().to_string())
             .map_err(|e| e.to_string())?;
 
-        let text = if first { format!("{}\n\n---\n\n{prompt}", preamble()) } else { prompt };
+        let text = if first { format!("{}\n\n---\n\n{prompt}", preamble(&lang)) } else { prompt };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tauri::async_runtime::spawn(pump(app.clone(), CONDUCTOR_LANE.to_string(), run.clone(), rx));
         let _ = tx.send(LaneEvent::Started {

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { t } from "./i18n.svelte";
+
   /**
    * A grab strip on one edge of a column. Drag to resize, arrow keys to
    * nudge, double-click to reset. The parent must be `position: relative`.
@@ -14,7 +16,7 @@
     max,
     reset,
     onchange,
-    label = "너비 조절",
+    label = "",
   }: {
     edge: "left" | "right";
     width: number;
@@ -69,7 +71,7 @@
   class:dragging
   role="separator"
   aria-orientation="vertical"
-  aria-label={label}
+  aria-label={label || t("split.width")}
   aria-valuenow={width}
   aria-valuemin={min}
   aria-valuemax={max}
@@ -77,7 +79,7 @@
   onpointerdown={startDrag}
   onkeydown={onKey}
   ondblclick={() => onchange(reset, true)}
-  title="드래그해서 너비 조절 · 더블클릭으로 기본 너비"
+  title={t("split.hint")}
 ></div>
 
 <style>

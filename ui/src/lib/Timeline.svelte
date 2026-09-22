@@ -2,6 +2,7 @@
   import { store, agentLabel, REPORT_PREFIX, type Run, type Segment, type Tool } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import Markdown from "./Markdown.svelte";
+  import { t } from "./i18n.svelte";
 
   let scroller = $state<HTMLDivElement>();
 
@@ -23,7 +24,7 @@
     const last = run.tools.at(-1);
     if (last) return `${last.toolKind} ${last.title}`;
     const text = run.message || run.thought;
-    return text ? text.slice(-90).replace(/\s+/g, " ") : "대기 중…";
+    return text ? text.slice(-90).replace(/\s+/g, " ") : t("timeline.waiting");
   }
 
   /** Hook chatter (devterm memory and the like) arrives as message text; hide it. */
@@ -65,7 +66,7 @@
   /** Reports are summaries; the full text lives in the lane. */
   function summary(run: Run): string {
     const text = cleanText(run.message).trim();
-    if (!text) return "_(텍스트 출력 없음)_";
+    if (!text) return t("timeline.noText");
     return text.length > 600 ? `${text.slice(0, 600)}…` : text;
   }
 </script>
@@ -74,8 +75,8 @@
   {#if store.runs.length === 0}
     <div class="empty">
       <div class="emptymark"><Mark size={56} ink="var(--lines)" /></div>
-      <div class="mlab">비어 있음</div>
-      <p class="serif">아래에서 레인에 첫 태스크를 보내세요.</p>
+      <div class="mlab">{t("timeline.empty")}</div>
+      <p class="serif">{t("timeline.emptyHint")}</p>
     </div>
   {/if}
 
@@ -84,16 +85,16 @@
   {#each store.runs.filter((r) => r.lane === "conductor") as run (run.id)}
     {#if run.lane === "conductor"}
       {#if run.prompt.startsWith(REPORT_PREFIX)}
-        <div class="sys mono">보고 도착 · {run.prompt.split("\n")[0].replace(REPORT_PREFIX, "").trim()}</div>
+        <div class="sys mono">{t("timeline.reportArrived")} · {run.prompt.split("\n")[0].replace(REPORT_PREFIX, "").trim()}</div>
       {:else}
         <div class="me">
-          <div class="mlab">나</div>
+          <div class="mlab">{t("timeline.me")}</div>
           <div class="bubble"><p>{run.prompt}</p></div>
         </div>
       {/if}
       <div class="conductor" class:live={run.status === "connecting" || run.status === "running"}>
         <div class="chead">
-          <span class="mlab">지휘자</span>
+          <span class="mlab">{t("timeline.conductor")}</span>
           <span class="mono meta">{agentLabel(run.agent)}</span>
           {#if run.status === "connecting" || run.status === "running"}
             <span class="dot pulse"></span>
@@ -125,7 +126,7 @@
         {#if run.status === "failed" && run.error}
           <p class="ctext bad">{run.error}</p>
         {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
-          <p class="ctext dim">생각 중…</p>
+          <p class="ctext dim">{t("timeline.thinking")}</p>
         {/if}
       </div>
     {:else}
@@ -151,7 +152,7 @@
           <span class="col">
             <span class="mlab-sm">RESULT</span>
             <span class="mono val" class:ok={run.status === "done"} class:bad={run.status === "failed"}>
-              • {run.status === "done" ? "성공" : "실패"}
+              • {run.status === "done" ? t("timeline.done") : t("timeline.failed")}
             </span>
           </span>
           <span class="col"><span class="mlab-sm">TOOLS</span><span class="mono val">{run.toolCount}</span></span>
@@ -163,12 +164,12 @@
         {#if store.inspecting === run.id}
           <div class="reportbody">
             <div class="field">
-              <div class="mlab-sm k">한 일</div>
+              <div class="mlab-sm k">{t("timeline.didWhat")}</div>
               <div class="v"><Markdown source={summary(run)} /></div>
             </div>
             {#if run.plan.length}
               <div class="field">
-                <div class="mlab-sm k">계획</div>
+                <div class="mlab-sm k">{t("timeline.plan")}</div>
                 <div class="v">
                   {#each run.plan as entry}<div>→ {entry}</div>{/each}
                 </div>
@@ -176,13 +177,13 @@
             {/if}
             {#if run.error}
               <div class="field">
-                <div class="mlab-sm k">실패</div>
+                <div class="mlab-sm k">{t("timeline.failure")}</div>
                 <div class="v bad">{run.error}</div>
               </div>
             {/if}
             <div class="membrane">
-              <span class="mlab-sm acc">↓ MEMBRANE</span>
-              <span class="note">여기까지가 Track 컨텍스트. 그 아래는 레인에 남아 있습니다.</span>
+              <span class="mlab-sm acc">{t("timeline.membrane")}</span>
+              <span class="note">{t("timeline.membraneNote")}</span>
             </div>
           </div>
         {/if}
@@ -283,7 +284,7 @@
     padding: 0 9px;
   }
 
-  /* Conversation text follows the interface font and the 대화창 size. */
+  /* Conversation text follows the interface font and the conversation size. */
   .ctext {
     margin: 0;
     font-family: var(--sans);

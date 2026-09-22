@@ -1,14 +1,15 @@
 <script lang="ts">
   import { store, type ThemePref } from "./store.svelte";
+  import { t } from "./i18n.svelte";
 
-  const options: { id: ThemePref; label: string; note: string }[] = [
-    { id: "system", label: "SYSTEM", note: "OS 설정을 따릅니다" },
-    { id: "dark", label: "DARK", note: "근흑 #0B0B0B" },
-    { id: "light", label: "LIGHT", note: "종이색 #FAF9F7" },
-  ];
+  const options = $derived<{ id: ThemePref; label: string; note: string }[]>([
+    { id: "system", label: t("theme.system"), note: t("theme.systemNote") },
+    { id: "dark", label: t("theme.dark"), note: t("theme.darkNote") },
+    { id: "light", label: t("theme.light"), note: t("theme.lightNote") },
+  ]);
 </script>
 
-<div class="picker" role="radiogroup" aria-label="테마">
+<div class="picker" role="radiogroup" aria-label={t("theme.label")}>
   {#each options as o (o.id)}
     <button
       class="opt"

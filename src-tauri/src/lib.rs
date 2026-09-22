@@ -192,9 +192,14 @@ async fn start_run(
 /// Send one human message to the conductor. Returns the conductor run id;
 /// the turn streams under it, and any lanes it opens stream under theirs.
 #[tauri::command]
-async fn conductor_prompt(app: AppHandle, prompt: String, agent: Option<String>) -> Result<String, String> {
+async fn conductor_prompt(
+    app: AppHandle,
+    prompt: String,
+    agent: Option<String>,
+    lang: Option<String>,
+) -> Result<String, String> {
     let agent = agent.unwrap_or_else(|| AgentKind::ClaudeCode.id().to_string());
-    conductor::conductor_turn(app, prompt, agent).await
+    conductor::conductor_turn(app, prompt, agent, lang.unwrap_or_default()).await
 }
 
 /// Every run, oldest first: what the timeline is rebuilt from at startup.

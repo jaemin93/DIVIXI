@@ -1,29 +1,30 @@
 <script lang="ts">
   import { store, agentLabel, type AgentStatus, type Readiness } from "./store.svelte";
+  import { t } from "./i18n.svelte";
 
   /** Status chip text and colour. Colour says state, nothing else. */
-  const chips: Record<Readiness, { label: string; color: string }> = {
-    ready: { label: "READY", color: "var(--ok)" },
-    needs_login: { label: "LOGIN", color: "var(--warn)" },
-    needs_download: { label: "DOWNLOAD", color: "var(--warn)" },
-    not_installed: { label: "MISSING", color: "var(--idle)" },
-    error: { label: "ERROR", color: "var(--acct)" },
-  };
+  const chips = $derived<Record<Readiness, { label: string; color: string }>>({
+    ready: { label: t("agents.state.ready"), color: "var(--ok)" },
+    needs_login: { label: t("agents.state.needs_login"), color: "var(--warn)" },
+    needs_download: { label: t("agents.state.needs_download"), color: "var(--warn)" },
+    not_installed: { label: t("agents.state.not_installed"), color: "var(--idle)" },
+    error: { label: t("agents.state.error"), color: "var(--acct)" },
+  });
 
   function adapterText(a: AgentStatus): string {
     switch (a.adapter.kind) {
       case "local_script":
-        return "adapter · node (local)";
+        return t("agents.adapterLocal");
       case "npx":
-        return `adapter · npx ${a.adapter.package}`;
+        return t("agents.adapterNpx", { pkg: a.adapter.package ?? "" });
       case "cli":
-        return "adapter · cli --acp";
+        return t("agents.adapterCli");
       case "binary":
-        return "adapter · acp server";
+        return t("agents.adapterServer");
       case "needs_download":
-        return "adapter · acp server not downloaded";
+        return t("agents.adapterNeedsDownload");
       default:
-        return `adapter · ${a.adapter.reason ?? "none"}`;
+        return t("agents.adapterNone", { reason: a.adapter.reason ?? "none" });
     }
   }
 
@@ -47,10 +48,10 @@
   {#if store.detecting}
     <div class="detecting" class:tall={store.agents === null}>
       <span class="spinner" aria-hidden="true"></span>
-      <span class="mono">감지 중 · 에이전트마다 몇 초 걸립니다</span>
+      <span class="mono">{t("agents.detecting")}</span>
     </div>
   {:else if store.agents === null}
-    <div class="empty mono">아직 감지하지 않았습니다.</div>
+    <div class="empty mono">{t("agents.notYet")}</div>
   {/if}
 
   {#each store.agents ?? [] as a (a.kind)}
@@ -68,9 +69,9 @@
         </div>
         <div class="mono detail">
           {#if a.cli}
-            cli · {a.cli.path}
+            {t("agents.cli")} · {a.cli.path}
           {:else}
-            cli · 없음 · {a.install_hint}
+            {t("agents.cli")} · {t("agents.cliMissing")} · {a.install_hint}
           {/if}
         </div>
         <div class="mono detail">{adapterText(a)}</div>
@@ -85,20 +86,20 @@
               {#if d.phase === "downloading"}
                 {pct === null ? mb(d.received) : `${pct}% · ${mb(d.received)} / ${mb(d.total ?? 0)}`}
               {:else if d.phase === "unpacking"}
-                압축 해제 중 · {mb(d.received)}
+                {t("agents.unpacking")} · {mb(d.received)}
               {:else}
-                다운로드 완료 · 확인 중
+                {t("agents.downloadDone")}
               {/if}
             </div>
           </div>
         {/if}
         {#if a.readiness === "needs_login"}
           <div class="detail hint">
-            로그인이 필요합니다.
+            {t("agents.needsLogin")}
             {#if a.probe?.auth_methods.length}
               {a.probe.auth_methods.map((m) => m.name).join(" · ")}
             {:else}
-              터미널에서 <span class="mono">{a.login_hint}</span>
+              {t("agents.inTerminal")} <span class="mono">{a.login_hint}</span>
             {/if}
           </div>
         {/if}
@@ -112,12 +113,12 @@
                 <button class="btn" disabled={!!busy} onclick={() => store.login(a.kind, m.id)}>{m.name}</button>
               {/each}
               {#if !a.probe?.auth_methods.length}
-                <button class="btn" disabled={!!busy} onclick={() => store.login(a.kind)}>로그인</button>
+                <button class="btn" disabled={!!busy} onclick={() => store.login(a.kind)}>{t("agents.login")}</button>
               {/if}
             {:else if a.readiness === "needs_download"}
-              <button class="btn" disabled={!!busy} onclick={() => store.download(a.kind)}>서버 다운로드</button>
+              <button class="btn" disabled={!!busy} onclick={() => store.download(a.kind)}>{t("agents.download")}</button>
             {:else if store.agent !== a.kind}
-              <button class="btn" onclick={() => (store.agent = a.kind)}>기본 에이전트로</button>
+              <button class="btn" onclick={() => (store.agent = a.kind)}>{t("agents.makeDefault")}</button>
             {/if}
           </div>
         {/if}

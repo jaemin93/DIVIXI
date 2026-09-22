@@ -18,36 +18,38 @@
   ];
   import AgentList from "./AgentList.svelte";
   import ThemePicker from "./ThemePicker.svelte";
+  import LangPicker from "./LangPicker.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
+  import { t } from "./i18n.svelte";
 
   /** The settings column. A group is a label; an entry opens a pane. */
   type Entry = { id: SettingsSection; icon: IconName; label: string; blurb: string };
-  const groups: { label: string; entries: Entry[] }[] = [
+  const groups = $derived<{ label: string; entries: Entry[] }[]>([
     {
       label: "",
-      entries: [{ id: "overview", icon: "overview", label: "개요", blurb: "상태, 에이전트, 저장소를 한눈에" }],
+      entries: [{ id: "overview", icon: "overview", label: t("settings.overview"), blurb: t("settings.overviewBlurb") }],
     },
     {
-      label: "환경 설정",
+      label: t("settings.group.prefs"),
       entries: [
-        { id: "appearance", icon: "look", label: "모습", blurb: "테마" },
-        { id: "chat", icon: "chat", label: "대화창", blurb: "타임라인 글자 크기" },
-        { id: "agents", icon: "agents", label: "에이전트", blurb: "감지, 로그인, 기본 에이전트" },
+        { id: "appearance", icon: "look", label: t("settings.appearance"), blurb: t("settings.appearanceBlurb") },
+        { id: "chat", icon: "chat", label: t("settings.chat"), blurb: t("settings.chatBlurb") },
+        { id: "agents", icon: "agents", label: t("settings.agents"), blurb: t("settings.agentsBlurb") },
       ],
     },
     {
-      label: "시스템",
-      entries: [{ id: "about", icon: "info", label: "정보", blurb: "버전과 경로" }],
+      label: t("settings.group.system"),
+      entries: [{ id: "about", icon: "info", label: t("settings.about"), blurb: t("settings.aboutBlurb") }],
     },
-  ];
+  ]);
 
   const current = $derived(groups.flatMap((g) => g.entries).find((e) => e.id === store.settingsSection)!);
 
-  const fonts: { id: ChatFont; label: string; px: string }[] = [
-    { id: "s", label: "작게", px: "11px" },
-    { id: "m", label: "보통", px: "13px" },
-    { id: "l", label: "크게", px: "15px" },
-  ];
+  const fonts = $derived<{ id: ChatFont; label: string; px: string }[]>([
+    { id: "s", label: t("settings.size.s"), px: "11px" },
+    { id: "m", label: t("settings.size.m"), px: "13px" },
+    { id: "l", label: t("settings.size.l"), px: "15px" },
+  ]);
 
   $effect(() => {
     if (store.info === null) store.loadInfo();
@@ -55,7 +57,7 @@
 </script>
 
 <aside class="col">
-  <div class="head"><span class="title serif">설정</span></div>
+  <div class="head"><span class="title serif">{t("settings.title")}</span></div>
   <div class="nav">
     {#each groups as g (g.label)}
       {#if g.label}<div class="mlab glabel">{g.label}</div>{/if}
@@ -73,33 +75,33 @@
   <div class="inner">
     <div class="top">
       <div>
-        <div class="mlab">설정 / {current.label}</div>
+        <div class="mlab">{t("settings.crumb", { section: current.label })}</div>
         <h1 class="serif">{current.label}</h1>
         <p class="blurb">{current.blurb}</p>
       </div>
       <span class="grow"></span>
-      <button class="btn" onclick={() => (store.view = "track")}>닫기</button>
+      <button class="btn" onclick={() => (store.view = "track")}>{t("settings.close")}</button>
     </div>
 
     {#if store.settingsSection === "overview"}
       <div class="tiles">
         <div class="tile">
-          <div class="mlab-sm">에이전트</div>
+          <div class="mlab-sm">{t("settings.tile.agents")}</div>
           <div class="big mono"><span class:ok={store.readyAgents.length > 0}>{store.readyAgents.length}</span> / {store.agents?.length ?? 0}</div>
-          <div class="sub">준비됨</div>
+          <div class="sub">{t("settings.tile.ready")}</div>
         </div>
         <div class="tile">
-          <div class="mlab-sm">런</div>
+          <div class="mlab-sm">{t("settings.tile.runs")}</div>
           <div class="big mono">{store.info?.runs ?? store.runs.length}</div>
-          <div class="sub">이 저장소에 기록됨</div>
+          <div class="sub">{t("settings.tile.runsNote")}</div>
         </div>
         <div class="tile">
-          <div class="mlab-sm">기본 에이전트</div>
+          <div class="mlab-sm">{t("settings.tile.default")}</div>
           <div class="big mono">{agentLabel(store.agent)}</div>
-          <div class="sub">레인이 열리는 곳</div>
+          <div class="sub">{t("settings.tile.defaultNote")}</div>
         </div>
         <div class="tile">
-          <div class="mlab-sm">버전</div>
+          <div class="mlab-sm">{t("settings.tile.version")}</div>
           <div class="big mono">{store.info?.version ?? "…"}</div>
           <div class="sub">orchestra</div>
         </div>
@@ -107,9 +109,9 @@
 
       <div class="card">
         <div class="cardhead">
-          <span class="ctitle">에이전트</span>
+          <span class="ctitle">{t("settings.card.agents")}</span>
           <span class="grow"></span>
-          <button class="btn" onclick={() => (store.settingsSection = "agents")}>설정</button>
+          <button class="btn" onclick={() => (store.settingsSection = "agents")}>{t("settings.card.configure")}</button>
         </div>
         <div class="rows mono">
           {#each store.agents ?? [] as a (a.kind)}
@@ -120,15 +122,15 @@
               <span class="dim">{a.readiness.replace("_", " ")}</span>
             </div>
           {/each}
-          {#if !store.agents}<div class="row dim">아직 감지하지 않았습니다.</div>{/if}
+          {#if !store.agents}<div class="row dim">{t("agents.notYet")}</div>{/if}
         </div>
       </div>
 
       <div class="card">
         <div class="cardhead">
-          <span class="ctitle">저장소</span>
+          <span class="ctitle">{t("settings.card.store")}</span>
           <span class="grow"></span>
-          <button class="btn" onclick={() => (store.settingsSection = "about")}>자세히</button>
+          <button class="btn" onclick={() => (store.settingsSection = "about")}>{t("settings.card.details")}</button>
         </div>
         <div class="rows mono">
           <div class="row"><span class="dim">db</span><span class="path">{store.info?.db_path ?? "…"}</span></div>
@@ -137,31 +139,34 @@
       </div>
     {:else if store.settingsSection === "appearance"}
       <div class="group">
-        <div class="gtitle">보기</div>
+        <div class="gtitle">{t("settings.view")}</div>
         <div class="card pad">
-          <div class="ftitle">테마</div>
-          <p class="fnote">System은 OS 설정을 따릅니다.</p>
+          <div class="ftitle">{t("settings.theme")}</div>
+          <p class="fnote">{t("settings.themeNote")}</p>
           <ThemePicker />
+          <div class="ftitle top">{t("lang.label")}</div>
+          <p class="fnote">{t("lang.blurb")}</p>
+          <LangPicker />
         </div>
       </div>
 
       <div class="group">
-        <div class="gtitle">확대/축소 및 글꼴</div>
+        <div class="gtitle">{t("settings.zoomAndFont")}</div>
         <div class="card pad">
-          <div class="ftitle">확대/축소 수준</div>
-          <p class="fnote">창 전체의 확대 비율입니다. Ctrl+= / Ctrl+− 와 같고, Ctrl+0으로 100%. {ZOOM_MIN}%–{ZOOM_MAX}%, 다시 실행해도 유지됩니다.</p>
+          <div class="ftitle">{t("settings.zoom")}</div>
+          <p class="fnote">{t("settings.zoomNote", { min: ZOOM_MIN, max: ZOOM_MAX })}</p>
           <div class="zoom">
-            <button class="btn sq" onclick={() => store.setZoom(store.zoom - ZOOM_STEP)} disabled={store.zoom <= ZOOM_MIN} aria-label="축소">−</button>
+            <button class="btn sq" onclick={() => store.setZoom(store.zoom - ZOOM_STEP)} disabled={store.zoom <= ZOOM_MIN} aria-label={t("settings.zoomOut")}>−</button>
             <span class="mono zval" aria-live="polite">{store.zoom}%</span>
-            <button class="btn sq" onclick={() => store.setZoom(store.zoom + ZOOM_STEP)} disabled={store.zoom >= ZOOM_MAX} aria-label="확대">+</button>
+            <button class="btn sq" onclick={() => store.setZoom(store.zoom + ZOOM_STEP)} disabled={store.zoom >= ZOOM_MAX} aria-label={t("settings.zoomIn")}>+</button>
             {#if store.zoom !== 100}
-              <button class="btn" onclick={() => store.setZoom(100)}>100%로</button>
+              <button class="btn" onclick={() => store.setZoom(100)}>{t("settings.zoomReset")}</button>
             {/if}
           </div>
 
-          <div class="ftitle top">글꼴</div>
-          <p class="fnote">인터페이스 글꼴입니다. 라벨과 식별자는 항상 모노, 에이전트 산문은 항상 세리프입니다.</p>
-          <div class="seg" role="radiogroup" aria-label="인터페이스 글꼴">
+          <div class="ftitle top">{t("settings.font")}</div>
+          <p class="fnote">{t("settings.fontNote")}</p>
+          <div class="seg" role="radiogroup" aria-label={t("settings.fontLabel")}>
             {#each uiFonts as f (f.id)}
               <button
                 class="segopt"
@@ -178,25 +183,24 @@
         </div>
       </div>
     {:else if store.settingsSection === "chat"}
-      <div class="picker" role="radiogroup" aria-label="대화창 글자 크기">
+      <div class="picker" role="radiogroup" aria-label={t("settings.chatSize")}>
         {#each fonts as f (f.id)}
           <button class="opt" class:on={store.chatFont === f.id} role="radio" aria-checked={store.chatFont === f.id} onclick={() => store.setChatFont(f.id)}>
-            <span class="sample serif" style="font-size: {f.px}">레인에 태스크 보내기</span>
+            <span class="sample serif" style="font-size: {f.px}">{t("settings.chatSample")}</span>
             <span class="mono label">{f.label} · {f.px}</span>
           </button>
         {/each}
       </div>
-      <p class="note">타임라인의 내 말풍선과 보고 본문에 적용됩니다.</p>
+      <p class="note">{t("settings.chatNote")}</p>
     {:else if store.settingsSection === "agents"}
       <div class="actions">
         <button class="btn" disabled={store.detecting} onclick={() => store.detect()}>
-          {store.detecting ? "감지 중…" : "다시 감지"}
+          {store.detecting ? t("settings.detecting") : t("settings.redetect")}
         </button>
-        <button class="btn" onclick={() => { store.setupStep = 1; store.setupOpen = true; }}>SETUP 열기</button>
+        <button class="btn" onclick={() => { store.setupStep = 1; store.setupOpen = true; }}>{t("settings.openSetup")}</button>
       </div>
       <p class="note">
-        앱을 켜 둔 채 설치하거나 로그인해도 다시 감지하면 반영됩니다.
-        레인은 기본 에이전트로 열립니다. 컴포저에서 런마다 바꿀 수 있습니다.
+        {t("settings.agentsNote")}
       </p>
       <AgentList />
     {:else if store.settingsSection === "about"}
@@ -207,7 +211,7 @@
         <div class="row"><span class="dim">workspace</span><span class="path">{store.info?.workspace ?? "…"}</span></div>
         <div class="row"><span class="dim">runs</span><span>{store.info?.runs ?? "…"}</span></div>
       </div>
-      <p class="note">`ORCHESTRA_DB`로 저장소 경로를, `ORCHESTRA_ACP_ADAPTER`로 Claude 어댑터 경로를 바꿀 수 있습니다.</p>
+      <p class="note">{t("settings.aboutNote")}</p>
     {/if}
   </div>
 </section>

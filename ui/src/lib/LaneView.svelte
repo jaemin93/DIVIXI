@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store, agentLabel, type Run, type Segment, type Tool } from "./store.svelte";
   import Markdown from "./Markdown.svelte";
+  import { t } from "./i18n.svelte";
 
   /**
    * A worker lane's session, read like a conversation: what the conductor
@@ -58,29 +59,29 @@
     <div class="mlab">LANE / {store.openLane}</div>
     <div class="row">
       <h1 class="serif">{store.openLane}</h1>
-      <span class="mono meta">{agentLabel(agent)} · {runs.length} turns</span>
+      <span class="mono meta">{agentLabel(agent)} · {t("lane.turns", { n: runs.length })}</span>
       {#if live}<span class="dot pulse"></span>{/if}
       <span class="grow"></span>
-      <button class="btn" onclick={() => (store.view = "track")}>← Track</button>
+      <button class="btn" onclick={() => (store.view = "track")}>{t("lane.back")}</button>
     </div>
   </header>
 
   <div class="scroll" bind:this={scroller}>
     {#if runs.length === 0}
-      <div class="mono empty">이 레인의 기록이 없습니다.</div>
+      <div class="mono empty">{t("lane.empty")}</div>
     {/if}
     {#each runs as run (run.id)}
       <!-- What the conductor sent this lane. -->
       <div class="turn from">
-        <div class="mlab">지휘자</div>
+        <div class="mlab">{t("lane.conductor")}</div>
         <div class="ctext"><Markdown source={run.prompt} /></div>
       </div>
 
       <!-- How the worker answered, as it happened. -->
       <div class="turn to" class:live={run.status === "running" || run.status === "connecting"} class:failed={run.status === "failed"}>
         <div class="head">
-          <span class="mlab">워커</span>
-          <span class="mono meta">{run.id} · {run.toolCount} tools{run.durationMs != null ? ` · ${secs(run.durationMs)}` : ""}</span>
+          <span class="mlab">{t("lane.worker")}</span>
+          <span class="mono meta">{run.id} · {t("lane.tools", { n: run.toolCount })}{run.durationMs != null ? ` · ${secs(run.durationMs)}` : ""}</span>
           {#if run.status === "running" || run.status === "connecting"}<span class="dot pulse"></span>{/if}
         </div>
         {#each collapse(run.segments) as seg, i (i)}
@@ -107,7 +108,7 @@
         {#if run.status === "failed" && run.error}
           <p class="ctext bad">{run.error}</p>
         {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
-          <p class="ctext dim">시작 중…</p>
+          <p class="ctext dim">{t("lane.starting")}</p>
         {/if}
       </div>
     {/each}

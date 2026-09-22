@@ -10,6 +10,7 @@
   import LaneView from "./lib/LaneView.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
+  import { t } from "./lib/i18n.svelte";
 
   // Browser-style zoom keys, app-wide.
   function onKey(e: KeyboardEvent) {
@@ -50,8 +51,8 @@
       <main>
         <header>
           <div class="mlab">#01 / Track</div>
-          <h1 class="serif">ACP 브리지</h1>
-          <p>devterm 오케스트라를 ACP 위로 올린다. 레인은 워크트리로 격리하고, 보고는 스키마로 강제한다.</p>
+          <h1 class="serif">{t("track.placeholderName")}</h1>
+          <p>{t("track.placeholderBlurb")}</p>
         </header>
         <Timeline />
         <Composer />

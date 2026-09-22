@@ -3,6 +3,8 @@
   import AgentList from "./AgentList.svelte";
   import ThemePicker from "./ThemePicker.svelte";
   import Mark from "./Mark.svelte";
+  import LangPicker from "./LangPicker.svelte";
+  import { t } from "./i18n.svelte";
 
   // First launch: detect as soon as the window shows, once.
   $effect(() => {
@@ -27,22 +29,22 @@
 <div class="backdrop">
   <div class="panel" role="dialog" aria-modal="true" aria-labelledby="setup-title">
     <aside class="side">
-      <div class="mlab">SETUP / {step === 1 ? "01" : "02"} · {step} / 2</div>
+      <div class="mlab">{t("setup.step", { step: step === 1 ? "01" : "02", n: step })}</div>
       <div class="hero">
         <Mark size={168} ink="var(--txt)" live={store.detecting} />
       </div>
       {#if step === 1}
-        <h1 id="setup-title" class="serif">어떤 에이전트가 있는지 봅니다.</h1>
-        <p>설치된 CLI를 찾고, 각각을 ACP로 한 번씩 띄워 로그인 상태까지 확인합니다.</p>
+        <h1 id="setup-title" class="serif">{t("setup.agentsTitle")}</h1>
+        <p>{t("setup.agentsBlurb")}</p>
       {:else}
-        <h1 id="setup-title" class="serif">어떤 모습으로 볼지 고릅니다.</h1>
-        <p>테마는 언제든 설정에서 바꿀 수 있습니다.</p>
+        <h1 id="setup-title" class="serif">{t("setup.lookTitle")}</h1>
+        <p>{t("setup.lookBlurb")}</p>
       {/if}
       <div class="status mono">
         {#if step === 1 && store.agents && !store.detecting}
-          {readyCount} / {store.agents.length} 준비됨
+          {t("setup.ready", { ready: readyCount, total: store.agents.length })}
         {:else if step === 2}
-          {store.theme === "dk" ? "DARK" : "LIGHT"} 적용 중
+          {t("setup.applying", { theme: store.theme === "dk" ? "DARK" : "LIGHT" })}
         {/if}
       </div>
     </aside>
@@ -50,9 +52,9 @@
     <section class="main">
       {#if step === 1}
         <div class="head">
-          <span class="mlab">에이전트</span>
+          <span class="mlab">{t("setup.agents")}</span>
           <span class="grow"></span>
-          <button class="btn" disabled={store.detecting} onclick={() => store.detect()}>다시 감지</button>
+          <button class="btn" disabled={store.detecting} onclick={() => store.detect()}>{t("setup.redetect")}</button>
         </div>
         <div class="list">
           <AgentList />
@@ -60,22 +62,24 @@
         <div class="foot">
           {#if store.lastError}<span class="mono err">{store.lastError}</span>{/if}
           <span class="grow"></span>
-          <button class="btn" disabled={store.detecting} onclick={finish}>나중에</button>
+          <button class="btn" disabled={store.detecting} onclick={finish}>{t("setup.later")}</button>
           <button class="btn btn-acc" disabled={readyCount === 0 || store.detecting} onclick={() => (store.setupStep = 2)}>
-            계속 →
+            {t("setup.continue")}
           </button>
         </div>
       {:else}
         <div class="head">
-          <span class="mlab">모습</span>
+          <span class="mlab">{t("setup.look")}</span>
         </div>
         <div class="body">
           <ThemePicker />
+          <div class="mlab sub">{t("lang.label")}</div>
+          <LangPicker />
         </div>
         <div class="foot">
-          <button class="btn" onclick={() => (store.setupStep = 1)}>← 에이전트</button>
+          <button class="btn" onclick={() => (store.setupStep = 1)}>{t("setup.backToAgents")}</button>
           <span class="grow"></span>
-          <button class="btn btn-acc" onclick={finish}>완료</button>
+          <button class="btn btn-acc" onclick={finish}>{t("setup.finish")}</button>
         </div>
       {/if}
     </section>
@@ -193,6 +197,10 @@
     overflow-y: auto;
     padding-top: 12px;
     border-bottom: 1px solid var(--line);
+  }
+
+  .sub {
+    margin: 22px 0 10px;
   }
 
   .foot {
