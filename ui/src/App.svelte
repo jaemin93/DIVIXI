@@ -14,11 +14,11 @@
   {#if store.setupOpen}
     <Setup />
   {/if}
-  {#if store.view === "settings"}
-    <Settings />
-  {:else}
-    <div class="body">
-      <Rail />
+  <div class="body">
+    <Rail />
+    {#if store.view === "settings"}
+      <Settings />
+    {:else}
       <main>
         <header>
           <div class="mlab">#01 / Track</div>
@@ -31,8 +31,8 @@
       {#if store.openRun}
         <Inspector run={store.openRun} />
       {/if}
-    </div>
-  {/if}
+    {/if}
+  </div>
 </div>
 
 <style>
