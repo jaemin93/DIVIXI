@@ -25,6 +25,11 @@
     return text ? text.slice(-90).replace(/\s+/g, " ") : "대기 중…";
   }
 
+  /** Tool titles from MCP arrive as `mcp__orchestra__spawn_lane`; show the tool. */
+  function toolLabel(title: string): string {
+    return title.replace(/^mcp__[a-z0-9_-]+__/i, "").replace(/^mcp.[a-z0-9_-]+./i, "");
+  }
+
   /** Reports are summaries; the full text lives in the lane. */
   function summary(run: Run) {
     const clean = run.message.trim().replace(/\s+/g, " ");
@@ -58,12 +63,28 @@
           <span class="grow"></span>
           <button class="btn open" onclick={() => store.inspect(run.id)}>{store.inspecting === run.id ? "닫기" : "상세"}</button>
         </div>
-        {#if run.message.trim()}
+        <!-- The turn as it unfolds: prose and tool lines in order, like a native session. -->
+        {#each run.segments as seg, i (i)}
+          {#if seg.kind === "text"}
+            {#if seg.text.trim()}<p class="ctext">{seg.text.trim()}</p>{/if}
+          {:else}
+            <div class="toolline mono" class:running={seg.tool.status !== "completed" && seg.tool.status !== "failed"}>
+              <span class="tdot" class:pulse={seg.tool.status !== "completed" && seg.tool.status !== "failed"}></span>
+              <span class="tk">{seg.tool.toolKind}</span>
+              <span class="tt">{toolLabel(seg.tool.title)}</span>
+              <span class="grow"></span>
+              <span class="tst">{seg.tool.status}</span>
+            </div>
+          {/if}
+        {/each}
+        {#if run.segments.length === 0 && run.message.trim()}
+          <!-- Restored from the store: only the folded text survives. -->
           <p class="ctext">{run.message.trim()}</p>
-        {:else if run.status === "failed"}
+        {/if}
+        {#if run.status === "failed" && run.error}
           <p class="ctext bad">{run.error}</p>
-        {:else}
-          <p class="ctext dim">{run.toolCount ? `레인과 작업 중 · ${run.toolCount} tools` : "생각 중…"}</p>
+        {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
+          <p class="ctext dim">생각 중…</p>
         {/if}
       </div>
     {:else}
@@ -225,6 +246,56 @@
 
   .ctext.dim {
     color: var(--lab);
+  }
+
+  .ctext + .ctext,
+  .toolline + .ctext,
+  .ctext + .toolline {
+    margin-top: 8px;
+  }
+
+  /* One line per tool call, as a native session prints them. */
+  .toolline {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    height: 22px;
+    font-size: 11px;
+    color: var(--lab);
+  }
+
+  .toolline.running {
+    color: var(--dim);
+  }
+
+  .tdot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--idle);
+    flex-shrink: 0;
+  }
+
+  .toolline.running .tdot {
+    background: var(--ok);
+  }
+
+  .tk {
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-size: 9px;
+  }
+
+  .tt {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--body);
+  }
+
+  .tst {
+    font-size: 9px;
+    letter-spacing: 0.12em;
   }
 
   .ctext.bad {

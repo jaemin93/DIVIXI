@@ -89,6 +89,9 @@ export type AgentStatus = {
 
 export type Tool = { id: string; title: string; toolKind: string; status: string };
 
+/** The turn as it happened: prose and tool calls in arrival order. */
+export type Segment = { kind: "text"; text: string } | { kind: "tool"; tool: Tool };
+
 export type TranscriptLine = { ms: number; label: string; text: string; tone: Tone };
 export type Tone = "in" | "out" | "ok" | "warn" | "dim";
 
@@ -124,6 +127,8 @@ export type Run = {
   thought: string;
   tools: Tool[];
   transcript: TranscriptLine[];
+  /** Ordered prose and tool calls, for showing a turn as it unfolds. */
+  segments: Segment[];
 };
 
 export type View = "track" | "settings";
@@ -526,6 +531,7 @@ class Store {
       run.tools = [];
       run.plan = [];
       run.transcript = [];
+      run.segments = [];
       for (const e of events) fold(run, e.at_ms, e.event);
       run.loaded = true;
     } catch (err) {
@@ -560,6 +566,7 @@ class Store {
         thought: "",
         tools: [],
         transcript: [],
+        segments: [],
       });
     } catch (err) {
       this.busy = false;
@@ -587,6 +594,7 @@ class Store {
         thought: "",
         tools: [],
         transcript: [],
+        segments: [],
       };
       this.runs.push(run);
       void this.refreshRun(env.run);
@@ -634,20 +642,29 @@ function fold(run: Run, ms: number, ev: LaneEvent) {
       run.cwd = ev.cwd;
       push(run, ms, "session", `${ev.session_id}  cwd=${ev.cwd}`, "out");
       break;
-    case "message":
+    case "message": {
       run.message += ev.text;
+      const last = run.segments.at(-1);
+      if (last && last.kind === "text") last.text += ev.text;
+      else run.segments.push({ kind: "text", text: ev.text });
       break;
+    }
     case "thought":
       run.thought += ev.text;
       break;
-    case "tool_call":
-      run.tools.push({ id: ev.id, title: ev.title, toolKind: ev.tool_kind, status: ev.status });
+    case "tool_call": {
+      const tool: Tool = { id: ev.id, title: ev.title, toolKind: ev.tool_kind, status: ev.status };
+      run.tools.push(tool);
+      run.segments.push({ kind: "tool", tool });
       run.toolCount = run.tools.length;
       push(run, ms, ev.tool_kind, ev.title, "dim");
       break;
+    }
     case "tool_update": {
       const tool = run.tools.find((t) => t.id === ev.id);
       if (tool) tool.status = ev.status;
+      const seg = run.segments.find((s) => s.kind === "tool" && s.tool.id === ev.id);
+      if (seg && seg.kind === "tool") seg.tool.status = ev.status;
       break;
     }
     case "plan":
@@ -701,6 +718,7 @@ function fromSummary(s: RunSummary): Run {
     thought: "",
     tools: [],
     transcript: [],
+    segments: [],
   };
 }
 
