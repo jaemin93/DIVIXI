@@ -1,0 +1,193 @@
+/* Design tokens. Two themes, one vocabulary.
+   `.dk` / `.lt` go on <html>; every colour below is referenced as var(--x). */
+
+.dk {
+  --bg: #0b0b0b;
+  --rail: #0d0d0d;
+  --card: #0f0f0f;
+  --cardq: #0c0c0c;
+  --inp: #101010;
+  --line: #1e1e1e;
+  --lineq: #161616;
+  --lines: #2a2a2a;
+  --txt: #e9e7e4;
+  --hi: #f0eeeb;
+  --body: #c9c7c4;
+  --dim: #9a9a9a;
+  --lab: #8e8e8e;
+  --acc: #e03127;
+  --acct: #f0453a;
+  --accon: #ffffff;
+  --accbg: #150f0e;
+  --accln: #3e1815;
+  --ok: #46c46a;
+  --okln: #2e6b3e;
+  --okbg: #0c1a10;
+  --oktx: #7bd99b;
+  --warn: #e0a030;
+  --warnbg: #100d08;
+  --warnln: #3a2a12;
+  --idle: #3a3a3a;
+  --delbg: #1a0c0c;
+  --deltx: #e58a82;
+  --dot: #1a1a1a;
+  --memb: #130c0b;
+  --membln: #2e1310;
+  --sel: #151515;
+  --sb: #242424;
+}
+
+.lt {
+  --bg: #faf9f7;
+  --rail: #f2f0ec;
+  --card: #ffffff;
+  --cardq: #f6f4f0;
+  --inp: #ffffff;
+  --line: #e2dfd9;
+  --lineq: #edeae4;
+  --lines: #d3cfc7;
+  --txt: #1a1917;
+  --hi: #0e0d0c;
+  --body: #35332f;
+  --dim: #5e5b55;
+  --lab: #6b675f;
+  --acc: #c42016;
+  --acct: #b81c12;
+  --accon: #ffffff;
+  --accbg: #fdf3f2;
+  --accln: #e8c4c0;
+  --ok: #1f7a3d;
+  --okln: #7cb894;
+  --okbg: #eff7f1;
+  --oktx: #1f7a3d;
+  --warn: #8f5806;
+  --warnbg: #fbf5e9;
+  --warnln: #e0cfa8;
+  --idle: #b8b3a9;
+  --delbg: #fdefee;
+  --deltx: #a32a20;
+  --dot: #e6e3dd;
+  --memb: #fdf3f2;
+  --membln: #e8c4c0;
+  --sel: #eae7e1;
+  --sb: #d3cfc7;
+}
+
+:root {
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --sans: "IBM Plex Sans", system-ui, sans-serif;
+  --serif: "Newsreader", Georgia, serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--txt);
+  font-family: var(--sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+/* The mono uppercase micro-label is the house signature. */
+.mlab {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--lab);
+}
+
+.mlab-sm {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--lab);
+}
+
+.mono {
+  font-family: var(--mono);
+}
+
+.serif {
+  font-family: var(--serif);
+}
+
+/* Flat, hairline, no radius, no shadow. */
+.btn {
+  height: 32px;
+  padding: 0 12px;
+  background: transparent;
+  border: 1px solid var(--lines);
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+}
+
+.btn:hover:not(:disabled) {
+  color: var(--hi);
+  border-color: var(--lines);
+  background: var(--sel);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn-acc {
+  background: var(--acc);
+  border: 0;
+  color: var(--accon);
+}
+
+.btn-acc:hover:not(:disabled) {
+  background: var(--acc);
+  color: var(--accon);
+  filter: brightness(1.12);
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--sb);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+input::placeholder {
+  color: var(--lab);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.pulse {
+  animation: pulse 1.8s ease-in-out infinite;
+}

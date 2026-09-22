@@ -1,0 +1,19 @@
+[package]
+name = "orchestra-acp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agent-client-protocol.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+orchestra-core = { path = "../orchestra" }
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
