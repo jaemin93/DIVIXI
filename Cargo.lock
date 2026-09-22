@@ -2688,6 +2688,7 @@ dependencies = [
  "orchestra-acp",
  "orchestra-agents",
  "orchestra-core",
+ "orchestra-mcp",
  "orchestra-store",
  "parking_lot",
  "serde",

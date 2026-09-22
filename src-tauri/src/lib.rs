@@ -11,9 +11,12 @@ use std::time::Duration;
 use orchestra_acp::{run_lane, AgentSpec, LaneSpec};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
 use orchestra_core::{LaneEnvelope, LaneEvent};
+use orchestra_mcp::McpServer;
 use orchestra_store::{RunSummary, SearchHit, Store, StoredEvent};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+mod conductor;
 
 /// How often accumulated message text is flushed to the webview and the store.
 ///
@@ -30,16 +33,30 @@ const AGENTS_META: &str = "agents";
 
 /// Process-wide state.
 pub struct AppState {
-    store: Store,
+    pub(crate) store: Store,
     /// Where the store lives, for the settings page.
     db_path: String,
     /// Where downloaded ACP servers live (`<app data>/adapters`).
     adapters_dir: PathBuf,
     /// Last detection result, mirrored from the store for quick lookups.
     agents: Mutex<Option<Vec<AgentStatus>>>,
+    /// The in-process MCP server that gives the conductor its tools.
+    pub(crate) mcp: McpServer,
+    /// Conductor and lane sessions.
+    pub(crate) sessions: conductor::Sessions,
 }
 
 impl AppState {
+    /// The model the user chose for an agent in the composer, if any.
+    pub(crate) fn chosen_model(&self, agent: &str) -> Option<String> {
+        let json = self.store.get_meta("setting:models").ok()??;
+        let map: serde_json::Value = serde_json::from_str(&json).ok()?;
+        map.get(agent)
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+
     fn detect_options(&self) -> DetectOptions {
         DetectOptions::new(&self.adapters_dir, workspace_root())
     }
@@ -76,7 +93,7 @@ impl AppState {
     }
 
     /// The id of the agent's model selector option, as detection saw it.
-    fn model_option_id(&self, agent: &str) -> Option<String> {
+    pub(crate) fn model_option_id(&self, agent: &str) -> Option<String> {
         let kind = AgentKind::parse(agent)?;
         let list = self.load_agents().ok()??;
         let status = list.iter().find(|s| s.kind == kind)?;
@@ -90,7 +107,7 @@ impl AppState {
     }
 
     /// The launch spec for an agent id, if it was detected as ready.
-    fn spec_for(&self, agent: &str) -> Result<AgentSpec, String> {
+    pub(crate) fn spec_for(&self, agent: &str) -> Result<AgentSpec, String> {
         let kind = AgentKind::parse(agent).ok_or_else(|| format!("unknown agent {agent}"))?;
         let list = self.load_agents()?.unwrap_or_default();
         match list.iter().find(|s| s.kind == kind) {
@@ -170,6 +187,15 @@ async fn start_run(
     });
 
     Ok(run)
+}
+
+/// Send one human message to the conductor. Returns the conductor run id;
+/// the turn streams under it, and any lanes it opens stream under theirs.
+#[tauri::command]
+async fn conductor_prompt(app: AppHandle, prompt: String, agent: Option<String>) -> Result<String, String> {
+    let agent = agent.unwrap_or_else(|| AgentKind::ClaudeCode.id().to_string());
+    let state = std::sync::Arc::new(conductor::AppStateRef(app.clone()));
+    conductor::conductor_prompt(app, state, prompt, agent).await
 }
 
 /// Every run, oldest first: what the timeline is rebuilt from at startup.
@@ -302,7 +328,7 @@ async fn download_agent(
 /// The store write happens before the emit, so anything the webview has seen
 /// is already durable. A store failure is logged and the event still reaches
 /// the webview: losing history is bad, losing the live view is worse.
-async fn pump(
+pub(crate) async fn pump(
     app: AppHandle,
     lane: String,
     run: String,
@@ -367,7 +393,7 @@ async fn pump(
 /// `tauri dev` starts the binary inside `src-tauri/`, so the plain working
 /// directory would point agents at the wrong folder. Walk up to the nearest
 /// `.git`; without one, the working directory itself.
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     cwd.ancestors()
         .find(|dir| dir.join(".git").exists())
@@ -398,6 +424,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             start_run,
+            conductor_prompt,
             list_runs,
             run_events,
             search_runs,
@@ -414,11 +441,16 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let (store, db_path) = open_store(&data_dir)?;
             let adapters_dir = data_dir.join("adapters");
+            // The conductor's tools, served from this process on localhost.
+            let tools = conductor::tools(app.handle().clone());
+            let mcp = tauri::async_runtime::block_on(McpServer::start("orchestra", tools))?;
             app.manage(AppState {
                 store,
                 db_path,
                 adapters_dir,
                 agents: Mutex::new(None),
+                mcp,
+                sessions: conductor::Sessions::default(),
             });
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Orchestra");

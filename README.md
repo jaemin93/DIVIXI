@@ -10,6 +10,9 @@
 
 **메커니즘과 정책의 분리.** Rust 코어는 레인을 띄우고 이벤트를 나르기만 합니다.
 무엇을 어떻게 분해할지(지휘자 로직)는 에이전트가 정합니다 — 코어에 넣지 않습니다.
+지휘자는 Track마다 하나 있는 오래 사는 ACP 세션이고, 앱 API(`spawn_lane`, `ask_lane`,
+`read_report`, `record_decision` …)를 프로세스 안 HTTP MCP 서버로 받습니다. 레인도 각각
+오래 사는 세션이라 Claude Code 세션 하나를 열어 두고 계속 시키는 것과 같습니다.
 
 **프로토콜은 한 곳에만.** `crates/acp`만 ACP를 압니다. 그 위는 `LaneEvent`만 봅니다.
 ACP를 지원하지 않는 에이전트는 나중에 같은 채널 뒤에 PTY 백엔드로 붙습니다.
@@ -20,6 +23,7 @@ ACP를 지원하지 않는 에이전트는 나중에 같은 채널 뒤에 PTY �
 crates/orchestra/   도메인 — LaneEvent, 막의 정의
 crates/acp/         ACP 클라이언트 — 에이전트 기동, 세션, 스트리밍
 crates/agents/      에이전트 카탈로그 — CLI 탐색, ACP 프로브·로그인, Antigravity 서버 다운로드
+crates/mcp/         앱 내장 HTTP MCP 서버 — 지휘자에게 주는 도구
 crates/store/       이벤트 스토어 — SQLite, append-only 로그 + runs 투영 + FTS5
 src-tauri/          앱 셸 — run 식별자, 이벤트 영속화, 코얼레싱, IPC
 ui/                 Svelte 5 — 타임라인, 인스펙터, 두 테마

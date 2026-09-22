@@ -42,10 +42,31 @@
   {/if}
 
   {#each store.runs as run (run.id)}
-    <div class="me">
-      <div class="mlab">나</div>
-      <div class="bubble"><p class="serif">{run.prompt}</p></div>
-    </div>
+    {#if run.lane === "conductor"}
+      <!-- A conductor turn: the human's message, then the conductor's reply as prose. -->
+      <div class="me">
+        <div class="mlab">나</div>
+        <div class="bubble"><p class="serif">{run.prompt}</p></div>
+      </div>
+      <div class="conductor" class:live={run.status === "connecting" || run.status === "running"}>
+        <div class="chead">
+          <span class="mlab">지휘자</span>
+          <span class="mono meta">{agentLabel(run.agent)} · {run.id}</span>
+          {#if run.status === "connecting" || run.status === "running"}
+            <span class="dot pulse"></span>
+          {/if}
+          <span class="grow"></span>
+          <button class="mono open" onclick={() => store.inspect(run.id)}>{store.inspecting === run.id ? "닫기" : "상세"}</button>
+        </div>
+        {#if run.message.trim()}
+          <p class="serif ctext">{run.message.trim()}</p>
+        {:else if run.status === "failed"}
+          <p class="serif ctext bad">{run.error}</p>
+        {:else}
+          <p class="serif ctext dim">{run.toolCount ? `레인과 작업 중 · ${run.toolCount} tools` : "생각 중…"}</p>
+        {/if}
+      </div>
+    {:else}
 
     {#if run.status === "connecting" || run.status === "running"}
       <div class="card running">
@@ -105,6 +126,7 @@
         {/if}
       </div>
     {/if}
+    {/if}
   {/each}
 </div>
 
@@ -157,6 +179,59 @@
     font-size: var(--chat-fs);
     line-height: var(--chat-lh);
     color: var(--txt);
+  }
+
+  /* The conductor speaks in prose, left-aligned, no card chrome: it is the
+     voice of the track, not a report. */
+  .conductor {
+    max-width: 680px;
+    margin-bottom: 22px;
+    padding-left: 14px;
+    border-left: 2px solid var(--lines);
+  }
+
+  .conductor.live {
+    border-left-color: var(--ok);
+  }
+
+  .chead {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 7px;
+  }
+
+  .chead .dot {
+    background: var(--ok);
+  }
+
+  .open {
+    background: transparent;
+    border: 0;
+    color: var(--lab);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    padding: 0;
+  }
+
+  .open:hover {
+    color: var(--hi);
+  }
+
+  .ctext {
+    margin: 0;
+    font-size: var(--chat-fs);
+    line-height: 1.7;
+    color: var(--txt);
+    white-space: pre-wrap;
+  }
+
+  .ctext.dim {
+    color: var(--lab);
+  }
+
+  .ctext.bad {
+    color: var(--acct);
   }
 
   .card {

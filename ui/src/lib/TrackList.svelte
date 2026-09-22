@@ -12,20 +12,23 @@
   let query = $state("");
   let open = $state<Record<string, boolean>>({ acp: true });
 
+  // Lanes are whatever the conductor has opened in this track, from the runs.
   const tracks = $derived([
     {
       id: "acp",
       name: "ACP 브리지",
       runs: store.runs.length,
       live: !!store.activeRun,
-      lanes: [
-        {
-          name: "solo",
-          agent: store.activeRun?.agent ?? store.runs.at(-1)?.agent ?? store.agent,
-          status: store.activeRun ? "running" : store.runs.length ? "idle" : "unspawned",
-          runs: store.runs.length,
-        },
-      ],
+      lanes: store.laneNames.map((name) => {
+        const runs = store.runs.filter((r) => r.lane === name);
+        const live = runs.some((r) => r.status === "running" || r.status === "connecting");
+        return {
+          name,
+          agent: runs.at(-1)?.agent ?? store.agent,
+          status: live ? "running" : "idle",
+          runs: runs.length,
+        };
+      }),
     },
   ]);
 

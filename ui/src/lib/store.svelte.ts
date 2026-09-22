@@ -533,19 +533,22 @@ class Store {
     }
   }
 
-  /** Ask the core to open a lane on the selected agent and run one prompt. */
-  async send(prompt: string, lane = "solo") {
+  /**
+   * Send a message to the conductor on the selected agent. The conductor
+   * decides whether to answer or to open lanes; lane runs arrive as
+   * `lane` events with their own run ids and are added when first seen.
+   */
+  async send(prompt: string) {
     const text = prompt.trim();
     if (!text || this.busy) return;
     this.busy = true;
     this.lastError = "";
     const agent = this.agent;
-    const model = this.models[agent] ?? null;
     try {
-      const id = await invoke<string>("start_run", { lane, prompt: text, agent, model });
+      const id = await invoke<string>("conductor_prompt", { prompt: text, agent });
       this.runs.push({
         id,
-        lane,
+        lane: "conductor",
         agent,
         prompt: text,
         status: "connecting",
@@ -564,14 +567,58 @@ class Store {
     }
   }
 
-  /** Fold one live lane event into the run it belongs to. */
+  /** Fold one live lane event into the run it belongs to, creating lane runs on first sight. */
   apply(env: Envelope) {
-    const run = this.runs.find((r) => r.id === env.run);
-    if (!run) return;
+    let run = this.runs.find((r) => r.id === env.run);
+    if (!run) {
+      // A lane the conductor opened: the core registered it, we have not.
+      // Show it now; the prompt text comes with the summary on reload.
+      run = {
+        id: env.run,
+        lane: env.lane,
+        agent: this.agent,
+        prompt: "",
+        status: "connecting",
+        startedAt: Date.now(),
+        message: "",
+        plan: [],
+        toolCount: 0,
+        loaded: true,
+        thought: "",
+        tools: [],
+        transcript: [],
+      };
+      this.runs.push(run);
+      void this.refreshRun(env.run);
+    }
     fold(run, env.at_ms, env.event);
-    if (env.event.kind === "finished" || env.event.kind === "failed") {
+    // The composer unlocks when the conductor's turn ends; lanes end inside it.
+    if (run.lane === "conductor" && (env.event.kind === "finished" || env.event.kind === "failed")) {
       this.busy = false;
     }
+  }
+
+  /** Fill a lane run's prompt and agent from the store once it exists there. */
+  private async refreshRun(id: string) {
+    try {
+      const summaries = await invoke<RunSummary[]>("list_runs");
+      const s = summaries.find((x) => x.id === id);
+      const run = this.runs.find((r) => r.id === id);
+      if (s && run) {
+        run.prompt = s.prompt;
+        run.agent = s.agent;
+        run.startedAt = s.started_at;
+      }
+    } catch {
+      // Cosmetic; the next restore fills it in.
+    }
+  }
+
+  /** Lane names seen in this track, in first-seen order, excluding the conductor. */
+  get laneNames(): string[] {
+    const seen: string[] = [];
+    for (const r of this.runs) if (r.lane !== "conductor" && !seen.includes(r.lane)) seen.push(r.lane);
+    return seen;
   }
 }
 

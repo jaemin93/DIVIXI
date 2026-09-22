@@ -15,6 +15,7 @@ anyhow.workspace = true
 orchestra-acp = { path = "../crates/acp" }
 orchestra-agents = { path = "../crates/agents" }
 orchestra-core = { path = "../crates/orchestra" }
+orchestra-mcp = { path = "../crates/mcp" }
 orchestra-store = { path = "../crates/store" }
 parking_lot.workspace = true
 serde.workspace = true
