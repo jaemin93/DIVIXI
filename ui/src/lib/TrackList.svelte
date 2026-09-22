@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store, agentLabel } from "./store.svelte";
   import Icon from "./Icon.svelte";
+  import SplitHandle from "./SplitHandle.svelte";
 
   /**
    * Second column: every track, each unfolding into its lanes.
@@ -33,7 +34,8 @@
   );
 </script>
 
-<aside>
+<aside style="width: {store.trackListWidth}px">
+  <SplitHandle edge="right" width={store.trackListWidth} min={200} max={480} reset={264} label="Tracks 열 너비" onchange={(px, persist) => store.setTrackListWidth(px, persist)} />
   <div class="head">
     <span class="mlab">Tracks</span>
     <span class="grow"></span>
@@ -85,7 +87,7 @@
 
 <style>
   aside {
-    width: 264px;
+    position: relative;
     flex-shrink: 0;
     border-right: 1px solid var(--line);
     background: var(--rail);

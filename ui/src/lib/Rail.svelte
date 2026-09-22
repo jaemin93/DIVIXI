@@ -2,6 +2,7 @@
   import { store } from "./store.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
   import Mark from "./Mark.svelte";
+  import SplitHandle from "./SplitHandle.svelte";
 
   /**
    * The rail's map. Adding a feature is one entry here: an icon, a label,
@@ -49,7 +50,10 @@
   }
 </script>
 
-<nav class:collapsed>
+<nav class:collapsed style={collapsed ? undefined : `width: ${store.railWidth}px`}>
+  {#if !collapsed}
+    <SplitHandle edge="right" width={store.railWidth} min={160} max={320} reset={200} label="사이드바 너비" onchange={(px, persist) => store.setRailWidth(px, persist)} />
+  {/if}
   <div class="top">
     <span class="brand" title="Orchestra"><Mark size={14} live={store.busy} />{#if !collapsed}<span class="mono name">ORCHESTRA</span>{/if}</span>
     <span class="grow"></span>
@@ -102,6 +106,7 @@
 
 <style>
   nav {
+    position: relative;
     width: 200px;
     flex-shrink: 0;
     border-right: 1px solid var(--line);
@@ -109,8 +114,7 @@
     display: flex;
     flex-direction: column;
     padding: 8px 0 12px;
-    transition: width 140ms ease-out;
-    overflow: hidden;
+    overflow: visible;
   }
 
   nav.collapsed {

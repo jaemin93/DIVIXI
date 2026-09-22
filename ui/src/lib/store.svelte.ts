@@ -177,6 +177,32 @@ class Store {
   info = $state<AppInfo | null>(null);
   /** Chosen model per agent id; absent means the agent's default. Persisted. */
   models = $state<Record<string, string>>({});
+  /** Column widths in px: the rail (expanded), the tracks column, the inspector. Persisted. */
+  railWidth = $state(200);
+  trackListWidth = $state(264);
+  inspectorWidth = $state(430);
+
+  private persistWidth(key: string, value: number) {
+    invoke("set_setting", { key, value: String(value) }).catch((err) => {
+      this.lastError = String(err);
+    });
+  }
+
+  setRailWidth(px: number, persist = false) {
+    this.railWidth = Math.min(320, Math.max(160, Math.round(px)));
+    if (persist) this.persistWidth("rail_width", this.railWidth);
+  }
+
+  setTrackListWidth(px: number, persist = false) {
+    this.trackListWidth = Math.min(480, Math.max(200, Math.round(px)));
+    if (persist) this.persistWidth("tracklist_width", this.trackListWidth);
+  }
+
+  setInspectorWidth(px: number, persist = false) {
+    const max = Math.max(360, Math.floor(window.innerWidth * 0.6));
+    this.inspectorWidth = Math.min(max, Math.max(320, Math.round(px)));
+    if (persist) this.persistWidth("inspector_width", this.inspectorWidth);
+  }
   runs = $state<Run[]>([]);
   /** Run id whose lane detail is open in the inspector; "" means closed. */
   inspecting = $state("");
@@ -316,7 +342,8 @@ class Store {
       if (this.themePref === "system") this.applyTheme();
     });
     try {
-      const [summaries, agents, theme, rail, tracklist, chatFont, models] = await Promise.all([
+      const [summaries, agents, theme, rail, tracklist, chatFont, models, inspectorWidth, railWidth, trackListWidth] =
+        await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<AgentStatus[] | null>("agent_statuses"),
         invoke<string | null>("get_setting", { key: "theme" }),
@@ -324,6 +351,9 @@ class Store {
         invoke<string | null>("get_setting", { key: "tracklist" }),
         invoke<string | null>("get_setting", { key: "chat_font" }),
         invoke<string | null>("get_setting", { key: "models" }),
+        invoke<string | null>("get_setting", { key: "inspector_width" }),
+        invoke<string | null>("get_setting", { key: "rail_width" }),
+        invoke<string | null>("get_setting", { key: "tracklist_width" }),
       ]);
       try {
         const parsed = models ? JSON.parse(models) : {};
@@ -331,6 +361,12 @@ class Store {
       } catch {
         this.models = {};
       }
+      const w = Number(inspectorWidth);
+      if (Number.isFinite(w) && w > 0) this.setInspectorWidth(w);
+      const rw = Number(railWidth);
+      if (Number.isFinite(rw) && rw > 0) this.setRailWidth(rw);
+      const tw = Number(trackListWidth);
+      if (Number.isFinite(tw) && tw > 0) this.setTrackListWidth(tw);
       if (theme === "system" || theme === "dark" || theme === "light") this.themePref = theme;
       this.applyTheme();
       this.railCollapsed = rail === "collapsed";

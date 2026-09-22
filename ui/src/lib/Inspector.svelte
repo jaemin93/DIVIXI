@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store, type Run } from "./store.svelte";
+  import SplitHandle from "./SplitHandle.svelte";
 
   let { run }: { run: Run } = $props();
   let tab = $state<"transcript" | "output" | "tools">("transcript");
@@ -11,9 +12,19 @@
     warn: "var(--warn)",
     dim: "var(--lab)",
   };
+
 </script>
 
-<aside>
+<aside style="width: {store.inspectorWidth}px">
+  <SplitHandle
+    edge="left"
+    width={store.inspectorWidth}
+    min={320}
+    max={Math.max(360, Math.floor(window.innerWidth * 0.6))}
+    reset={430}
+    label="레인 패널 너비"
+    onchange={(px, persist) => store.setInspectorWidth(px, persist)}
+  />
   <div class="head">
     <span class="mlab">LANE / {run.lane}</span>
     <span class="mono id">{run.id}</span>
@@ -65,7 +76,7 @@
 
 <style>
   aside {
-    width: 430px;
+    position: relative;
     flex-shrink: 0;
     border-left: 1px solid var(--line);
     background: var(--rail);
@@ -73,6 +84,7 @@
     flex-direction: column;
     min-height: 0;
   }
+
 
   .head {
     height: 44px;
