@@ -108,6 +108,11 @@ export type Run = {
 
 export type View = "track" | "settings";
 
+/** What the user asked for; `system` follows the OS. */
+export type ThemePref = "system" | "dark" | "light";
+
+const scheme = typeof window !== "undefined" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+
 /** Mirrors the `agent_download` event payload. */
 export type DownloadProgress = {
   agent: AgentId;
@@ -118,10 +123,15 @@ export type DownloadProgress = {
 
 /** Everything above the membrane plus, per run, the detail kept below it. */
 class Store {
+  /** Effective theme class on <html>. */
   theme = $state<"dk" | "lt">("dk");
+  /** The stored preference behind `theme`. */
+  themePref = $state<ThemePref>("system");
   view = $state<View>("track");
-  /** First-run agent setup, shown in front of the shell. */
+  /** First-run setup, shown in front of the shell. */
   setupOpen = $state(false);
+  /** Setup step: 1 agents, 2 appearance. */
+  setupStep = $state<1 | 2>(1);
   runs = $state<Run[]>([]);
   /** Run id whose lane detail is open in the inspector; "" means closed. */
   inspecting = $state("");
@@ -155,18 +165,42 @@ class Store {
     return this.agents?.find((a) => a.kind === this.agent);
   }
 
-  toggleTheme() {
-    this.theme = this.theme === "dk" ? "lt" : "dk";
+  /** Apply the preference to <html> and, for `system`, follow the OS. */
+  private applyTheme() {
+    const dark = this.themePref === "system" ? (scheme?.matches ?? true) : this.themePref === "dark";
+    this.theme = dark ? "dk" : "lt";
     document.documentElement.className = this.theme;
   }
 
-  /** Rebuild the timeline and agent list from the store. Called once at startup. */
-  async restore() {
+  /** Choose a theme; persisted, applied at once. */
+  async setTheme(pref: ThemePref) {
+    this.themePref = pref;
+    this.applyTheme();
     try {
-      const [summaries, agents] = await Promise.all([
+      await invoke("set_setting", { key: "theme", value: pref });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Title-bar shortcut: flip between the explicit themes. */
+  toggleTheme() {
+    void this.setTheme(this.theme === "dk" ? "light" : "dark");
+  }
+
+  /** Rebuild the timeline, agent list and preferences from the store. Called once at startup. */
+  async restore() {
+    scheme?.addEventListener("change", () => {
+      if (this.themePref === "system") this.applyTheme();
+    });
+    try {
+      const [summaries, agents, theme] = await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<AgentStatus[] | null>("agent_statuses"),
+        invoke<string | null>("get_setting", { key: "theme" }),
       ]);
+      if (theme === "system" || theme === "dark" || theme === "light") this.themePref = theme;
+      this.applyTheme();
       this.runs = summaries.map(fromSummary);
       // The core closes runs left live by a previous process, so nothing
       // restored can be in flight.
@@ -175,7 +209,10 @@ class Store {
       this.pickDefaultAgent();
       // Setup comes first when nothing has been detected yet, or when the
       // last detection left nothing to run lanes on.
-      if (agents === null || this.readyAgents.length === 0) this.setupOpen = true;
+      if (agents === null || this.readyAgents.length === 0) {
+        this.setupStep = 1;
+        this.setupOpen = true;
+      }
     } catch (err) {
       this.lastError = String(err);
     } finally {

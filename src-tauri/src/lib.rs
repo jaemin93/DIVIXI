@@ -169,6 +169,27 @@ fn agent_statuses(state: State<'_, AppState>) -> Result<Option<Vec<AgentStatus>>
     state.load_agents()
 }
 
+/// Namespace for user preferences in the store's `meta` table.
+const SETTING_PREFIX: &str = "setting:";
+
+/// Read a user preference (`theme`, …).
+#[tauri::command]
+fn get_setting(state: State<'_, AppState>, key: String) -> Result<Option<String>, String> {
+    state
+        .store
+        .get_meta(&format!("{SETTING_PREFIX}{key}"))
+        .map_err(|e| e.to_string())
+}
+
+/// Write a user preference.
+#[tauri::command]
+fn set_setting(state: State<'_, AppState>, key: String, value: String) -> Result<(), String> {
+    state
+        .store
+        .set_meta(&format!("{SETTING_PREFIX}{key}"), &value)
+        .map_err(|e| e.to_string())
+}
+
 /// Detect every agent now and remember the result. Takes several seconds:
 /// each agent is launched and probed over ACP.
 #[tauri::command]
@@ -335,6 +356,8 @@ pub fn run() {
             detect_agents,
             login_agent,
             download_agent,
+            get_setting,
+            set_setting,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
