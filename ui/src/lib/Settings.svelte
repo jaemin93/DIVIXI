@@ -14,7 +14,7 @@
       <span class="grow"></span>
       <button class="btn" onclick={() => (store.view = "track")}>닫기</button>
     </div>
-    <p>System은 OS의 다크 모드 설정을 따릅니다.</p>
+    <div class="gap"></div>
     <ThemePicker />
 
     <div class="top section">
@@ -56,6 +56,10 @@
     align-items: flex-end;
     gap: 10px;
     padding-bottom: 6px;
+  }
+
+  .gap {
+    height: 16px;
   }
 
   .section {

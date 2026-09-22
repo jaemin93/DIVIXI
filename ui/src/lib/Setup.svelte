@@ -71,7 +71,6 @@
         </div>
         <div class="body">
           <ThemePicker />
-          <p class="hint">System은 OS의 다크 모드 설정을 따르고, OS가 바뀌면 같이 바뀝니다.</p>
         </div>
         <div class="foot">
           <button class="btn" onclick={() => (store.setupStep = 1)}>← 에이전트</button>
@@ -194,10 +193,6 @@
     overflow-y: auto;
     padding-top: 12px;
     border-bottom: 1px solid var(--line);
-  }
-
-  .hint {
-    max-width: 520px;
   }
 
   .foot {
