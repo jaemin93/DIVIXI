@@ -46,24 +46,24 @@
       <!-- A conductor turn: the human's message, then the conductor's reply as prose. -->
       <div class="me">
         <div class="mlab">나</div>
-        <div class="bubble"><p class="serif">{run.prompt}</p></div>
+        <div class="bubble"><p>{run.prompt}</p></div>
       </div>
       <div class="conductor" class:live={run.status === "connecting" || run.status === "running"}>
         <div class="chead">
           <span class="mlab">지휘자</span>
-          <span class="mono meta">{agentLabel(run.agent)} · {run.id}</span>
+          <span class="mono meta">{agentLabel(run.agent)}</span>
           {#if run.status === "connecting" || run.status === "running"}
             <span class="dot pulse"></span>
           {/if}
           <span class="grow"></span>
-          <button class="mono open" onclick={() => store.inspect(run.id)}>{store.inspecting === run.id ? "닫기" : "상세"}</button>
+          <button class="btn open" onclick={() => store.inspect(run.id)}>{store.inspecting === run.id ? "닫기" : "상세"}</button>
         </div>
         {#if run.message.trim()}
-          <p class="serif ctext">{run.message.trim()}</p>
+          <p class="ctext">{run.message.trim()}</p>
         {:else if run.status === "failed"}
-          <p class="serif ctext bad">{run.error}</p>
+          <p class="ctext bad">{run.error}</p>
         {:else}
-          <p class="serif ctext dim">{run.toolCount ? `레인과 작업 중 · ${run.toolCount} tools` : "생각 중…"}</p>
+          <p class="ctext dim">{run.toolCount ? `레인과 작업 중 · ${run.toolCount} tools` : "생각 중…"}</p>
         {/if}
       </div>
     {:else}
@@ -176,18 +176,21 @@
 
   .bubble p {
     margin: 0;
+    font-family: var(--sans);
     font-size: var(--chat-fs);
     line-height: var(--chat-lh);
     color: var(--txt);
   }
 
-  /* The conductor speaks in prose, left-aligned, no card chrome: it is the
-     voice of the track, not a report. */
+  /* The conductor's turn: the same surface as the other cards, with the
+     accent on the left, but its body is prose, not a report. */
   .conductor {
     max-width: 680px;
     margin-bottom: 22px;
-    padding-left: 14px;
+    padding: 13px 17px 15px;
+    border: 1px solid var(--line);
     border-left: 2px solid var(--lines);
+    background: var(--card);
   }
 
   .conductor.live {
@@ -197,8 +200,8 @@
   .chead {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin-bottom: 7px;
+    gap: 12px;
+    margin-bottom: 10px;
   }
 
   .chead .dot {
@@ -206,20 +209,14 @@
   }
 
   .open {
-    background: transparent;
-    border: 0;
-    color: var(--lab);
-    font-size: 10px;
-    letter-spacing: 0.14em;
-    padding: 0;
+    height: 24px;
+    padding: 0 9px;
   }
 
-  .open:hover {
-    color: var(--hi);
-  }
-
+  /* Conversation text follows the interface font and the 대화창 size. */
   .ctext {
     margin: 0;
+    font-family: var(--sans);
     font-size: var(--chat-fs);
     line-height: 1.7;
     color: var(--txt);

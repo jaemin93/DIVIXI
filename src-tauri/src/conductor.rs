@@ -418,10 +418,14 @@ pub async fn conductor_prompt(
 
         // The turn runs in the background; the busy flag clears when it ends.
         let state_for_turn = state.clone();
+        let run_for_turn = run.clone();
         tauri::async_runtime::spawn(async move {
             let st = state_for_turn.get();
             // No lock held during the turn: the tools it calls lock too.
+            let started = std::time::Instant::now();
+            tracing::info!(run = %run_for_turn, "conductor turn starting");
             let result = session.prompt(text, tx.clone()).await;
+            tracing::info!(run = %run_for_turn, elapsed_ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "conductor turn ended");
             if let Err(err) = result {
                 let _ = tx.send(LaneEvent::Failed { error: err.to_string() });
                 // A failed turn kills the session; drop it so the next prompt reopens.
