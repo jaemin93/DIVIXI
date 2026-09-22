@@ -28,10 +28,12 @@
 
   /** Hook chatter (devterm memory and the like) arrives as message text; hide it. */
   function cleanText(text: string): string {
+    // "Notice: <Hook> says: …" up to the next notice or line end; they
+    // often arrive glued together on one line.
     return text
-      .split("\n")
-      .filter((line) => !/^Notice: .* says: /.test(line.trim()))
-      .join("\n");
+      .replace(/Notice: [\w:.-]+ says: .*?(?=Notice: [\w:.-]+ says: |\n|$)/g, "")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n");
   }
 
   /**
@@ -57,13 +59,14 @@
 
   /** Tool titles from MCP arrive as `mcp__orchestra__spawn_lane`; show the tool. */
   function toolLabel(title: string): string {
-    return title.replace(/^mcp__[a-z0-9_-]+__/i, "").replace(/^mcp.[a-z0-9_-]+./i, "");
+    return title.replace(/^mcp__[a-z0-9_-]+__/i, "").replace(/^mcp\.[a-z0-9_-]+\./i, "");
   }
 
   /** Reports are summaries; the full text lives in the lane. */
-  function summary(run: Run) {
-    const clean = run.message.trim().replace(/\s+/g, " ");
-    return clean.length > 220 ? `${clean.slice(0, 220)}…` : clean || "(텍스트 출력 없음)";
+  function summary(run: Run): string {
+    const text = cleanText(run.message).trim();
+    if (!text) return "_(텍스트 출력 없음)_";
+    return text.length > 600 ? `${text.slice(0, 600)}…` : text;
   }
 </script>
 
@@ -112,7 +115,7 @@
         {/each}
         {#if run.segments.length === 0 && run.message.trim()}
           <!-- Restored from the store: only the folded text survives. -->
-          <div class="ctext"><Markdown source={run.message} /></div>
+          <div class="ctext"><Markdown source={cleanText(run.message)} /></div>
         {/if}
         {#if run.status === "failed" && run.error}
           <p class="ctext bad">{run.error}</p>
