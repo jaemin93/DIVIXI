@@ -134,6 +134,8 @@ class Store {
   setupStep = $state<1 | 2>(1);
   /** Left rail folded to icons. Persisted. */
   railCollapsed = $state(false);
+  /** Second column (tracks and their lanes) shown. Persisted. */
+  trackListOpen = $state(true);
   runs = $state<Run[]>([]);
   /** Run id whose lane detail is open in the inspector; "" means closed. */
   inspecting = $state("");
@@ -200,21 +202,33 @@ class Store {
     }
   }
 
+  /** Show or hide the track list column; persisted. */
+  async setTrackList(open: boolean) {
+    this.trackListOpen = open;
+    try {
+      await invoke("set_setting", { key: "tracklist", value: open ? "open" : "closed" });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
   /** Rebuild the timeline, agent list and preferences from the store. Called once at startup. */
   async restore() {
     scheme?.addEventListener("change", () => {
       if (this.themePref === "system") this.applyTheme();
     });
     try {
-      const [summaries, agents, theme, rail] = await Promise.all([
+      const [summaries, agents, theme, rail, tracklist] = await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<AgentStatus[] | null>("agent_statuses"),
         invoke<string | null>("get_setting", { key: "theme" }),
         invoke<string | null>("get_setting", { key: "rail" }),
+        invoke<string | null>("get_setting", { key: "tracklist" }),
       ]);
       if (theme === "system" || theme === "dark" || theme === "light") this.themePref = theme;
       this.applyTheme();
       this.railCollapsed = rail === "collapsed";
+      this.trackListOpen = tracklist !== "closed";
       this.runs = summaries.map(fromSummary);
       // The core closes runs left live by a previous process, so nothing
       // restored can be in flight.

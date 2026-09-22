@@ -2,6 +2,7 @@
   import { store } from "./lib/store.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
   import Rail from "./lib/Rail.svelte";
+  import TrackList from "./lib/TrackList.svelte";
   import Timeline from "./lib/Timeline.svelte";
   import Composer from "./lib/Composer.svelte";
   import Inspector from "./lib/Inspector.svelte";
@@ -19,6 +20,9 @@
     {#if store.view === "settings"}
       <Settings />
     {:else}
+      {#if store.trackListOpen}
+        <TrackList />
+      {/if}
       <main>
         <header>
           <div class="mlab">#01 / Track</div>
