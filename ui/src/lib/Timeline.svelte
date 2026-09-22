@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store, agentLabel, type Run } from "./store.svelte";
+  import Mark from "./Mark.svelte";
 
   let scroller = $state<HTMLDivElement>();
 
@@ -34,6 +35,7 @@
 <div class="scroll" bind:this={scroller}>
   {#if store.runs.length === 0}
     <div class="empty">
+      <div class="emptymark"><Mark size={56} ink="var(--lines)" /></div>
       <div class="mlab">비어 있음</div>
       <p class="serif">아래에서 레인에 첫 태스크를 보내세요.</p>
     </div>
@@ -123,6 +125,12 @@
     margin: 10px 0 0;
     font-size: 19px;
     color: var(--dim);
+  }
+
+  .emptymark {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 18px;
   }
 
   .me {
