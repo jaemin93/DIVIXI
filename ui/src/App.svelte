@@ -11,9 +11,10 @@
 
 <div class="shell">
   <TitleBar />
-  {#if store.view === "setup"}
+  {#if store.setupOpen}
     <Setup />
-  {:else if store.view === "settings"}
+  {/if}
+  {#if store.view === "settings"}
     <Settings />
   {:else}
     <div class="body">

@@ -5,7 +5,7 @@
 //!   cargo run -p orchestra-agents --example detect -- --download   # also fetch the Antigravity server
 //!   cargo run -p orchestra-agents --example detect -- --no-probe   # locate only
 
-use orchestra_agents::{detect_all, download_antigravity, DetectOptions, Readiness};
+use orchestra_agents::{detect_all, DetectOptions, Readiness};
 
 fn main() -> anyhow::Result<()> {
     orchestra_acp::scrub_inherited_session_env();
@@ -25,7 +25,11 @@ async fn run() -> anyhow::Result<()> {
     opts.skip_probe = args.iter().any(|a| a == "--no-probe");
 
     if args.iter().any(|a| a == "--download") {
-        let path = download_antigravity(&adapters_dir).await?;
+        let path = orchestra_agents::download_antigravity_with(&adapters_dir, |p| {
+            let total = p.total.map(|t| format!("{:.1} MB", t as f64 / 1048576.0)).unwrap_or_else(|| "?".into());
+            println!("  {:?} {:.1} MB / {total}", p.phase, p.received as f64 / 1048576.0);
+        })
+        .await?;
         println!("antigravity server: {}", path.display());
     }
 

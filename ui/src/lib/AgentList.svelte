@@ -30,6 +30,17 @@
   function version(a: AgentStatus): string {
     return a.probe?.agent_version ?? a.cli?.version ?? "";
   }
+
+  function mb(n: number): string {
+    return `${(n / 1048576).toFixed(1)} MB`;
+  }
+
+  /** 0–100 when the total is known, null for an indeterminate bar. */
+  function percent(p: { received: number; total: number | null; phase: string }): number | null {
+    if (p.phase === "unpacking" || p.phase === "done") return 100;
+    if (!p.total) return null;
+    return Math.min(100, Math.round((p.received / p.total) * 100));
+  }
 </script>
 
 <div class="list">
@@ -58,6 +69,24 @@
           {/if}
         </div>
         <div class="mono detail">{adapterText(a)}</div>
+        {#if store.downloads[a.kind]}
+          {@const d = store.downloads[a.kind]}
+          {@const pct = percent(d)}
+          <div class="dl">
+            <div class="bar" class:indeterminate={pct === null}>
+              <div class="fill" style="width: {pct ?? 30}%"></div>
+            </div>
+            <div class="mono dltext">
+              {#if d.phase === "downloading"}
+                {pct === null ? mb(d.received) : `${pct}% · ${mb(d.received)} / ${mb(d.total ?? 0)}`}
+              {:else if d.phase === "unpacking"}
+                압축 해제 중 · {mb(d.received)}
+              {:else}
+                다운로드 완료 · 확인 중
+              {/if}
+            </div>
+          </div>
+        {/if}
         {#if a.readiness === "needs_login"}
           <div class="detail hint">
             로그인이 필요합니다.
@@ -187,5 +216,44 @@
     display: flex;
     gap: 8px;
     margin-top: 6px;
+  }
+
+  .dl {
+    margin-top: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  /* Hairline track, accent fill. No radius. */
+  .bar {
+    height: 3px;
+    background: var(--line);
+    overflow: hidden;
+  }
+
+  .fill {
+    height: 100%;
+    background: var(--acc);
+    transition: width 120ms linear;
+  }
+
+  .indeterminate .fill {
+    animation: slide 1.2s ease-in-out infinite;
+  }
+
+  @keyframes slide {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(340%);
+    }
+  }
+
+  .dltext {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--lab);
   }
 </style>

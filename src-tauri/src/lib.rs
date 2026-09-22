@@ -195,16 +195,33 @@ async fn login_agent(
     state.update_agent(next)
 }
 
+/// Progress of an adapter download, emitted as `agent_download` events.
+#[derive(Clone, serde::Serialize)]
+struct DownloadEvent {
+    agent: String,
+    #[serde(flatten)]
+    progress: orchestra_agents::DownloadProgress,
+}
+
 /// Download an agent's ACP server (Antigravity only, for now) and re-detect it.
+///
+/// Progress goes out as `agent_download` events so the webview can draw a bar.
 #[tauri::command]
-async fn download_agent(state: State<'_, AppState>, agent: String) -> Result<AgentStatus, String> {
+async fn download_agent(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    agent: String,
+) -> Result<AgentStatus, String> {
     let kind = AgentKind::parse(&agent).ok_or_else(|| format!("unknown agent {agent}"))?;
     if kind != AgentKind::Antigravity {
         return Err(format!("{} needs no download", kind.name()));
     }
-    orchestra_agents::download_antigravity(&state.adapters_dir)
-        .await
-        .map_err(|e| e.to_string())?;
+    let id = kind.id().to_string();
+    orchestra_agents::download_antigravity_with(&state.adapters_dir, move |progress| {
+        let _ = app.emit("agent_download", DownloadEvent { agent: id.clone(), progress });
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     let opts = state.detect_options();
     let next = orchestra_agents::detect(kind, &opts).await;
     state.update_agent(next)

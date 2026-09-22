@@ -106,12 +106,22 @@ export type Run = {
   transcript: TranscriptLine[];
 };
 
-export type View = "setup" | "track" | "settings";
+export type View = "track" | "settings";
+
+/** Mirrors the `agent_download` event payload. */
+export type DownloadProgress = {
+  agent: AgentId;
+  phase: "downloading" | "unpacking" | "done";
+  received: number;
+  total: number | null;
+};
 
 /** Everything above the membrane plus, per run, the detail kept below it. */
 class Store {
   theme = $state<"dk" | "lt">("dk");
   view = $state<View>("track");
+  /** First-run agent setup, shown in front of the shell. */
+  setupOpen = $state(false);
   runs = $state<Run[]>([]);
   /** Run id whose lane detail is open in the inspector; "" means closed. */
   inspecting = $state("");
@@ -126,6 +136,8 @@ class Store {
   detecting = $state(false);
   /** Agent ids with a login or download in flight. */
   working = $state<Record<string, string>>({});
+  /** Live download progress per agent id, while a download runs. */
+  downloads = $state<Record<string, DownloadProgress>>({});
 
   get openRun(): Run | undefined {
     return this.runs.find((r) => r.id === this.inspecting);
@@ -162,7 +174,7 @@ class Store {
       this.agents = agents;
       this.pickDefaultAgent();
       // First launch: nothing has been detected yet, so setup comes first.
-      if (agents === null) this.view = "setup";
+      if (agents === null) this.setupOpen = true;
     } catch (err) {
       this.lastError = String(err);
     } finally {
@@ -197,9 +209,21 @@ class Store {
     await this.workOn(agent, "로그인 중", () => invoke<AgentStatus>("login_agent", { agent, method: method ?? null }));
   }
 
-  /** Fetch the agent's ACP server (Antigravity). */
+  /** Fetch the agent's ACP server (Antigravity). Progress arrives as events. */
   async download(agent: AgentId) {
-    await this.workOn(agent, "다운로드 중", () => invoke<AgentStatus>("download_agent", { agent }));
+    this.downloads = { ...this.downloads, [agent]: { agent, phase: "downloading", received: 0, total: null } };
+    try {
+      await this.workOn(agent, "다운로드 중", () => invoke<AgentStatus>("download_agent", { agent }));
+    } finally {
+      const { [agent]: _done, ...rest } = this.downloads;
+      this.downloads = rest;
+    }
+  }
+
+  /** Fold a progress event in. */
+  progress(p: DownloadProgress) {
+    if (!(p.agent in this.downloads)) return;
+    this.downloads = { ...this.downloads, [p.agent]: p };
   }
 
   private async workOn(agent: AgentId, label: string, op: () => Promise<AgentStatus>) {
@@ -385,5 +409,8 @@ export const store = new Store();
 
 /** Subscribe once; the core emits one `lane` event per lane event. */
 export async function connectEvents() {
-  await listen<Envelope>("lane", (e) => store.apply(e.payload));
+  await Promise.all([
+    listen<Envelope>("lane", (e) => store.apply(e.payload)),
+    listen<DownloadProgress>("agent_download", (e) => store.progress(e.payload)),
+  ]);
 }

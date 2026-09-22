@@ -400,11 +400,40 @@ fn installed_antigravity_server(adapters_dir: &Path, release: &AntigravityReleas
     find_file(&antigravity_dir(adapters_dir, release), &release.exe)
 }
 
+/// Where a download is, for a progress bar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadProgress {
+    pub phase: DownloadPhase,
+    /// Bytes received so far.
+    pub received: u64,
+    /// Total bytes, when the server said.
+    pub total: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadPhase {
+    Downloading,
+    Unpacking,
+    Done,
+}
+
 /// Download and unpack the Antigravity ACP server into `adapters_dir`.
 ///
 /// Returns the server path. Safe to call again: an existing install is
 /// returned without downloading.
 pub async fn download_antigravity(adapters_dir: &Path) -> anyhow::Result<PathBuf> {
+    download_antigravity_with(adapters_dir, |_| {}).await
+}
+
+/// [`download_antigravity`] with a progress callback, called as bytes
+/// arrive (at most a few times per second) and at each phase change.
+pub async fn download_antigravity_with(
+    adapters_dir: &Path,
+    mut progress: impl FnMut(DownloadProgress) + Send,
+) -> anyhow::Result<PathBuf> {
+    use futures::StreamExt;
+
     let release = antigravity_release()
         .ok_or_else(|| anyhow::anyhow!("no Antigravity ACP server is published for this platform"))?;
     if let Some(existing) = installed_antigravity_server(adapters_dir, &release) {
@@ -413,14 +442,28 @@ pub async fn download_antigravity(adapters_dir: &Path) -> anyhow::Result<PathBuf
 
     let dir = antigravity_dir(adapters_dir, &release);
     tracing::info!(url = %release.url, dir = %dir.display(), "downloading Antigravity ACP server");
-    let bytes = reqwest::get(&release.url)
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+    let response = reqwest::get(&release.url).await?.error_for_status()?;
+    let total = response.content_length();
+    progress(DownloadProgress { phase: DownloadPhase::Downloading, received: 0, total });
+
+    let mut bytes: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
+    let mut stream = response.bytes_stream();
+    let mut last_report = std::time::Instant::now();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        bytes.extend_from_slice(&chunk);
+        // Throttle: a bar does not need every 16 KiB chunk.
+        if last_report.elapsed() >= Duration::from_millis(120) {
+            progress(DownloadProgress { phase: DownloadPhase::Downloading, received: bytes.len() as u64, total });
+            last_report = std::time::Instant::now();
+        }
+    }
+    let received = bytes.len() as u64;
+    progress(DownloadProgress { phase: DownloadPhase::Unpacking, received, total: Some(received) });
 
     let dir_for_unpack = dir.clone();
     tokio::task::spawn_blocking(move || unpack_zip(&bytes, &dir_for_unpack)).await??;
+    progress(DownloadProgress { phase: DownloadPhase::Done, received, total: Some(received) });
 
     let path = find_file(&dir, &release.exe)
         .ok_or_else(|| anyhow::anyhow!("{} was not in the archive", release.exe))?;
