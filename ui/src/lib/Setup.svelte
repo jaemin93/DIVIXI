@@ -85,7 +85,7 @@
 <style>
   .backdrop {
     position: fixed;
-    inset: 0;
+    inset: 32px 0 0 0; /* below the window chrome */
     z-index: 20;
     background: color-mix(in srgb, var(--bg) 78%, transparent);
     display: flex;
@@ -99,7 +99,7 @@
      scrolls inside. */
   .panel {
     width: min(960px, calc(100vw - 48px));
-    height: min(640px, calc(100vh - 48px));
+    height: min(640px, calc(100vh - 32px - 48px));
     display: flex;
     background: var(--card);
     border: 1px solid var(--lines);

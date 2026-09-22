@@ -7,9 +7,11 @@
   import Inspector from "./lib/Inspector.svelte";
   import Setup from "./lib/Setup.svelte";
   import Settings from "./lib/Settings.svelte";
+  import WindowChrome from "./lib/WindowChrome.svelte";
 </script>
 
 <div class="shell">
+  <WindowChrome />
   {#if store.setupOpen}
     <Setup />
   {/if}
