@@ -67,11 +67,12 @@ async fn run() -> anyhow::Result<()> {
         println!("           adapter  {:?}", s.adapter);
         if let Some(p) = &s.probe {
             println!(
-                "           probe    {} {} · protocol {} · loadSession={} · session {:?}",
+                "           probe    {} {} · protocol {} · loadSession={} · mcpHttp={} · session {:?}",
                 p.agent_name.as_deref().unwrap_or("?"),
                 p.agent_version.as_deref().unwrap_or(""),
                 p.protocol,
                 p.load_session,
+                p.mcp_http,
                 p.session
             );
             for m in &p.auth_methods {

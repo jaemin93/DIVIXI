@@ -13,20 +13,20 @@ use agent_client_protocol::{
         v1::{
             AuthMethod, AuthenticateRequest, InitializeRequest, NewSessionRequest,
             SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-            SessionConfigOptionValue, SessionConfigSelectOptions, SetSessionConfigOptionRequest,
-            SetSessionModeRequest,
+            SessionConfigSelectOptions,
         },
         ProtocolVersion,
     },
-    util::MatchDispatch,
-    Agent, Client, ErrorCode, SessionMessage,
+    Client, ErrorCode,
 };
 use orchestra_core::LaneEvent;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 mod process;
+mod session;
 pub use process::{spawn as spawn_agent, AgentProcess};
+pub use session::{AgentSession, McpHttp, SessionOptions};
 
 /// How to launch an agent subprocess.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +295,10 @@ pub struct ProbeReport {
     pub agent_name: Option<String>,
     pub agent_version: Option<String>,
     pub load_session: bool,
+    /// Whether the agent accepts HTTP MCP servers in `session/new`. The
+    /// conductor's tools arrive that way.
+    #[serde(default)]
+    pub mcp_http: bool,
     pub auth_methods: Vec<AuthMethodInfo>,
     pub session: SessionProbe,
     /// Session options the agent offered, when a session was created.
@@ -453,6 +457,7 @@ async fn probe_inner(
                 agent_name: init.agent_info.as_ref().map(|i| i.name.clone()),
                 agent_version: init.agent_info.as_ref().map(|i| i.version.clone()),
                 load_session: init.agent_capabilities.load_session,
+                mcp_http: init.agent_capabilities.mcp_capabilities.http,
                 auth_methods,
                 session,
                 config_options,
@@ -494,115 +499,26 @@ pub async fn run_lane(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyhow:
 }
 
 async fn run_lane_inner(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyhow::Result<()> {
-    let (process, transport) = process::spawn(&spec.agent)?;
-
-    let cwd = spec.cwd.clone();
-    let prompt = spec.prompt.clone();
-    let mode = spec.mode.clone();
-    let config = spec.config.clone();
-
-    let outcome = Client
-        .builder()
-        .name("orchestra")
-        .connect_with(transport, async move |cx| {
-            let init = cx
-                .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                .block_task()
-                .await?;
-
-            let _ = tx.send(LaneEvent::Connected {
-                protocol: format!("{:?}", init.protocol_version),
-                load_session: init.agent_capabilities.load_session,
-            });
-
-            let cwd_label = cwd.display().to_string();
-            cx.build_session(&cwd)
-                .block_task()
-                .run_until(async move |mut session| {
-                    let session_id = session.session_id().clone();
-                    let _ = tx.send(LaneEvent::Started {
-                        session_id: format!("{session_id}"),
-                        cwd: cwd_label,
-                    });
-
-                    // Mode ids are agent-specific (`bypassPermissions` is
-                    // Claude's; others say `yolo`, `full-access`, …), so an
-                    // explicit request is used as given and otherwise the
-                    // least-interrupting mode the agent advertises is chosen.
-                    let available: Vec<(String, String)> = session
-                        .modes()
-                        .map(|m| {
-                            m.available_modes
-                                .iter()
-                                .map(|x| (x.id.to_string(), x.name.clone()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let current = session.modes().map(|m| m.current_mode_id.to_string());
-                    tracing::info!(?available, ?current, "session modes");
-                    let wanted = mode.or_else(|| pick_autonomous_mode(&available));
-                    if let Some(wanted) = wanted {
-                        if current.as_deref() != Some(wanted.as_str()) {
-                            tracing::info!(mode = %wanted, "setting session mode");
-                            session
-                                .connection()
-                                .send_request_to(Agent, SetSessionModeRequest::new(session_id.clone(), wanted))
-                                .block_task()
-                                .await?;
-                        }
-                    }
-
-                    // Session options (model, …). A rejected option is logged,
-                    // not fatal: the lane still runs on the agent's default.
-                    for (option, value) in &config {
-                        tracing::info!(option, value, "setting session option");
-                        let request = SetSessionConfigOptionRequest::new(
-                            session_id.clone(),
-                            option.clone(),
-                            SessionConfigOptionValue::ValueId { value: value.clone().into() },
-                        );
-                        if let Err(err) = session.connection().send_request_to(Agent, request).block_task().await {
-                            tracing::warn!(option, value, %err, "agent rejected session option");
-                        }
-                    }
-
-                    session.send_prompt(&prompt)?;
-
-                    loop {
-                        match session.read_update().await? {
-                            SessionMessage::SessionMessage(dispatch) => {
-                                let tx = tx.clone();
-                                MatchDispatch::new(dispatch)
-                                    .if_notification(async move |notif: SessionNotification| {
-                                        for ev in translate(notif.update) {
-                                            let _ = tx.send(ev);
-                                        }
-                                        Ok(())
-                                    })
-                                    .await
-                                    .otherwise_ignore()?;
-                            }
-                            SessionMessage::StopReason(reason) => {
-                                let _ = tx.send(LaneEvent::Finished {
-                                    stop_reason: format!("{reason:?}"),
-                                });
-                                break;
-                            }
-                            // `SessionMessage` is `#[non_exhaustive]`.
-                            _ => {}
-                        }
-                    }
-                    Ok(())
-                })
-                .await
-        })
-        .await;
-
-    let result = match outcome {
-        Ok(()) => Ok(()),
-        Err(err) => Err(anyhow::anyhow!(with_stderr(format!("acp connection failed: {err}"), &process))),
-    };
-    process.shutdown().await;
+    let session = AgentSession::open(
+        &spec.agent,
+        SessionOptions {
+            cwd: spec.cwd.clone(),
+            mode: spec.mode.clone(),
+            config: spec.config.clone(),
+            mcp_servers: Vec::new(),
+        },
+    )
+    .await?;
+    let _ = tx.send(LaneEvent::Connected {
+        protocol: "ProtocolVersion(1)".to_string(),
+        load_session: false,
+    });
+    let _ = tx.send(LaneEvent::Started {
+        session_id: session.session_id().to_string(),
+        cwd: spec.cwd.display().to_string(),
+    });
+    let result = session.prompt(spec.prompt.clone(), tx).await;
+    session.close().await;
     result
 }
 
@@ -689,10 +605,10 @@ mod mode_tests {
     }
 }
 
-use agent_client_protocol::schema::v1::{ContentBlock, SessionNotification, SessionUpdate};
+use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
 
 /// Map one protocol update onto zero or more lane events.
-fn translate(update: SessionUpdate) -> Vec<LaneEvent> {
+pub(crate) fn translate(update: SessionUpdate) -> Vec<LaneEvent> {
     match update {
         SessionUpdate::AgentMessageChunk(chunk) => text_of(&chunk.content)
             .map(|text| vec![LaneEvent::Message { text }])

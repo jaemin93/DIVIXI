@@ -17,6 +17,7 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+orchestra-mcp = { path = "../mcp" }
 
 [target."cfg(windows)".dependencies]
 winreg = "0.56.0"
