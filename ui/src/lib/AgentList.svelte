@@ -44,7 +44,12 @@
 </script>
 
 <div class="list">
-  {#if store.agents === null && !store.detecting}
+  {#if store.detecting}
+    <div class="detecting" class:tall={store.agents === null}>
+      <span class="spinner" aria-hidden="true"></span>
+      <span class="mono">감지 중 · 에이전트마다 몇 초 걸립니다</span>
+    </div>
+  {:else if store.agents === null}
     <div class="empty mono">아직 감지하지 않았습니다.</div>
   {/if}
 
@@ -131,6 +136,43 @@
     padding: 18px 0;
     font-size: 11px;
     color: var(--lab);
+  }
+
+  .detecting {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 18px 0;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    color: var(--lab);
+  }
+
+  /* Empty list: the spinner owns the space. */
+  .detecting.tall {
+    flex-direction: column;
+    padding: 96px 0;
+  }
+
+  .spinner {
+    width: 16px;
+    height: 16px;
+    border: 1px solid var(--lines);
+    border-top-color: var(--acc);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+
+  .tall .spinner {
+    width: 28px;
+    height: 28px;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .row {

@@ -27,9 +27,7 @@
       <h1 id="setup-title" class="serif">어떤 에이전트가 있는지 봅니다.</h1>
       <p>설치된 CLI를 찾고, 각각을 ACP로 한 번씩 띄워 로그인 상태까지 확인합니다.</p>
       <div class="status mono">
-        {#if store.detecting}
-          감지 중 · 에이전트마다 몇 초
-        {:else if store.agents}
+        {#if store.agents && !store.detecting}
           {readyCount} / {store.agents.length} 준비됨
         {/if}
       </div>
