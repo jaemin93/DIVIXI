@@ -14,6 +14,7 @@
       <button class="btn" disabled={store.detecting} onclick={() => store.detect()}>
         {store.detecting ? "감지 중…" : "다시 감지"}
       </button>
+      <button class="btn" onclick={() => (store.setupOpen = true)}>SETUP 열기</button>
       <button class="btn" onclick={() => (store.view = "track")}>닫기</button>
     </div>
     <p>

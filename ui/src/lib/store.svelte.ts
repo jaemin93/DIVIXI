@@ -173,8 +173,9 @@ class Store {
       this.busy = false;
       this.agents = agents;
       this.pickDefaultAgent();
-      // First launch: nothing has been detected yet, so setup comes first.
-      if (agents === null) this.setupOpen = true;
+      // Setup comes first when nothing has been detected yet, or when the
+      // last detection left nothing to run lanes on.
+      if (agents === null || this.readyAgents.length === 0) this.setupOpen = true;
     } catch (err) {
       this.lastError = String(err);
     } finally {
