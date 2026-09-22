@@ -68,13 +68,12 @@
     padding: 32px 24px;
   }
 
-  /* Fixed size: the list scrolls inside, so the panel never jumps when
-     detection fills it in. */
+  /* Sized by the window, not by its content: the panel follows a window
+     resize but never jumps when detection fills the list in. The list
+     scrolls inside. */
   .panel {
-    width: 960px;
-    max-width: 100%;
-    height: 640px;
-    max-height: 100%;
+    width: min(960px, calc(100vw - 48px));
+    height: min(640px, calc(100vh - 36px - 48px));
     display: flex;
     background: var(--card);
     border: 1px solid var(--lines);
@@ -83,16 +82,32 @@
   .side {
     width: 300px;
     flex-shrink: 0;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     padding: 24px 26px 22px;
     border-right: 1px solid var(--line);
     background: var(--rail);
+    overflow: hidden;
   }
 
   .hero {
-    padding: 34px 0 26px;
+    padding: 28px 0 22px;
     color: var(--txt);
+  }
+
+  /* Short windows: give the list the room, not the mark. */
+  @media (max-height: 700px) {
+    .side {
+      width: 260px;
+    }
+    .hero {
+      padding: 16px 0 14px;
+    }
+    .hero :global(svg) {
+      width: 112px;
+      height: 112px;
+    }
   }
 
   h1 {
