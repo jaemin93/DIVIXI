@@ -44,9 +44,9 @@
   const current = $derived(groups.flatMap((g) => g.entries).find((e) => e.id === store.settingsSection)!);
 
   const fonts: { id: ChatFont; label: string; px: string }[] = [
-    { id: "s", label: "작게", px: "13px" },
-    { id: "m", label: "보통", px: "15px" },
-    { id: "l", label: "크게", px: "18px" },
+    { id: "s", label: "작게", px: "11px" },
+    { id: "m", label: "보통", px: "13px" },
+    { id: "l", label: "크게", px: "15px" },
   ];
 
   $effect(() => {

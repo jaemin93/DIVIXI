@@ -182,7 +182,7 @@ class Store {
   /** Which settings section is open. */
   settingsSection = $state<SettingsSection>("overview");
   /** Conversation text size. Persisted. */
-  chatFont = $state<ChatFont>("m");
+  chatFont = $state<ChatFont>("s");
   /** Interface typeface. Persisted. */
   uiFont = $state<UiFont>("sans");
   /** Native webview zoom in percent. Persisted. */

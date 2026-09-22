@@ -80,8 +80,8 @@
 
   /* Conversation text: the user's bubbles and agent prose. Set from
      settings via data-chat-font on <html>. */
-  --chat-fs: 15px;
-  --chat-lh: 1.55;
+  --chat-fs: 11px;
+  --chat-lh: 1.6;
 }
 
 /* UI typeface, from settings › 모습 › 글꼴. Labels and identifiers stay
@@ -98,14 +98,14 @@
   --sans: "Newsreader", Georgia, serif;
 }
 
-:root[data-chat-font="s"] {
+:root[data-chat-font="m"] {
   --chat-fs: 13px;
-  --chat-lh: 1.55;
+  --chat-lh: 1.6;
 }
 
 :root[data-chat-font="l"] {
-  --chat-fs: 18px;
-  --chat-lh: 1.5;
+  --chat-fs: 15px;
+  --chat-lh: 1.55;
 }
 
 * {
