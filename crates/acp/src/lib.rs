@@ -5,21 +5,29 @@
 //! it sees lane events and nothing else, which is what lets a non-ACP backend
 //! (a PTY-driven CLI) be added later behind the same channel.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use agent_client_protocol::{
     schema::{
-        v1::{InitializeRequest, SetSessionModeRequest},
+        v1::{
+            AuthMethod, AuthenticateRequest, InitializeRequest, NewSessionRequest,
+            SetSessionModeRequest,
+        },
         ProtocolVersion,
     },
     util::MatchDispatch,
-    AcpAgent, AcpAgentConfig, Agent, Client, SessionMessage,
+    Agent, Client, ErrorCode, SessionMessage,
 };
 use orchestra_core::LaneEvent;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
+mod process;
+pub use process::{spawn as spawn_agent, AgentProcess};
+
 /// How to launch an agent subprocess.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSpec {
     /// Executable to run.
     pub program: String,
@@ -38,17 +46,54 @@ pub struct AgentSpec {
 /// Note the package name: `@zed-industries/claude-code-acp` was renamed and
 /// its last release (0.16.2, Feb 2026) is stale. Pinning that one silently
 /// freezes the lane on a months-old agent SDK.
-const CLAUDE_ADAPTER: &str = "@agentclientprotocol/claude-agent-acp@0.79.0";
+pub const CLAUDE_ADAPTER: &str = "@agentclientprotocol/claude-agent-acp@0.79.0";
 
-/// Where the locally installed adapter's entry point lives, relative to a
-/// directory that has a `node_modules`.
-const CLAUDE_ADAPTER_SCRIPT: &str =
+/// Where the locally installed Claude adapter's entry point lives, relative to
+/// a directory that has a `node_modules`.
+pub const CLAUDE_ADAPTER_SCRIPT: &str =
     "node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js";
 
-/// Overrides adapter discovery with an explicit path to the entry script.
+/// Overrides Claude adapter discovery with an explicit path to the entry script.
 const ADAPTER_ENV: &str = "ORCHESTRA_ACP_ADAPTER";
 
 impl AgentSpec {
+    /// Run a JavaScript entry script directly under `node`.
+    pub fn node_script(script: impl AsRef<Path>) -> Self {
+        Self {
+            program: "node".to_string(),
+            args: vec![script.as_ref().to_string_lossy().into_owned()],
+            env: Vec::new(),
+        }
+    }
+
+    /// Run an npm package through `npx`. Slow (ten seconds or more per
+    /// launch), so callers should prefer a local install when one exists.
+    ///
+    /// On Windows `npx` is a shim, so it goes through `cmd /C`.
+    pub fn npx(package: &str, args: &[&str]) -> Self {
+        let (program, mut argv) = if cfg!(windows) {
+            ("cmd".to_string(), vec!["/C".to_string(), "npx".to_string()])
+        } else {
+            ("npx".to_string(), Vec::new())
+        };
+        argv.extend(["-y".to_string(), package.to_string()]);
+        argv.extend(args.iter().map(|s| s.to_string()));
+        Self {
+            program,
+            args: argv,
+            env: Vec::new(),
+        }
+    }
+
+    /// Run a native executable.
+    pub fn binary(program: impl AsRef<Path>, args: &[&str]) -> Self {
+        Self {
+            program: program.as_ref().to_string_lossy().into_owned(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            env: Vec::new(),
+        }
+    }
+
     /// The Claude Code ACP adapter.
     ///
     /// Claude Code has no native ACP mode as of CLI 2.1.x, so the adapter
@@ -56,48 +101,32 @@ impl AgentSpec {
     /// is preferred and run directly under `node`. Going through `npx` with
     /// nothing installed costs ten seconds per lane on a warm cache and twenty
     /// on a cold one, all of it before `initialize`. Without a local install
-    /// this falls back to `npx`, which on Windows is a shim and so goes
-    /// through `cmd /C`.
+    /// this falls back to `npx`.
     pub fn claude_code() -> Self {
-        if let Some(script) = find_local_adapter() {
+        if let Some(explicit) = std::env::var_os(ADAPTER_ENV) {
+            let path = PathBuf::from(explicit);
+            if path.is_file() {
+                tracing::info!(script = %path.display(), "using adapter from {ADAPTER_ENV}");
+                return Self::node_script(path);
+            }
+            tracing::warn!(path = %path.display(), "{ADAPTER_ENV} is set but is not a file");
+        }
+        if let Some(script) = find_local_script(CLAUDE_ADAPTER_SCRIPT) {
             tracing::info!(script = %script.display(), "using locally installed adapter");
-            return Self {
-                program: "node".to_string(),
-                args: vec![script.to_string_lossy().into_owned()],
-                env: Vec::new(),
-            };
+            return Self::node_script(script);
         }
-
         tracing::info!(package = CLAUDE_ADAPTER, "no local adapter install; falling back to npx");
-        let (program, mut args) = if cfg!(windows) {
-            ("cmd".to_string(), vec!["/C".to_string(), "npx".to_string()])
-        } else {
-            ("npx".to_string(), Vec::new())
-        };
-        args.extend(["-y".to_string(), CLAUDE_ADAPTER.to_string()]);
-        Self {
-            program,
-            args,
-            env: Vec::new(),
-        }
+        Self::npx(CLAUDE_ADAPTER, &[])
     }
 }
 
-/// Locate a locally installed adapter entry script.
+/// Locate a script inside a locally installed npm package.
 ///
-/// Checks `ORCHESTRA_ACP_ADAPTER` first, then walks up from the working
-/// directory and from the executable's directory looking for `node_modules`.
-/// The walk covers both `cargo run` from the repo root and the Tauri dev
-/// binary, which lives under `target/`.
-fn find_local_adapter() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os(ADAPTER_ENV) {
-        let path = PathBuf::from(explicit);
-        if path.is_file() {
-            return Some(path);
-        }
-        tracing::warn!(path = %path.display(), "{ADAPTER_ENV} is set but is not a file");
-    }
-
+/// `relative` is a path like `node_modules/<pkg>/dist/index.js`. The search
+/// walks up from the working directory and from the executable's directory
+/// looking for a directory that contains it, which covers both `cargo run`
+/// from the repo root and the Tauri dev binary, which lives under `target/`.
+pub fn find_local_script(relative: &str) -> Option<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(cwd);
@@ -111,7 +140,7 @@ fn find_local_adapter() -> Option<PathBuf> {
     roots
         .iter()
         .flat_map(|root| root.ancestors())
-        .map(|dir| dir.join(CLAUDE_ADAPTER_SCRIPT))
+        .map(|dir| dir.join(relative))
         .find(|candidate| candidate.is_file())
 }
 
@@ -171,6 +200,188 @@ pub fn scrub_inherited_session_env() {
     }
 }
 
+/// "…" plus the agent's last stderr lines, for error messages.
+fn with_stderr(msg: String, process: &AgentProcess) -> String {
+    let tail = process.stderr_tail();
+    if tail.is_empty() {
+        msg
+    } else {
+        format!("{msg}\nagent stderr:\n  {}", tail.join("\n  "))
+    }
+}
+
+/// One way an agent lets the user log in, as advertised in `initialize`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthMethodInfo {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// For terminal methods: the command line to run, joined with spaces.
+    pub terminal_command: Option<String>,
+}
+
+/// What `session/new` said during a probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionProbe {
+    /// A session was created: the agent is ready to run.
+    Ok,
+    /// The agent answered `auth_required`: installed, not logged in.
+    ///
+    /// `detail` is whatever the agent attached to the error, which is often
+    /// the most useful text available (Antigravity, for one, lists the
+    /// accepted auth methods and a settings file there).
+    AuthRequired { detail: Option<String> },
+    /// Some other failure.
+    Failed { error: String, detail: Option<String> },
+}
+
+impl SessionProbe {
+    fn from_error(err: &agent_client_protocol::Error) -> Self {
+        let detail = err.data.as_ref().map(|d| {
+            d.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| d.to_string())
+        });
+        // The code is authoritative, but an agent that wraps the error loses
+        // it and keeps only the standard message, so accept that too.
+        if err.code == ErrorCode::AuthRequired || err.message.starts_with("Authentication required") {
+            SessionProbe::AuthRequired { detail }
+        } else {
+            SessionProbe::Failed {
+                error: err.message.clone(),
+                detail,
+            }
+        }
+    }
+}
+
+/// What a probe learned about an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeReport {
+    pub protocol: String,
+    pub agent_name: Option<String>,
+    pub agent_version: Option<String>,
+    pub load_session: bool,
+    pub auth_methods: Vec<AuthMethodInfo>,
+    pub session: SessionProbe,
+}
+
+/// Launch an agent, run the `initialize` handshake, try to open a session,
+/// and shut it down again.
+///
+/// This is the protocol-native way to detect an agent: `initialize` reports
+/// what it is and how to log in, and `session/new` fails with
+/// `auth_required` when nobody has. Nothing is prompted. The whole probe is
+/// bounded by `timeout`; an agent that hangs is reported as a failure, not
+/// waited on.
+pub async fn probe(agent: &AgentSpec, cwd: &Path, timeout: Duration) -> anyhow::Result<ProbeReport> {
+    probe_inner(agent, cwd, timeout, None).await
+}
+
+/// Like [`probe`], but when `session/new` asks for authentication, send
+/// `authenticate` with `method_id` and try the session once more.
+///
+/// The agent owns the login flow. Depending on the method it may reuse
+/// cached credentials silently or open a browser; either way the result is
+/// visible in the returned report's `session`.
+pub async fn authenticate(
+    agent: &AgentSpec,
+    cwd: &Path,
+    method_id: &str,
+    timeout: Duration,
+) -> anyhow::Result<ProbeReport> {
+    probe_inner(agent, cwd, timeout, Some(method_id.to_string())).await
+}
+
+async fn probe_inner(
+    agent: &AgentSpec,
+    cwd: &Path,
+    timeout: Duration,
+    auth: Option<String>,
+) -> anyhow::Result<ProbeReport> {
+    let (process, transport) = process::spawn(agent)?;
+    let cwd = cwd.to_path_buf();
+
+    let probe = Client
+        .builder()
+        .name("orchestra-probe")
+        .connect_with(transport, async move |cx| {
+            let init = cx
+                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+
+            let auth_methods = init
+                .auth_methods
+                .iter()
+                .map(|m| AuthMethodInfo {
+                    id: m.id().to_string(),
+                    name: m.name().to_string(),
+                    description: m.description().map(str::to_owned),
+                    terminal_command: match m {
+                        AuthMethod::Terminal(t) => Some(t.args.join(" ")),
+                        _ => None,
+                    },
+                })
+                .collect();
+
+            // The raw request, not `build_session`: that one spawns session
+            // runners whose failure tears the whole connection down, which
+            // would hide the error code we are here to read.
+            let new_session = || async {
+                match cx
+                    .send_request(NewSessionRequest::new(cwd.clone()))
+                    .block_task()
+                    .await
+                {
+                    Ok(_) => SessionProbe::Ok,
+                    Err(err) => SessionProbe::from_error(&err),
+                }
+            };
+
+            let mut session = new_session().await;
+            if let (SessionProbe::AuthRequired { .. }, Some(method)) = (&session, auth.clone()) {
+                tracing::info!(method, "session requires auth; authenticating");
+                match cx
+                    .send_request(AuthenticateRequest::new(method.clone()))
+                    .block_task()
+                    .await
+                {
+                    Ok(_) => session = new_session().await,
+                    Err(err) => {
+                        session = SessionProbe::Failed {
+                            error: format!("authenticate({method}) failed: {}", err.message),
+                            detail: err.data.as_ref().map(|d| d.to_string()),
+                        }
+                    }
+                }
+            }
+
+            Ok(ProbeReport {
+                protocol: format!("{:?}", init.protocol_version),
+                agent_name: init.agent_info.as_ref().map(|i| i.name.clone()),
+                agent_version: init.agent_info.as_ref().map(|i| i.version.clone()),
+                load_session: init.agent_capabilities.load_session,
+                auth_methods,
+                session,
+            })
+        });
+
+    let outcome = tokio::time::timeout(timeout, probe).await;
+    let result = match outcome {
+        Ok(Ok(report)) => Ok(report),
+        Ok(Err(err)) => Err(anyhow::anyhow!(with_stderr(format!("acp probe failed: {err}"), &process))),
+        Err(_) => Err(anyhow::anyhow!(with_stderr(
+            format!("acp probe timed out after {}s", timeout.as_secs()),
+            &process
+        ))),
+    };
+    process.shutdown().await;
+    result
+}
+
 /// Run one prompt to completion, emitting events as they arrive.
 ///
 /// Returns once the agent reports a stop reason or the connection fails. The
@@ -193,11 +404,7 @@ pub async fn run_lane(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyhow:
 }
 
 async fn run_lane_inner(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyhow::Result<()> {
-    let mut cfg = AcpAgentConfig::new(&spec.agent.program).args(spec.agent.args.clone());
-    for (k, v) in &spec.agent.env {
-        cfg = cfg.env(k, v);
-    }
-    let transport = AcpAgent::new(cfg);
+    let (process, transport) = process::spawn(&spec.agent)?;
 
     let cwd = spec.cwd.clone();
     let prompt = spec.prompt.clone();
@@ -267,10 +474,12 @@ async fn run_lane_inner(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyho
         })
         .await;
 
-    if let Err(err) = outcome {
-        anyhow::bail!("acp connection failed: {err}");
-    }
-    Ok(())
+    let result = match outcome {
+        Ok(()) => Ok(()),
+        Err(err) => Err(anyhow::anyhow!(with_stderr(format!("acp connection failed: {err}"), &process))),
+    };
+    process.shutdown().await;
+    result
 }
 
 use agent_client_protocol::schema::v1::{ContentBlock, SessionNotification, SessionUpdate};
