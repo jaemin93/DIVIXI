@@ -8,7 +8,25 @@
   import Setup from "./lib/Setup.svelte";
   import Settings from "./lib/Settings.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
+  import { ZOOM_STEP } from "./lib/store.svelte";
+
+  // Browser-style zoom keys, app-wide.
+  function onKey(e: KeyboardEvent) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    if (e.key === "=" || e.key === "+") {
+      e.preventDefault();
+      store.setZoom(store.zoom + ZOOM_STEP);
+    } else if (e.key === "-") {
+      e.preventDefault();
+      store.setZoom(store.zoom - ZOOM_STEP);
+    } else if (e.key === "0") {
+      e.preventDefault();
+      store.setZoom(100);
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onKey} />
 
 <div class="shell">
   <WindowChrome />

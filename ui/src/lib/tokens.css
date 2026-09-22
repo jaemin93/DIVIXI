@@ -84,6 +84,20 @@
   --chat-lh: 1.55;
 }
 
+/* UI typeface, from settings › 모습 › 글꼴. Labels and identifiers stay
+   mono; agent prose stays serif. This swaps the interface face only. */
+:root[data-ui-font="mono"] {
+  --sans: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+:root[data-ui-font="system"] {
+  --sans: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+}
+
+:root[data-ui-font="serif"] {
+  --sans: "Newsreader", Georgia, serif;
+}
+
 :root[data-chat-font="s"] {
   --chat-fs: 13px;
   --chat-lh: 1.55;

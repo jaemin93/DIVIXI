@@ -1,5 +1,21 @@
 <script lang="ts">
-  import { store, agentLabel, type SettingsSection, type ChatFont } from "./store.svelte";
+  import {
+    store,
+    agentLabel,
+    ZOOM_MIN,
+    ZOOM_MAX,
+    ZOOM_STEP,
+    type SettingsSection,
+    type ChatFont,
+    type UiFont,
+  } from "./store.svelte";
+
+  const uiFonts: { id: UiFont; label: string; family: string }[] = [
+    { id: "sans", label: "Sans", family: '"IBM Plex Sans", system-ui, sans-serif' },
+    { id: "mono", label: "Mono", family: '"IBM Plex Mono", ui-monospace, monospace' },
+    { id: "system", label: "System", family: 'system-ui, "Segoe UI", "Malgun Gothic", sans-serif' },
+    { id: "serif", label: "Serif", family: '"Newsreader", Georgia, serif' },
+  ];
   import AgentList from "./AgentList.svelte";
   import ThemePicker from "./ThemePicker.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
@@ -120,7 +136,47 @@
         </div>
       </div>
     {:else if store.settingsSection === "appearance"}
-      <ThemePicker />
+      <div class="group">
+        <div class="gtitle">보기</div>
+        <div class="card pad">
+          <div class="ftitle">테마</div>
+          <p class="fnote">System은 OS 설정을 따릅니다.</p>
+          <ThemePicker />
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="gtitle">확대/축소 및 글꼴</div>
+        <div class="card pad">
+          <div class="ftitle">확대/축소 수준</div>
+          <p class="fnote">창 전체의 확대 비율입니다. Ctrl+= / Ctrl+− 와 같고, Ctrl+0으로 100%. {ZOOM_MIN}%–{ZOOM_MAX}%, 다시 실행해도 유지됩니다.</p>
+          <div class="zoom">
+            <button class="btn sq" onclick={() => store.setZoom(store.zoom - ZOOM_STEP)} disabled={store.zoom <= ZOOM_MIN} aria-label="축소">−</button>
+            <span class="mono zval" aria-live="polite">{store.zoom}%</span>
+            <button class="btn sq" onclick={() => store.setZoom(store.zoom + ZOOM_STEP)} disabled={store.zoom >= ZOOM_MAX} aria-label="확대">+</button>
+            {#if store.zoom !== 100}
+              <button class="btn" onclick={() => store.setZoom(100)}>100%로</button>
+            {/if}
+          </div>
+
+          <div class="ftitle top">글꼴</div>
+          <p class="fnote">인터페이스 글꼴입니다. 라벨과 식별자는 항상 모노, 에이전트 산문은 항상 세리프입니다.</p>
+          <div class="seg" role="radiogroup" aria-label="인터페이스 글꼴">
+            {#each uiFonts as f (f.id)}
+              <button
+                class="segopt"
+                class:on={store.uiFont === f.id}
+                role="radio"
+                aria-checked={store.uiFont === f.id}
+                style="font-family: {f.family}"
+                onclick={() => store.setUiFont(f.id)}
+              >
+                {f.label}
+              </button>
+            {/each}
+          </div>
+        </div>
+      </div>
     {:else if store.settingsSection === "chat"}
       <div class="picker" role="radiogroup" aria-label="대화창 글자 크기">
         {#each fonts as f (f.id)}
@@ -366,6 +422,94 @@
     height: 6px;
     border-radius: 50%;
     flex-shrink: 0;
+  }
+
+  .group {
+    margin-bottom: 26px;
+  }
+
+  .gtitle {
+    font-size: 15px;
+    color: var(--hi);
+    margin-bottom: 10px;
+  }
+
+  .card.pad {
+    padding: 18px 20px 20px;
+  }
+
+  .ftitle {
+    font-size: 14px;
+    color: var(--hi);
+  }
+
+  .ftitle.top {
+    margin-top: 24px;
+  }
+
+  .fnote {
+    margin: 6px 0 12px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--dim);
+    max-width: 600px;
+  }
+
+  .zoom {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .sq {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    font-size: 14px;
+    letter-spacing: 0;
+  }
+
+  .zval {
+    min-width: 64px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--hi);
+  }
+
+  /* Segmented control: hairline box, accent underline on the chosen one. */
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--line);
+  }
+
+  .segopt {
+    height: 40px;
+    padding: 0 18px;
+    background: transparent;
+    border: 0;
+    border-right: 1px solid var(--line);
+    border-bottom: 2px solid transparent;
+    color: var(--dim);
+    font-size: 14px;
+  }
+
+  .segopt:last-child {
+    border-right: 0;
+  }
+
+  .segopt:hover {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .segopt.on {
+    color: var(--hi);
+    background: var(--sel);
+    border-bottom-color: var(--acc);
   }
 
   /* Font-size picker: same shape as the theme picker. */

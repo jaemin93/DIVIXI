@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 /** Mirrors `orchestra_core::LaneEvent` — serde tags it with `kind`. */
 export type LaneEvent =
@@ -133,6 +134,14 @@ export type ThemePref = "system" | "dark" | "light";
 /** Conversation text size. */
 export type ChatFont = "s" | "m" | "l";
 
+/** Interface typeface. */
+export type UiFont = "sans" | "mono" | "system" | "serif";
+
+/** Zoom bounds in percent; steps of 10, as Ctrl+= / Ctrl+- move. */
+export const ZOOM_MIN = 50;
+export const ZOOM_MAX = 200;
+export const ZOOM_STEP = 10;
+
 /** Settings sections, in the settings column. */
 export type SettingsSection = "overview" | "appearance" | "chat" | "agents" | "about";
 
@@ -174,6 +183,10 @@ class Store {
   settingsSection = $state<SettingsSection>("overview");
   /** Conversation text size. Persisted. */
   chatFont = $state<ChatFont>("m");
+  /** Interface typeface. Persisted. */
+  uiFont = $state<UiFont>("sans");
+  /** Native webview zoom in percent. Persisted. */
+  zoom = $state(100);
   info = $state<AppInfo | null>(null);
   /** Chosen model per agent id; absent means the agent's default. Persisted. */
   models = $state<Record<string, string>>({});
@@ -315,6 +328,38 @@ class Store {
     }
   }
 
+  /** Interface typeface; persisted, applied through a root attribute. */
+  async setUiFont(font: UiFont) {
+    this.uiFont = font;
+    document.documentElement.dataset.uiFont = font;
+    try {
+      await invoke("set_setting", { key: "ui_font", value: font });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /**
+   * Zoom the whole interface, like Ctrl+= / Ctrl+- in a browser. Uses the
+   * webview's native zoom; if that is refused, CSS zoom on the root.
+   */
+  async setZoom(percent: number, persist = true) {
+    const z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(percent / ZOOM_STEP) * ZOOM_STEP));
+    this.zoom = z;
+    try {
+      await getCurrentWebview().setZoom(z / 100);
+      (document.documentElement.style as unknown as { zoom: string }).zoom = "";
+    } catch {
+      (document.documentElement.style as unknown as { zoom: string }).zoom = `${z}%`;
+    }
+    if (!persist) return;
+    try {
+      await invoke("set_setting", { key: "zoom", value: String(z) });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
   /** Conversation text size; persisted, applied through a root attribute. */
   async setChatFont(size: ChatFont) {
     this.chatFont = size;
@@ -342,7 +387,7 @@ class Store {
       if (this.themePref === "system") this.applyTheme();
     });
     try {
-      const [summaries, agents, theme, rail, tracklist, chatFont, models, inspectorWidth, railWidth, trackListWidth] =
+      const [summaries, agents, theme, rail, tracklist, chatFont, models, inspectorWidth, railWidth, trackListWidth, uiFont, zoom] =
         await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<AgentStatus[] | null>("agent_statuses"),
@@ -354,7 +399,13 @@ class Store {
         invoke<string | null>("get_setting", { key: "inspector_width" }),
         invoke<string | null>("get_setting", { key: "rail_width" }),
         invoke<string | null>("get_setting", { key: "tracklist_width" }),
+        invoke<string | null>("get_setting", { key: "ui_font" }),
+        invoke<string | null>("get_setting", { key: "zoom" }),
       ]);
+      if (uiFont === "sans" || uiFont === "mono" || uiFont === "system" || uiFont === "serif") this.uiFont = uiFont;
+      document.documentElement.dataset.uiFont = this.uiFont;
+      const z = Number(zoom);
+      if (Number.isFinite(z) && z >= ZOOM_MIN && z <= ZOOM_MAX && z !== 100) void this.setZoom(z, false);
       try {
         const parsed = models ? JSON.parse(models) : {};
         if (parsed && typeof parsed === "object") this.models = parsed;
