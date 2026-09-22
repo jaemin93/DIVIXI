@@ -7,7 +7,7 @@
   $effect(() => {
     void store.runs.length;
     void store.activeRun?.message.length;
-    void store.activeRun?.tools.length;
+    void store.activeRun?.toolCount;
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   });
 
@@ -52,13 +52,13 @@
           <span class="mono tag ok">{run.status === "connecting" ? "CONNECTING" : "RUNNING"}</span>
           <span class="mono meta">lane {run.lane} · {run.id}</span>
           <span class="grow"></span>
-          <span class="mono meta">{run.tools.length} tools</span>
+          <span class="mono meta">{run.toolCount} tools</span>
         </div>
         <div class="mono tailline">› {tail(run)}</div>
       </div>
     {:else}
       <div class="card report" class:failed={run.status === "failed"}>
-        <button class="rowhead" onclick={() => (store.inspecting = store.inspecting === run.id ? "" : run.id)}>
+        <button class="rowhead" onclick={() => store.inspect(run.id)}>
           <span class="mono chev">{store.inspecting === run.id ? "▾" : "▸"}</span>
           <span class="col"><span class="mlab-sm">LANE</span><span class="mono val">{run.lane}</span></span>
           <span class="col"><span class="mlab-sm">RUN</span><span class="mono val">{run.id}</span></span>
@@ -68,7 +68,7 @@
               • {run.status === "done" ? "성공" : "실패"}
             </span>
           </span>
-          <span class="col"><span class="mlab-sm">TOOLS</span><span class="mono val">{run.tools.length}</span></span>
+          <span class="col"><span class="mlab-sm">TOOLS</span><span class="mono val">{run.toolCount}</span></span>
           <span class="col"><span class="mlab-sm">DURATION</span><span class="mono val">{secs(run.durationMs)}</span></span>
           <span class="grow"></span>
           <span class="mlab">REPORT</span>

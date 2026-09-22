@@ -25,10 +25,52 @@ pub enum LaneStatus {
     Failed,
 }
 
+/// Lifecycle of a single run, as projected from its events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    /// The agent subprocess is starting; no session yet.
+    Connecting,
+    /// A session exists and the prompt is in flight.
+    Running,
+    /// The turn ended normally.
+    Done,
+    /// The run failed, or was interrupted by the app closing.
+    Failed,
+}
+
+impl RunStatus {
+    /// Whether the run can still change.
+    pub fn is_live(self) -> bool {
+        matches!(self, RunStatus::Connecting | RunStatus::Running)
+    }
+
+    /// The `snake_case` name serde uses, for storage keys and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunStatus::Connecting => "connecting",
+            RunStatus::Running => "running",
+            RunStatus::Done => "done",
+            RunStatus::Failed => "failed",
+        }
+    }
+
+    /// Inverse of [`RunStatus::as_str`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "connecting" => RunStatus::Connecting,
+            "running" => RunStatus::Running,
+            "done" => RunStatus::Done,
+            "failed" => RunStatus::Failed,
+            _ => return None,
+        })
+    }
+}
+
 /// One thing that happened inside a lane.
 ///
 /// Serialized to the UI as `{"kind": "...", ...}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LaneEvent {
     /// The agent subprocess answered `initialize`.
@@ -110,6 +152,30 @@ impl LaneEvent {
         )
     }
 
+    /// The serde tag (`kind`) this variant serializes with.
+    ///
+    /// Stable storage key: the event store indexes on it, so it must not
+    /// drift from the `#[serde(tag = "kind")]` names.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            LaneEvent::Connected { .. } => "connected",
+            LaneEvent::Started { .. } => "started",
+            LaneEvent::Message { .. } => "message",
+            LaneEvent::Thought { .. } => "thought",
+            LaneEvent::ToolCall { .. } => "tool_call",
+            LaneEvent::ToolUpdate { .. } => "tool_update",
+            LaneEvent::Plan { .. } => "plan",
+            LaneEvent::Usage { .. } => "usage",
+            LaneEvent::Finished { .. } => "finished",
+            LaneEvent::Failed { .. } => "failed",
+        }
+    }
+
+    /// Whether this event ends the run.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, LaneEvent::Finished { .. } | LaneEvent::Failed { .. })
+    }
+
     /// Short mono label used by the inspector's transcript view.
     pub fn label(&self) -> &'static str {
         match self {
@@ -163,6 +229,40 @@ mod tests {
             status: "pending".into()
         }
         .above_membrane());
+    }
+
+    #[test]
+    fn kind_matches_serde_tag() {
+        let samples = [
+            LaneEvent::Connected { protocol: "v1".into(), load_session: false },
+            LaneEvent::Started { session_id: "s".into(), cwd: ".".into() },
+            LaneEvent::Message { text: "m".into() },
+            LaneEvent::Thought { text: "t".into() },
+            LaneEvent::ToolCall {
+                id: "1".into(),
+                title: "ls".into(),
+                tool_kind: "execute".into(),
+                status: "pending".into(),
+            },
+            LaneEvent::ToolUpdate { id: "1".into(), status: "completed".into() },
+            LaneEvent::Plan { entries: vec![] },
+            LaneEvent::Usage { raw: serde_json::Value::Null },
+            LaneEvent::Finished { stop_reason: "end_turn".into() },
+            LaneEvent::Failed { error: "boom".into() },
+        ];
+        for ev in samples {
+            let json = serde_json::to_value(&ev).unwrap();
+            assert_eq!(json["kind"], ev.kind(), "{ev:?}");
+        }
+    }
+
+    #[test]
+    fn run_status_round_trips() {
+        for s in [RunStatus::Connecting, RunStatus::Running, RunStatus::Done, RunStatus::Failed] {
+            assert_eq!(RunStatus::parse(s.as_str()), Some(s));
+            let json = serde_json::to_string(&s).unwrap();
+            assert_eq!(json, format!("\"{}\"", s.as_str()));
+        }
     }
 
     #[test]

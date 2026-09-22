@@ -19,7 +19,8 @@ ACP를 지원하지 않는 에이전트는 나중에 같은 채널 뒤에 PTY �
 ```
 crates/orchestra/   도메인 — LaneEvent, 막의 정의
 crates/acp/         ACP 클라이언트 — 에이전트 기동, 세션, 스트리밍
-src-tauri/          앱 셸 — run 식별자, 이벤트 코얼레싱, IPC
+crates/store/       이벤트 스토어 — SQLite, append-only 로그 + runs 투영 + FTS5
+src-tauri/          앱 셸 — run 식별자, 이벤트 영속화, 코얼레싱, IPC
 ui/                 Svelte 5 — 타임라인, 인스펙터, 두 테마
 refs/               디자인 레퍼런스
 ```
@@ -47,17 +48,32 @@ cargo run -p orchestra-acp --example smoke -- "Reply with exactly: ORCHESTRA OK"
 스레드가 생기기 전에 호출해야 합니다.
 
 **어댑터.** Claude Code CLI 2.1.x는 ACP 네이티브 지원이 없어서
-`@zed-industries/claude-code-acp`를 `npx`로 띄웁니다. 첫 실행은 다운로드 때문에
-느립니다. 레인은 `bypassPermissions` 모드로 돌아갑니다 — 툴 승인 프롬프트가 아니라
+`@agentclientprotocol/claude-agent-acp`(devDependency로 고정)를 `node`로 직접
+띄웁니다. `node_modules`가 없으면 `npx`로 떨어지는데, 그러면 레인당 10초 이상 느립니다.
+`ORCHESTRA_ACP_ADAPTER`로 엔트리 스크립트 경로를 강제할 수 있습니다.
+레인은 `bypassPermissions` 모드로 돌아갑니다 — 툴 승인 프롬프트가 아니라
 레인이 스스로 올리는 에스컬레이션만 사람에게 보이는 게 설계 의도입니다.
 
 **코얼레싱.** 에이전트 텍스트 청크는 40ms 단위로 묶어서 webview에 보냅니다.
-토큰마다 IPC를 태우면 창이 버벅입니다.
+토큰마다 IPC를 태우면 창이 버벅입니다. 스토어에도 같은 프레임 단위로 기록됩니다.
 
-## 현재 상태 (Phase 0)
+**이벤트 스토어.** 레인 이벤트는 전부 `events` 테이블에 append-only로 쌓이고,
+`runs` 테이블은 그 로그를 런 종료 시점에 접은(fold) 투영입니다. 타임라인은 `runs`만
+읽어서 복원하고, 인스펙터를 열 때만 그 런의 `events`를 재생합니다 — 막이 저장소
+레벨에서도 지켜집니다. 종료된 런은 프롬프트·출력·툴 제목이 FTS5로 색인됩니다.
+앱이 실행 중이던 런을 남기고 죽으면 다음 기동 때 `failed`로 닫습니다.
+파일은 앱 데이터 폴더의 `orchestra.db`이고 `ORCHESTRA_DB`로 바꿀 수 있습니다
+(`:memory:`도 됩니다). 저장 경로만 따로 확인하려면:
+
+```bash
+cargo run -p orchestra-store --example persist -- "Reply with exactly: ORCHESTRA OK"
+```
+
+## 현재 상태 (Phase 1 진행 중)
 
 되는 것: 레인 1개 기동, 프롬프트 1회 실행, 스트리밍, Report 카드, 인스펙터
-(트랜스크립트 / 출력 / 툴), 다크·라이트 테마.
+(트랜스크립트 / 출력 / 툴), 다크·라이트 테마, SQLite 이벤트 스토어(재시작 후 타임라인
+복원, 인스펙터 지연 로드, 전문 검색 API).
 
-아직 없는 것: 다중 레인, 워크트리 격리, 이벤트 스토어(SQLite), Decision 에스컬레이션,
-Draft 화면, 승격, wrap-up 폴드.
+아직 없는 것: 다중 레인, 워크트리 격리, Report 스키마 강제, Decision 에스컬레이션,
+Draft 화면, 승격, wrap-up 폴드, 검색 UI.
