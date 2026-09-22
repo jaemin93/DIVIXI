@@ -90,7 +90,7 @@ export type AgentStatus = {
 export type Tool = { id: string; title: string; toolKind: string; status: string };
 
 /** The turn as it happened: prose and tool calls in arrival order. */
-export type Segment = { kind: "text"; text: string } | { kind: "tool"; tool: Tool };
+export type Segment = { kind: "text"; text: string } | { kind: "thought"; text: string } | { kind: "tool"; tool: Tool };
 
 export type TranscriptLine = { ms: number; label: string; text: string; tone: Tone };
 export type Tone = "in" | "out" | "ok" | "warn" | "dim";
@@ -649,9 +649,13 @@ function fold(run: Run, ms: number, ev: LaneEvent) {
       else run.segments.push({ kind: "text", text: ev.text });
       break;
     }
-    case "thought":
+    case "thought": {
       run.thought += ev.text;
+      const last = run.segments.at(-1);
+      if (last && last.kind === "thought") last.text += ev.text;
+      else run.segments.push({ kind: "thought", text: ev.text });
       break;
+    }
     case "tool_call": {
       const tool: Tool = { id: ev.id, title: ev.title, toolKind: ev.tool_kind, status: ev.status };
       run.tools.push(tool);

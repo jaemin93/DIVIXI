@@ -220,3 +220,205 @@ input::placeholder {
 .pulse {
   animation: pulse 1.8s ease-in-out infinite;
 }
+
+/* Rendered markdown (agent prose). Type follows the conversation settings;
+   colours say only what a token is. */
+.md {
+  font-family: var(--sans);
+  font-size: var(--chat-fs);
+  line-height: 1.7;
+  color: var(--txt);
+  overflow-wrap: anywhere;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md p {
+  margin: 0 0 0.8em;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  font-family: var(--serif);
+  font-weight: 400;
+  color: var(--hi);
+  margin: 1.2em 0 0.5em;
+  line-height: 1.25;
+}
+
+.md h1 {
+  font-size: 1.6em;
+}
+
+.md h2 {
+  font-size: 1.35em;
+}
+
+.md h3 {
+  font-size: 1.15em;
+}
+
+.md h4 {
+  font-size: 1em;
+}
+
+.md ul,
+.md ol {
+  margin: 0 0 0.8em;
+  padding-left: 1.4em;
+}
+
+.md li {
+  margin: 0.2em 0;
+}
+
+.md li > p {
+  margin: 0;
+}
+
+.md input[type="checkbox"] {
+  margin: 0 0.5em 0 0;
+}
+
+.md a {
+  color: var(--acct);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accln);
+}
+
+.md strong {
+  color: var(--hi);
+  font-weight: 600;
+}
+
+.md blockquote {
+  margin: 0 0 0.8em;
+  padding: 0.2em 0 0.2em 1em;
+  border-left: 2px solid var(--lines);
+  color: var(--dim);
+}
+
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 1.2em 0;
+}
+
+.md code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  background: var(--sel);
+  padding: 0.1em 0.35em;
+}
+
+.md pre {
+  margin: 0 0 0.9em;
+  padding: 12px 14px;
+  background: var(--inp);
+  border: 1px solid var(--line);
+  overflow-x: auto;
+}
+
+.md pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.9em;
+  line-height: 1.6;
+}
+
+.md table {
+  border-collapse: collapse;
+  margin: 0 0 0.9em;
+  font-size: 0.95em;
+}
+
+.md th,
+.md td {
+  border: 1px solid var(--line);
+  padding: 5px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.md th {
+  font-family: var(--mono);
+  font-size: 0.8em;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--lab);
+  font-weight: 400;
+}
+
+.md img {
+  max-width: 100%;
+}
+
+/* highlight.js tokens on the house palette. Two themes, same vocabulary. */
+.hljs-comment,
+.hljs-quote {
+  color: var(--lab);
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-type,
+.hljs-doctag,
+.hljs-meta {
+  color: var(--acct);
+}
+
+.hljs-string,
+.hljs-attr,
+.hljs-template-tag,
+.hljs-addition,
+.hljs-symbol,
+.hljs-bullet {
+  color: var(--oktx);
+}
+
+.hljs-number,
+.hljs-literal,
+.hljs-regexp,
+.hljs-link {
+  color: var(--warn);
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-function .hljs-title {
+  color: var(--hi);
+}
+
+.hljs-variable,
+.hljs-params,
+.hljs-attribute,
+.hljs-property,
+.hljs-tag {
+  color: var(--body);
+}
+
+.hljs-deletion {
+  color: var(--deltx);
+  background: var(--delbg);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}

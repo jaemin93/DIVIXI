@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store, agentLabel, type Run } from "./store.svelte";
   import Mark from "./Mark.svelte";
+  import Markdown from "./Markdown.svelte";
 
   let scroller = $state<HTMLDivElement>();
 
@@ -66,7 +67,9 @@
         <!-- The turn as it unfolds: prose and tool lines in order, like a native session. -->
         {#each run.segments as seg, i (i)}
           {#if seg.kind === "text"}
-            {#if seg.text.trim()}<p class="ctext">{seg.text.trim()}</p>{/if}
+            {#if seg.text.trim()}<div class="ctext"><Markdown source={seg.text} /></div>{/if}
+          {:else if seg.kind === "thought"}
+            {#if seg.text.trim()}<p class="ctext thought">{seg.text.trim()}</p>{/if}
           {:else}
             <div class="toolline mono" class:running={seg.tool.status !== "completed" && seg.tool.status !== "failed"}>
               <span class="tdot" class:pulse={seg.tool.status !== "completed" && seg.tool.status !== "failed"}></span>
@@ -79,7 +82,7 @@
         {/each}
         {#if run.segments.length === 0 && run.message.trim()}
           <!-- Restored from the store: only the folded text survives. -->
-          <p class="ctext">{run.message.trim()}</p>
+          <div class="ctext"><Markdown source={run.message} /></div>
         {/if}
         {#if run.status === "failed" && run.error}
           <p class="ctext bad">{run.error}</p>
@@ -123,7 +126,7 @@
           <div class="reportbody">
             <div class="field">
               <div class="mlab-sm k">한 일</div>
-              <div class="v">{summary(run)}</div>
+              <div class="v"><Markdown source={summary(run)} /></div>
             </div>
             {#if run.plan.length}
               <div class="field">
@@ -246,6 +249,13 @@
 
   .ctext.dim {
     color: var(--lab);
+  }
+
+  /* Thinking: quieter than speech. */
+  .ctext.thought {
+    color: var(--lab);
+    font-style: italic;
+    font-size: calc(var(--chat-fs) - 1px);
   }
 
   .ctext + .ctext,
