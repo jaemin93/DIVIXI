@@ -12,7 +12,9 @@
 무엇을 어떻게 분해할지(지휘자 로직)는 에이전트가 정합니다 — 코어에 넣지 않습니다.
 지휘자는 Track마다 하나 있는 오래 사는 ACP 세션이고, 앱 API(`spawn_lane`, `ask_lane`,
 `read_report`, `record_decision` …)를 프로세스 안 HTTP MCP 서버로 받습니다. 레인도 각각
-오래 사는 세션이라 Claude Code 세션 하나를 열어 두고 계속 시키는 것과 같습니다.
+오래 사는 세션이라 Claude Code 세션 하나를 열어 두고 계속 시키는 것과 같습니다. 지휘자와
+레인의 세션 id는 스토어에 남아, 앱을 다시 켜거나 레인을 닫았다 열어도 이전 대화를 이어갑니다
+(`session/load`). `lane_status`는 열린 레인과 닫힌 레인을 모두 보여 줍니다.
 
 **프로토콜은 한 곳에만.** `crates/acp`만 ACP를 압니다. 그 위는 `LaneEvent`만 봅니다.
 ACP를 지원하지 않는 에이전트는 나중에 같은 채널 뒤에 PTY 백엔드로 붙습니다.
@@ -99,11 +101,11 @@ cargo run -p orchestra-store --example persist -- "Reply with exactly: ORCHESTRA
 
 ## 현재 상태 (Phase 1 진행 중)
 
-되는 것: 첫 실행 setup의 에이전트 감지·로그인·다운로드, 설정의 재감지, 런마다
-에이전트 선택(Claude Code / Codex / Copilot / Antigravity), 레인 1개 기동, 프롬프트 1회
-실행, 스트리밍, Report 카드, 인스펙터(트랜스크립트 / 출력 / 툴), 다크·라이트 테마,
-SQLite 이벤트 스토어(재시작 후 타임라인 복원, 인스펙터 지연 로드, 전문 검색 API).
+되는 것: 첫 실행 setup의 에이전트 감지·로그인·다운로드와 테마·언어, 설정의 재감지,
+지휘자 세션(오래 살고, 재시작 후 `session/load`로 이어짐), 비동기 레인(`[lane-report]`로
+지휘자에게 보고, 닫힌 레인 재개, 전체 레인 목록), 레인 뷰(지휘자↔워커 대화), 스트리밍과
+마크다운 렌더링, Kiro식 창 크롬·레일·Tracks 열·설정, 대화창 폰트·확대·서체·언어(ko/en),
+SQLite 이벤트 스토어(재시작 후 타임라인 복원, 전문 검색 API).
 
-아직 없는 것: Track 생성 흐름(첫 화면), 지휘자 세션, 다중 레인, 워크트리 격리,
-Report 스키마 강제, Decision 에스컬레이션, Draft 화면, 승격, wrap-up 폴드, 검색 UI,
-대화창 폰트 크기 설정.
+아직 없는 것: Track 생성 흐름(첫 화면), 다중 레인의 워크트리 격리, Report 스키마 강제,
+Decision UI, Draft 화면, 승격, wrap-up 폴드, 검색 UI.

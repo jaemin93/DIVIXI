@@ -10,7 +10,9 @@
 //! Lanes are agent sessions too, one per lane name, alive across runs, so
 //! a lane is a Claude Code (or Codex, …) session the conductor keeps
 //! talking to. Every turn, on the conductor or a lane, is one run in the
-//! store.
+//! store. A lane's session id is remembered in the store as well, so a
+//! closed lane (closed on purpose, or gone with an app restart) reopens
+//! with its conversation when the conductor calls it by name again.
 //!
 //! Lane work is asynchronous from the conductor's point of view: `spawn_lane`
 //! and `ask_lane` return as soon as the lane has the task, and when the lane
@@ -78,7 +80,9 @@ fn preamble(lang: &str) -> String {
 - 사람의 메시지가 질문이나 잡담이면 직접 답합니다. 레인을 열지 않습니다.
 - 코드를 읽거나 고치거나 조사하는 일처럼 실제 작업이 필요하면 `spawn_lane`으로 레인을 열어 맡깁니다. 레인 이름은 짧은 영문 소문자(예: fix-parser)로 짓고, task에는 레인이 혼자 끝낼 수 있을 만큼 구체적으로 적습니다.
 - `spawn_lane`과 `ask_lane`은 레인이 일을 받는 즉시 돌아옵니다. 결과를 기다리지 말고, 사람에게 무엇을 맡겼는지 한 문장으로 알린 뒤 턴을 끝냅니다. 레인이 끝나면 `{REPORT_PREFIX}`로 시작하는 메시지가 당신에게 옵니다. 그때 무슨 일이 있었는지 한두 문단으로 사람에게 설명합니다. 보고를 그대로 붙여넣지 말고 요점만 말합니다.
-- 같은 레인에 이어서 시킬 일은 `ask_lane`으로 보냅니다. 레인은 이전 대화를 기억합니다. 어떤 레인이 열려 있고 무엇을 하는 중인지는 `lane_status`로 봅니다.
+- 같은 레인에 이어서 시킬 일은 `ask_lane`으로 보냅니다. 레인은 이전 대화를 기억합니다.
+- 레인 목록은 열린 것과 닫힌 것 모두 `lane_status`로 봅니다. 터미널이나 파일을 뒤져 레인을 찾지 않습니다.
+- 닫힌 레인은 같은 이름으로 `spawn_lane`이나 `ask_lane`을 부르면 이전 대화를 기억한 채 다시 열립니다. 기억을 버리고 처음부터 시작하려면 `spawn_lane`에 fresh=true를 줍니다. `close_lane`은 세션만 닫고 기록은 남깁니다.
 - 도구가 오류를 돌려주면 오류 문구에 적힌 대로 한 번만 다시 시도하고, 그래도 안 되면 사람에게 무엇이 막혔는지 말합니다. 같은 도구를 반복해서 부르지 않습니다.
 - 사람이 결정해야 할 일(되돌리기 어려운 변경, 여러 갈래 중 선택)은 스스로 정하지 말고 선택지를 제시하고 묻습니다. 사람이 정하면 `record_decision`으로 남깁니다.
 - 한국어로 말합니다. 짧게, 명확하게.
@@ -94,7 +98,9 @@ Rules:
 - If the human's message is a question or small talk, answer it yourself. Do not open a lane.
 - If real work is needed (reading, changing or investigating code), open a lane with `spawn_lane`. Name it short and lowercase (e.g. fix-parser) and make the task specific enough for the lane to finish alone.
 - `spawn_lane` and `ask_lane` return as soon as the lane has the task. Do not wait for the result: tell the human in one sentence what you delegated and end your turn. When the lane finishes, a message starting with `{REPORT_PREFIX}` reaches you. Then explain to the human in a paragraph or two what happened. Do not paste the report; give the gist.
-- Follow-ups for the same lane go through `ask_lane`; the lane remembers its earlier turns. `lane_status` shows which lanes are open and what they are doing.
+- Follow-ups for the same lane go through `ask_lane`; the lane remembers its earlier turns.
+- `lane_status` lists every lane, open and closed. Never hunt for lanes through the terminal or files.
+- A closed lane reopens with its earlier conversation when you call `spawn_lane` or `ask_lane` with its name. To drop that memory and start over, pass fresh=true to `spawn_lane`. `close_lane` only closes the session; the record stays.
 - If a tool returns an error, retry once as the message suggests; if that fails, tell the human what is blocked. Never call the same tool repeatedly.
 - Decisions that belong to the human (hard-to-undo changes, a choice between directions) are not yours to make: present the options and ask. Once the human decides, record it with `record_decision`.
 - Speak English. Short and clear.
@@ -117,13 +123,14 @@ pub fn tools(app: AppHandle) -> Vec<Tool> {
     vec![
         Tool::new(
             "spawn_lane",
-            "Open a new lane (a separate agent session) and give it a task. Returns at once with the run id; the lane works in the background and its report reaches you later as a message starting with [레인 보고]. Use for real work; answer questions yourself instead.",
+            &format!("Open a lane (a separate agent session) and give it a task. Returns at once with the run id; the lane works in the background and its report reaches you later as a message starting with {REPORT_PREFIX}. A closed lane with this name is reopened with its earlier conversation (the result says resumed=true); pass fresh=true to start it over without that memory. Use for real work; answer questions yourself instead."),
             json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Short lane name, lowercase, e.g. fix-parser. Must be new." },
+                    "name": { "type": "string", "description": "Short lane name, lowercase, e.g. fix-parser. New, or the name of a closed lane to reopen." },
                     "task": { "type": "string", "description": "What the lane should do, specific enough to finish alone." },
-                    "agent": { "type": "string", "description": "Agent id to run the lane on: claude_code, codex, copilot, antigravity. Defaults to the conductor's agent." }
+                    "agent": { "type": "string", "description": "Agent id to run the lane on: claude_code, codex, copilot, antigravity. Defaults to the lane's earlier agent, else the conductor's." },
+                    "fresh": { "type": "boolean", "description": "Start over without the closed lane's earlier conversation. Default false." }
                 },
                 "required": ["name", "task"]
             }),
@@ -133,13 +140,14 @@ pub fn tools(app: AppHandle) -> Vec<Tool> {
                     let name = str_arg(&args, "name")?;
                     let task = str_arg(&args, "task")?;
                     let agent = args.get("agent").and_then(Value::as_str).map(str::to_owned);
-                    start_lane_turn(app, name, task, agent, true).await
+                    let fresh = args.get("fresh").and_then(Value::as_bool).unwrap_or(false);
+                    start_lane_turn(app, name, task, agent, true, fresh).await
                 }
             },
         ),
         Tool::new(
             "ask_lane",
-            "Send a follow-up message to an existing lane. The lane remembers its earlier turns. Returns at once; the lane's answer reaches you later as a [레인 보고] message.",
+            &format!("Send a follow-up message to a lane. The lane remembers its earlier turns; a closed lane is reopened with that memory. Returns at once; the lane's answer reaches you later as a {REPORT_PREFIX} message."),
             json!({
                 "type": "object",
                 "properties": {
@@ -153,32 +161,19 @@ pub fn tools(app: AppHandle) -> Vec<Tool> {
                 async move {
                     let name = str_arg(&args, "name")?;
                     let message = str_arg(&args, "message")?;
-                    start_lane_turn(app, name, message, None, false).await
+                    start_lane_turn(app, name, message, None, false, false).await
                 }
             },
         ),
         Tool::new(
             "lane_status",
-            "List open lanes: agent, turns run, and whether a turn is in flight (with its run id).",
+            "List every lane, open or closed: agent, whether its session is open, whether a turn is in flight (with its run id), how many runs it has, and its last run with status. A closed lane marked resumable reopens with its memory when you call spawn_lane or ask_lane with its name.",
             json!({ "type": "object", "properties": {}, "additionalProperties": false }),
             move |_args| {
                 let app = status_app.clone();
                 async move {
                     let state = app.state::<AppState>();
-                    let lanes = state.sessions.lanes.lock().await;
-                    let list: Vec<Value> = lanes
-                        .iter()
-                        .map(|(name, live)| {
-                            json!({
-                                "name": name,
-                                "agent": live.agent,
-                                "turns": live.turns,
-                                "running": live.running.is_some(),
-                                "run": live.running,
-                            })
-                        })
-                        .collect();
-                    Ok(Value::Array(list))
+                    Ok(Value::Array(lane_list(&state).await))
                 }
             },
         ),
@@ -204,7 +199,7 @@ pub fn tools(app: AppHandle) -> Vec<Tool> {
         ),
         Tool::new(
             "close_lane",
-            "Close a lane's session. Its runs stay in the record.",
+            "Close a lane's session. Its runs and its memory stay in the record; spawn_lane or ask_lane with the same name reopens it.",
             json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" } },
@@ -279,6 +274,82 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// What the store remembers about a lane's last agent session, so the lane
+/// can be reopened with its conversation.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LaneRecord {
+    session_id: String,
+    agent: String,
+}
+
+fn lane_record_key(name: &str) -> String {
+    format!("lane_session:{name}")
+}
+
+fn lane_record(state: &AppState, name: &str) -> Option<LaneRecord> {
+    state
+        .store
+        .get_meta(&lane_record_key(name))
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+}
+
+fn remember_lane(state: &AppState, name: &str, record: &LaneRecord) {
+    match serde_json::to_string(record) {
+        Ok(json) => {
+            if let Err(err) = state.store.set_meta(&lane_record_key(name), &json) {
+                tracing::warn!(lane = %name, %err, "could not remember lane session id");
+            }
+        }
+        Err(err) => tracing::warn!(lane = %name, %err, "could not encode lane record"),
+    }
+}
+
+/// Every lane the store knows, merged with what is open right now. The
+/// conductor's own lane is not a lane to it.
+async fn lane_list(state: &AppState) -> Vec<Value> {
+    let history = state.store.lanes().unwrap_or_else(|err| {
+        tracing::warn!(%err, "could not list lanes from the store");
+        Vec::new()
+    });
+    let lanes = state.sessions.lanes.lock().await;
+    let mut list: Vec<Value> = history
+        .iter()
+        .filter(|info| info.name != CONDUCTOR_LANE)
+        .map(|info| {
+            let live = lanes.get(&info.name);
+            json!({
+                "name": info.name,
+                "agent": live.map(|l| l.agent.clone()).unwrap_or_else(|| info.agent.clone()),
+                "open": live.is_some(),
+                "running": live.map(|l| l.running.is_some()).unwrap_or(false),
+                "run": live.and_then(|l| l.running.clone()),
+                "runs": info.runs,
+                "last_run": info.last_run,
+                "last_status": info.last_status.as_str(),
+                "last_at": info.last_at,
+                "resumable": live.is_none() && lane_record(state, &info.name).is_some(),
+            })
+        })
+        .collect();
+    // A lane opened so recently that its first run is not in the store yet.
+    for (name, live) in lanes.iter() {
+        if !history.iter().any(|h| &h.name == name) {
+            list.push(json!({
+                "name": name,
+                "agent": live.agent,
+                "open": true,
+                "running": live.running.is_some(),
+                "run": live.running,
+                "runs": 0,
+                "resumable": false,
+            }));
+        }
+    }
+    list
+}
+
 /// Session options for an agent: workspace, autonomous mode, chosen model.
 fn session_options(state: &AppState, agent: &str, mcp: Option<&McpServer>) -> SessionOptions {
     let model = state.chosen_model(agent);
@@ -302,15 +373,19 @@ fn session_options(state: &AppState, agent: &str, mcp: Option<&McpServer>) -> Se
     }
 }
 
-/// Give a lane a turn and return at once. Opens the lane first when `open`
-/// is set. The turn runs in the background; when it ends, its report is
-/// handed to the conductor as a new turn.
+/// Give a lane a turn and return at once. `open` is `spawn_lane` (a lane
+/// that is already open is refused); `ask_lane` needs the lane to exist,
+/// open or in the record. A lane that is not open but has a remembered
+/// session is reopened with it, unless `fresh` says to forget. The turn
+/// runs in the background; when it ends, its report is handed to the
+/// conductor as a new turn.
 async fn start_lane_turn(
     app: AppHandle,
     name: String,
     text: String,
     agent: Option<String>,
     open: bool,
+    fresh: bool,
 ) -> Result<Value, String> {
     if name == CONDUCTOR_LANE {
         return Err("that name is reserved".to_string());
@@ -318,32 +393,45 @@ async fn start_lane_turn(
     let state = app.state::<AppState>();
 
     // Resolve or open the lane session; refuse a second turn on a busy lane.
-    let (agent_id, turns, session) = {
+    let (agent_id, turns, session, resumed, note) = {
         let mut lanes = state.sessions.lanes.lock().await;
         match (lanes.get_mut(&name), open) {
             (Some(live), true) => {
                 return Err(format!(
-                    "lane {name} already exists (agent {}, {} turns). Send follow-ups with ask_lane(name=\"{name}\", message=...), or spawn_lane with a new name.",
+                    "lane {name} is already open (agent {}, {} turns). Send follow-ups with ask_lane(name=\"{name}\", message=...), or spawn_lane with a new name.",
                     live.agent, live.turns
                 ))
-            }
-            (None, false) => {
-                let open: Vec<String> = lanes.keys().cloned().collect();
-                return Err(format!("no lane {name}. Open lanes: {open:?}. Use spawn_lane to create one."));
             }
             (Some(live), false) => {
                 if let Some(run) = &live.running {
                     return Err(format!(
-                        "lane {name} is still working on run {run}. Wait for its [레인 보고] before sending more."
+                        "lane {name} is still working on run {run}. Wait for its {REPORT_PREFIX} before sending more."
                     ));
                 }
                 live.turns += 1;
-                (live.agent.clone(), live.turns, live.session.clone())
+                (live.agent.clone(), live.turns, live.session.clone(), false, None)
             }
-            (None, true) => {
-                let agent_id = match agent {
-                    Some(a) => a,
-                    None => state
+            (None, _) => {
+                let record = if fresh { None } else { lane_record(&state, &name) };
+                let history = state.store.lanes().unwrap_or_default();
+                let past = history.iter().find(|l| l.name == name);
+                if !open && record.is_none() && past.is_none() {
+                    let open_names: Vec<String> = lanes.keys().cloned().collect();
+                    let closed: Vec<&str> = history
+                        .iter()
+                        .filter(|l| l.name != CONDUCTOR_LANE && !lanes.contains_key(&l.name))
+                        .map(|l| l.name.as_str())
+                        .collect();
+                    return Err(format!(
+                        "no lane {name}. Open lanes: {open_names:?}. Closed lanes: {closed:?}. Use spawn_lane to create one."
+                    ));
+                }
+                // Agent: the caller's choice, else the lane's earlier one, else the conductor's.
+                let agent_id = match (agent, &record, past) {
+                    (Some(a), _, _) => a,
+                    (None, Some(r), _) => r.agent.clone(),
+                    (None, None, Some(p)) if !fresh => p.agent.clone(),
+                    _ => state
                         .sessions
                         .conductor
                         .lock()
@@ -352,20 +440,43 @@ async fn start_lane_turn(
                         .map(|c| c.agent.clone())
                         .unwrap_or_else(|| "claude_code".to_string()),
                 };
+                // Memory only carries over on the agent that made it.
+                let resume = record.filter(|r| r.agent == agent_id).map(|r| r.session_id);
+                let wanted = resume.is_some();
                 let spec: AgentSpec = state.spec_for(&agent_id)?;
-                let opts = session_options(&state, &agent_id, None);
-                tracing::info!(lane = %name, agent = %agent_id, "opening lane session");
+                let mut opts = session_options(&state, &agent_id, None);
+                opts.resume = resume;
+                tracing::info!(lane = %name, agent = %agent_id, resume = ?opts.resume, "opening lane session");
                 let session = Arc::new(AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?);
+                let resumed = session.resumed();
+                remember_lane(
+                    &state,
+                    &name,
+                    &LaneRecord {
+                        session_id: session.session_id().to_string(),
+                        agent: agent_id.clone(),
+                    },
+                );
+                let turns = if resumed { past.map(|p| p.runs).unwrap_or(0) + 1 } else { 1 };
                 lanes.insert(
                     name.clone(),
                     Live {
                         agent: agent_id.clone(),
                         session: session.clone(),
-                        turns: 1,
+                        turns,
                         running: None,
                     },
                 );
-                (agent_id, 1, session)
+                let note = if resumed {
+                    Some("Reopened with its earlier conversation.")
+                } else if wanted {
+                    Some("Its earlier conversation could not be restored; the lane starts fresh.")
+                } else if past.is_some() {
+                    Some("Started fresh; earlier runs stay in the record but the lane does not remember them.")
+                } else {
+                    None
+                };
+                (agent_id, turns, session, resumed, note)
             }
         }
     };
@@ -413,14 +524,19 @@ async fn start_lane_turn(
         report_to_conductor(app_for_turn, name_t, run_t).await;
     });
 
-    Ok(json!({
+    let mut result = json!({
         "run": run,
         "lane": name,
         "agent": agent_id,
         "turn": turns,
+        "resumed": resumed,
         "status": "running",
-        "note": "The lane is working. Its report will arrive as a [레인 보고] message; tell the human what you delegated and end your turn.",
-    }))
+        "note": format!("The lane is working. Its report will arrive as a {REPORT_PREFIX} message; tell the human what you delegated and end your turn."),
+    });
+    if let Some(note) = note {
+        result["memory"] = Value::String(note.to_string());
+    }
+    Ok(result)
 }
 
 /// Hand a finished lane run to the conductor as a new turn.

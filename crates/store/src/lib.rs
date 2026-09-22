@@ -107,6 +107,19 @@ pub struct RunSummary {
     pub tool_count: u32,
 }
 
+/// A lane as the record knows it: its runs, whoever ran them last.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LaneInfo {
+    pub name: String,
+    /// Agent of the latest run.
+    pub agent: String,
+    pub runs: u32,
+    pub last_run: String,
+    pub last_status: RunStatus,
+    /// Unix milliseconds of the latest run's start.
+    pub last_at: i64,
+}
+
 /// One event from the log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredEvent {
@@ -286,6 +299,33 @@ impl Store {
              FROM runs ORDER BY n",
         )?;
         let rows = stmt.query_map([], row_to_summary)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Every lane that ever had a run, newest activity first, with the
+    /// agent and status of its latest run. Lanes outlive their sessions:
+    /// this is how a closed lane is still known.
+    pub fn lanes(&self) -> anyhow::Result<Vec<LaneInfo>> {
+        let conn = self.conn.lock();
+        // The latest run per lane, joined back for its id, status and time.
+        let mut stmt = conn.prepare(
+            "SELECT r.lane, r.agent, c.runs, r.id, r.status, r.started_at
+             FROM runs r
+             JOIN (SELECT lane, COUNT(*) AS runs, MAX(n) AS last_n FROM runs GROUP BY lane) c
+               ON c.lane = r.lane AND c.last_n = r.n
+             ORDER BY r.n DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let status: String = r.get(4)?;
+            Ok(LaneInfo {
+                name: r.get(0)?,
+                agent: r.get(1)?,
+                runs: r.get::<_, i64>(2)? as u32,
+                last_run: r.get(3)?,
+                last_status: RunStatus::parse(&status).unwrap_or(RunStatus::Failed),
+                last_at: r.get(5)?,
+            })
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -545,6 +585,24 @@ mod tests {
         assert_eq!(runs[0].status, RunStatus::Done);
         assert_eq!(runs[1].status, RunStatus::Running);
         assert_eq!(runs[1].output, "", "live runs are not folded yet");
+    }
+
+    #[test]
+    fn lanes_are_grouped_from_runs_newest_first() {
+        let store = Store::in_memory().unwrap();
+        drive_run(&store, "conductor", "hi", &["x"], &[]);
+        drive_run(&store, "ui", "fix", &["y"], &["ls"]);
+        drive_run(&store, "ui", "more", &["z"], &[]);
+        drive_run(&store, "docs", "write", &["w"], &[]);
+
+        let lanes = store.lanes().unwrap();
+        let names: Vec<&str> = lanes.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["docs", "ui", "conductor"]);
+        let ui = lanes.iter().find(|l| l.name == "ui").unwrap();
+        assert_eq!(ui.runs, 2);
+        assert_eq!(ui.last_run, "t003");
+        assert_eq!(ui.last_status, RunStatus::Done);
+        assert_eq!(ui.agent, "claude_code");
     }
 
     #[test]
