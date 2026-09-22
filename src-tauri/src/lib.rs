@@ -194,8 +194,7 @@ async fn start_run(
 #[tauri::command]
 async fn conductor_prompt(app: AppHandle, prompt: String, agent: Option<String>) -> Result<String, String> {
     let agent = agent.unwrap_or_else(|| AgentKind::ClaudeCode.id().to_string());
-    let state = std::sync::Arc::new(conductor::AppStateRef(app.clone()));
-    conductor::conductor_prompt(app, state, prompt, agent).await
+    conductor::conductor_turn(app, prompt, agent).await
 }
 
 /// Every run, oldest first: what the timeline is rebuilt from at startup.

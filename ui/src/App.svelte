@@ -7,6 +7,7 @@
   import Inspector from "./lib/Inspector.svelte";
   import Setup from "./lib/Setup.svelte";
   import Settings from "./lib/Settings.svelte";
+  import LaneView from "./lib/LaneView.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
 
@@ -37,6 +38,11 @@
     <Rail />
     {#if store.view === "settings"}
       <Settings />
+    {:else if store.view === "lane"}
+      {#if store.trackListOpen}
+        <TrackList />
+      {/if}
+      <LaneView />
     {:else}
       {#if store.trackListOpen}
         <TrackList />

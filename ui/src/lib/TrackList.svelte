@@ -69,7 +69,7 @@
 
       {#if open[t.id]}
         {#each t.lanes as lane (lane.name)}
-          <div class="lane">
+          <button class="lane" class:on={store.view === "lane" && store.openLane === lane.name} onclick={() => store.openLaneView(lane.name)}>
             <span
               class="dot"
               class:pulse={lane.status === "running"}
@@ -78,7 +78,7 @@
             <span class="mono name">{lane.name}</span>
             <span class="mono meta">{agentLabel(lane.agent)}</span>
             <span class="mono count">{lane.runs}</span>
-          </div>
+          </button>
         {/each}
       {/if}
     {/each}
@@ -205,13 +205,29 @@
   }
 
   .lane {
+    width: 100%;
     height: 30px;
     display: flex;
     align-items: center;
     gap: 10px;
     padding: 0 16px 0 44px;
+    background: transparent;
+    border: 0;
+    border-left: 2px solid transparent;
+    text-align: left;
     font-size: 11px;
     color: var(--dim);
+  }
+
+  .lane:hover {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .lane.on {
+    color: var(--hi);
+    border-left-color: var(--acc);
+    background: var(--sel);
   }
 
   .dot {

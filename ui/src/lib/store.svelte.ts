@@ -131,7 +131,10 @@ export type Run = {
   segments: Segment[];
 };
 
-export type View = "track" | "settings";
+export type View = "track" | "settings" | "lane";
+
+/** Prefix of conductor prompts Orchestra injects itself (lane reports). */
+export const REPORT_PREFIX = "[레인 보고]";
 
 /** What the user asked for; `system` follows the OS. */
 export type ThemePref = "system" | "dark" | "light";
@@ -186,6 +189,8 @@ class Store {
   trackListOpen = $state(true);
   /** Which settings section is open. */
   settingsSection = $state<SettingsSection>("overview");
+  /** Lane whose session is open in the main area (view === "lane"). */
+  openLane = $state("");
   /** Conversation text size. Persisted. */
   chatFont = $state<ChatFont>("s");
   /** Interface typeface. Persisted. */
@@ -315,6 +320,16 @@ class Store {
       await invoke("set_setting", { key: "rail", value: collapsed ? "collapsed" : "expanded" });
     } catch (err) {
       this.lastError = String(err);
+    }
+  }
+
+  /** Show a lane's session: the conductor's messages and the worker's replies. */
+  async openLaneView(name: string) {
+    this.openLane = name;
+    this.view = "lane";
+    // Restored runs only carry their folded text; replay them for the full turn.
+    for (const run of this.runs) {
+      if (run.lane === name && !run.loaded) await this.hydrate(run);
     }
   }
 

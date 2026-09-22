@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel, type Run, type Segment, type Tool } from "./store.svelte";
+  import { store, agentLabel, REPORT_PREFIX, type Run, type Segment, type Tool } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import Markdown from "./Markdown.svelte";
 
@@ -79,13 +79,18 @@
     </div>
   {/if}
 
-  {#each store.runs as run (run.id)}
+  <!-- The track is the human and the conductor. Lane work is the conductor's
+       to relay; lanes themselves are read in their own view. -->
+  {#each store.runs.filter((r) => r.lane === "conductor") as run (run.id)}
     {#if run.lane === "conductor"}
-      <!-- A conductor turn: the human's message, then the conductor's reply as prose. -->
-      <div class="me">
-        <div class="mlab">나</div>
-        <div class="bubble"><p>{run.prompt}</p></div>
-      </div>
+      {#if run.prompt.startsWith(REPORT_PREFIX)}
+        <div class="sys mono">보고 도착 · {run.prompt.split("\n")[0].replace(REPORT_PREFIX, "").trim()}</div>
+      {:else}
+        <div class="me">
+          <div class="mlab">나</div>
+          <div class="bubble"><p>{run.prompt}</p></div>
+        </div>
+      {/if}
       <div class="conductor" class:live={run.status === "connecting" || run.status === "running"}>
         <div class="chead">
           <span class="mlab">지휘자</span>
@@ -210,6 +215,14 @@
     display: flex;
     justify-content: center;
     margin-bottom: 18px;
+  }
+
+  /* A lane report arriving for the conductor: a quiet system line. */
+  .sys {
+    margin: 0 0 12px;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--lab);
   }
 
   .me {
