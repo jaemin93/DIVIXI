@@ -552,6 +552,16 @@ class Store {
     const agent = this.agent;
     try {
       const id = await invoke<string>("conductor_prompt", { prompt: text, agent });
+      // The core emits the first events before this call returns, and
+      // `apply` creates a placeholder run for them. Fill that in rather than
+      // pushing a second run with the same id, which would sit empty forever.
+      const existing = this.runs.find((r) => r.id === id);
+      if (existing) {
+        existing.lane = "conductor";
+        existing.agent = agent;
+        existing.prompt = text;
+        return;
+      }
       this.runs.push({
         id,
         lane: "conductor",
