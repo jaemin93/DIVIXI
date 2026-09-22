@@ -31,7 +31,6 @@
   ];
 
   const secondary: Item[] = [
-    { id: "agents", icon: "agents", label: "Agents", go: () => store.openSettings("agents") },
     { id: "settings", icon: "settings", label: "설정", go: () => store.openSettings("overview") },
   ];
 
@@ -39,13 +38,12 @@
 
   function active(item: Item): boolean {
     if (item.id === "tracks") return store.view === "track";
-    if (item.id === "settings" || item.id === "agents") return store.view === "settings";
+    if (item.id === "settings") return store.view === "settings";
     return false;
   }
 
   function badge(item: Item): string {
     if (item.id === "tracks") return "1";
-    if (item.id === "agents") return String(store.readyAgents.length);
     return "";
   }
 </script>
