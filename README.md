@@ -19,6 +19,7 @@ ACP를 지원하지 않는 에이전트는 나중에 같은 채널 뒤에 PTY �
 ```
 crates/orchestra/   도메인 — LaneEvent, 막의 정의
 crates/acp/         ACP 클라이언트 — 에이전트 기동, 세션, 스트리밍
+crates/agents/      에이전트 카탈로그 — CLI 탐색, ACP 프로브·로그인, Antigravity 서버 다운로드
 crates/store/       이벤트 스토어 — SQLite, append-only 로그 + runs 투영 + FTS5
 src-tauri/          앱 셸 — run 식별자, 이벤트 영속화, 코얼레싱, IPC
 ui/                 Svelte 5 — 타임라인, 인스펙터, 두 테마
@@ -47,12 +48,35 @@ cargo run -p orchestra-acp --example smoke -- "Reply with exactly: ORCHESTRA OK"
 `scrub_inherited_session_env()`가 `main` 맨 앞에서 이 변수들을 지웁니다.
 스레드가 생기기 전에 호출해야 합니다.
 
-**어댑터.** Claude Code CLI 2.1.x는 ACP 네이티브 지원이 없어서
-`@agentclientprotocol/claude-agent-acp`(devDependency로 고정)를 `node`로 직접
-띄웁니다. `node_modules`가 없으면 `npx`로 떨어지는데, 그러면 레인당 10초 이상 느립니다.
-`ORCHESTRA_ACP_ADAPTER`로 엔트리 스크립트 경로를 강제할 수 있습니다.
-레인은 `bypassPermissions` 모드로 돌아갑니다 — 툴 승인 프롬프트가 아니라
-레인이 스스로 올리는 에스컬레이션만 사람에게 보이는 게 설계 의도입니다.
+**에이전트.** 네 가지를 ACP로 붙입니다. 첫 실행 setup과 설정 화면의 "다시 감지"가
+`crates/agents`의 감지를 돌립니다.
+
+| 에이전트 | ACP 진입 | 자율 모드 id |
+|---|---|---|
+| Claude Code | `@agentclientprotocol/claude-agent-acp` (devDependency, `node`로 직접) | `bypassPermissions` |
+| Codex | `@agentclientprotocol/codex-acp` (devDependency, `@openai/codex` 번들) | `agent-full-access` |
+| GitHub Copilot | 설치된 `copilot.exe --acp` | `…/session-modes#autopilot` |
+| Antigravity | Google의 `agy_acp_server` zip을 앱 데이터 폴더에 다운로드 | `yolo` |
+
+감지는 세 단계입니다. CLI 실행 파일 탐색(프로세스 PATH + Windows 레지스트리 PATH +
+알려진 설치 경로), ACP `initialize`(이름·버전·로그인 방법), `session/new`(성공이면
+준비됨, `auth_required`면 로그인 필요). 로그인은 ACP `authenticate`로 에이전트가 직접
+합니다. Antigravity는 `agy` CLI 로그인과 별개로 ACP 서버 인증이 필요하며
+`oauth-personal`이 Google 계정 자격을 재사용합니다.
+
+레인은 에이전트가 광고하는 모드 중 가장 자율적인 것으로 돌아갑니다 — 툴 승인
+프롬프트가 아니라 레인이 스스로 올리는 에스컬레이션만 사람에게 보이는 게 설계
+의도입니다. `ORCHESTRA_ACP_ADAPTER`로 Claude 어댑터 경로를 강제할 수 있습니다.
+
+에이전트 프로세스는 `crates/acp`가 직접 띄우고 직접 죽입니다. Windows에서는 Job
+Object로 묶어 자손까지 함께 종료됩니다. Antigravity 서버는 stdin EOF를 무시하므로
+프로토콜 크레이트의 기본 정리에 맡기면 레인마다 하나씩 남습니다.
+
+```bash
+cargo run -p orchestra-agents --example detect                  # 감지 결과 출력
+cargo run -p orchestra-agents --example detect -- --download    # Antigravity 서버까지
+cargo run -p orchestra-agents --example lane -- codex "prompt"  # 특정 에이전트로 레인 1회
+```
 
 **코얼레싱.** 에이전트 텍스트 청크는 40ms 단위로 묶어서 webview에 보냅니다.
 토큰마다 IPC를 태우면 창이 버벅입니다. 스토어에도 같은 프레임 단위로 기록됩니다.
@@ -71,9 +95,11 @@ cargo run -p orchestra-store --example persist -- "Reply with exactly: ORCHESTRA
 
 ## 현재 상태 (Phase 1 진행 중)
 
-되는 것: 레인 1개 기동, 프롬프트 1회 실행, 스트리밍, Report 카드, 인스펙터
-(트랜스크립트 / 출력 / 툴), 다크·라이트 테마, SQLite 이벤트 스토어(재시작 후 타임라인
-복원, 인스펙터 지연 로드, 전문 검색 API).
+되는 것: 첫 실행 setup의 에이전트 감지·로그인·다운로드, 설정의 재감지, 런마다
+에이전트 선택(Claude Code / Codex / Copilot / Antigravity), 레인 1개 기동, 프롬프트 1회
+실행, 스트리밍, Report 카드, 인스펙터(트랜스크립트 / 출력 / 툴), 다크·라이트 테마,
+SQLite 이벤트 스토어(재시작 후 타임라인 복원, 인스펙터 지연 로드, 전문 검색 API).
 
-아직 없는 것: 다중 레인, 워크트리 격리, Report 스키마 강제, Decision 에스컬레이션,
-Draft 화면, 승격, wrap-up 폴드, 검색 UI.
+아직 없는 것: Track 생성 흐름(첫 화면), 지휘자 세션, 다중 레인, 워크트리 격리,
+Report 스키마 강제, Decision 에스컬레이션, Draft 화면, 승격, wrap-up 폴드, 검색 UI,
+대화창 폰트 크기 설정.

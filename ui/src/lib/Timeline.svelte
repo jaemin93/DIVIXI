@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, type Run } from "./store.svelte";
+  import { store, agentLabel, type Run } from "./store.svelte";
 
   let scroller = $state<HTMLDivElement>();
 
@@ -50,7 +50,7 @@
         <div class="head">
           <span class="dot pulse"></span>
           <span class="mono tag ok">{run.status === "connecting" ? "CONNECTING" : "RUNNING"}</span>
-          <span class="mono meta">lane {run.lane} · {run.id}</span>
+          <span class="mono meta">lane {run.lane} · {run.id} · {agentLabel(run.agent)}</span>
           <span class="grow"></span>
           <span class="mono meta">{run.toolCount} tools</span>
         </div>
@@ -62,6 +62,7 @@
           <span class="mono chev">{store.inspecting === run.id ? "▾" : "▸"}</span>
           <span class="col"><span class="mlab-sm">LANE</span><span class="mono val">{run.lane}</span></span>
           <span class="col"><span class="mlab-sm">RUN</span><span class="mono val">{run.id}</span></span>
+          <span class="col"><span class="mlab-sm">AGENT</span><span class="mono val">{agentLabel(run.agent)}</span></span>
           <span class="col">
             <span class="mlab-sm">RESULT</span>
             <span class="mono val" class:ok={run.status === "done"} class:bad={run.status === "failed"}>

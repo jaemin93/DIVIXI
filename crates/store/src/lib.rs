@@ -22,8 +22,16 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-/// Bump when `SCHEMA` changes in a way that needs a migration.
-const SCHEMA_VERSION: i64 = 1;
+/// Bump when `SCHEMA` changes in a way that needs a migration, and add the
+/// step to [`migrate`].
+const SCHEMA_VERSION: i64 = 2;
+
+/// Migration steps, applied in order from the stored version to
+/// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
+const MIGRATIONS: &[&str] = &[
+    // 1 -> 2: runs record which agent ran them.
+    "ALTER TABLE runs ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude_code';",
+];
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -46,7 +54,8 @@ CREATE TABLE IF NOT EXISTS runs (
     error       TEXT,
     output      TEXT    NOT NULL DEFAULT '',
     plan        TEXT    NOT NULL DEFAULT '[]',
-    tool_count  INTEGER NOT NULL DEFAULT 0
+    tool_count  INTEGER NOT NULL DEFAULT 0,
+    agent       TEXT    NOT NULL DEFAULT 'claude_code'
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -79,6 +88,8 @@ pub const INTERRUPTED: &str = "interrupted: the app closed while the run was liv
 pub struct RunSummary {
     pub id: RunId,
     pub lane: LaneId,
+    /// Which agent ran it (`claude_code`, `codex`, …).
+    pub agent: String,
     pub prompt: String,
     pub cwd: String,
     pub status: RunStatus,
@@ -137,8 +148,11 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.execute_batch(SCHEMA)?;
 
+        // A fresh file gets the current schema; an existing one is migrated
+        // step by step. The `meta` table is created first so the version can
+        // be read before anything else is touched.
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
         let version: Option<i64> = conn
             .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| {
                 r.get::<_, String>(0)
@@ -147,18 +161,39 @@ impl Store {
             .and_then(|v| v.parse().ok());
         match version {
             None => {
+                conn.execute_batch(SCHEMA)?;
                 conn.execute(
                     "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)",
                     params![SCHEMA_VERSION.to_string()],
                 )?;
             }
             Some(v) if v == SCHEMA_VERSION => {}
-            Some(v) => anyhow::bail!("store schema version {v} is not supported (want {SCHEMA_VERSION})"),
+            Some(v) if v < SCHEMA_VERSION => migrate(&conn, v)?,
+            Some(v) => anyhow::bail!("store schema version {v} is newer than this build supports ({SCHEMA_VERSION})"),
         }
 
         let store = Self { conn: Mutex::new(conn) };
         store.close_interrupted_runs()?;
         Ok(store)
+    }
+
+    /// Read a free-form setting.
+    pub fn get_meta(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Write a free-form setting.
+    pub fn set_meta(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     fn close_interrupted_runs(&self) -> anyhow::Result<()> {
@@ -181,14 +216,14 @@ impl Store {
     /// Register a new run and return its id.
     ///
     /// Ids are `t001`, `t002`, … in creation order, durable across restarts.
-    pub fn begin_run(&self, lane: &str, prompt: &str, cwd: &str) -> anyhow::Result<RunId> {
+    pub fn begin_run(&self, lane: &str, agent: &str, prompt: &str, cwd: &str) -> anyhow::Result<RunId> {
         let conn = self.conn.lock();
         let next: i64 = conn.query_row("SELECT COALESCE(MAX(n), 0) + 1 FROM runs", [], |r| r.get(0))?;
         let id = format!("t{next:03}");
         conn.execute(
-            "INSERT INTO runs(n, id, lane, prompt, cwd, status, started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![next, id, lane, prompt, cwd, RunStatus::Connecting.as_str(), now_ms()],
+            "INSERT INTO runs(n, id, lane, agent, prompt, cwd, status, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![next, id, lane, agent, prompt, cwd, RunStatus::Connecting.as_str(), now_ms()],
         )?;
         Ok(id)
     }
@@ -247,7 +282,7 @@ impl Store {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, lane, prompt, cwd, status, started_at, duration_ms, session_id,
-                    stop_reason, error, output, plan, tool_count
+                    stop_reason, error, output, plan, tool_count, agent
              FROM runs ORDER BY n",
         )?;
         let rows = stmt.query_map([], row_to_summary)?;
@@ -260,7 +295,7 @@ impl Store {
         Ok(conn
             .query_row(
                 "SELECT id, lane, prompt, cwd, status, started_at, duration_ms, session_id,
-                        stop_reason, error, output, plan, tool_count
+                        stop_reason, error, output, plan, tool_count, agent
                  FROM runs WHERE id = ?1",
                 params![id],
                 row_to_summary,
@@ -299,6 +334,22 @@ impl Store {
         let rows = stmt.query_map(params![expr], |r| Ok(SearchHit { run: r.get(0)?, snippet: r.get(1)? }))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+}
+
+/// Upgrade an existing database from `from` to [`SCHEMA_VERSION`].
+fn migrate(conn: &Connection, from: i64) -> anyhow::Result<()> {
+    for v in from..SCHEMA_VERSION {
+        let step = MIGRATIONS
+            .get((v - 1) as usize)
+            .ok_or_else(|| anyhow::anyhow!("no migration from schema version {v}"))?;
+        tracing::info!(from = v, to = v + 1, "migrating event store");
+        conn.execute_batch(step)?;
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+            params![(v + 1).to_string()],
+        )?;
+    }
+    Ok(())
 }
 
 /// Recompute a run's folded columns from its event log and index it.
@@ -362,6 +413,7 @@ fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
     Ok(RunSummary {
         id: r.get(0)?,
         lane: r.get(1)?,
+        agent: r.get(13)?,
         prompt: r.get(2)?,
         cwd: r.get(3)?,
         status: RunStatus::parse(&status).unwrap_or(RunStatus::Failed),
@@ -397,7 +449,7 @@ mod tests {
     }
 
     fn drive_run(store: &Store, lane: &str, prompt: &str, output: &[&str], tools: &[&str]) -> RunId {
-        let run = store.begin_run(lane, prompt, ".").unwrap();
+        let run = store.begin_run(lane, "claude_code", prompt, ".").unwrap();
         store.append(&run, 10, &LaneEvent::Connected { protocol: "v1".into(), load_session: true }).unwrap();
         store.append(&run, 20, &LaneEvent::Started { session_id: "sess".into(), cwd: ".".into() }).unwrap();
         for (i, t) in tools.iter().enumerate() {
@@ -414,8 +466,49 @@ mod tests {
     #[test]
     fn ids_are_sequential() {
         let store = Store::in_memory().unwrap();
-        assert_eq!(store.begin_run("solo", "a", ".").unwrap(), "t001");
-        assert_eq!(store.begin_run("solo", "b", ".").unwrap(), "t002");
+        assert_eq!(store.begin_run("solo", "codex", "a", ".").unwrap(), "t001");
+        assert_eq!(store.begin_run("solo", "codex", "b", ".").unwrap(), "t002");
+        assert_eq!(store.run("t001").unwrap().unwrap().agent, "codex");
+    }
+
+    #[test]
+    fn meta_round_trips() {
+        let store = Store::in_memory().unwrap();
+        assert_eq!(store.get_meta("agents").unwrap(), None);
+        store.set_meta("agents", "[1]").unwrap();
+        store.set_meta("agents", "[2]").unwrap();
+        assert_eq!(store.get_meta("agents").unwrap().as_deref(), Some("[2]"));
+        assert_eq!(store.get_meta("schema_version").unwrap().as_deref(), Some(SCHEMA_VERSION.to_string().as_str()));
+    }
+
+    #[test]
+    fn migrates_a_version_1_database() {
+        let dir = std::env::temp_dir().join(format!("orchestra-store-mig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v1.db");
+        let _ = std::fs::remove_file(&path);
+
+        // Build a v1 file by hand: the v1 schema had no `agent` column.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&SCHEMA.replace(",\n    agent       TEXT    NOT NULL DEFAULT 'claude_code'", "")).unwrap();
+            conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')", []).unwrap();
+            conn.execute(
+                "INSERT INTO runs(n, id, lane, prompt, cwd, status, started_at) VALUES (1, 't001', 'solo', 'old', '.', 'done', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.get_meta("schema_version").unwrap().as_deref(), Some("2"));
+        let old = store.run("t001").unwrap().unwrap();
+        assert_eq!(old.agent, "claude_code", "pre-migration runs default to Claude");
+        let new = store.begin_run("solo", "copilot", "new", ".").unwrap();
+        assert_eq!(store.run(&new).unwrap().unwrap().agent, "copilot");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -444,7 +537,7 @@ mod tests {
     fn timeline_lists_runs_in_order_without_detail() {
         let store = Store::in_memory().unwrap();
         drive_run(&store, "solo", "first", &["x"], &[]);
-        let live = store.begin_run("solo", "second", ".").unwrap();
+        let live = store.begin_run("solo", "claude_code", "second", ".").unwrap();
         store.append(&live, 5, &LaneEvent::Started { session_id: "s2".into(), cwd: ".".into() }).unwrap();
 
         let runs = store.runs().unwrap();
@@ -457,7 +550,7 @@ mod tests {
     #[test]
     fn failure_records_error_and_folds() {
         let store = Store::in_memory().unwrap();
-        let run = store.begin_run("solo", "p", ".").unwrap();
+        let run = store.begin_run("solo", "claude_code", "p", ".").unwrap();
         store.append(&run, 1, &LaneEvent::Message { text: "partial".into() }).unwrap();
         store.append(&run, 2, &LaneEvent::Failed { error: "boom".into() }).unwrap();
         let s = store.run(&run).unwrap().unwrap();
@@ -486,7 +579,7 @@ mod tests {
 
         let run = {
             let store = Store::open(&path).unwrap();
-            let run = store.begin_run("solo", "never finishes", ".").unwrap();
+            let run = store.begin_run("solo", "claude_code", "never finishes", ".").unwrap();
             store.append(&run, 7, &LaneEvent::Started { session_id: "s".into(), cwd: ".".into() }).unwrap();
             store.append(&run, 8, &LaneEvent::Message { text: "half".into() }).unwrap();
             run

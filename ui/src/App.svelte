@@ -5,25 +5,33 @@
   import Timeline from "./lib/Timeline.svelte";
   import Composer from "./lib/Composer.svelte";
   import Inspector from "./lib/Inspector.svelte";
+  import Setup from "./lib/Setup.svelte";
+  import Settings from "./lib/Settings.svelte";
 </script>
 
 <div class="shell">
   <TitleBar />
-  <div class="body">
-    <Rail />
-    <main>
-      <header>
-        <div class="mlab">#01 / Track</div>
-        <h1 class="serif">ACP 브리지</h1>
-        <p>devterm 오케스트라를 ACP 위로 올린다. 레인은 워크트리로 격리하고, 보고는 스키마로 강제한다.</p>
-      </header>
-      <Timeline />
-      <Composer />
-    </main>
-    {#if store.openRun}
-      <Inspector run={store.openRun} />
-    {/if}
-  </div>
+  {#if store.view === "setup"}
+    <Setup />
+  {:else if store.view === "settings"}
+    <Settings />
+  {:else}
+    <div class="body">
+      <Rail />
+      <main>
+        <header>
+          <div class="mlab">#01 / Track</div>
+          <h1 class="serif">ACP 브리지</h1>
+          <p>devterm 오케스트라를 ACP 위로 올린다. 레인은 워크트리로 격리하고, 보고는 스키마로 강제한다.</p>
+        </header>
+        <Timeline />
+        <Composer />
+      </main>
+      {#if store.openRun}
+        <Inspector run={store.openRun} />
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>

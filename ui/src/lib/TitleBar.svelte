@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store } from "./store.svelte";
+  import { store, agentLabel } from "./store.svelte";
 </script>
 
 <div class="bar">
@@ -13,8 +13,11 @@
   <button class="btn" onclick={() => store.toggleTheme()}>
     {store.theme === "dk" ? "LIGHT" : "DARK"}
   </button>
+  <button class="btn" class:on={store.view === "settings"} onclick={() => (store.view = store.view === "settings" ? "track" : "settings")}>
+    설정
+  </button>
   <span class="mono agents">
-    <span class="dot" class:live={!store.busy}></span>claude-code
+    <span class="dot" class:live={store.currentAgent?.readiness === "ready" && !store.busy}></span>{agentLabel(store.agent)}
   </span>
 </div>
 
@@ -84,5 +87,10 @@
   .btn {
     height: 24px;
     padding: 0 9px;
+  }
+
+  .btn.on {
+    color: var(--hi);
+    background: var(--sel);
   }
 </style>

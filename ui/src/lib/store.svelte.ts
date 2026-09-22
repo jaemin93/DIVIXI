@@ -25,6 +25,7 @@ export type Envelope = {
 export type RunSummary = {
   id: string;
   lane: string;
+  agent: string;
   prompt: string;
   cwd: string;
   status: RunStatus;
@@ -41,6 +42,36 @@ export type RunSummary = {
 /** Mirrors `orchestra_store::StoredEvent`. */
 export type StoredEvent = { seq: number; at_ms: number; event: LaneEvent };
 
+/** Mirrors `orchestra_agents::AgentKind` ids. */
+export type AgentId = "claude_code" | "codex" | "copilot" | "antigravity";
+
+export type Readiness = "ready" | "needs_login" | "needs_download" | "not_installed" | "error";
+
+export type AuthMethodInfo = {
+  id: string;
+  name: string;
+  description: string | null;
+  terminal_command: string | null;
+};
+
+/** Mirrors `orchestra_agents::AgentStatus`. */
+export type AgentStatus = {
+  kind: AgentId;
+  name: string;
+  readiness: Readiness;
+  cli: { path: string; version: string | null } | null;
+  adapter: { kind: string; path?: string; package?: string; reason?: string };
+  probe: {
+    protocol: string;
+    agent_name: string | null;
+    agent_version: string | null;
+    auth_methods: AuthMethodInfo[];
+  } | null;
+  error: string | null;
+  login_hint: string;
+  install_hint: string;
+};
+
 export type Tool = { id: string; title: string; toolKind: string; status: string };
 
 export type TranscriptLine = { ms: number; label: string; text: string; tone: Tone };
@@ -51,6 +82,7 @@ export type RunStatus = "connecting" | "running" | "done" | "failed";
 export type Run = {
   id: string;
   lane: string;
+  agent: string;
   prompt: string;
   status: RunStatus;
   sessionId?: string;
@@ -74,15 +106,26 @@ export type Run = {
   transcript: TranscriptLine[];
 };
 
+export type View = "setup" | "track" | "settings";
+
 /** Everything above the membrane plus, per run, the detail kept below it. */
 class Store {
   theme = $state<"dk" | "lt">("dk");
+  view = $state<View>("track");
   runs = $state<Run[]>([]);
   /** Run id whose lane detail is open in the inspector; "" means closed. */
   inspecting = $state("");
   busy = $state(false);
   lastError = $state("");
   restored = $state(false);
+
+  /** Last detection result; null until setup has run once. */
+  agents = $state<AgentStatus[] | null>(null);
+  /** Agent id lanes are opened on. */
+  agent = $state<AgentId>("claude_code");
+  detecting = $state(false);
+  /** Agent ids with a login or download in flight. */
+  working = $state<Record<string, string>>({});
 
   get openRun(): Run | undefined {
     return this.runs.find((r) => r.id === this.inspecting);
@@ -92,23 +135,87 @@ class Store {
     return this.runs.find((r) => r.status === "running" || r.status === "connecting");
   }
 
+  get readyAgents(): AgentStatus[] {
+    return (this.agents ?? []).filter((a) => a.readiness === "ready");
+  }
+
+  get currentAgent(): AgentStatus | undefined {
+    return this.agents?.find((a) => a.kind === this.agent);
+  }
+
   toggleTheme() {
     this.theme = this.theme === "dk" ? "lt" : "dk";
     document.documentElement.className = this.theme;
   }
 
-  /** Rebuild the timeline from the store. Called once at startup. */
+  /** Rebuild the timeline and agent list from the store. Called once at startup. */
   async restore() {
     try {
-      const summaries = await invoke<RunSummary[]>("list_runs");
+      const [summaries, agents] = await Promise.all([
+        invoke<RunSummary[]>("list_runs"),
+        invoke<AgentStatus[] | null>("agent_statuses"),
+      ]);
       this.runs = summaries.map(fromSummary);
       // The core closes runs left live by a previous process, so nothing
       // restored can be in flight.
       this.busy = false;
+      this.agents = agents;
+      this.pickDefaultAgent();
+      // First launch: nothing has been detected yet, so setup comes first.
+      if (agents === null) this.view = "setup";
     } catch (err) {
       this.lastError = String(err);
     } finally {
       this.restored = true;
+    }
+  }
+
+  /** Keep the selected agent on one that is ready. */
+  private pickDefaultAgent() {
+    const ready = this.readyAgents;
+    if (ready.some((a) => a.kind === this.agent)) return;
+    if (ready.length) this.agent = ready[0].kind;
+  }
+
+  /** Launch and probe every agent. Several seconds. */
+  async detect() {
+    if (this.detecting) return;
+    this.detecting = true;
+    this.lastError = "";
+    try {
+      this.agents = await invoke<AgentStatus[]>("detect_agents");
+      this.pickDefaultAgent();
+    } catch (err) {
+      this.lastError = String(err);
+    } finally {
+      this.detecting = false;
+    }
+  }
+
+  /** Run the agent's own ACP login flow. May open a browser. */
+  async login(agent: AgentId, method?: string) {
+    await this.workOn(agent, "로그인 중", () => invoke<AgentStatus>("login_agent", { agent, method: method ?? null }));
+  }
+
+  /** Fetch the agent's ACP server (Antigravity). */
+  async download(agent: AgentId) {
+    await this.workOn(agent, "다운로드 중", () => invoke<AgentStatus>("download_agent", { agent }));
+  }
+
+  private async workOn(agent: AgentId, label: string, op: () => Promise<AgentStatus>) {
+    if (this.working[agent]) return;
+    this.working = { ...this.working, [agent]: label };
+    this.lastError = "";
+    try {
+      const next = await op();
+      this.agents = (this.agents ?? []).map((a) => (a.kind === agent ? next : a));
+      if (!this.agents.some((a) => a.kind === agent)) this.agents = [...this.agents, next];
+      this.pickDefaultAgent();
+    } catch (err) {
+      this.lastError = String(err);
+    } finally {
+      const { [agent]: _done, ...rest } = this.working;
+      this.working = rest;
     }
   }
 
@@ -141,17 +248,19 @@ class Store {
     }
   }
 
-  /** Ask the core to open a lane and run one prompt. */
+  /** Ask the core to open a lane on the selected agent and run one prompt. */
   async send(prompt: string, lane = "solo") {
     const text = prompt.trim();
     if (!text || this.busy) return;
     this.busy = true;
     this.lastError = "";
+    const agent = this.agent;
     try {
-      const id = await invoke<string>("start_run", { lane, prompt: text });
+      const id = await invoke<string>("start_run", { lane, prompt: text, agent });
       this.runs.push({
         id,
         lane,
+        agent,
         prompt: text,
         status: "connecting",
         startedAt: Date.now(),
@@ -233,6 +342,7 @@ function fromSummary(s: RunSummary): Run {
   return {
     id: s.id,
     lane: s.lane,
+    agent: s.agent,
     prompt: s.prompt,
     status: s.status,
     sessionId: s.session_id ?? undefined,
@@ -253,6 +363,22 @@ function fromSummary(s: RunSummary): Run {
 
 function push(run: Run, ms: number, label: string, text: string, tone: Tone) {
   run.transcript.push({ ms, label, text, tone });
+}
+
+/** Short mono label for an agent id. */
+export function agentLabel(id: string): string {
+  switch (id) {
+    case "claude_code":
+      return "claude-code";
+    case "codex":
+      return "codex";
+    case "copilot":
+      return "copilot";
+    case "antigravity":
+      return "antigravity";
+    default:
+      return id;
+  }
 }
 
 export const store = new Store();

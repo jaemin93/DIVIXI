@@ -2607,6 +2607,7 @@ dependencies = [
  "anyhow",
  "futures",
  "orchestra-acp",
+ "orchestra-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -2623,6 +2624,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "orchestra-acp",
+ "orchestra-agents",
  "orchestra-core",
  "orchestra-store",
  "parking_lot",

@@ -434,12 +434,31 @@ async fn run_lane_inner(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyho
                         cwd: cwd_label,
                     });
 
-                    if let Some(mode) = mode {
-                        session
-                            .connection()
-                            .send_request_to(Agent, SetSessionModeRequest::new(session_id, mode))
-                            .block_task()
-                            .await?;
+                    // Mode ids are agent-specific (`bypassPermissions` is
+                    // Claude's; others say `yolo`, `full-access`, …), so an
+                    // explicit request is used as given and otherwise the
+                    // least-interrupting mode the agent advertises is chosen.
+                    let available: Vec<(String, String)> = session
+                        .modes()
+                        .map(|m| {
+                            m.available_modes
+                                .iter()
+                                .map(|x| (x.id.to_string(), x.name.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let current = session.modes().map(|m| m.current_mode_id.to_string());
+                    tracing::info!(?available, ?current, "session modes");
+                    let wanted = mode.or_else(|| pick_autonomous_mode(&available));
+                    if let Some(wanted) = wanted {
+                        if current.as_deref() != Some(wanted.as_str()) {
+                            tracing::info!(mode = %wanted, "setting session mode");
+                            session
+                                .connection()
+                                .send_request_to(Agent, SetSessionModeRequest::new(session_id, wanted))
+                                .block_task()
+                                .await?;
+                        }
                     }
 
                     session.send_prompt(&prompt)?;
@@ -480,6 +499,89 @@ async fn run_lane_inner(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyho
     };
     process.shutdown().await;
     result
+}
+
+/// Mode ids that mean "do not stop to ask about tools", most autonomous
+/// first, as observed per agent:
+///
+/// - Claude Code: `bypassPermissions`
+/// - Codex: `agent-full-access` (default `agent` still asks)
+/// - Copilot: `https://agentclientprotocol.com/protocol/session-modes#autopilot`
+/// - Antigravity: `yolo` (then `auto_edit`, `default`)
+///
+/// Ids are compared by their last `#`/`/` segment, case-insensitively,
+/// and names are compared too.
+const AUTONOMOUS_MODE_IDS: &[&str] = &[
+    "bypasspermissions",
+    "bypass-permissions",
+    "yolo",
+    "agent-full-access",
+    "full-access",
+    "full_access",
+    "fullaccess",
+    "autopilot",
+    "auto-approve",
+    "autoapprove",
+    "auto_edit",
+    "auto-edit",
+    "autoedit",
+    "acceptedits",
+    "accept-edits",
+];
+
+/// The most autonomous mode among `(id, name)` pairs the agent offers.
+///
+/// Lanes run without per-tool approval by design: Orchestra surfaces the
+/// escalations a lane raises on purpose, not permission prompts. When an
+/// agent offers nothing recognizable, its default mode is kept.
+pub fn pick_autonomous_mode(available: &[(String, String)]) -> Option<String> {
+    fn key(s: &str) -> String {
+        s.rsplit(['#', '/']).next().unwrap_or(s).to_ascii_lowercase()
+    }
+    AUTONOMOUS_MODE_IDS.iter().find_map(|want| {
+        available
+            .iter()
+            .find(|(id, name)| key(id) == *want || key(name) == *want)
+            .map(|(id, _)| id.clone())
+    })
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::pick_autonomous_mode;
+
+    fn modes(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(i, n)| (i.to_string(), n.to_string())).collect()
+    }
+
+    #[test]
+    fn picks_each_agents_autonomous_mode() {
+        assert_eq!(
+            pick_autonomous_mode(&modes(&[("default", "Default"), ("bypassPermissions", "Bypass")])),
+            Some("bypassPermissions".into())
+        );
+        assert_eq!(
+            pick_autonomous_mode(&modes(&[
+                ("read-only", "Ask for approval"),
+                ("agent", "Approve for me"),
+                ("agent-full-access", "Full access")
+            ])),
+            Some("agent-full-access".into())
+        );
+        let cp = "https://agentclientprotocol.com/protocol/session-modes#autopilot";
+        assert_eq!(
+            pick_autonomous_mode(&modes(&[
+                ("https://agentclientprotocol.com/protocol/session-modes#agent", "Agent"),
+                (cp, "Autopilot")
+            ])),
+            Some(cp.into())
+        );
+        assert_eq!(
+            pick_autonomous_mode(&modes(&[("default", "Default"), ("auto_edit", "Auto Edit"), ("yolo", "YOLO")])),
+            Some("yolo".into())
+        );
+        assert_eq!(pick_autonomous_mode(&modes(&[("plan", "Plan")])), None);
+    }
 }
 
 use agent_client_protocol::schema::v1::{ContentBlock, SessionNotification, SessionUpdate};

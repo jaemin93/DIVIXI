@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store } from "./store.svelte";
+  import { store, agentLabel } from "./store.svelte";
 
   // Phase 0 runs everything in one lane; the rail shows the shape the
   // domain model already has, not more than the core can back.
@@ -36,10 +36,18 @@
   <span class="grow"></span>
 
   <div class="mlab pad">Agents</div>
-  <div class="agent mono">
-    <span class="dot" style="background: var(--ok)"></span>claude-code<span class="grow"></span>
-    <span class="count">acp</span>
-  </div>
+  {#each store.agents ?? [] as a (a.kind)}
+    <button class="agent mono" class:on={store.agent === a.kind} disabled={a.readiness !== "ready"} onclick={() => (store.agent = a.kind)}>
+      <span
+        class="dot"
+        style="background: {a.readiness === 'ready' ? 'var(--ok)' : a.readiness === 'needs_login' || a.readiness === 'needs_download' ? 'var(--warn)' : a.readiness === 'error' ? 'var(--acct)' : 'var(--idle)'}"
+      ></span>{agentLabel(a.kind)}<span class="grow"></span>
+      <span class="count">{a.readiness === "ready" ? "acp" : a.readiness === "needs_login" ? "login" : a.readiness === "needs_download" ? "dl" : "—"}</span>
+    </button>
+  {/each}
+  {#if !store.agents}
+    <div class="agent mono"><span class="dot" style="background: var(--idle)"></span>미감지</div>
+  {/if}
 </nav>
 
 <style>
@@ -109,11 +117,27 @@
   }
 
   .agent {
+    width: 100%;
+    height: 28px;
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 0 16px;
+    background: transparent;
+    border: 0;
+    border-left: 2px solid transparent;
+    text-align: left;
     font-size: 11px;
     color: var(--dim);
+  }
+
+  .agent.on {
+    color: var(--hi);
+    border-left-color: var(--acc);
+  }
+
+  .agent:disabled {
+    cursor: default;
+    opacity: 0.7;
   }
 </style>

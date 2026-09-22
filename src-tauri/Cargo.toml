@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow.workspace = true
 orchestra-acp = { path = "../crates/acp" }
+orchestra-agents = { path = "../crates/agents" }
 orchestra-core = { path = "../crates/orchestra" }
 orchestra-store = { path = "../crates/store" }
 parking_lot.workspace = true

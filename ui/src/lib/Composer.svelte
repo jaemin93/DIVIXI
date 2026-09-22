@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store } from "./store.svelte";
+  import { store, agentLabel } from "./store.svelte";
 
   let draft = $state("");
 
@@ -12,6 +12,20 @@
 </script>
 
 <form onsubmit={submit}>
+  <select
+    class="mono agent"
+    bind:value={store.agent}
+    disabled={store.busy || store.readyAgents.length === 0}
+    aria-label="레인 에이전트"
+    title="이 런을 실행할 에이전트"
+  >
+    {#each store.readyAgents as a (a.kind)}
+      <option value={a.kind}>{agentLabel(a.kind)}</option>
+    {/each}
+    {#if store.readyAgents.length === 0}
+      <option value={store.agent}>{agentLabel(store.agent)}</option>
+    {/if}
+  </select>
   <input
     type="text"
     bind:value={draft}
@@ -30,6 +44,21 @@
     padding: 16px 34px 18px;
     display: flex;
     gap: 9px;
+  }
+
+  .agent {
+    height: 44px;
+    padding: 0 10px;
+    background: var(--inp);
+    border: 1px solid var(--lines);
+    color: var(--dim);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    outline: none;
+  }
+
+  .agent:focus {
+    border-color: var(--acc);
   }
 
   input {
