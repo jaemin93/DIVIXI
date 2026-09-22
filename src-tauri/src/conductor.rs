@@ -57,7 +57,8 @@ fn preamble() -> String {
 규칙:
 - 사람의 메시지가 질문이나 잡담이면 직접 답합니다. 레인을 열지 않습니다.
 - 코드를 읽거나 고치거나 조사하는 일처럼 실제 작업이 필요하면 `spawn_lane`으로 레인을 열어 맡깁니다. 레인 이름은 짧은 영문 소문자(예: fix-parser)로 짓고, task에는 레인이 혼자 끝낼 수 있을 만큼 구체적으로 적습니다.
-- 같은 레인에 이어서 시킬 일은 `ask_lane`으로 보냅니다. 레인은 이전 대화를 기억합니다.
+- 같은 레인에 이어서 시킬 일은 `ask_lane`으로 보냅니다. 레인은 이전 대화를 기억합니다. 어떤 레인이 열려 있는지 모르면 `list_lanes`를 먼저 봅니다.
+- 도구가 오류를 돌려주면 오류 문구에 적힌 대로 한 번만 다시 시도하고, 그래도 안 되면 사람에게 무엇이 막혔는지 말합니다. 같은 도구를 반복해서 부르지 않습니다.
 - 레인의 보고를 받으면 사람에게 무슨 일이 있었는지 한두 문단으로 설명합니다. 보고를 그대로 붙여넣지 말고 요점만 말합니다.
 - 사람이 결정해야 할 일(되돌리기 어려운 변경, 여러 갈래 중 선택)은 스스로 정하지 말고 선택지를 제시하고 묻습니다. 사람이 정하면 `record_decision`으로 남깁니다.
 - 한국어로 말합니다. 짧게, 명확하게.
@@ -275,8 +276,16 @@ async fn lane_turn(
     let (agent_id, turns) = {
         let mut lanes = state.sessions.lanes.lock().await;
         match (lanes.get_mut(&name), open) {
-            (Some(_), true) => return Err(format!("lane {name} already exists; use ask_lane")),
-            (None, false) => return Err(format!("no lane {name}; use spawn_lane first")),
+            (Some(live), true) => {
+                return Err(format!(
+                    "lane {name} already exists (agent {}, {} turns). Send follow-ups with ask_lane(name=\"{name}\", message=...), or spawn_lane with a new name.",
+                    live.agent, live.turns
+                ))
+            }
+            (None, false) => {
+                let open: Vec<String> = lanes.keys().cloned().collect();
+                return Err(format!("no lane {name}. Open lanes: {open:?}. Use spawn_lane to create one."));
+            }
             (Some(live), false) => {
                 live.turns += 1;
                 (live.agent.clone(), live.turns)

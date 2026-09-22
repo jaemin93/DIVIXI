@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel, type Run } from "./store.svelte";
+  import { store, agentLabel, type Run, type Segment, type Tool } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import Markdown from "./Markdown.svelte";
 
@@ -24,6 +24,35 @@
     if (last) return `${last.toolKind} ${last.title}`;
     const text = run.message || run.thought;
     return text ? text.slice(-90).replace(/\s+/g, " ") : "대기 중…";
+  }
+
+  /** Hook chatter (devterm memory and the like) arrives as message text; hide it. */
+  function cleanText(text: string): string {
+    return text
+      .split("\n")
+      .filter((line) => !/^Notice: .* says: /.test(line.trim()))
+      .join("\n");
+  }
+
+  /**
+   * Consecutive tool calls fold into one line that overwrites itself, the way
+   * a terminal does with : the latest tool shows, earlier ones become a count.
+   */
+  type Shown = Segment | { kind: "tools"; tools: Tool[] };
+  function collapse(segments: Segment[]): Shown[] {
+    const out: Shown[] = [];
+    for (const seg of segments) {
+      const last = out.at(-1);
+      if (seg.kind === "tool") {
+        if (last && last.kind === "tools") last.tools.push(seg.tool);
+        else out.push({ kind: "tools", tools: [seg.tool] });
+      } else if (seg.kind === "text" && !cleanText(seg.text).trim()) {
+        continue;
+      } else {
+        out.push(seg);
+      }
+    }
+    return out;
   }
 
   /** Tool titles from MCP arrive as `mcp__orchestra__spawn_lane`; show the tool. */
@@ -61,22 +90,23 @@
           {#if run.status === "connecting" || run.status === "running"}
             <span class="dot pulse"></span>
           {/if}
-          <span class="grow"></span>
-          <button class="btn open" onclick={() => store.inspect(run.id)}>{store.inspecting === run.id ? "닫기" : "상세"}</button>
         </div>
         <!-- The turn as it unfolds: prose and tool lines in order, like a native session. -->
-        {#each run.segments as seg, i (i)}
+        {#each collapse(run.segments) as seg, i (i)}
           {#if seg.kind === "text"}
-            {#if seg.text.trim()}<div class="ctext"><Markdown source={seg.text} /></div>{/if}
+            <div class="ctext"><Markdown source={cleanText(seg.text)} /></div>
           {:else if seg.kind === "thought"}
-            {#if seg.text.trim()}<p class="ctext thought">{seg.text.trim()}</p>{/if}
+            {#if cleanText(seg.text).trim()}<p class="ctext thought">{cleanText(seg.text).trim()}</p>{/if}
           {:else}
-            <div class="toolline mono" class:running={seg.tool.status !== "completed" && seg.tool.status !== "failed"}>
-              <span class="tdot" class:pulse={seg.tool.status !== "completed" && seg.tool.status !== "failed"}></span>
-              <span class="tk">{seg.tool.toolKind}</span>
-              <span class="tt">{toolLabel(seg.tool.title)}</span>
+            {@const tool = seg.tools[seg.tools.length - 1]}
+            {@const running = tool.status !== "completed" && tool.status !== "failed"}
+            <div class="toolline mono" class:running>
+              <span class="tdot" class:pulse={running}></span>
+              <span class="tk">{tool.toolKind}</span>
+              <span class="tt">{toolLabel(tool.title)}</span>
+              {#if seg.tools.length > 1}<span class="tcount">+{seg.tools.length - 1}</span>{/if}
               <span class="grow"></span>
-              <span class="tst">{seg.tool.status}</span>
+              <span class="tst" class:bad={tool.status === "failed"}>{tool.status}</span>
             </div>
           {/if}
         {/each}
@@ -306,6 +336,18 @@
   .tst {
     font-size: 9px;
     letter-spacing: 0.12em;
+  }
+
+  .tst.bad {
+    color: var(--acct);
+  }
+
+  .tcount {
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    color: var(--lab);
+    border: 1px solid var(--line);
+    padding: 1px 5px;
   }
 
   .ctext.bad {
