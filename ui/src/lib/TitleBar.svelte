@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel } from "./store.svelte";
+  import { store } from "./store.svelte";
   import Mark from "./Mark.svelte";
 </script>
 
@@ -11,15 +11,6 @@
   {#if store.lastError}
     <span class="mono err">{store.lastError}</span>
   {/if}
-  <button class="btn" onclick={() => store.toggleTheme()}>
-    {store.theme === "dk" ? "LIGHT" : "DARK"}
-  </button>
-  <button class="btn" class:on={store.view === "settings"} onclick={() => (store.view === "settings" ? (store.view = "track") : store.openSettings("overview"))}>
-    설정
-  </button>
-  <span class="mono agents">
-    <span class="dot" class:live={store.currentAgent?.readiness === "ready" && !store.busy}></span>{agentLabel(store.agent)}
-  </span>
 </div>
 
 <style>
@@ -51,7 +42,6 @@
   }
 
   .ctx,
-  .agents,
   .err {
     font-size: 10px;
     letter-spacing: 0.12em;
@@ -68,33 +58,5 @@
 
   .grow {
     flex: 1;
-  }
-
-  .agents {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--dim);
-  }
-
-  .dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--idle);
-  }
-
-  .dot.live {
-    background: var(--ok);
-  }
-
-  .btn {
-    height: 24px;
-    padding: 0 9px;
-  }
-
-  .btn.on {
-    color: var(--hi);
-    background: var(--sel);
   }
 </style>
