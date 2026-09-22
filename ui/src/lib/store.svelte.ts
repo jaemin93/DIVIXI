@@ -54,6 +54,19 @@ export type AuthMethodInfo = {
   terminal_command: string | null;
 };
 
+/** Mirrors `orchestra_acp::ConfigChoice`. */
+export type ConfigChoice = { id: string; name: string; description: string | null; group: string | null };
+
+/** Mirrors `orchestra_acp::ConfigOptionInfo`: a session option the agent exposes. */
+export type ConfigOption = {
+  id: string;
+  name: string;
+  description: string | null;
+  category: string;
+  current: string;
+  choices: ConfigChoice[];
+};
+
 /** Mirrors `orchestra_agents::AgentStatus`. */
 export type AgentStatus = {
   kind: AgentId;
@@ -66,6 +79,7 @@ export type AgentStatus = {
     agent_name: string | null;
     agent_version: string | null;
     auth_methods: AuthMethodInfo[];
+    config_options?: ConfigOption[];
   } | null;
   error: string | null;
   login_hint: string;
@@ -78,6 +92,9 @@ export type TranscriptLine = { ms: number; label: string; text: string; tone: To
 export type Tone = "in" | "out" | "ok" | "warn" | "dim";
 
 export type RunStatus = "connecting" | "running" | "done" | "failed";
+
+/** Context accounting from the agent's `usage` updates. */
+export type Usage = { used: number; size: number; cost?: number; currency?: string };
 
 export type Run = {
   id: string;
@@ -96,6 +113,8 @@ export type Run = {
   toolCount: number;
   stopReason?: string;
   error?: string;
+  /** Latest context accounting; live runs update it, restored runs get it on hydrate. */
+  usage?: Usage;
   /**
    * Below the membrane: what the inspector shows. Empty until `loaded`,
    * which is immediate for live runs and lazy for restored ones.
@@ -156,6 +175,8 @@ class Store {
   /** Conversation text size. Persisted. */
   chatFont = $state<ChatFont>("m");
   info = $state<AppInfo | null>(null);
+  /** Chosen model per agent id; absent means the agent's default. Persisted. */
+  models = $state<Record<string, string>>({});
   runs = $state<Run[]>([]);
   /** Run id whose lane detail is open in the inspector; "" means closed. */
   inspecting = $state("");
@@ -187,6 +208,37 @@ class Store {
 
   get currentAgent(): AgentStatus | undefined {
     return this.agents?.find((a) => a.kind === this.agent);
+  }
+
+  /** The selected agent's model selector, if it advertised one. */
+  get modelOption(): ConfigOption | undefined {
+    return this.currentAgent?.probe?.config_options?.find((o) => o.category === "model");
+  }
+
+  /** Model id in effect for the selected agent: the choice, else the agent's current. */
+  get modelId(): string {
+    return this.models[this.agent] ?? this.modelOption?.current ?? "";
+  }
+
+  get modelName(): string {
+    const id = this.modelId;
+    return this.modelOption?.choices.find((c) => c.id === id)?.name ?? id ?? "default";
+  }
+
+  /** Context accounting to show: the live run's, else the latest run that reported one. */
+  get context(): Usage | undefined {
+    return this.activeRun?.usage ?? [...this.runs].reverse().find((r) => r.usage)?.usage;
+  }
+
+  /** Choose a model for an agent; persisted, used by the next run. Empty clears the choice. */
+  async setModel(agent: AgentId, model: string) {
+    const { [agent]: _old, ...rest } = this.models;
+    this.models = model ? { ...rest, [agent]: model } : rest;
+    try {
+      await invoke("set_setting", { key: "models", value: JSON.stringify(this.models) });
+    } catch (err) {
+      this.lastError = String(err);
+    }
   }
 
   /** Apply the preference to <html> and, for `system`, follow the OS. */
@@ -264,14 +316,21 @@ class Store {
       if (this.themePref === "system") this.applyTheme();
     });
     try {
-      const [summaries, agents, theme, rail, tracklist, chatFont] = await Promise.all([
+      const [summaries, agents, theme, rail, tracklist, chatFont, models] = await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<AgentStatus[] | null>("agent_statuses"),
         invoke<string | null>("get_setting", { key: "theme" }),
         invoke<string | null>("get_setting", { key: "rail" }),
         invoke<string | null>("get_setting", { key: "tracklist" }),
         invoke<string | null>("get_setting", { key: "chat_font" }),
+        invoke<string | null>("get_setting", { key: "models" }),
       ]);
+      try {
+        const parsed = models ? JSON.parse(models) : {};
+        if (parsed && typeof parsed === "object") this.models = parsed;
+      } catch {
+        this.models = {};
+      }
       if (theme === "system" || theme === "dark" || theme === "light") this.themePref = theme;
       this.applyTheme();
       this.railCollapsed = rail === "collapsed";
@@ -394,8 +453,9 @@ class Store {
     this.busy = true;
     this.lastError = "";
     const agent = this.agent;
+    const model = this.models[agent] ?? null;
     try {
-      const id = await invoke<string>("start_run", { lane, prompt: text, agent });
+      const id = await invoke<string>("start_run", { lane, prompt: text, agent, model });
       this.runs.push({
         id,
         lane,
@@ -460,8 +520,18 @@ function fold(run: Run, ms: number, ev: LaneEvent) {
       run.plan = ev.entries;
       push(run, ms, "plan", `${ev.entries.length} entries`, "dim");
       break;
-    case "usage":
+    case "usage": {
+      const raw = ev.raw as { used?: number; size?: number; cost?: { amount?: number; currency?: string } } | null;
+      if (raw && typeof raw.used === "number" && typeof raw.size === "number") {
+        run.usage = {
+          used: raw.used,
+          size: raw.size,
+          cost: raw.cost?.amount ?? run.usage?.cost,
+          currency: raw.cost?.currency ?? run.usage?.currency,
+        };
+      }
       break;
+    }
     case "finished":
       run.status = "done";
       run.stopReason = ev.stop_reason;

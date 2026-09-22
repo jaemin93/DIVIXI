@@ -36,6 +36,7 @@ async fn run() -> anyhow::Result<()> {
             cwd: std::env::current_dir()?,
             prompt,
             mode: Some("bypassPermissions".to_string()),
+            config: Vec::new(),
         },
         tx,
     ));

@@ -75,6 +75,20 @@ impl AppState {
         Ok(status)
     }
 
+    /// The id of the agent's model selector option, as detection saw it.
+    fn model_option_id(&self, agent: &str) -> Option<String> {
+        let kind = AgentKind::parse(agent)?;
+        let list = self.load_agents().ok()??;
+        let status = list.iter().find(|s| s.kind == kind)?;
+        status
+            .probe
+            .as_ref()?
+            .config_options
+            .iter()
+            .find(|o| o.category == "model")
+            .map(|o| o.id.clone())
+    }
+
     /// The launch spec for an agent id, if it was detected as ready.
     fn spec_for(&self, agent: &str) -> Result<AgentSpec, String> {
         let kind = AgentKind::parse(agent).ok_or_else(|| format!("unknown agent {agent}"))?;
@@ -105,9 +119,19 @@ async fn start_run(
     lane: String,
     prompt: String,
     agent: Option<String>,
+    model: Option<String>,
 ) -> Result<String, String> {
     let agent = agent.unwrap_or_else(|| AgentKind::ClaudeCode.id().to_string());
     let agent_spec = state.spec_for(&agent)?;
+    // A model choice is sent as the agent's own model config option, whose id
+    // detection recorded; an agent without one just ignores the choice.
+    let config: Vec<(String, String)> = match model.filter(|m| !m.is_empty()) {
+        Some(model) => state
+            .model_option_id(&agent)
+            .map(|id| vec![(id, model)])
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
     let cwd = workspace_root();
     let run = state
         .store
@@ -120,6 +144,7 @@ async fn start_run(
         prompt,
         // The most autonomous mode the agent offers is chosen per session.
         mode: None,
+        config,
     };
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

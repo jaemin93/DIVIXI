@@ -25,6 +25,8 @@ async fn run() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let id = args.next().unwrap_or_else(|| "claude_code".to_string());
     let prompt = args.next().unwrap_or_else(|| "Reply with exactly: ORCHESTRA OK".to_string());
+    // Optional third argument: a model value id for the agent's `model` option.
+    let config: Vec<(String, String)> = args.next().map(|m| vec![("model".to_string(), m)]).unwrap_or_default();
     let kind = AgentKind::parse(&id).ok_or_else(|| anyhow::anyhow!("unknown agent {id}"))?;
 
     let adapters_dir = std::env::temp_dir().join("orchestra-adapters");
@@ -43,6 +45,7 @@ async fn run() -> anyhow::Result<()> {
             cwd: std::env::current_dir()?,
             prompt,
             mode: None,
+            config,
         },
         tx,
     ));

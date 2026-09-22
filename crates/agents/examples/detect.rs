@@ -77,6 +77,12 @@ async fn run() -> anyhow::Result<()> {
             for m in &p.auth_methods {
                 println!("           auth     {} — {}{}", m.id, m.name, m.terminal_command.as_deref().map(|c| format!("  [{c}]")).unwrap_or_default());
             }
+            for o in &p.config_options {
+                println!("           option   [{}] {} = {}  ({} choices)", o.category, o.id, o.current, o.choices.len());
+                for c in &o.choices {
+                    println!("                      {:<36} {}{}", c.id, c.name, c.group.as_deref().map(|g| format!("  · {g}")).unwrap_or_default());
+                }
+            }
         }
         if let Some(e) = &s.error {
             println!("           error    {e}");

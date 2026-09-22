@@ -12,6 +12,8 @@ use agent_client_protocol::{
     schema::{
         v1::{
             AuthMethod, AuthenticateRequest, InitializeRequest, NewSessionRequest,
+            SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+            SessionConfigOptionValue, SessionConfigSelectOptions, SetSessionConfigOptionRequest,
             SetSessionModeRequest,
         },
         ProtocolVersion,
@@ -156,9 +158,13 @@ pub struct LaneSpec {
     /// Session mode to request before prompting, e.g. `bypassPermissions`.
     ///
     /// Orchestra surfaces deliberate escalations, not tool-approval prompts,
-    /// so lanes run without per-tool permission round-trips. `None` leaves the
-    /// agent's default mode alone.
+    /// so lanes run without per-tool permission round-trips. `None` picks the
+    /// most autonomous mode the agent advertises.
     pub mode: Option<String>,
+    /// Session options to set before prompting: `(option id, value id)`, as
+    /// the agent advertised them (see [`ConfigOptionInfo`]). The model
+    /// selector goes here.
+    pub config: Vec<(String, String)>,
 }
 
 /// Environment variables that mark "you are inside a Claude Code session".
@@ -257,6 +263,31 @@ impl SessionProbe {
     }
 }
 
+/// One value a select-type session option can take.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigChoice {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// Group name when the agent groups its choices (e.g. by provider).
+    pub group: Option<String>,
+}
+
+/// A session option the agent exposes (`session/new` → `configOptions`):
+/// the model selector, thought level, and so on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigOptionInfo {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// `model`, `mode`, `model_config`, `thought_level`, or the agent's own word.
+    pub category: String,
+    /// Current value id (select) or `true`/`false` (boolean).
+    pub current: String,
+    /// Empty for boolean options.
+    pub choices: Vec<ConfigChoice>,
+}
+
 /// What a probe learned about an agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeReport {
@@ -266,6 +297,64 @@ pub struct ProbeReport {
     pub load_session: bool,
     pub auth_methods: Vec<AuthMethodInfo>,
     pub session: SessionProbe,
+    /// Session options the agent offered, when a session was created.
+    #[serde(default)]
+    pub config_options: Vec<ConfigOptionInfo>,
+}
+
+fn config_options_of(options: Option<&Vec<SessionConfigOption>>) -> Vec<ConfigOptionInfo> {
+    let Some(options) = options else { return Vec::new() };
+    options
+        .iter()
+        .map(|o| {
+            let category = match &o.category {
+                Some(SessionConfigOptionCategory::Mode) => "mode".to_string(),
+                Some(SessionConfigOptionCategory::Model) => "model".to_string(),
+                Some(SessionConfigOptionCategory::ModelConfig) => "model_config".to_string(),
+                Some(SessionConfigOptionCategory::ThoughtLevel) => "thought_level".to_string(),
+                Some(SessionConfigOptionCategory::Other(s)) => s.clone(),
+                Some(_) | None => "other".to_string(),
+            };
+            let (current, choices) = match &o.kind {
+                SessionConfigKind::Select(sel) => {
+                    let flat: Vec<ConfigChoice> = match &sel.options {
+                        SessionConfigSelectOptions::Ungrouped(list) => list
+                            .iter()
+                            .map(|c| ConfigChoice {
+                                id: c.value.to_string(),
+                                name: c.name.clone(),
+                                description: c.description.clone(),
+                                group: None,
+                            })
+                            .collect(),
+                        SessionConfigSelectOptions::Grouped(groups) => groups
+                            .iter()
+                            .flat_map(|g| {
+                                g.options.iter().map(move |c| ConfigChoice {
+                                    id: c.value.to_string(),
+                                    name: c.name.clone(),
+                                    description: c.description.clone(),
+                                    group: Some(g.name.clone()),
+                                })
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    (sel.current_value.to_string(), flat)
+                }
+                SessionConfigKind::Boolean(b) => (b.current_value.to_string(), Vec::new()),
+                _ => (String::new(), Vec::new()),
+            };
+            ConfigOptionInfo {
+                id: o.id.to_string(),
+                name: o.name.clone(),
+                description: o.description.clone(),
+                category,
+                current,
+                choices,
+            }
+        })
+        .collect()
 }
 
 /// Launch an agent, run the `initialize` handshake, try to open a session,
@@ -336,12 +425,12 @@ async fn probe_inner(
                     .block_task()
                     .await
                 {
-                    Ok(_) => SessionProbe::Ok,
-                    Err(err) => SessionProbe::from_error(&err),
+                    Ok(resp) => (SessionProbe::Ok, config_options_of(resp.config_options.as_ref())),
+                    Err(err) => (SessionProbe::from_error(&err), Vec::new()),
                 }
             };
 
-            let mut session = new_session().await;
+            let (mut session, mut config_options) = new_session().await;
             if let (SessionProbe::AuthRequired { .. }, Some(method)) = (&session, auth.clone()) {
                 tracing::info!(method, "session requires auth; authenticating");
                 match cx
@@ -349,7 +438,7 @@ async fn probe_inner(
                     .block_task()
                     .await
                 {
-                    Ok(_) => session = new_session().await,
+                    Ok(_) => (session, config_options) = new_session().await,
                     Err(err) => {
                         session = SessionProbe::Failed {
                             error: format!("authenticate({method}) failed: {}", err.message),
@@ -366,6 +455,7 @@ async fn probe_inner(
                 load_session: init.agent_capabilities.load_session,
                 auth_methods,
                 session,
+                config_options,
             })
         });
 
@@ -409,6 +499,7 @@ async fn run_lane_inner(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyho
     let cwd = spec.cwd.clone();
     let prompt = spec.prompt.clone();
     let mode = spec.mode.clone();
+    let config = spec.config.clone();
 
     let outcome = Client
         .builder()
@@ -455,9 +546,23 @@ async fn run_lane_inner(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyho
                             tracing::info!(mode = %wanted, "setting session mode");
                             session
                                 .connection()
-                                .send_request_to(Agent, SetSessionModeRequest::new(session_id, wanted))
+                                .send_request_to(Agent, SetSessionModeRequest::new(session_id.clone(), wanted))
                                 .block_task()
                                 .await?;
+                        }
+                    }
+
+                    // Session options (model, …). A rejected option is logged,
+                    // not fatal: the lane still runs on the agent's default.
+                    for (option, value) in &config {
+                        tracing::info!(option, value, "setting session option");
+                        let request = SetSessionConfigOptionRequest::new(
+                            session_id.clone(),
+                            option.clone(),
+                            SessionConfigOptionValue::ValueId { value: value.clone().into() },
+                        );
+                        if let Err(err) = session.connection().send_request_to(Agent, request).block_task().await {
+                            tracing::warn!(option, value, %err, "agent rejected session option");
                         }
                     }
 

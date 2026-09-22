@@ -54,6 +54,7 @@ async fn run() -> anyhow::Result<()> {
                 cwd,
                 prompt,
                 mode: Some("bypassPermissions".to_string()),
+                config: Vec::new(),
             },
             tx,
         ));

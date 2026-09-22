@@ -12,7 +12,9 @@
     | "overview"
     | "look"
     | "chat"
-    | "info";
+    | "info"
+    | "bot"
+    | "folder";
 </script>
 
 <script lang="ts">
@@ -55,6 +57,11 @@
     <path d="M2.5 3h11v7h-6l-3 3v-3h-2z" />
   {:else if name === "info"}
     <circle cx="8" cy="8" r="5.5" /><path d="M8 7v4M8 5v.5" />
+  {:else if name === "bot"}
+    <rect x="2.5" y="5.5" width="11" height="8" /><path d="M8 2.5v3M5 13.5v1M11 13.5v1" />
+    <rect x="5" y="8" width="1.5" height="2" fill="currentColor" stroke="none" /><rect x="9.5" y="8" width="1.5" height="2" fill="currentColor" stroke="none" />
+  {:else if name === "folder"}
+    <path d="M2.5 4.5h4l1.5 1.5h5.5v7h-11z" />
   {/if}
 </svg>
 
