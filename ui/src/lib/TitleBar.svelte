@@ -1,23 +1,10 @@
 <script lang="ts">
   import { store, agentLabel } from "./store.svelte";
-  import Mark, { type LaneState } from "./Mark.svelte";
-
-  // One lane per detected agent; the running one pulses.
-  const lanes = $derived<LaneState[]>(
-    (store.agents ?? []).length
-      ? (store.agents ?? []).map((a) =>
-          a.readiness !== "ready"
-            ? "idle"
-            : store.busy && store.activeRun?.agent === a.kind
-              ? "probing"
-              : "ready",
-        )
-      : ["plain", "plain", "plain", "plain"],
-  );
+  import Mark from "./Mark.svelte";
 </script>
 
 <div class="bar">
-  <span class="brand"><Mark size={14} {lanes} />ORCHESTRA</span>
+  <span class="brand"><Mark size={14} live={store.busy} />ORCHESTRA</span>
   <span class="sep"></span>
   <span class="mono ctx">divixi / exp-001</span>
   <span class="grow"></span>

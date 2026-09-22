@@ -1,7 +1,7 @@
 // Generates the source icon for `tauri icon`.
 //
-// The membrane mark, as in ui/src/lib/Mark.svelte: four lanes below a
-// hairline, one accent square above it. Same 64-unit geometry, scaled.
+// The staff mark, as in ui/src/lib/Mark.svelte: four staves and one accent
+// downbeat across them. Same 64-unit geometry, scaled.
 import { deflateSync } from "node:zlib";
 import { writeFileSync, mkdirSync } from "node:fs";
 
@@ -29,16 +29,10 @@ const rect = (x, y, w, h, c) => {
   for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) put(xx, yy, c);
 };
 
-// What crossed.
-rect(29.5, 15, 5, 5, ACCENT);
-// The membrane. Slightly heavier than the UI hairline so it survives 32px.
-rect(8, 30, 48, 2, PALE);
-// The lanes.
-const lanes = 4;
-for (let i = 0; i < lanes; i++) {
-  const cx = 14 + (36 * i) / (lanes - 1);
-  rect(cx - 1.75, 38, 3.5, 18, PALE);
-}
+// The staves. Slightly heavier than the UI hairline so they survive 32px.
+for (const y of [22, 30, 38, 46]) rect(8, y - 1, 48, 2, PALE);
+// The downbeat.
+rect(21, 13, 3.5, 42, ACCENT);
 
 // Raw scanlines, each prefixed with filter type 0.
 const raw = Buffer.alloc(SIZE * (SIZE * 4 + 1));

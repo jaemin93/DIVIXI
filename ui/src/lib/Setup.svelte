@@ -1,7 +1,7 @@
 <script lang="ts">
   import { store } from "./store.svelte";
   import AgentList from "./AgentList.svelte";
-  import Mark, { type LaneState } from "./Mark.svelte";
+  import Mark from "./Mark.svelte";
 
   // First launch: detect as soon as the window shows, once.
   $effect(() => {
@@ -9,21 +9,6 @@
   });
 
   const readyCount = $derived(store.readyAgents.length);
-
-  // The mark is the progress display: one lane per agent.
-  const lanes = $derived<LaneState[]>(
-    store.detecting || store.agents === null
-      ? ["probing", "probing", "probing", "probing"]
-      : store.agents.map((a) =>
-          a.readiness === "ready"
-            ? "ready"
-            : a.readiness === "needs_login" || a.readiness === "needs_download"
-              ? "attention"
-              : a.readiness === "error"
-                ? "error"
-                : "idle",
-        ),
-  );
 
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape" && !store.detecting) store.setupOpen = false;
@@ -37,13 +22,10 @@
     <aside class="side">
       <div class="mlab">SETUP / 01</div>
       <div class="hero">
-        <Mark size={168} {lanes} ink="var(--txt)" title="에이전트 감지 상태" />
+        <Mark size={168} ink="var(--txt)" live={store.detecting} />
       </div>
       <h1 id="setup-title" class="serif">어떤 에이전트가 있는지 봅니다.</h1>
-      <p>
-        설치된 CLI를 찾고, 각각을 ACP로 한 번씩 띄워 로그인 상태까지 확인합니다.
-        막 아래 획 하나가 에이전트 하나입니다.
-      </p>
+      <p>설치된 CLI를 찾고, 각각을 ACP로 한 번씩 띄워 로그인 상태까지 확인합니다.</p>
       <div class="status mono">
         {#if store.detecting}
           감지 중 · 에이전트마다 몇 초
@@ -86,9 +68,12 @@
     padding: 32px 24px;
   }
 
+  /* Fixed size: the list scrolls inside, so the panel never jumps when
+     detection fills it in. */
   .panel {
     width: 960px;
     max-width: 100%;
+    height: 640px;
     max-height: 100%;
     display: flex;
     background: var(--card);
