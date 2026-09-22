@@ -92,6 +92,8 @@
 
     <span class="grow"></span>
 
+    {#if store.lastError}<span class="mono err" title={store.lastError}>{store.lastError}</span>{/if}
+
     <!-- context -->
     <Popover bind:open={contextOpen} align="right" width={280}>
       {#snippet trigger()}
@@ -238,6 +240,15 @@
 
   .grow {
     flex: 1;
+  }
+
+  .err {
+    font-size: 10px;
+    color: var(--acct);
+    max-width: 360px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* Context: a hairline track, accent fill; no numbers until asked. */

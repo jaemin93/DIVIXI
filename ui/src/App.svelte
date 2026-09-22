@@ -1,6 +1,5 @@
 <script lang="ts">
   import { store } from "./lib/store.svelte";
-  import TitleBar from "./lib/TitleBar.svelte";
   import Rail from "./lib/Rail.svelte";
   import TrackList from "./lib/TrackList.svelte";
   import Timeline from "./lib/Timeline.svelte";
@@ -11,7 +10,6 @@
 </script>
 
 <div class="shell">
-  <TitleBar />
   {#if store.setupOpen}
     <Setup />
   {/if}

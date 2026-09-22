@@ -36,7 +36,7 @@
         <p>설치된 CLI를 찾고, 각각을 ACP로 한 번씩 띄워 로그인 상태까지 확인합니다.</p>
       {:else}
         <h1 id="setup-title" class="serif">어떤 모습으로 볼지 고릅니다.</h1>
-        <p>테마는 언제든 설정이나 타이틀바에서 바꿀 수 있습니다.</p>
+        <p>테마는 언제든 설정에서 바꿀 수 있습니다.</p>
       {/if}
       <div class="status mono">
         {#if step === 1 && store.agents && !store.detecting}
@@ -85,7 +85,7 @@
 <style>
   .backdrop {
     position: fixed;
-    inset: 36px 0 0 0; /* below the title bar */
+    inset: 0;
     z-index: 20;
     background: color-mix(in srgb, var(--bg) 78%, transparent);
     display: flex;
@@ -99,7 +99,7 @@
      scrolls inside. */
   .panel {
     width: min(960px, calc(100vw - 48px));
-    height: min(640px, calc(100vh - 36px - 48px));
+    height: min(640px, calc(100vh - 48px));
     display: flex;
     background: var(--card);
     border: 1px solid var(--lines);

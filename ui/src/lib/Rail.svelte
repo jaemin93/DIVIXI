@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store } from "./store.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
+  import Mark from "./Mark.svelte";
 
   /**
    * The rail's map. Adding a feature is one entry here: an icon, a label,
@@ -50,6 +51,8 @@
 
 <nav class:collapsed>
   <div class="top">
+    <span class="brand" title="Orchestra"><Mark size={14} live={store.busy} />{#if !collapsed}<span class="mono name">ORCHESTRA</span>{/if}</span>
+    <span class="grow"></span>
     <button
       class="toggle"
       onclick={() => store.setRail(!collapsed)}
@@ -115,14 +118,31 @@
   }
 
   .top {
+    height: 36px;
     display: flex;
-    justify-content: flex-end;
-    padding: 0 8px 10px;
+    align-items: center;
+    gap: 8px;
+    padding: 0 8px 0 16px;
+    margin-bottom: 8px;
   }
 
   .collapsed .top {
-    justify-content: center;
-    padding: 0 0 10px;
+    flex-direction: column;
+    height: auto;
+    gap: 6px;
+    padding: 6px 0 0;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    color: var(--txt);
+  }
+
+  .name {
+    font-size: 10px;
+    letter-spacing: 0.22em;
   }
 
   .toggle {
