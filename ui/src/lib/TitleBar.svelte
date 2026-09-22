@@ -5,8 +5,6 @@
 
 <div class="bar">
   <span class="brand"><Mark size={14} live={store.busy} />ORCHESTRA</span>
-  <span class="sep"></span>
-  <span class="mono ctx">divixi / exp-001</span>
   <span class="grow"></span>
   {#if store.lastError}
     <span class="mono err">{store.lastError}</span>
@@ -35,13 +33,6 @@
     color: var(--txt);
   }
 
-  .sep {
-    width: 1px;
-    height: 12px;
-    background: var(--lines);
-  }
-
-  .ctx,
   .err {
     font-size: 10px;
     letter-spacing: 0.12em;
