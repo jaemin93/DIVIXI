@@ -40,12 +40,35 @@ pub struct AgentSpec {
 /// freezes the lane on a months-old agent SDK.
 const CLAUDE_ADAPTER: &str = "@agentclientprotocol/claude-agent-acp@0.79.0";
 
+/// Where the locally installed adapter's entry point lives, relative to a
+/// directory that has a `node_modules`.
+const CLAUDE_ADAPTER_SCRIPT: &str =
+    "node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js";
+
+/// Overrides adapter discovery with an explicit path to the entry script.
+const ADAPTER_ENV: &str = "ORCHESTRA_ACP_ADAPTER";
+
 impl AgentSpec {
-    /// The Claude Code ACP adapter, run through `npx`.
+    /// The Claude Code ACP adapter.
     ///
     /// Claude Code has no native ACP mode as of CLI 2.1.x, so the adapter
-    /// bridges it. On Windows `npx` is a shim, so it goes through `cmd /C`.
+    /// bridges it. A local install (`npm i -D @agentclientprotocol/claude-agent-acp`)
+    /// is preferred and run directly under `node`. Going through `npx` with
+    /// nothing installed costs ten seconds per lane on a warm cache and twenty
+    /// on a cold one, all of it before `initialize`. Without a local install
+    /// this falls back to `npx`, which on Windows is a shim and so goes
+    /// through `cmd /C`.
     pub fn claude_code() -> Self {
+        if let Some(script) = find_local_adapter() {
+            tracing::info!(script = %script.display(), "using locally installed adapter");
+            return Self {
+                program: "node".to_string(),
+                args: vec![script.to_string_lossy().into_owned()],
+                env: Vec::new(),
+            };
+        }
+
+        tracing::info!(package = CLAUDE_ADAPTER, "no local adapter install; falling back to npx");
         let (program, mut args) = if cfg!(windows) {
             ("cmd".to_string(), vec!["/C".to_string(), "npx".to_string()])
         } else {
@@ -58,6 +81,38 @@ impl AgentSpec {
             env: Vec::new(),
         }
     }
+}
+
+/// Locate a locally installed adapter entry script.
+///
+/// Checks `ORCHESTRA_ACP_ADAPTER` first, then walks up from the working
+/// directory and from the executable's directory looking for `node_modules`.
+/// The walk covers both `cargo run` from the repo root and the Tauri dev
+/// binary, which lives under `target/`.
+fn find_local_adapter() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os(ADAPTER_ENV) {
+        let path = PathBuf::from(explicit);
+        if path.is_file() {
+            return Some(path);
+        }
+        tracing::warn!(path = %path.display(), "{ADAPTER_ENV} is set but is not a file");
+    }
+
+    let mut roots = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(PathBuf::from))
+    {
+        roots.push(dir);
+    }
+    roots
+        .iter()
+        .flat_map(|root| root.ancestors())
+        .map(|dir| dir.join(CLAUDE_ADAPTER_SCRIPT))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Everything needed to execute one run in one lane.
@@ -121,6 +176,23 @@ pub fn scrub_inherited_session_env() {
 /// Returns once the agent reports a stop reason or the connection fails. The
 /// subprocess is torn down when this future resolves.
 pub async fn run_lane(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    tracing::info!(
+        program = %spec.agent.program,
+        cwd = %spec.cwd.display(),
+        prompt_chars = spec.prompt.chars().count(),
+        "lane run starting"
+    );
+    let result = run_lane_inner(spec, tx).await;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match &result {
+        Ok(()) => tracing::info!(elapsed_ms, "lane run finished"),
+        Err(err) => tracing::warn!(elapsed_ms, %err, "lane run failed"),
+    }
+    result
+}
+
+async fn run_lane_inner(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyhow::Result<()> {
     let mut cfg = AcpAgentConfig::new(&spec.agent.program).args(spec.agent.args.clone());
     for (k, v) in &spec.agent.env {
         cfg = cfg.env(k, v);

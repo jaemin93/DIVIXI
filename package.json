@@ -13,6 +13,7 @@
     "@tauri-apps/api": "^2.11.1"
   },
   "devDependencies": {
+    "@agentclientprotocol/claude-agent-acp": "^0.79.0",
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tauri-apps/cli": "^2.11.5",
     "svelte": "^5.57.1",
