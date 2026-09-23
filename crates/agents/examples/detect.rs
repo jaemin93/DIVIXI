@@ -78,6 +78,16 @@ async fn run() -> anyhow::Result<()> {
             for m in &p.auth_methods {
                 println!("           auth     {} — {}{}", m.id, m.name, m.terminal_command.as_deref().map(|c| format!("  [{c}]")).unwrap_or_default());
             }
+            if !p.modes.is_empty() {
+                println!(
+                    "           modes    default={} autonomous={}",
+                    p.default_mode.as_deref().unwrap_or("-"),
+                    p.autonomous_mode.as_deref().unwrap_or("-")
+                );
+                for m in &p.modes {
+                    println!("                      {:<36} {}{}", m.id, m.name, m.description.as_deref().map(|d| format!("  · {d}")).unwrap_or_default());
+                }
+            }
             for o in &p.config_options {
                 println!("           option   [{}] {} = {}  ({} choices)", o.category, o.id, o.current, o.choices.len());
                 for c in &o.choices {

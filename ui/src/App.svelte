@@ -8,7 +8,7 @@
   import Setup from "./lib/Setup.svelte";
   import Settings from "./lib/Settings.svelte";
   import LaneView from "./lib/LaneView.svelte";
-  import NewTrack from "./lib/NewTrack.svelte";
+  import TrackForm from "./lib/TrackForm.svelte";
   import TrackHeader from "./lib/TrackHeader.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
@@ -49,7 +49,14 @@
       {#if store.trackListOpen && store.tracks.length > 0}
         <TrackList />
       {/if}
-      <NewTrack />
+      <TrackForm />
+    {:else if store.view === "edit-track"}
+      {#if store.trackListOpen}
+        <TrackList />
+      {/if}
+      {#key store.currentTrack.id}
+        <TrackForm track={store.currentTrack} />
+      {/key}
     {:else}
       {#if store.trackListOpen}
         <TrackList />

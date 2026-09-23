@@ -44,7 +44,13 @@ async fn run() -> anyhow::Result<()> {
     let run_id = {
         let store = Store::open(&path)?;
         let cwd = std::env::current_dir()?;
-        let track = store.create_track("persist", "example", &cwd.display().to_string(), "claude_code")?;
+        let track = store.create_track(&orchestra_store::TrackPatch {
+            name: Some("persist".into()),
+            intent: Some("example".into()),
+            cwd: Some(cwd.display().to_string()),
+            agent: Some("claude_code".into()),
+            ..Default::default()
+        })?;
         let run_id = store.begin_run(&track.id, "solo", "claude_code", &prompt, &cwd.display().to_string())?;
         println!("run: {run_id}");
 

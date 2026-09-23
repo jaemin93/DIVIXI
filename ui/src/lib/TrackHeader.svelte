@@ -2,35 +2,15 @@
   import { store, agentLabel, type Track } from "./store.svelte";
   import { t } from "./i18n.svelte";
 
-  /** The track's name and intent, editable in place; deletion asks twice. */
+  /** The track's name and intent; editing opens the track form, deletion asks twice. */
   let { track }: { track: Track } = $props();
 
-  let editing = $state(false);
-  let name = $state("");
-  let intent = $state("");
   let confirming = $state(false);
 
   const index = $derived(store.tracks.findIndex((x) => x.id === track.id) + 1);
 
-  function edit() {
-    name = track.name;
-    intent = track.intent;
-    editing = true;
-    confirming = false;
-  }
-
-  async function save(e: Event) {
-    e.preventDefault();
-    if (!name.trim()) return;
-    await store.updateTrack(track.id, { name: name.trim(), intent: intent.trim() });
-    editing = false;
-  }
-
   function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") {
-      editing = false;
-      confirming = false;
-    }
+    if (e.key === "Escape") confirming = false;
   }
 </script>
 
@@ -41,29 +21,18 @@
     <span class="mlab">#{String(index).padStart(2, "0")} / TRACK</span>
     <span class="mono meta">{agentLabel(track.agent)}</span>
     <span class="grow"></span>
-    {#if editing}
-      <button class="btn" type="button" onclick={() => (editing = false)}>{t("track.cancel")}</button>
-      <button class="btn btn-acc" type="submit" form="track-edit" disabled={!name.trim()}>{t("track.save")}</button>
-    {:else if confirming}
+    {#if confirming}
       <span class="mono note">{store.busy ? t("track.busyNote") : t("track.deleteNote")}</span>
       <button class="btn" type="button" onclick={() => (confirming = false)}>{t("track.cancel")}</button>
       <button class="btn danger" type="button" disabled={store.busy} onclick={() => store.deleteTrack(track.id)}>{t("track.confirmDelete")}</button>
     {:else}
-      <button class="btn" type="button" onclick={edit}>{t("track.edit")}</button>
+      <button class="btn" type="button" onclick={() => (store.view = "edit-track")}>{t("track.edit")}</button>
       <button class="btn" type="button" onclick={() => (confirming = true)}>{t("track.delete")}</button>
     {/if}
   </div>
 
-  {#if editing}
-    <form id="track-edit" onsubmit={save}>
-      <!-- svelte-ignore a11y_autofocus -->
-      <input class="serif name" type="text" bind:value={name} maxlength="80" autofocus aria-label={t("newtrack.name")} />
-      <input class="intent" type="text" bind:value={intent} maxlength="200" placeholder={t("newtrack.intentPh")} aria-label={t("newtrack.intent")} />
-    </form>
-  {:else}
-    <h1 class="serif">{track.name}</h1>
-    <p class:none={!track.intent}>{track.intent || t("track.noIntent")}</p>
-  {/if}
+  <h1 class="serif">{track.name}</h1>
+  <p class:none={!track.intent}>{track.intent || t("track.noIntent")}</p>
 </header>
 
 <style>
@@ -118,37 +87,5 @@
 
   p.none {
     color: var(--lab);
-  }
-
-  form {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-top: 8px;
-    max-width: 620px;
-  }
-
-  input {
-    background: var(--inp);
-    border: 1px solid var(--line);
-    color: var(--txt);
-    outline: none;
-    padding: 4px 10px;
-  }
-
-  input:focus {
-    border-color: var(--acc);
-  }
-
-  input.name {
-    font-size: 30px;
-    line-height: 1.1;
-    color: var(--hi);
-  }
-
-  input.intent {
-    font-family: var(--sans);
-    font-size: 13px;
-    line-height: 1.6;
   }
 </style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel } from "./store.svelte";
+  import { store, agentLabel, laneAgentOf } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
   import { t } from "./i18n.svelte";
@@ -30,6 +30,26 @@
     return n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n);
   }
 
+  /** Mode ids like `…/session-modes#autopilot` read as their last segment. */
+  function modeKey(id: string): string {
+    return id.replace(/^.*[#/]/, "");
+  }
+
+  /** What the current track's lanes run on: agent, model and mode in effect. */
+  const workers = $derived.by(() => {
+    const track = store.currentTrack;
+    const agent = track ? laneAgentOf(track) : store.agent;
+    const config = track?.worker_config ?? {};
+    const options = store.optionsOf(agent);
+    const modelOpt = options.find((o) => o.category === "model");
+    const modeOpt = options.find((o) => o.category === "mode");
+    return {
+      agent,
+      model: modelOpt ? store.choiceName(modelOpt, store.effective(agent, config, modelOpt)) : "",
+      mode: modeOpt ? store.effective(agent, config, modeOpt) : store.autonomousModeOf(agent),
+    };
+  });
+
   function shortPath(p: string | undefined): string {
     if (!p) return "";
     const parts = p.split(/[\\/]/).filter(Boolean);
@@ -57,6 +77,7 @@
         <button class="chip" onclick={() => (agentOpen = !agentOpen)} title={t("composer.agentTitle")} aria-haspopup="listbox" aria-expanded={agentOpen}>
           <Icon name="bot" size={14} />
           <span class="mono">{agentLabel(store.agent)}</span>
+          {#if store.conductorMode}<span class="mono mode" title={t("composer.modeTitle")}>{modeKey(store.conductorMode)}</span>{/if}
         </button>
       {/snippet}
       <div class="mlab ph">{t("composer.agent")}</div>
@@ -82,6 +103,14 @@
         {/each}
       </div>
     </Popover>
+
+    <!-- workers: what lanes will run on; the track form changes it -->
+    <button class="chip" onclick={() => (store.view = "edit-track")} title={t("composer.workersTitle")}>
+      <span class="mono dim">{t("composer.workers")}</span>
+      <span class="mono">{agentLabel(workers.agent)}</span>
+      {#if workers.model}<span class="mono dim">{workers.model}</span>{/if}
+      {#if workers.mode}<span class="mono mode">{modeKey(workers.mode)}</span>{/if}
+    </button>
 
     <span class="chip static" title={store.currentTrack?.cwd}>
       <Icon name="folder" size={14} />
@@ -133,7 +162,7 @@
             role="option"
             aria-selected={store.modelId === c.id}
             onclick={() => {
-              store.setModel(store.agent, c.id);
+              if (store.modelOption) store.setConductorOption(store.modelOption.id, c.id);
               modelOpen = false;
             }}
           >
@@ -151,8 +180,8 @@
         <div class="foot mono">
           <span class="dim">{store.modelOption.name}</span>
           <span class="grow"></span>
-          {#if store.models[store.agent]}
-            <button class="link" onclick={() => store.setModel(store.agent, "")}>{t("composer.defaultModel")}</button>
+          {#if store.currentTrack?.conductor_config[store.modelOption.id]}
+            <button class="link" onclick={() => store.setConductorOption(store.modelOption!.id, "")}>{t("composer.defaultModel")}</button>
           {/if}
         </div>
       {/if}
@@ -226,6 +255,17 @@
   }
 
   .chip.static {
+    color: var(--lab);
+  }
+
+  .chip .mode {
+    color: var(--lab);
+    border: 1px solid var(--line);
+    padding: 1px 5px;
+    font-size: 9px;
+  }
+
+  .chip .dim {
     color: var(--lab);
   }
 

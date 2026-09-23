@@ -11,7 +11,7 @@ use std::time::Duration;
 use agent_client_protocol::{
     schema::{
         v1::{
-            AuthMethod, AuthenticateRequest, InitializeRequest, NewSessionRequest,
+            AuthMethod, AuthenticateRequest, InitializeRequest, NewSessionRequest, NewSessionResponse,
             SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
             SessionConfigSelectOptions,
         },
@@ -288,6 +288,16 @@ pub struct ConfigOptionInfo {
     pub choices: Vec<ConfigChoice>,
 }
 
+/// A session mode the agent offers (`session/new` → `modes`): how much it
+/// asks before acting. Ids are the agent's own (`bypassPermissions`,
+/// `agent-full-access`, `yolo`, …).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModeInfo {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
 /// What a probe learned about an agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeReport {
@@ -304,6 +314,39 @@ pub struct ProbeReport {
     /// Session options the agent offered, when a session was created.
     #[serde(default)]
     pub config_options: Vec<ConfigOptionInfo>,
+    /// Session modes the agent offered, when a session was created.
+    #[serde(default)]
+    pub modes: Vec<ModeInfo>,
+    /// The mode a fresh session starts in, when the agent has modes.
+    #[serde(default)]
+    pub default_mode: Option<String>,
+    /// The mode Orchestra picks when none is chosen: the most autonomous
+    /// one offered (see [`pick_autonomous_mode`]), else the default.
+    #[serde(default)]
+    pub autonomous_mode: Option<String>,
+}
+
+/// What `session/new` said about the session: its options and modes.
+type SessionShape = (Vec<ConfigOptionInfo>, Vec<ModeInfo>, Option<String>);
+
+fn session_shape_of(resp: &NewSessionResponse) -> SessionShape {
+    let options = config_options_of(resp.config_options.as_ref());
+    let modes = resp
+        .modes
+        .as_ref()
+        .map(|m| {
+            m.available_modes
+                .iter()
+                .map(|x| ModeInfo {
+                    id: x.id.to_string(),
+                    name: x.name.clone(),
+                    description: x.description.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let current = resp.modes.as_ref().map(|m| m.current_mode_id.to_string());
+    (options, modes, current)
 }
 
 fn config_options_of(options: Option<&Vec<SessionConfigOption>>) -> Vec<ConfigOptionInfo> {
@@ -429,12 +472,12 @@ async fn probe_inner(
                     .block_task()
                     .await
                 {
-                    Ok(resp) => (SessionProbe::Ok, config_options_of(resp.config_options.as_ref())),
-                    Err(err) => (SessionProbe::from_error(&err), Vec::new()),
+                    Ok(resp) => (SessionProbe::Ok, session_shape_of(&resp)),
+                    Err(err) => (SessionProbe::from_error(&err), SessionShape::default()),
                 }
             };
 
-            let (mut session, mut config_options) = new_session().await;
+            let (mut session, mut shape) = new_session().await;
             if let (SessionProbe::AuthRequired { .. }, Some(method)) = (&session, auth.clone()) {
                 tracing::info!(method, "session requires auth; authenticating");
                 match cx
@@ -442,7 +485,7 @@ async fn probe_inner(
                     .block_task()
                     .await
                 {
-                    Ok(_) => (session, config_options) = new_session().await,
+                    Ok(_) => (session, shape) = new_session().await,
                     Err(err) => {
                         session = SessionProbe::Failed {
                             error: format!("authenticate({method}) failed: {}", err.message),
@@ -452,6 +495,9 @@ async fn probe_inner(
                 }
             }
 
+            let (config_options, modes, default_mode) = shape;
+            let pairs: Vec<(String, String)> = modes.iter().map(|m| (m.id.clone(), m.name.clone())).collect();
+            let autonomous_mode = pick_autonomous_mode(&pairs).or_else(|| default_mode.clone());
             Ok(ProbeReport {
                 protocol: format!("{:?}", init.protocol_version),
                 agent_name: init.agent_info.as_ref().map(|i| i.name.clone()),
@@ -461,6 +507,9 @@ async fn probe_inner(
                 auth_methods,
                 session,
                 config_options,
+                modes,
+                default_mode,
+                autonomous_mode,
             })
         });
 

@@ -14,6 +14,7 @@
 //! Storage is SQLite (bundled, WAL). One file per app; runs carry their own
 //! working directory.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -55,6 +56,18 @@ const MIGRATIONS: &[&str] = &[
     UPDATE runs SET track = 'tr001';
     UPDATE meta SET key = 'conductor_session:tr001:' || substr(key, 19) WHERE key LIKE 'conductor_session:%';
     UPDATE meta SET key = 'lane_session:tr001/' || substr(key, 14) WHERE key LIKE 'lane_session:%';",
+    // 3 -> 4: per-track session options for the conductor and for lanes
+    // (agent, and a map of the agent's own select options: mode, model,
+    // effort…). The global per-agent model choice becomes the first
+    // track's conductor model.
+    "ALTER TABLE tracks ADD COLUMN conductor_config TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE tracks ADD COLUMN worker_agent TEXT NOT NULL DEFAULT '';
+    ALTER TABLE tracks ADD COLUMN worker_config TEXT NOT NULL DEFAULT '{}';
+    UPDATE tracks SET conductor_config = json_object('model',
+        json_extract((SELECT value FROM meta WHERE key = 'setting:models'), '$.' || agent))
+      WHERE json_valid((SELECT value FROM meta WHERE key = 'setting:models'))
+        AND json_extract((SELECT value FROM meta WHERE key = 'setting:models'), '$.' || agent) IS NOT NULL;
+    DELETE FROM meta WHERE key = 'setting:models';",
 ];
 
 const SCHEMA: &str = r#"
@@ -64,13 +77,16 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 CREATE TABLE IF NOT EXISTS tracks (
-    id         TEXT    PRIMARY KEY,
-    name       TEXT    NOT NULL,
-    intent     TEXT    NOT NULL DEFAULT '',
-    cwd        TEXT    NOT NULL,
-    agent      TEXT    NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    id               TEXT    PRIMARY KEY,
+    name             TEXT    NOT NULL,
+    intent           TEXT    NOT NULL DEFAULT '',
+    cwd              TEXT    NOT NULL,
+    agent            TEXT    NOT NULL,
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    conductor_config TEXT    NOT NULL DEFAULT '{}',
+    worker_agent     TEXT    NOT NULL DEFAULT '',
+    worker_config    TEXT    NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -157,11 +173,43 @@ pub struct TrackInfo {
     pub cwd: String,
     /// Agent the conductor runs on.
     pub agent: String,
+    /// The conductor's session options, `option id → value id`, in the
+    /// agent's own terms (`mode`, `model`, `reasoning_effort`, …). Absent
+    /// options keep the agent's default; an absent `mode` means the most
+    /// autonomous one.
+    pub conductor_config: BTreeMap<String, String>,
+    /// Agent lanes run on; empty means the conductor's.
+    pub worker_agent: String,
+    /// Lanes' session options, like `conductor_config`.
+    pub worker_config: BTreeMap<String, String>,
     /// Unix milliseconds.
     pub created_at: i64,
     /// Unix milliseconds of the last run started in it, or its creation.
     pub updated_at: i64,
     pub runs: u32,
+}
+
+impl TrackInfo {
+    /// The agent lanes run on.
+    pub fn lane_agent(&self) -> &str {
+        if self.worker_agent.is_empty() {
+            &self.agent
+        } else {
+            &self.worker_agent
+        }
+    }
+}
+
+/// Fields of a track a caller may set; `None` keeps what is there.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TrackPatch {
+    pub name: Option<String>,
+    pub intent: Option<String>,
+    pub cwd: Option<String>,
+    pub agent: Option<String>,
+    pub conductor_config: Option<BTreeMap<String, String>>,
+    pub worker_agent: Option<String>,
+    pub worker_config: Option<BTreeMap<String, String>>,
 }
 
 /// A lane as the record knows it: its runs, whoever ran them last.
@@ -283,8 +331,13 @@ impl Store {
         Ok(())
     }
 
-    /// Create a track. Ids are `tr001`, `tr002`, … in creation order.
-    pub fn create_track(&self, name: &str, intent: &str, cwd: &str, agent: &str) -> anyhow::Result<TrackInfo> {
+    /// Create a track. Ids are `tr001`, `tr002`, … in creation order. The
+    /// patch's `name`, `cwd` and `agent` are required; the rest defaults.
+    pub fn create_track(&self, patch: &TrackPatch) -> anyhow::Result<TrackInfo> {
+        let name = patch.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        let (Some(name), Some(cwd), Some(agent)) = (name, patch.cwd.as_deref(), patch.agent.as_deref()) else {
+            anyhow::bail!("a track needs a name, a working directory and an agent");
+        };
         let id = {
             let conn = self.conn.lock();
             let next: i64 = conn.query_row(
@@ -295,9 +348,20 @@ impl Store {
             let id = format!("tr{next:03}");
             let now = now_ms();
             conn.execute(
-                "INSERT INTO tracks(id, name, intent, cwd, agent, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-                params![id, name.trim(), intent.trim(), cwd, agent, now],
+                "INSERT INTO tracks(id, name, intent, cwd, agent, created_at, updated_at,
+                                    conductor_config, worker_agent, worker_config)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9)",
+                params![
+                    id,
+                    name,
+                    patch.intent.as_deref().unwrap_or("").trim(),
+                    cwd,
+                    agent,
+                    now,
+                    config_json(patch.conductor_config.as_ref())?,
+                    patch.worker_agent.as_deref().unwrap_or(""),
+                    config_json(patch.worker_config.as_ref())?,
+                ],
             )?;
             id
         };
@@ -320,27 +384,44 @@ impl Store {
             .optional()?)
     }
 
-    /// Change a track's name, intent or conductor agent; `None` keeps a field.
-    pub fn update_track(
-        &self,
-        id: &str,
-        name: Option<&str>,
-        intent: Option<&str>,
-        agent: Option<&str>,
-    ) -> anyhow::Result<TrackInfo> {
+    /// Change a track's fields; `None` in the patch keeps a field.
+    pub fn update_track(&self, id: &str, patch: &TrackPatch) -> anyhow::Result<TrackInfo> {
         {
             let conn = self.conn.lock();
             let changed = conn.execute(
                 "UPDATE tracks SET name = COALESCE(?2, name), intent = COALESCE(?3, intent),
-                        agent = COALESCE(?4, agent)
+                        cwd = COALESCE(?4, cwd), agent = COALESCE(?5, agent),
+                        conductor_config = COALESCE(?6, conductor_config),
+                        worker_agent = COALESCE(?7, worker_agent),
+                        worker_config = COALESCE(?8, worker_config)
                  WHERE id = ?1",
-                params![id, name.map(str::trim), intent.map(str::trim), agent],
+                params![
+                    id,
+                    patch.name.as_deref().map(str::trim),
+                    patch.intent.as_deref().map(str::trim),
+                    patch.cwd.as_deref(),
+                    patch.agent.as_deref(),
+                    patch.conductor_config.as_ref().map(|c| config_json(Some(c))).transpose()?,
+                    patch.worker_agent.as_deref(),
+                    patch.worker_config.as_ref().map(|c| config_json(Some(c))).transpose()?,
+                ],
             )?;
             if changed == 0 {
                 anyhow::bail!("no track {id}");
             }
         }
         self.track(id)?.ok_or_else(|| anyhow::anyhow!("no track {id}"))
+    }
+
+    /// Forget a track's remembered conductor and lane sessions, so they
+    /// open fresh next time (needed when the working directory changes).
+    pub fn forget_track_sessions(&self, id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'lane_session:' || ?1 || '/%'",
+            params![id],
+        )?;
+        Ok(())
     }
 
     /// Delete a track with every run, event and remembered session in it.
@@ -582,10 +663,13 @@ const RUN_SELECT: &str = "SELECT id, lane, prompt, cwd, status, started_at, dura
 
 /// Columns of a track, in the order `row_to_track` reads them.
 const TRACK_SELECT: &str = "SELECT t.id, t.name, t.intent, t.cwd, t.agent, t.created_at, t.updated_at,
-                                   (SELECT COUNT(*) FROM runs r WHERE r.track = t.id)
+                                   (SELECT COUNT(*) FROM runs r WHERE r.track = t.id),
+                                   t.conductor_config, t.worker_agent, t.worker_config
                             FROM tracks t";
 
 fn row_to_track(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackInfo> {
+    let conductor: String = r.get(8)?;
+    let worker: String = r.get(10)?;
     Ok(TrackInfo {
         id: r.get(0)?,
         name: r.get(1)?,
@@ -595,7 +679,18 @@ fn row_to_track(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackInfo> {
         created_at: r.get(5)?,
         updated_at: r.get(6)?,
         runs: r.get::<_, i64>(7)? as u32,
+        conductor_config: serde_json::from_str(&conductor).unwrap_or_default(),
+        worker_agent: r.get(9)?,
+        worker_config: serde_json::from_str(&worker).unwrap_or_default(),
     })
+}
+
+/// A config map as the `tracks` row stores it: JSON, empty values dropped.
+fn config_json(config: Option<&BTreeMap<String, String>>) -> anyhow::Result<String> {
+    let clean: BTreeMap<&String, &String> = config
+        .map(|c| c.iter().filter(|(_, v)| !v.trim().is_empty()).collect())
+        .unwrap_or_default();
+    Ok(serde_json::to_string(&clean)?)
 }
 
 fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
@@ -670,11 +765,14 @@ mod tests {
     #[test]
     fn tracks_are_created_listed_updated_and_deleted() {
         let store = Store::in_memory().unwrap();
-        let a = store.create_track("  Parser ", "fix the tokenizer", "C:/repo", "claude_code").unwrap();
-        let b = store.create_track("Docs", "", "C:/repo", "codex").unwrap();
+        let a = store.create_track(&new_track("  Parser ", "fix the tokenizer", "C:/repo", "claude_code")).unwrap();
+        let b = store.create_track(&new_track("Docs", "", "C:/repo", "codex")).unwrap();
         assert_eq!((a.id.as_str(), a.name.as_str()), ("tr001", "Parser"));
         assert_eq!(b.id, "tr002");
         assert_eq!(store.tracks().unwrap().len(), 2);
+        assert!(a.conductor_config.is_empty() && a.worker_agent.is_empty(), "defaults are empty");
+        assert_eq!(a.lane_agent(), "claude_code", "lanes follow the conductor by default");
+        assert!(store.create_track(&TrackPatch { name: Some("  ".into()), ..new_track("x", "", ".", "codex") }).is_err());
 
         // Runs count per track and bump its activity time.
         let before = store.track("tr001").unwrap().unwrap().updated_at;
@@ -687,9 +785,23 @@ mod tests {
         assert_eq!(store.lanes("tr001").unwrap().len(), 2);
         assert_eq!(store.lanes("tr002").unwrap().len(), 1);
 
-        let a = store.update_track("tr001", Some("Lexer"), None, Some("copilot")).unwrap();
+        let patch = TrackPatch {
+            name: Some("Lexer".into()),
+            agent: Some("copilot".into()),
+            conductor_config: Some(BTreeMap::from([("model".to_string(), "gpt-5.4".to_string()), ("mode".to_string(), "  ".to_string())])),
+            worker_agent: Some("codex".into()),
+            worker_config: Some(BTreeMap::from([("mode".to_string(), "agent-full-access".to_string())])),
+            ..TrackPatch::default()
+        };
+        let a = store.update_track("tr001", &patch).unwrap();
         assert_eq!((a.name.as_str(), a.intent.as_str(), a.agent.as_str()), ("Lexer", "fix the tokenizer", "copilot"));
-        assert!(store.update_track("tr009", Some("x"), None, None).is_err());
+        assert_eq!(a.conductor_config, BTreeMap::from([("model".to_string(), "gpt-5.4".to_string())]), "blank values are dropped");
+        assert_eq!((a.worker_agent.as_str(), a.lane_agent()), ("codex", "codex"));
+        assert_eq!(a.worker_config.get("mode").map(String::as_str), Some("agent-full-access"));
+        // A patch without a field keeps it.
+        let a = store.update_track("tr001", &TrackPatch { intent: Some("lex it".into()), ..TrackPatch::default() }).unwrap();
+        assert_eq!((a.name.as_str(), a.intent.as_str(), a.worker_agent.as_str()), ("Lexer", "lex it", "codex"));
+        assert!(store.update_track("tr009", &TrackPatch { name: Some("x".into()), ..TrackPatch::default() }).is_err());
 
         // Deleting takes the runs, their events and remembered sessions with it.
         store.set_meta("conductor_session:tr001:copilot", "s1").unwrap();
@@ -704,7 +816,17 @@ mod tests {
         assert_eq!(store.get_meta("lane_session:tr002/ui").unwrap().as_deref(), Some("{}"));
         assert!(store.delete_track("tr001").is_err());
         // Ids never reuse a deleted number.
-        assert_eq!(store.create_track("Again", "", ".", "codex").unwrap().id, "tr003");
+        assert_eq!(store.create_track(&new_track("Again", "", ".", "codex")).unwrap().id, "tr003");
+    }
+
+    fn new_track(name: &str, intent: &str, cwd: &str, agent: &str) -> TrackPatch {
+        TrackPatch {
+            name: Some(name.into()),
+            intent: Some(intent.into()),
+            cwd: Some(cwd.into()),
+            agent: Some(agent.into()),
+            ..TrackPatch::default()
+        }
     }
 
     #[test]
@@ -742,10 +864,15 @@ mod tests {
             .unwrap();
             conn.execute("INSERT INTO meta(key, value) VALUES ('conductor_session:claude_code', 'sess-c')", []).unwrap();
             conn.execute("INSERT INTO meta(key, value) VALUES ('lane_session:ui', '{\"a\":1}')", []).unwrap();
+            conn.execute("INSERT INTO meta(key, value) VALUES ('setting:models', '{\"claude_code\":\"opus[1m]\",\"codex\":\"gpt-5.5\"}')", []).unwrap();
         }
 
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.get_meta("schema_version").unwrap().as_deref(), Some("3"));
+        assert_eq!(store.get_meta("schema_version").unwrap().as_deref(), Some(SCHEMA_VERSION.to_string().as_str()));
+        // The global model choice for the first track's agent became its conductor model.
+        let first = store.track("tr001").unwrap().unwrap();
+        assert_eq!(first.conductor_config.get("model").map(String::as_str), Some("opus[1m]"));
+        assert_eq!(store.get_meta("setting:models").unwrap(), None);
         let old = store.run("t001").unwrap().unwrap();
         assert_eq!(old.agent, "claude_code", "pre-migration runs default to Claude");
         assert_eq!(old.track, "tr001", "pre-migration runs join the first track");

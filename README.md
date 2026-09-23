@@ -58,12 +58,16 @@ cargo run -p orchestra-acp --example smoke -- "Reply with exactly: ORCHESTRA OK"
 **에이전트.** 네 가지를 ACP로 붙입니다. 첫 실행 setup과 설정 화면의 "다시 감지"가
 `crates/agents`의 감지를 돌립니다.
 
-| 에이전트 | ACP 진입 | 자율 모드 id |
+| 에이전트 | ACP 진입 | 권한 모드 (기본 = 가장 자율적인 것) |
 |---|---|---|
-| Claude Code | `@agentclientprotocol/claude-agent-acp` (devDependency, `node`로 직접) | `bypassPermissions` |
-| Codex | `@agentclientprotocol/codex-acp` (devDependency, `@openai/codex` 번들) | `agent-full-access` |
-| GitHub Copilot | 설치된 `copilot.exe --acp` | `…/session-modes#autopilot` |
-| Antigravity | Google의 `agy_acp_server` zip을 앱 데이터 폴더에 다운로드 | `yolo` |
+| Claude Code | `@agentclientprotocol/claude-agent-acp` (devDependency, `node`로 직접) | default · acceptEdits · plan · auto · **bypassPermissions** |
+| Codex | `@agentclientprotocol/codex-acp` (devDependency, `@openai/codex` 번들) | read-only · agent · **agent-full-access** |
+| GitHub Copilot | 설치된 `copilot.exe --acp` | agent · plan · **autopilot** |
+| Antigravity | Google의 `agy_acp_server` zip을 앱 데이터 폴더에 다운로드 | default · auto_edit · **yolo** |
+
+트랙 설정(헤더의 "편집", 또는 컴포저의 워커 칩)에서 지휘자와 워커 각각의 에이전트, 모델, 권한
+모드, 그 밖에 에이전트가 알리는 세션 옵션(추론 강도 등)을 고릅니다. 고르지 않은 옵션은
+에이전트 기본값이고, 모드를 고르지 않으면 묻지 않는 쪽을 씁니다.
 
 감지는 세 단계입니다. CLI 실행 파일 탐색(프로세스 PATH + Windows 레지스트리 PATH +
 알려진 설치 경로), ACP `initialize`(이름·버전·로그인 방법), `session/new`(성공이면

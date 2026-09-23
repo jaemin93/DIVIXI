@@ -8,10 +8,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use orchestra_acp::AgentSpec;
+use orchestra_acp::{AgentSpec, ConfigOptionInfo};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
 use orchestra_core::{LaneEnvelope, LaneEvent};
-use orchestra_store::{RunSummary, SearchHit, Store, StoredEvent, TrackInfo};
+use orchestra_store::{RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -45,16 +45,6 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// The model the user chose for an agent in the composer, if any.
-    pub(crate) fn chosen_model(&self, agent: &str) -> Option<String> {
-        let json = self.store.get_meta("setting:models").ok()??;
-        let map: serde_json::Value = serde_json::from_str(&json).ok()?;
-        map.get(agent)
-            .and_then(serde_json::Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-    }
-
     fn detect_options(&self) -> DetectOptions {
         DetectOptions::new(&self.adapters_dir, workspace_root())
     }
@@ -90,18 +80,17 @@ impl AppState {
         Ok(status)
     }
 
-    /// The id of the agent's model selector option, as detection saw it.
-    pub(crate) fn model_option_id(&self, agent: &str) -> Option<String> {
-        let kind = AgentKind::parse(agent)?;
-        let list = self.load_agents().ok()??;
-        let status = list.iter().find(|s| s.kind == kind)?;
-        status
-            .probe
-            .as_ref()?
-            .config_options
-            .iter()
-            .find(|o| o.category == "model")
-            .map(|o| o.id.clone())
+    /// The session options an agent advertised at detection (mode, model,
+    /// effort, …); empty when it was never probed.
+    pub(crate) fn config_options_for(&self, agent: &str) -> Vec<ConfigOptionInfo> {
+        let Some(kind) = AgentKind::parse(agent) else { return Vec::new() };
+        self.load_agents()
+            .ok()
+            .flatten()
+            .and_then(|list| list.into_iter().find(|s| s.kind == kind))
+            .and_then(|s| s.probe)
+            .map(|p| p.config_options)
+            .unwrap_or_default()
     }
 
     /// The launch spec for an agent id, if it was detected as ready.
@@ -127,59 +116,65 @@ fn list_tracks(state: State<'_, AppState>) -> Result<Vec<TrackInfo>, String> {
     state.store.tracks().map_err(|e| e.to_string())
 }
 
-/// Create a track. An empty working directory means the repository the app
-/// was launched from; an empty agent means Claude Code.
-#[tauri::command]
-fn create_track(
-    state: State<'_, AppState>,
-    name: String,
-    intent: Option<String>,
-    cwd: Option<String>,
-    agent: Option<String>,
-) -> Result<TrackInfo, String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("a track needs a name".to_string());
-    }
-    let cwd = match cwd.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()) {
-        Some(c) => {
-            if !std::path::Path::new(&c).is_dir() {
-                return Err(format!("not a directory: {c}"));
-            }
-            c
-        }
-        None => workspace_root().display().to_string(),
-    };
-    let agent = agent.filter(|a| !a.is_empty()).unwrap_or_else(|| AgentKind::ClaudeCode.id().to_string());
-    AgentKind::parse(&agent).ok_or_else(|| format!("unknown agent {agent}"))?;
-    state
-        .store
-        .create_track(name, intent.as_deref().unwrap_or(""), &cwd, &agent)
-        .map_err(|e| e.to_string())
-}
-
-/// Rename a track, change its intent, or move its conductor to another
-/// agent (the conductor reopens on that agent at the next message).
-#[tauri::command]
-fn update_track(
-    state: State<'_, AppState>,
-    id: String,
-    name: Option<String>,
-    intent: Option<String>,
-    agent: Option<String>,
-) -> Result<TrackInfo, String> {
-    if let Some(n) = name.as_deref() {
+/// Check the fields a patch sets. `cwd` must be a directory, agents must
+/// be known; an empty worker agent means "the conductor's".
+fn check_patch(patch: &mut TrackPatch) -> Result<(), String> {
+    if let Some(n) = patch.name.as_deref() {
         if n.trim().is_empty() {
             return Err("a track needs a name".to_string());
         }
     }
-    if let Some(a) = agent.as_deref() {
+    if let Some(c) = patch.cwd.as_mut() {
+        *c = c.trim().to_string();
+        if !std::path::Path::new(c.as_str()).is_dir() {
+            return Err(format!("not a directory: {c}"));
+        }
+    }
+    if let Some(a) = patch.agent.as_deref() {
         AgentKind::parse(a).ok_or_else(|| format!("unknown agent {a}"))?;
     }
-    state
+    if let Some(w) = patch.worker_agent.as_deref().filter(|w| !w.is_empty()) {
+        AgentKind::parse(w).ok_or_else(|| format!("unknown agent {w}"))?;
+    }
+    Ok(())
+}
+
+/// Create a track. An empty working directory means the repository the app
+/// was launched from; an empty agent means Claude Code.
+#[tauri::command]
+fn create_track(state: State<'_, AppState>, mut patch: TrackPatch) -> Result<TrackInfo, String> {
+    if patch.cwd.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        patch.cwd = Some(workspace_root().display().to_string());
+    }
+    if patch.agent.as_deref().unwrap_or("").is_empty() {
+        patch.agent = Some(AgentKind::ClaudeCode.id().to_string());
+    }
+    check_patch(&mut patch)?;
+    state.store.create_track(&patch).map_err(|e| e.to_string())
+}
+
+/// Change a track: name, intent, folder, or the conductor's and lanes'
+/// agent and session options. The conductor reopens with the new options
+/// at its next message (keeping its memory); open lanes keep theirs until
+/// closed. A new folder closes every session and forgets their memory,
+/// since a session belongs to the directory it was opened in.
+#[tauri::command]
+async fn update_track(state: State<'_, AppState>, id: String, mut patch: TrackPatch) -> Result<TrackInfo, String> {
+    check_patch(&mut patch)?;
+    let before = state
         .store
-        .update_track(&id, name.as_deref(), intent.as_deref(), agent.as_deref())
-        .map_err(|e| e.to_string())
+        .track(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no track {id}"))?;
+    let moved = patch.cwd.as_deref().is_some_and(|c| c != before.cwd);
+    if moved {
+        if state.sessions.is_busy(&id) {
+            return Err("the conductor is still responding; wait before changing the folder".to_string());
+        }
+        state.sessions.close_track(&id).await;
+        state.store.forget_track_sessions(&id).map_err(|e| e.to_string())?;
+    }
+    state.store.update_track(&id, &patch).map_err(|e| e.to_string())
 }
 
 /// Delete a track: its sessions close, its runs and memory go.

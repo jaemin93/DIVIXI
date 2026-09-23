@@ -24,7 +24,7 @@
 //! blocking tool would trip the agent's own MCP call timeout on any lane
 //! that runs for minutes, which real work does.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,8 +67,16 @@ pub struct Live {
 /// A track's conductor: its session and the MCP server that is its hands.
 pub struct Conductor {
     pub live: Live,
+    /// Agent and options the session was opened with; when the track's
+    /// differ, the next message reopens it.
+    fingerprint: String,
     /// Dropped with the conductor; the server stops then.
     _mcp: McpServer,
+}
+
+/// What a session was opened with, compared to decide on reopening.
+fn fingerprint(agent: &str, config: &BTreeMap<String, String>) -> String {
+    format!("{agent}\n{}", serde_json::to_string(config).unwrap_or_default())
 }
 
 /// Conductor and lane sessions, across tracks. Held behind async mutexes
@@ -413,16 +421,37 @@ async fn lane_list(state: &AppState, track: &str) -> Vec<Value> {
     list
 }
 
-/// Session options for an agent: working directory, autonomous mode,
-/// chosen model, and the conductor's tools when it is the conductor.
-fn session_options(state: &AppState, agent: &str, cwd: &str, mcp: Option<&McpServer>) -> SessionOptions {
-    let model = state.chosen_model(agent);
-    let config = model
-        .and_then(|m| state.model_option_id(agent).map(|id| vec![(id, m)]))
-        .unwrap_or_default();
+/// Session options for an agent: working directory, the track's choices
+/// for that agent (`option id → value id`), and the conductor's tools when
+/// it is the conductor.
+///
+/// The agent's mode option is sent as `session/set_mode`; every other
+/// option goes through `session/set_config_option`. No mode chosen means
+/// the most autonomous one the agent offers.
+fn session_options(
+    state: &AppState,
+    agent: &str,
+    cwd: &str,
+    chosen: &BTreeMap<String, String>,
+    mcp: Option<&McpServer>,
+) -> SessionOptions {
+    let known = state.config_options_for(agent);
+    let mut mode = None;
+    let mut config = Vec::new();
+    for (id, value) in chosen {
+        if value.trim().is_empty() {
+            continue;
+        }
+        let is_mode = known.iter().any(|o| o.id == *id && o.category == "mode");
+        if is_mode {
+            mode = Some(value.clone());
+        } else {
+            config.push((id.clone(), value.clone()));
+        }
+    }
     SessionOptions {
         cwd: PathBuf::from(cwd),
-        mode: None,
+        mode,
         config,
         mcp_servers: mcp
             .map(|m| {
@@ -502,18 +531,23 @@ async fn start_lane_turn(
                         "no lane {name}. Open lanes: {open_names:?}. Closed lanes: {closed:?}. Use spawn_lane to create one."
                     ));
                 }
-                // Agent: the caller's choice, else the lane's earlier one, else the track's.
+                // Agent: the caller's choice, else the lane's earlier one, else
+                // the track's worker agent.
                 let agent_id = match (agent, &record, past) {
                     (Some(a), _, _) => a,
                     (None, Some(r), _) => r.agent.clone(),
                     (None, None, Some(p)) if !fresh => p.agent.clone(),
-                    _ => info.agent.clone(),
+                    _ => info.lane_agent().to_string(),
                 };
                 // Memory only carries over on the agent that made it.
                 let resume = record.filter(|r| r.agent == agent_id).map(|r| r.session_id);
                 let wanted = resume.is_some();
                 let spec: AgentSpec = state.spec_for(&agent_id)?;
-                let mut opts = session_options(&state, &agent_id, &info.cwd, None);
+                // The track's worker options are in its worker agent's terms;
+                // a lane on some other agent gets that agent's defaults.
+                let empty = BTreeMap::new();
+                let chosen = if agent_id == info.lane_agent() { &info.worker_config } else { &empty };
+                let mut opts = session_options(&state, &agent_id, &info.cwd, chosen, None);
                 opts.resume = resume;
                 tracing::info!(%track, lane = %name, agent = %agent_id, resume = ?opts.resume, "opening lane session");
                 let session = Arc::new(AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?);
@@ -673,12 +707,14 @@ pub async fn conductor_turn(
     let st = app.state::<AppState>();
     let mut info = track_info(&st, &track)?;
     if let Some(agent) = agent.filter(|a| *a != info.agent) {
-        info = st
-            .store
-            .update_track(&track, None, None, Some(&agent))
-            .map_err(|e| e.to_string())?;
+        let patch = orchestra_store::TrackPatch {
+            agent: Some(agent),
+            ..Default::default()
+        };
+        info = st.store.update_track(&track, &patch).map_err(|e| e.to_string())?;
     }
     let agent = info.agent.clone();
+    let wanted = fingerprint(&agent, &info.conductor_config);
 
     if !st.sessions.begin_turn(&track) {
         return Err("conductor is still responding".to_string());
@@ -687,12 +723,12 @@ pub async fn conductor_turn(
     let outcome: Result<String, String> = async {
         let mut guard = st.sessions.conductors.lock().await;
         let needs_open = match guard.get(&track) {
-            Some(c) => c.live.agent != agent,
+            Some(c) => c.fingerprint != wanted,
             None => true,
         };
         if needs_open {
             if let Some(old) = guard.remove(&track) {
-                tracing::info!(%track, agent = %old.live.agent, "closing conductor session (agent changed)");
+                tracing::info!(%track, agent = %old.live.agent, "closing conductor session (agent or options changed)");
                 drop(old);
             }
             let spec = st.spec_for(&agent)?;
@@ -700,7 +736,7 @@ pub async fn conductor_turn(
             let mcp = McpServer::start("orchestra", tools(app.clone(), track.clone()))
                 .await
                 .map_err(|e| e.to_string())?;
-            let mut opts = session_options(&st, &agent, &info.cwd, Some(&mcp));
+            let mut opts = session_options(&st, &agent, &info.cwd, &info.conductor_config, Some(&mcp));
             // Bring back the conductor this track had last time, with its memory.
             let key = format!("conductor_session:{track}:{agent}");
             opts.resume = st.store.get_meta(&key).ok().flatten();
@@ -720,6 +756,7 @@ pub async fn conductor_turn(
                         turns: if resumed { 1 } else { 0 },
                         running: None,
                     },
+                    fingerprint: wanted.clone(),
                     _mcp: mcp,
                 },
             );

@@ -24,17 +24,41 @@ export type Envelope = {
   event: LaneEvent;
 };
 
+/** Session options chosen for one role: `option id → value id`, in the agent's own terms. */
+export type OptionConfig = Record<string, string>;
+
 /** Mirrors `orchestra_store::TrackInfo`: one conductor, its lanes, one folder. */
 export type Track = {
   id: string;
   name: string;
   intent: string;
   cwd: string;
+  /** Agent the conductor runs on. */
   agent: string;
+  conductor_config: OptionConfig;
+  /** Agent lanes run on; empty means the conductor's. */
+  worker_agent: string;
+  worker_config: OptionConfig;
   created_at: number;
   updated_at: number;
   runs: number;
 };
+
+/** Mirrors `orchestra_store::TrackPatch`: fields to set, the rest kept. */
+export type TrackPatch = Partial<{
+  name: string;
+  intent: string;
+  cwd: string;
+  agent: string;
+  conductor_config: OptionConfig;
+  worker_agent: string;
+  worker_config: OptionConfig;
+}>;
+
+/** The agent a track's lanes run on. */
+export function laneAgentOf(track: Track): string {
+  return track.worker_agent || track.agent;
+}
 
 /** Mirrors `orchestra_store::RunSummary`: one run as the timeline sees it. */
 export type RunSummary = {
@@ -78,10 +102,14 @@ export type ConfigOption = {
   id: string;
   name: string;
   description: string | null;
+  /** `mode`, `model`, `thought_level`, or the agent's own word. */
   category: string;
   current: string;
   choices: ConfigChoice[];
 };
+
+/** Mirrors `orchestra_acp::ModeInfo`. */
+export type ModeInfo = { id: string; name: string; description: string | null };
 
 /** Mirrors `orchestra_agents::AgentStatus`. */
 export type AgentStatus = {
@@ -96,6 +124,10 @@ export type AgentStatus = {
     agent_version: string | null;
     auth_methods: AuthMethodInfo[];
     config_options?: ConfigOption[];
+    modes?: ModeInfo[];
+    default_mode?: string | null;
+    /** The mode Orchestra picks when none is chosen. */
+    autonomous_mode?: string | null;
   } | null;
   error: string | null;
   login_hint: string;
@@ -147,7 +179,7 @@ export type Run = {
   segments: Segment[];
 };
 
-export type View = "track" | "settings" | "lane" | "new-track";
+export type View = "track" | "settings" | "lane" | "new-track" | "edit-track";
 
 /** Prefix of conductor prompts Orchestra injects itself (lane reports). Language-neutral. */
 export const REPORT_PREFIX = "[lane-report]";
@@ -216,8 +248,6 @@ class Store {
   /** Native webview zoom in percent. Persisted. */
   zoom = $state(100);
   info = $state<AppInfo | null>(null);
-  /** Chosen model per agent id; absent means the agent's default. Persisted. */
-  models = $state<Record<string, string>>({});
   /** Column widths in px: the rail (expanded), the tracks column, the inspector. Persisted. */
   railWidth = $state(200);
   trackListWidth = $state(264);
@@ -293,10 +323,10 @@ class Store {
   }
 
   /** Create a track and open it. */
-  async createTrack(name: string, intent: string, cwd: string, agent: AgentId): Promise<boolean> {
+  async createTrack(patch: TrackPatch): Promise<boolean> {
     this.lastError = "";
     try {
-      const track = await invoke<Track>("create_track", { name, intent, cwd, agent });
+      const track = await invoke<Track>("create_track", { patch });
       this.tracks.push(track);
       await this.selectTrack(track.id);
       return true;
@@ -321,28 +351,24 @@ class Store {
     }
   }
 
-  /** Rename a track or change its intent. */
-  async updateTrack(id: string, patch: { name?: string; intent?: string }) {
+  /** Change a track's fields; the conductor picks up agent and option changes at its next message. */
+  async updateTrack(id: string, patch: TrackPatch): Promise<boolean> {
     this.lastError = "";
     try {
-      const next = await invoke<Track>("update_track", { id, name: patch.name ?? null, intent: patch.intent ?? null, agent: null });
+      const next = await invoke<Track>("update_track", { id, patch });
       this.tracks = this.tracks.map((t) => (t.id === id ? next : t));
+      if (id === this.track && this.readyAgents.some((a) => a.kind === next.agent)) this.agent = next.agent as AgentId;
+      return true;
     } catch (err) {
       this.lastError = String(err);
+      return false;
     }
   }
 
   /** Move the current track's conductor to another agent; it reopens there on the next message. */
   async setTrackAgent(agent: AgentId) {
     this.agent = agent;
-    const id = this.track;
-    if (!id) return;
-    try {
-      const next = await invoke<Track>("update_track", { id, name: null, intent: null, agent });
-      this.tracks = this.tracks.map((t) => (t.id === id ? next : t));
-    } catch (err) {
-      this.lastError = String(err);
-    }
+    if (this.track) await this.updateTrack(this.track, { agent });
   }
 
   /** Delete a track with its runs and memory; the app moves to a neighbour or to creation. */
@@ -384,19 +410,51 @@ class Store {
     return this.agents?.find((a) => a.kind === this.agent);
   }
 
-  /** The selected agent's model selector, if it advertised one. */
-  get modelOption(): ConfigOption | undefined {
-    return this.currentAgent?.probe?.config_options?.find((o) => o.category === "model");
+  /** The select options an agent advertised at detection (mode, model, effort, …). */
+  optionsOf(agent: string): ConfigOption[] {
+    return (this.agents?.find((a) => a.kind === agent)?.probe?.config_options ?? []).filter((o) => o.choices.length > 0);
   }
 
-  /** Model id in effect for the selected agent: the choice, else the agent's current. */
+  /** The mode Orchestra picks for an agent when the track chooses none. */
+  autonomousModeOf(agent: string): string {
+    const status = this.agents?.find((a) => a.kind === agent);
+    return status?.probe?.autonomous_mode ?? status?.probe?.config_options?.find((o) => o.category === "mode")?.current ?? "";
+  }
+
+  /** Value in effect for one of an agent's options: the track's choice, else the agent's current. */
+  effective(agent: string, config: OptionConfig, option: ConfigOption): string {
+    const chosen = config[option.id];
+    if (chosen) return chosen;
+    if (option.category === "mode") return this.autonomousModeOf(agent) || option.current;
+    return option.current;
+  }
+
+  /** Human name of a choice, falling back to its id. */
+  choiceName(option: ConfigOption | undefined, id: string): string {
+    return option?.choices.find((c) => c.id === id)?.name ?? id;
+  }
+
+  /** The conductor's model selector on the current track's agent, if it advertised one. */
+  get modelOption(): ConfigOption | undefined {
+    return this.optionsOf(this.agent).find((o) => o.category === "model");
+  }
+
+  /** Model id in effect for the conductor: the track's choice, else the agent's current. */
   get modelId(): string {
-    return this.models[this.agent] ?? this.modelOption?.current ?? "";
+    const option = this.modelOption;
+    if (!option) return "";
+    return this.effective(this.agent, this.currentTrack?.conductor_config ?? {}, option);
   }
 
   get modelName(): string {
-    const id = this.modelId;
-    return this.modelOption?.choices.find((c) => c.id === id)?.name ?? id ?? "default";
+    return this.choiceName(this.modelOption, this.modelId) || "default";
+  }
+
+  /** Mode id in effect for the conductor. */
+  get conductorMode(): string {
+    const option = this.optionsOf(this.agent).find((o) => o.category === "mode");
+    if (!option) return this.autonomousModeOf(this.agent);
+    return this.effective(this.agent, this.currentTrack?.conductor_config ?? {}, option);
   }
 
   /** Context accounting to show: the live run's, else the latest run that reported one. */
@@ -404,15 +462,12 @@ class Store {
     return this.activeRun?.usage ?? [...this.runs].reverse().find((r) => r.usage)?.usage;
   }
 
-  /** Choose a model for an agent; persisted, used by the next run. Empty clears the choice. */
-  async setModel(agent: AgentId, model: string) {
-    const { [agent]: _old, ...rest } = this.models;
-    this.models = model ? { ...rest, [agent]: model } : rest;
-    try {
-      await invoke("set_setting", { key: "models", value: JSON.stringify(this.models) });
-    } catch (err) {
-      this.lastError = String(err);
-    }
+  /** Set one of the conductor's options on the current track; empty clears it. Takes effect at the next message. */
+  async setConductorOption(id: string, value: string) {
+    const track = this.currentTrack;
+    if (!track) return;
+    const { [id]: _old, ...rest } = track.conductor_config;
+    await this.updateTrack(track.id, { conductor_config: value ? { ...rest, [id]: value } : rest });
   }
 
   /** Apply the preference to <html> and, for `system`, follow the OS. */
@@ -549,7 +604,7 @@ class Store {
       if (this.themePref === "system") this.applyTheme();
     });
     try {
-      const [summaries, tracks, savedTrack, agents, theme, rail, tracklist, chatFont, models, inspectorWidth, railWidth, trackListWidth, uiFont, zoom, language] =
+      const [summaries, tracks, savedTrack, agents, theme, rail, tracklist, chatFont, inspectorWidth, railWidth, trackListWidth, uiFont, zoom, language] =
         await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<Track[]>("list_tracks"),
@@ -559,7 +614,6 @@ class Store {
         invoke<string | null>("get_setting", { key: "rail" }),
         invoke<string | null>("get_setting", { key: "tracklist" }),
         invoke<string | null>("get_setting", { key: "chat_font" }),
-        invoke<string | null>("get_setting", { key: "models" }),
         invoke<string | null>("get_setting", { key: "inspector_width" }),
         invoke<string | null>("get_setting", { key: "rail_width" }),
         invoke<string | null>("get_setting", { key: "tracklist_width" }),
@@ -574,12 +628,6 @@ class Store {
       document.documentElement.dataset.uiFont = this.uiFont;
       const z = Number(zoom);
       if (Number.isFinite(z) && z >= ZOOM_MIN && z <= ZOOM_MAX && z !== 100) void this.setZoom(z, false);
-      try {
-        const parsed = models ? JSON.parse(models) : {};
-        if (parsed && typeof parsed === "object") this.models = parsed;
-      } catch {
-        this.models = {};
-      }
       const w = Number(inspectorWidth);
       if (Number.isFinite(w) && w > 0) this.setInspectorWidth(w);
       const rw = Number(railWidth);

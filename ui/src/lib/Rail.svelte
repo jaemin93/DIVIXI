@@ -22,7 +22,7 @@
       label: "rail.tracks",
       go: () => {
         // Second click on the active item folds the list away.
-        if ((store.view === "track" || store.view === "lane") && store.trackListOpen) store.setTrackList(false);
+        if (store.view !== "settings" && store.trackListOpen) store.setTrackList(false);
         else {
           store.view = store.currentTrack ? "track" : "new-track";
           store.setTrackList(true);
@@ -40,7 +40,7 @@
   const collapsed = $derived(store.railCollapsed);
 
   function active(item: Item): boolean {
-    if (item.id === "tracks") return store.view === "track" || store.view === "lane" || store.view === "new-track";
+    if (item.id === "tracks") return store.view !== "settings";
     if (item.id === "settings") return store.view === "settings";
     return false;
   }
