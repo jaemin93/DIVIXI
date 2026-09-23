@@ -58,17 +58,18 @@
     <SplitHandle edge="right" width={store.railWidth} min={160} max={320} reset={200} label={t("rail.width")} onchange={(px, persist) => store.setRailWidth(px, persist)} />
   {/if}
   <div class="top">
-    <span class="brand" title="Divixi"><Mark size={16} live={store.anyLive} />{#if !collapsed}<span class="mono name">DIVIXI</span>{/if}</span>
-    <span class="grow"></span>
-    <button
-      class="toggle"
-      onclick={() => store.setRail(!collapsed)}
-      title={collapsed ? t("rail.expand") : t("rail.collapse")}
-      aria-label={collapsed ? t("rail.expand") : t("rail.collapse")}
-      aria-expanded={!collapsed}
-    >
-      <Icon name={collapsed ? "expand" : "collapse"} />
-    </button>
+    {#if collapsed}
+      <!-- Folded, the mark is the way back out: it opens the rail. -->
+      <button class="brand open" onclick={() => store.setRail(false)} title={t("rail.expand")} aria-label={t("rail.expand")} aria-expanded="false">
+        <Mark size={16} live={store.anyLive} />
+      </button>
+    {:else}
+      <span class="brand" title="Divixi"><Mark size={16} live={store.anyLive} /><span class="mono name">DIVIXI</span></span>
+      <span class="grow"></span>
+      <button class="toggle" onclick={() => store.setRail(true)} title={t("rail.collapse")} aria-label={t("rail.collapse")} aria-expanded="true">
+        <Icon name="collapse" />
+      </button>
+    {/if}
   </div>
 
   {#snippet entry(item: Item)}
@@ -150,6 +151,20 @@
   .name {
     font-size: 10px;
     letter-spacing: 0.22em;
+  }
+
+  /* The folded rail's mark: a button the size of the rail items below it. */
+  .brand.open {
+    width: 32px;
+    height: 32px;
+    justify-content: center;
+    padding: 0;
+    background: transparent;
+    border: 0;
+  }
+
+  .brand.open:hover {
+    background: var(--sel);
   }
 
   .toggle {
