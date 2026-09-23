@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store, agentLabel, type Run, type Segment, type Tool } from "./store.svelte";
   import Markdown from "./Markdown.svelte";
+  import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
 
   /**
@@ -60,7 +61,7 @@
     <div class="row">
       <h1 class="serif">{store.openLane}</h1>
       <span class="mono meta">{agentLabel(agent)} · {t("lane.turns", { n: runs.length })}</span>
-      {#if live}<span class="dot pulse"></span>{/if}
+      {#if live}<Working />{/if}
       <span class="grow"></span>
       <button class="btn" onclick={() => (store.view = "track")}>{t("lane.back")}</button>
     </div>
@@ -84,7 +85,7 @@
         <div class="head">
           <span class="mlab">{t("lane.worker")}</span>
           <span class="mono meta">{run.id} · {t("lane.tools", { n: run.toolCount })}{run.durationMs != null ? ` · ${secs(run.durationMs)}` : ""}</span>
-          {#if run.status === "running" || run.status === "connecting"}<span class="dot pulse"></span>{/if}
+          {#if run.status === "running" || run.status === "connecting"}<Working />{/if}
         </div>
         {#each collapse(run.segments) as seg, i (i)}
           {#if seg.kind === "text"}
@@ -158,12 +159,6 @@
     flex: 1;
   }
 
-  .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--ok);
-  }
 
   .scroll {
     flex: 1;

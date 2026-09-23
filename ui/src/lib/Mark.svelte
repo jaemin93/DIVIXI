@@ -6,7 +6,7 @@
    * beat cutting across all of them, and the x in the name: crossing
    * providers, one becoming many. It is a brand mark, not a gauge: it does
    * not count agents or lanes. The only thing it shows is whether the
-   * conductor is live (`live` pulses the X).
+   * conductor is live (`live` turns the X).
    *
    * Drawn with its own colours on no background, the same in both themes
    * and the same as the app icon (`scripts/make-icon.mjs` uses this
@@ -45,12 +45,25 @@
     <rect x="8" y={y - 0.75} width="48" height="1.5" fill={STAVE} shape-rendering="crispEdges" />
   {/each}
   <!-- the X: the beat across the staves -->
-  <path d="M20 12 L44 56 M44 12 L20 56" stroke={ACCENT} stroke-width="4" stroke-linecap="square" class:pulse={live} />
+  <path d="M20 12 L44 56 M44 12 L20 56" stroke={ACCENT} stroke-width="4" stroke-linecap="square" class:spin={live} />
 </svg>
 
 <style>
   svg {
     display: block;
     flex-shrink: 0;
+  }
+
+  /* Working: the X turns about its own centre; the staves stay. */
+  .spin {
+    transform-box: view-box;
+    transform-origin: 32px 34px;
+    animation: turn 1.4s linear infinite;
+  }
+
+  @keyframes turn {
+    to {
+      transform: rotate(360deg);
+    }
   }
 </style>

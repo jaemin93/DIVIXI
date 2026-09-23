@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store, agentLabel, REPORT_PREFIX, type Segment, type Tool } from "./store.svelte";
   import Mark from "./Mark.svelte";
+  import Working from "./Working.svelte";
   import Markdown from "./Markdown.svelte";
   import { t } from "./i18n.svelte";
 
@@ -77,7 +78,7 @@
         <span class="mlab">{t("timeline.conductor")}</span>
         <span class="mono meta">{agentLabel(run.agent)}</span>
         {#if run.status === "connecting" || run.status === "running"}
-          <span class="dot pulse"></span>
+          <Working />
         {/if}
       </div>
       <!-- The turn as it unfolds: prose and tool lines in order, like a native session. -->
@@ -196,9 +197,6 @@
     margin-bottom: 10px;
   }
 
-  .chead .dot {
-    background: var(--ok);
-  }
 
   /* Conversation text follows the interface font and the conversation size. */
   .ctext {
@@ -283,12 +281,6 @@
     padding: 1px 5px;
   }
 
-  .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
 
   .meta {
     font-size: 10px;
