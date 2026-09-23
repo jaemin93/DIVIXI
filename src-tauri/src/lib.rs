@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 mod conductor;
+mod metrics;
 mod workspace;
 
 /// How often accumulated message text is flushed to the webview and the store.
@@ -43,6 +44,8 @@ pub struct AppState {
     agents: Mutex<Option<Vec<AgentStatus>>>,
     /// Conductor and lane sessions, across tracks.
     pub(crate) sessions: conductor::Sessions,
+    /// CPU, memory and disk readings for the title bar.
+    meter: metrics::Meter,
 }
 
 impl AppState {
@@ -286,6 +289,21 @@ fn dismiss_decision(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resu
     let decision = state.store.dismiss_decision(id).map_err(|e| e.to_string())?;
     let _ = app.emit("decision", &decision);
     Ok(decision)
+}
+
+/// How the machine is doing, measured on the disk of `track`'s folder.
+#[tauri::command]
+async fn system_metrics(state: State<'_, AppState>, track: Option<String>) -> Result<metrics::Metrics, String> {
+    let folder = track
+        .and_then(|t| state.store.track(&t).ok().flatten())
+        .map(|t| PathBuf::from(t.cwd));
+    let (sessions, working) = state.sessions.counts().await;
+    let meter = &state.meter;
+    // Disk enumeration touches the OS; keep it off the async workers.
+    let mut reading = tokio::task::block_in_place(|| meter.read(folder.as_deref()));
+    reading.sessions = sessions;
+    reading.working = working;
+    Ok(reading)
 }
 
 /// Every run, oldest first: what the timeline is rebuilt from at startup.
@@ -601,6 +619,7 @@ pub fn run() {
             list_runs,
             run_events,
             list_decisions,
+            system_metrics,
             answer_decision,
             dismiss_decision,
             search_runs,
@@ -639,6 +658,7 @@ pub fn run() {
                 adapters_dir,
                 agents: Mutex::new(None),
                 sessions: conductor::Sessions::default(),
+                meter: metrics::Meter::default(),
             });
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Divixi");

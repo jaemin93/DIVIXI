@@ -2,6 +2,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
   import { t } from "./i18n.svelte";
+  import SystemMeter from "./SystemMeter.svelte";
 
   /**
    * The window's own chrome. The OS title bar is off (`decorations: false`),
@@ -10,7 +11,7 @@
    * Tauri handles that through the drag-region attribute.
    *
    * The empty middle is on purpose: a command bar and notifications go
-   * there later.
+   * there later. The system meter sits by the window buttons.
    */
   const win = getCurrentWindow();
   let maximized = $state(false);
@@ -33,6 +34,7 @@
 
 <div class="chrome" data-tauri-drag-region>
   <span class="grow" data-tauri-drag-region></span>
+  <SystemMeter />
   <div class="controls">
     <button class="wc" onclick={() => win.minimize()} aria-label={t("win.minimize")} title={t("win.minimize")}>
       <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor" stroke-width="1" /></svg>

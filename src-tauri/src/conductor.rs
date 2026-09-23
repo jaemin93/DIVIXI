@@ -109,6 +109,15 @@ impl Sessions {
         self.busy.lock().contains(track)
     }
 
+    /// Open agent sessions across tracks, and how many are mid-turn.
+    pub async fn counts(&self) -> (usize, usize) {
+        let conductors = self.conductors.lock().await;
+        let lanes = self.lanes.lock().await;
+        let open = conductors.len() + lanes.len();
+        let working = self.busy.lock().len() + lanes.values().filter(|l| l.running.is_some()).count();
+        (open, working)
+    }
+
     /// Whether the conductor or any lane of a track has a turn in flight.
     pub async fn is_active(&self, track: &str) -> bool {
         if self.is_busy(track) {
