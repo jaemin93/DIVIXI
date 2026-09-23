@@ -138,9 +138,21 @@ const ko = {
   "composer.model": "모델",
   "composer.noModels": "이 에이전트는 모델 선택을 제공하지 않습니다. 다시 감지하면 갱신됩니다.",
   "composer.defaultModel": "에이전트 기본값으로",
-  "composer.workersTitle": "워커 레인의 에이전트 · 모델 · 모드. 눌러서 Track 설정 열기",
-  "composer.workers": "워커",
   "composer.modeTitle": "권한 모드",
+
+  // Agent · model picker
+  "picker.title": "지휘자와 워커의 에이전트 · 모델",
+  "picker.conductor": "지휘자",
+  "picker.worker": "워커",
+  "picker.agent": "에이전트",
+  "picker.model": "모델",
+  "picker.same": "지휘자와 같음",
+  "picker.sameNote": "지휘자의 에이전트와 설정을 따릅니다",
+  "picker.default": "에이전트 기본값",
+  "picker.noModels": "모델 선택 없음",
+  "picker.mode": "모드",
+  "picker.settings": "Track 설정…",
+  "picker.applies": "다음 세션부터 적용",
 
   // Agent list
   "agents.detecting": "감지 중 · 에이전트마다 몇 초 걸립니다",
@@ -376,9 +388,21 @@ const en: Record<Key, string> = {
   "composer.model": "Model",
   "composer.noModels": "This agent does not offer a model choice. Re-detect to refresh.",
   "composer.defaultModel": "Use agent default",
-  "composer.workersTitle": "Worker lanes' agent · model · mode. Click to open track settings",
-  "composer.workers": "workers",
   "composer.modeTitle": "Permission mode",
+
+  // Agent · model picker
+  "picker.title": "Agent and model for the conductor and for workers",
+  "picker.conductor": "Conductor",
+  "picker.worker": "Workers",
+  "picker.agent": "Agent",
+  "picker.model": "Model",
+  "picker.same": "Same as conductor",
+  "picker.sameNote": "Follows the conductor's agent and settings",
+  "picker.default": "Agent default",
+  "picker.noModels": "No model choice",
+  "picker.mode": "Mode",
+  "picker.settings": "Track settings…",
+  "picker.applies": "Applies from the next session",
 
   "agents.detecting": "Detecting · a few seconds per agent",
   "agents.notYet": "Not detected yet.",

@@ -60,6 +60,9 @@ export function laneAgentOf(track: Track): string {
   return track.worker_agent || track.agent;
 }
 
+/** Who a session setting is for. */
+export type Role = "conductor" | "worker";
+
 /** Mirrors `orchestra_store::RunSummary`: one run as the timeline sees it. */
 export type RunSummary = {
   id: string;
@@ -434,40 +437,44 @@ class Store {
     return option?.choices.find((c) => c.id === id)?.name ?? id;
   }
 
-  /** The conductor's model selector on the current track's agent, if it advertised one. */
-  get modelOption(): ConfigOption | undefined {
-    return this.optionsOf(this.agent).find((o) => o.category === "model");
-  }
-
-  /** Model id in effect for the conductor: the track's choice, else the agent's current. */
-  get modelId(): string {
-    const option = this.modelOption;
-    if (!option) return "";
-    return this.effective(this.agent, this.currentTrack?.conductor_config ?? {}, option);
-  }
-
-  get modelName(): string {
-    return this.choiceName(this.modelOption, this.modelId) || "default";
-  }
-
-  /** Mode id in effect for the conductor. */
-  get conductorMode(): string {
-    const option = this.optionsOf(this.agent).find((o) => o.category === "mode");
-    if (!option) return this.autonomousModeOf(this.agent);
-    return this.effective(this.agent, this.currentTrack?.conductor_config ?? {}, option);
-  }
-
   /** Context accounting to show: the live run's, else the latest run that reported one. */
   get context(): Usage | undefined {
     return this.activeRun?.usage ?? [...this.runs].reverse().find((r) => r.usage)?.usage;
   }
 
-  /** Set one of the conductor's options on the current track; empty clears it. Takes effect at the next message. */
-  async setConductorOption(id: string, value: string) {
+  /** The agent a role runs on in the current track. */
+  roleAgent(role: Role): string {
+    const track = this.currentTrack;
+    if (!track) return this.agent;
+    return role === "conductor" ? track.agent : laneAgentOf(track);
+  }
+
+  /** A role's chosen options in the current track. */
+  roleConfig(role: Role): OptionConfig {
+    const track = this.currentTrack;
+    if (!track) return {};
+    return role === "conductor" ? track.conductor_config : track.worker_config;
+  }
+
+  /** Put a role on an agent; for workers, empty means "same as the conductor". Takes effect at the next session. */
+  async setRoleAgent(role: Role, agent: string) {
     const track = this.currentTrack;
     if (!track) return;
-    const { [id]: _old, ...rest } = track.conductor_config;
-    await this.updateTrack(track.id, { conductor_config: value ? { ...rest, [id]: value } : rest });
+    if (role === "conductor") {
+      this.agent = agent as AgentId;
+      await this.updateTrack(track.id, { agent });
+    } else {
+      await this.updateTrack(track.id, { worker_agent: agent });
+    }
+  }
+
+  /** Set one of a role's options on the current track; empty clears it. Takes effect at the next session. */
+  async setRoleOption(role: Role, id: string, value: string) {
+    const track = this.currentTrack;
+    if (!track) return;
+    const { [id]: _old, ...rest } = this.roleConfig(role);
+    const next = value ? { ...rest, [id]: value } : rest;
+    await this.updateTrack(track.id, role === "conductor" ? { conductor_config: next } : { worker_config: next });
   }
 
   /** Apply the preference to <html> and, for `system`, follow the OS. */

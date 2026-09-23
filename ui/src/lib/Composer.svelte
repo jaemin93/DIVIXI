@@ -1,14 +1,12 @@
 <script lang="ts">
-  import { store, agentLabel, laneAgentOf } from "./store.svelte";
+  import { store } from "./store.svelte";
+  import AgentPicker from "./AgentPicker.svelte";
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
   import { t } from "./i18n.svelte";
 
   let draft = $state("");
-  let agentOpen = $state(false);
   let contextOpen = $state(false);
-  let modelOpen = $state(false);
-  let filter = $state("");
 
   function submit(e: Event) {
     e.preventDefault();
@@ -17,38 +15,12 @@
     store.send(text);
   }
 
-  const choices = $derived(
-    (store.modelOption?.choices ?? []).filter(
-      (c) => !filter.trim() || `${c.id} ${c.name}`.toLowerCase().includes(filter.trim().toLowerCase()),
-    ),
-  );
-
   const ctx = $derived(store.context);
   const pct = $derived(ctx && ctx.size > 0 ? Math.min(100, (ctx.used / ctx.size) * 100) : 0);
 
   function k(n: number): string {
     return n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1)}k` : String(n);
   }
-
-  /** Mode ids like `…/session-modes#autopilot` read as their last segment. */
-  function modeKey(id: string): string {
-    return id.replace(/^.*[#/]/, "");
-  }
-
-  /** What the current track's lanes run on: agent, model and mode in effect. */
-  const workers = $derived.by(() => {
-    const track = store.currentTrack;
-    const agent = track ? laneAgentOf(track) : store.agent;
-    const config = track?.worker_config ?? {};
-    const options = store.optionsOf(agent);
-    const modelOpt = options.find((o) => o.category === "model");
-    const modeOpt = options.find((o) => o.category === "mode");
-    return {
-      agent,
-      model: modelOpt ? store.choiceName(modelOpt, store.effective(agent, config, modelOpt)) : "",
-      mode: modeOpt ? store.effective(agent, config, modeOpt) : store.autonomousModeOf(agent),
-    };
-  });
 
   function shortPath(p: string | undefined): string {
     if (!p) return "";
@@ -71,46 +43,7 @@
   </form>
 
   <div class="status">
-    <!-- agent -->
-    <Popover bind:open={agentOpen} width={260}>
-      {#snippet trigger()}
-        <button class="chip" onclick={() => (agentOpen = !agentOpen)} title={t("composer.agentTitle")} aria-haspopup="listbox" aria-expanded={agentOpen}>
-          <Icon name="bot" size={14} />
-          <span class="mono">{agentLabel(store.agent)}</span>
-          {#if store.conductorMode}<span class="mono mode" title={t("composer.modeTitle")}>{modeKey(store.conductorMode)}</span>{/if}
-        </button>
-      {/snippet}
-      <div class="mlab ph">{t("composer.agent")}</div>
-      <div class="list" role="listbox" aria-label={t("composer.agent")}>
-        {#each store.agents ?? [] as a (a.kind)}
-          <button
-            class="opt"
-            class:on={store.agent === a.kind}
-            role="option"
-            aria-selected={store.agent === a.kind}
-            disabled={a.readiness !== "ready"}
-            onclick={() => {
-              store.setTrackAgent(a.kind);
-              agentOpen = false;
-            }}
-          >
-            <span class="dot" style="background: {a.readiness === 'ready' ? 'var(--ok)' : 'var(--idle)'}"></span>
-            <span class="mono id">{agentLabel(a.kind)}</span>
-            <span class="grow"></span>
-            {#if store.agent === a.kind}<span class="mono check">✓</span>{/if}
-            {#if a.readiness !== "ready"}<span class="mono dim">{a.readiness.replace("_", " ")}</span>{/if}
-          </button>
-        {/each}
-      </div>
-    </Popover>
-
-    <!-- workers: what lanes will run on; the track form changes it -->
-    <button class="chip" onclick={() => (store.view = "edit-track")} title={t("composer.workersTitle")}>
-      <span class="mono dim">{t("composer.workers")}</span>
-      <span class="mono">{agentLabel(workers.agent)}</span>
-      {#if workers.model}<span class="mono dim">{workers.model}</span>{/if}
-      {#if workers.mode}<span class="mono mode">{modeKey(workers.mode)}</span>{/if}
-    </button>
+    <AgentPicker />
 
     <span class="chip static" title={store.currentTrack?.cwd}>
       <Icon name="folder" size={14} />
@@ -141,50 +74,6 @@
           <div class="row dim">{t("composer.noRuns")}</div>
         {/if}
       </div>
-    </Popover>
-
-    <!-- model -->
-    <Popover bind:open={modelOpen} align="right" width={360}>
-      {#snippet trigger()}
-        <button class="chip" onclick={() => (modelOpen = !modelOpen)} title={t("composer.modelTitle")} aria-haspopup="listbox" aria-expanded={modelOpen}>
-          <span class="mono">{store.modelName || "default"}</span>
-        </button>
-      {/snippet}
-      <input class="filter" type="text" bind:value={filter} placeholder={t("composer.filter")} aria-label={t("composer.modelFilter")} />
-      <div class="list" role="listbox" aria-label={t("composer.model")}>
-        {#if !store.modelOption}
-          <div class="mono dim ph">{t("composer.noModels")}</div>
-        {/if}
-        {#each choices as c (c.id)}
-          <button
-            class="opt model"
-            class:on={store.modelId === c.id}
-            role="option"
-            aria-selected={store.modelId === c.id}
-            onclick={() => {
-              if (store.modelOption) store.setConductorOption(store.modelOption.id, c.id);
-              modelOpen = false;
-            }}
-          >
-            <span class="line">
-              <span class="mono id">{c.id}</span>
-              {#if store.modelId === c.id}<span class="mono check">✓</span>{/if}
-              <span class="grow"></span>
-              {#if c.group}<span class="mono dim">{c.group}</span>{/if}
-            </span>
-            <span class="desc">{c.name}{c.description ? ` · ${c.description}` : ""}</span>
-          </button>
-        {/each}
-      </div>
-      {#if store.modelOption}
-        <div class="foot mono">
-          <span class="dim">{store.modelOption.name}</span>
-          <span class="grow"></span>
-          {#if store.currentTrack?.conductor_config[store.modelOption.id]}
-            <button class="link" onclick={() => store.setConductorOption(store.modelOption!.id, "")}>{t("composer.defaultModel")}</button>
-          {/if}
-        </div>
-      {/if}
     </Popover>
   </div>
 </div>
@@ -258,17 +147,6 @@
     color: var(--lab);
   }
 
-  .chip .mode {
-    color: var(--lab);
-    border: 1px solid var(--line);
-    padding: 1px 5px;
-    font-size: 9px;
-  }
-
-  .chip .dim {
-    color: var(--lab);
-  }
-
   .path {
     max-width: 320px;
     overflow: hidden;
@@ -321,87 +199,6 @@
     padding: 12px 14px 8px;
   }
 
-  .list {
-    min-height: 0;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    padding-bottom: 6px;
-  }
-
-  .opt {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 14px;
-    background: transparent;
-    border: 0;
-    border-left: 2px solid transparent;
-    text-align: left;
-    color: var(--dim);
-    font-size: 12px;
-  }
-
-  .opt:hover:not(:disabled) {
-    color: var(--hi);
-    background: var(--sel);
-  }
-
-  .opt.on {
-    color: var(--hi);
-    border-left-color: var(--acc);
-  }
-
-  .opt:disabled {
-    opacity: 0.55;
-    cursor: default;
-  }
-
-  .opt.model {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 3px;
-  }
-
-  .line {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .id {
-    font-size: 12px;
-    color: inherit;
-  }
-
-  .check {
-    color: var(--acct);
-    font-size: 11px;
-  }
-
-  .desc {
-    font-size: 11px;
-    color: var(--lab);
-  }
-
-  .dim {
-    color: var(--lab);
-    font-size: 10px;
-  }
-
-  .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .filter {
-    margin: 10px 14px 6px;
-    height: 30px;
-    font-size: 12px;
-  }
-
   .kv {
     display: flex;
     flex-direction: column;
@@ -417,27 +214,9 @@
   }
 
   .row .dim {
+    color: var(--lab);
     width: 40px;
     flex-shrink: 0;
     font-size: 11px;
-  }
-
-  .foot {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 14px 10px;
-    border-top: 1px solid var(--line);
-    font-size: 10px;
-  }
-
-  .link {
-    background: transparent;
-    border: 0;
-    color: var(--acct);
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 0.1em;
-    padding: 0;
   }
 </style>
