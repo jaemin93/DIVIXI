@@ -7,7 +7,6 @@
   import Inspector from "./lib/Inspector.svelte";
   import Setup from "./lib/Setup.svelte";
   import Settings from "./lib/Settings.svelte";
-  import Library from "./lib/Library.svelte";
   import LaneView from "./lib/LaneView.svelte";
   import TrackForm from "./lib/TrackForm.svelte";
   import TrackHeader from "./lib/TrackHeader.svelte";
@@ -41,8 +40,6 @@
     <Rail />
     {#if store.view === "settings"}
       <Settings />
-    {:else if store.view === "library"}
-      <Library />
     {:else if store.view === "lane"}
       {#if store.trackListOpen}
         <TrackList />

@@ -28,7 +28,7 @@ crates/acp/         ACP 클라이언트 — 에이전트 기동, 세션, 스트�
 crates/agents/      에이전트 카탈로그 — CLI 탐색, ACP 프로브·로그인, Antigravity 서버 다운로드
 crates/mcp/         앱 내장 HTTP MCP 서버 — 지휘자에게 주는 도구
 crates/store/       이벤트 스토어 — SQLite, append-only 로그 + runs 투영 + FTS5
-src-tauri/          앱 셸 — run 식별자, 이벤트 영속화, 코얼레싱, IPC, 지휘자, 라이브러리
+src-tauri/          앱 셸 — run 식별자, 이벤트 영속화, 코얼레싱, IPC
 ui/                 Svelte 5 — 타임라인, 인스펙터, 두 테마
 refs/               디자인 레퍼런스
 ```
@@ -65,16 +65,9 @@ cargo run -p orchestra-acp --example smoke -- "Reply with exactly: ORCHESTRA OK"
 | GitHub Copilot | 설치된 `copilot.exe --acp` | agent · plan · **autopilot** |
 | Antigravity | Google의 `agy_acp_server` zip을 앱 데이터 폴더에 다운로드 | default · auto_edit · **yolo** |
 
-트랙 설정(헤더의 "편집", 또는 컴포저 왼쪽 칩)에서 지휘자와 워커 각각의 에이전트, 모델, 권한
+트랙 설정(헤더의 "편집", 또는 컴포저의 워커 칩)에서 지휘자와 워커 각각의 에이전트, 모델, 권한
 모드, 그 밖에 에이전트가 알리는 세션 옵션(추론 강도 등)을 고릅니다. 고르지 않은 옵션은
 에이전트 기본값이고, 모드를 고르지 않으면 묻지 않는 쪽을 씁니다.
-
-**Library.** 레일의 Library에서 네 에이전트가 함께 쓰는 것을 관리합니다. MCP 서버는 Orchestra가
-목록을 갖고 모든 지휘자·레인 세션에 ACP `session/new`로 넣어 줍니다(에이전트 설정 파일은 손대지
-않고, 각 에이전트가 자기 설정에 가진 서버는 읽기 전용으로 보여 주며 가져올 수 있습니다). 스킬은
-`<앱 데이터>/skills/<이름>/SKILL.md` 한 벌을 두고 고른 에이전트의 사용자 스킬 폴더
-(`~/.claude/skills`, `~/.codex/skills`, `~/.copilot/skills`, `~/.gemini/skills`)로 복사합니다.
-복사본의 `.orchestra` 표식으로 Orchestra가 만든 것만 갱신·삭제합니다.
 
 감지는 세 단계입니다. CLI 실행 파일 탐색(프로세스 PATH + Windows 레지스트리 PATH +
 알려진 설치 경로), ACP `initialize`(이름·버전·로그인 방법), `session/new`(성공이면

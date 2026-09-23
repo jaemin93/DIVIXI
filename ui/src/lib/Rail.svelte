@@ -22,7 +22,7 @@
       label: "rail.tracks",
       go: () => {
         // Second click on the active item folds the list away.
-        if (store.view !== "settings" && store.view !== "library" && store.trackListOpen) store.setTrackList(false);
+        if (store.view !== "settings" && store.trackListOpen) store.setTrackList(false);
         else {
           store.view = store.currentTrack ? "track" : "new-track";
           store.setTrackList(true);
@@ -31,7 +31,6 @@
     },
     { id: "drafts", icon: "draft", label: "rail.drafts", soon: true },
     { id: "wrapup", icon: "wrapup", label: "rail.wrapup", soon: true },
-    { id: "library", icon: "library", label: "rail.library", go: () => store.openLibrary() },
   ];
 
   const secondary: Item[] = [
@@ -41,9 +40,8 @@
   const collapsed = $derived(store.railCollapsed);
 
   function active(item: Item): boolean {
-    if (item.id === "tracks") return store.view !== "settings" && store.view !== "library";
+    if (item.id === "tracks") return store.view !== "settings";
     if (item.id === "settings") return store.view === "settings";
-    if (item.id === "library") return store.view === "library";
     return false;
   }
 

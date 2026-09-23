@@ -182,58 +182,7 @@ export type Run = {
   segments: Segment[];
 };
 
-export type View = "track" | "settings" | "lane" | "new-track" | "edit-track" | "library";
-
-/** Library sections, in the library column. */
-export type LibrarySection = "mcp" | "skills";
-
-/** Mirrors `library::McpServerDef`: an MCP server every session gets through ACP. */
-export type McpServerDef = {
-  name: string;
-  transport: "stdio" | "http";
-  command: string;
-  args: string[];
-  env: [string, string][];
-  url: string;
-  headers: [string, string][];
-  enabled: boolean;
-  /** Agent ids; empty means every agent. */
-  agents: string[];
-};
-
-/** Mirrors `library::AgentMcp`: a server an agent has in its own config. */
-export type AgentMcp = {
-  agent: string;
-  name: string;
-  transport: string;
-  command: string;
-  args: string[];
-  url: string;
-  source: string;
-  in_library: boolean;
-};
-
-/** Mirrors `library::SkillInfo`. */
-export type SkillInfo = {
-  name: string;
-  description: string;
-  path: string;
-  installed: string[];
-  foreign: string[];
-};
-
-/** Mirrors `library::AgentSkill`. */
-export type AgentSkill = {
-  agent: string;
-  name: string;
-  description: string;
-  path: string;
-  managed: boolean;
-  in_library: boolean;
-};
-
-/** Mirrors `library::SyncReport`. */
-export type SyncReport = { copied: string[]; removed: string[]; skipped: string[] };
+export type View = "track" | "settings" | "lane" | "new-track" | "edit-track";
 
 /** Prefix of conductor prompts Orchestra injects itself (lane reports). Language-neutral. */
 export const REPORT_PREFIX = "[lane-report]";
@@ -260,8 +209,6 @@ export type AppInfo = {
   version: string;
   db_path: string;
   adapters_dir: string;
-  skills_dir: string;
-  agent_skill_dirs: Record<string, string>;
   workspace: string;
   runs: number;
 };
@@ -293,16 +240,6 @@ class Store {
   trackListOpen = $state(true);
   /** Which settings section is open. */
   settingsSection = $state<SettingsSection>("overview");
-  /** Which library section is open. */
-  librarySection = $state<LibrarySection>("mcp");
-  /** The library: MCP servers and skills, and what agents hold themselves. */
-  mcpServers = $state<McpServerDef[]>([]);
-  agentMcp = $state<AgentMcp[]>([]);
-  skills = $state<SkillInfo[]>([]);
-  agentSkills = $state<AgentSkill[]>([]);
-  /** The last skill sync's outcome, shown until the next action. */
-  syncReport = $state<SyncReport | null>(null);
-  libraryLoading = $state(false);
   /** Lane whose session is open in the main area (view === "lane"). */
   openLane = $state("");
   /** Conversation text size. Persisted. */
@@ -588,88 +525,6 @@ class Store {
     this.settingsSection = section;
     this.view = "settings";
     void this.loadInfo();
-  }
-
-  /** Open the library on a section and refresh it. */
-  openLibrary(section: LibrarySection = this.librarySection) {
-    this.librarySection = section;
-    this.view = "library";
-    void this.loadInfo();
-    void this.loadLibrary();
-  }
-
-  /** Reload MCP servers and skills, both the library's and the agents' own. */
-  async loadLibrary() {
-    this.libraryLoading = true;
-    try {
-      const [mcp, agentMcp, skills, agentSkills] = await Promise.all([
-        invoke<McpServerDef[]>("list_mcp_servers"),
-        invoke<AgentMcp[]>("agent_mcp_servers"),
-        invoke<SkillInfo[]>("list_skills"),
-        invoke<AgentSkill[]>("agent_skills"),
-      ]);
-      this.mcpServers = mcp;
-      this.agentMcp = agentMcp;
-      this.skills = skills;
-      this.agentSkills = agentSkills;
-    } catch (err) {
-      this.lastError = String(err);
-    } finally {
-      this.libraryLoading = false;
-    }
-  }
-
-  private async libraryCall<T>(op: () => Promise<T>): Promise<T | undefined> {
-    this.lastError = "";
-    this.syncReport = null;
-    try {
-      const out = await op();
-      await this.loadLibrary();
-      return out;
-    } catch (err) {
-      this.lastError = String(err);
-      return undefined;
-    }
-  }
-
-  /** Add or replace an MCP server; sessions opened from now on get it. */
-  saveMcp(def: McpServerDef) {
-    return this.libraryCall(() => invoke<McpServerDef[]>("save_mcp_server", { def }));
-  }
-
-  deleteMcp(name: string) {
-    return this.libraryCall(() => invoke<McpServerDef[]>("delete_mcp_server", { name }));
-  }
-
-  importMcp(agent: string, name: string) {
-    return this.libraryCall(() => invoke<McpServerDef[]>("import_mcp_server", { agent, name }));
-  }
-
-  /** Copy the library's skills into the given agents' skill folders. */
-  async syncSkills(agents: string[]) {
-    const report = await this.libraryCall(() => invoke<SyncReport>("sync_skills", { agents }));
-    if (report) this.syncReport = report;
-  }
-
-  createSkill(name: string, description: string) {
-    return this.libraryCall(() => invoke<string>("create_skill", { name, description }));
-  }
-
-  importSkill(agent: string, name: string) {
-    return this.libraryCall(() => invoke<string>("import_skill", { agent, name }));
-  }
-
-  removeSkill(name: string) {
-    return this.libraryCall(() => invoke<string[]>("remove_skill", { name }));
-  }
-
-  /** Show a library folder in the file manager. */
-  async reveal(path: string) {
-    try {
-      await invoke("reveal_path", { path });
-    } catch (err) {
-      this.lastError = String(err);
-    }
   }
 
   async loadInfo() {

@@ -449,24 +449,19 @@ fn session_options(
             config.push((id.clone(), value.clone()));
         }
     }
-    // The library's servers for this agent, plus Orchestra's own tools for
-    // a conductor.
-    let mut mcp_servers = crate::library::mcp_for_agent(&state.store, agent);
-    if let Some(m) = mcp {
-        mcp_servers.push(
-            McpHttp {
-                name: "orchestra".to_string(),
-                url: m.url(),
-                headers: vec![m.auth_header()],
-            }
-            .into(),
-        );
-    }
     SessionOptions {
         cwd: PathBuf::from(cwd),
         mode,
         config,
-        mcp_servers,
+        mcp_servers: mcp
+            .map(|m| {
+                vec![McpHttp {
+                    name: "orchestra".to_string(),
+                    url: m.url(),
+                    headers: vec![m.auth_header()],
+                }]
+            })
+            .unwrap_or_default(),
         resume: None,
     }
 }

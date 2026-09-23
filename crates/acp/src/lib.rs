@@ -26,7 +26,7 @@ use tokio::sync::mpsc::UnboundedSender;
 mod process;
 mod session;
 pub use process::{spawn as spawn_agent, AgentProcess};
-pub use session::{AgentSession, McpHttp, McpServerSpec, McpStdio, SessionOptions};
+pub use session::{AgentSession, McpHttp, SessionOptions};
 
 /// How to launch an agent subprocess.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
