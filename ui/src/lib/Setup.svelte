@@ -31,7 +31,7 @@
     <aside class="side">
       <div class="mlab">{t("setup.step", { step: step === 1 ? "01" : "02", n: step })}</div>
       <div class="hero">
-        <Mark size={168} ink="var(--txt)" live={store.detecting} />
+        <Mark size={168} live={store.detecting} />
       </div>
       {#if step === 1}
         <h1 id="setup-title" class="serif">{t("setup.agentsTitle")}</h1>

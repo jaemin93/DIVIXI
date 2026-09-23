@@ -118,7 +118,7 @@
   <div class="sheet">
     <div class="mlab">{editing ? t("newtrack.editTitle") : first ? t("newtrack.first") : t("newtrack.title")}</div>
     <div class="titlerow">
-      <Mark size={28} ink="var(--hi)" />
+      <Mark size={28} />
       <h1 class="serif">{editing ? track?.name : first ? t("newtrack.first") : t("newtrack.title")}</h1>
     </div>
     <p class="blurb">{editing ? t("newtrack.editBlurb") : t("newtrack.blurb")}</p>

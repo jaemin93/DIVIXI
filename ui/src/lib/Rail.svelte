@@ -56,7 +56,7 @@
     <SplitHandle edge="right" width={store.railWidth} min={160} max={320} reset={200} label={t("rail.width")} onchange={(px, persist) => store.setRailWidth(px, persist)} />
   {/if}
   <div class="top">
-    <span class="brand" title="Divixi"><Mark size={14} live={store.anyLive} />{#if !collapsed}<span class="mono name">DIVIXI</span>{/if}</span>
+    <span class="brand" title="Divixi"><Mark size={16} live={store.anyLive} />{#if !collapsed}<span class="mono name">DIVIXI</span>{/if}</span>
     <span class="grow"></span>
     <button
       class="toggle"

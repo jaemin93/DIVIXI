@@ -55,7 +55,7 @@
 <div class="scroll" bind:this={scroller}>
   {#if store.trackRuns.length === 0}
     <div class="empty">
-      <div class="emptymark"><Mark size={56} ink="var(--lines)" /></div>
+      <div class="emptymark"><Mark size={56} /></div>
       <div class="mlab">{t("timeline.empty")}</div>
       <p class="serif">{t("timeline.emptyHint")}</p>
     </div>
