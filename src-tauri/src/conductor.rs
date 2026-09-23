@@ -20,7 +20,7 @@
 //!
 //! Lane work is asynchronous from the conductor's point of view: `spawn_lane`
 //! and `ask_lane` return as soon as the lane has the task, and when the lane
-//! finishes, Orchestra hands its report to the conductor as a new turn. A
+//! finishes, Divixi hands its report to the conductor as a new turn. A
 //! blocking tool would trip the agent's own MCP call timeout on any lane
 //! that runs for minutes, which real work does.
 
@@ -42,7 +42,7 @@ use crate::{pump, AppState};
 /// The lane name conductor turns are recorded under.
 pub const CONDUCTOR_LANE: &str = "conductor";
 
-/// Prefix of conductor prompts that Orchestra itself injects (lane reports).
+/// Prefix of conductor prompts that Divixi itself injects (lane reports).
 /// Language-neutral; the timeline shows these as system lines, not as the
 /// human speaking, and the preamble tells the conductor what it means.
 pub const REPORT_PREFIX: &str = "[lane-report]";
@@ -130,7 +130,7 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
             format!("\n이 트랙의 목적: {intent}\n")
         };
         return format!(
-            r#"당신은 Orchestra의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 레인(lane)이라는 별도의 에이전트 세션에 맡깁니다.
+            r#"당신은 Divixi의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 레인(lane)이라는 별도의 에이전트 세션에 맡깁니다.
 
 트랙 이름: {name}{about}
 규칙:
@@ -156,7 +156,7 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
         format!("\nWhat this track is for: {intent}\n")
     };
     format!(
-        r#"You are Orchestra's conductor. You are the only one who talks to the human; real work is delegated to lanes, which are separate agent sessions.
+        r#"You are Divixi's conductor. You are the only one who talks to the human; real work is delegated to lanes, which are separate agent sessions.
 
 Track: {name}{about}
 Rules:
@@ -456,7 +456,7 @@ fn session_options(
         mcp_servers: mcp
             .map(|m| {
                 vec![McpHttp {
-                    name: "orchestra".to_string(),
+                    name: "divixi".to_string(),
                     url: m.url(),
                     headers: vec![m.auth_header()],
                 }]
@@ -712,7 +712,7 @@ async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_tur
         }
         let spec = st.spec_for(&agent)?;
         // This track's tools, on their own server: every call is scoped.
-        let mcp = McpServer::start("orchestra", tools(app.clone(), track.to_string()))
+        let mcp = McpServer::start("divixi", tools(app.clone(), track.to_string()))
             .await
             .map_err(|e| e.to_string())?;
         let mut opts = session_options(&st, &agent, &info.cwd, &info.conductor_config, Some(&mcp));

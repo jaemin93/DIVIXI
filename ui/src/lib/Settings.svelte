@@ -103,7 +103,7 @@
         <div class="tile">
           <div class="mlab-sm">{t("settings.tile.version")}</div>
           <div class="big mono">{store.info?.version ?? "…"}</div>
-          <div class="sub">orchestra</div>
+          <div class="sub">divixi</div>
         </div>
       </div>
 

@@ -1,6 +1,9 @@
-# Orchestra
+# Divixi
 
-에이전트 오케스트레이션 데스크톱 앱. Rust + Tauri 2 + Svelte 5.
+여러 네이티브 AI 에이전트 세션을 한 사람이 지휘하는 데스크톱. Rust + Tauri 2 + Svelte 5.
+이름은 악보 지시어 *divisi*(한 파트를 독립된 여러 성부로 나눠 연주)에서 s를 x로 바꾼 것입니다. x는 교차와 곱셈, 제공자를 가로질러 하나가 여럿이 되는 것. 지휘자 한
+세션과 대화하면 지휘자가 일을 독립된 워커 세션들로 나눕니다. 코드 안의 크레이트 이름은 아직
+`orchestra-*`입니다.
 
 ## 설계 원칙
 
@@ -77,7 +80,7 @@ cargo run -p orchestra-acp --example smoke -- "Reply with exactly: ORCHESTRA OK"
 
 레인은 에이전트가 광고하는 모드 중 가장 자율적인 것으로 돌아갑니다 — 툴 승인
 프롬프트가 아니라 레인이 스스로 올리는 에스컬레이션만 사람에게 보이는 게 설계
-의도입니다. `ORCHESTRA_ACP_ADAPTER`로 Claude 어댑터 경로를 강제할 수 있습니다.
+의도입니다. `DIVIXI_ACP_ADAPTER`로 Claude 어댑터 경로를 강제할 수 있습니다.
 
 에이전트 프로세스는 `crates/acp`가 직접 띄우고 직접 죽입니다. Windows에서는 Job
 Object로 묶어 자손까지 함께 종료됩니다. Antigravity 서버는 stdin EOF를 무시하므로
@@ -97,7 +100,7 @@ cargo run -p orchestra-agents --example lane -- codex "prompt"  # 특정 에이�
 읽어서 복원하고, 레인 뷰를 열 때만 그 레인 런들의 `events`를 재생합니다 — 막이 저장소
 레벨에서도 지켜집니다. 종료된 런은 프롬프트·출력·툴 제목이 FTS5로 색인됩니다.
 앱이 실행 중이던 런을 남기고 죽으면 다음 기동 때 `failed`로 닫습니다.
-파일은 앱 데이터 폴더의 `orchestra.db`이고 `ORCHESTRA_DB`로 바꿀 수 있습니다
+파일은 앱 데이터 폴더의 `divixi.db`이고 `DIVIXI_DB`로 바꿀 수 있습니다
 (`:memory:`도 됩니다). 저장 경로만 따로 확인하려면:
 
 ```bash

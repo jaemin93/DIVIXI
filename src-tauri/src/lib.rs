@@ -1,4 +1,4 @@
-//! Orchestra desktop shell.
+//! Divixi desktop shell.
 //!
 //! The webview is a view. Everything that decides anything lives in Rust: this
 //! module owns run identity, knows which agents are installed, spawns lanes,
@@ -27,7 +27,7 @@ mod workspace;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(40);
 
 /// Overrides where the event store lives. `:memory:` gives a throwaway store.
-const DB_ENV: &str = "ORCHESTRA_DB";
+const DB_ENV: &str = "DIVIXI_DB";
 
 /// Store key holding the last agent detection result (JSON).
 const AGENTS_META: &str = "agents";
@@ -513,7 +513,7 @@ pub(crate) fn workspace_root() -> PathBuf {
         .unwrap_or(cwd)
 }
 
-/// Open the event store: `ORCHESTRA_DB` if set, else `orchestra.db` in the
+/// Open the event store: `DIVIXI_DB` if set, else `divixi.db` in the
 /// platform app-data directory.
 fn open_store(data_dir: &std::path::Path) -> anyhow::Result<(Store, String)> {
     if let Some(explicit) = std::env::var_os(DB_ENV) {
@@ -526,7 +526,16 @@ fn open_store(data_dir: &std::path::Path) -> anyhow::Result<(Store, String)> {
         return Ok((Store::open(&path)?, path.display().to_string()));
     }
 
-    let path = data_dir.join("orchestra.db");
+    let path = data_dir.join("divixi.db");
+    // The store was orchestra.db before the app was named Divixi.
+    if !path.exists() {
+        for suffix in ["", "-wal", "-shm"] {
+            let old = data_dir.join(format!("orchestra.db{suffix}"));
+            if old.exists() {
+                let _ = std::fs::rename(&old, data_dir.join(format!("divixi.db{suffix}")));
+            }
+        }
+    }
     tracing::info!(path = %path.display(), "opening event store");
     Ok((Store::open(&path)?, path.display().to_string()))
 }
@@ -565,6 +574,17 @@ pub fn run() {
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+            // The app was Orchestra before it was Divixi; its data folder moves along.
+            if !data_dir.exists() {
+                if let Some(old) = data_dir.parent().map(|p| p.join("app.orchestra")) {
+                    if old.is_dir() {
+                        match std::fs::rename(&old, &data_dir) {
+                            Ok(()) => tracing::info!(from = %old.display(), to = %data_dir.display(), "moved the data folder"),
+                            Err(err) => tracing::warn!(%err, "could not move the old data folder; starting empty"),
+                        }
+                    }
+                }
+            }
             std::fs::create_dir_all(&data_dir)?;
             let (store, db_path) = open_store(&data_dir)?;
             let adapters_dir = data_dir.join("adapters");
@@ -576,12 +596,12 @@ pub fn run() {
                 sessions: conductor::Sessions::default(),
             });
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_title("Orchestra");
+                let _ = window.set_title("Divixi");
             }
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("failed to start Orchestra");
+        .expect("failed to start Divixi");
 }
 
 #[cfg(test)]

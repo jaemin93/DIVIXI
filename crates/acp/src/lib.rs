@@ -56,7 +56,7 @@ pub const CLAUDE_ADAPTER_SCRIPT: &str =
     "node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js";
 
 /// Overrides Claude adapter discovery with an explicit path to the entry script.
-const ADAPTER_ENV: &str = "ORCHESTRA_ACP_ADAPTER";
+const ADAPTER_ENV: &str = "DIVIXI_ACP_ADAPTER";
 
 impl AgentSpec {
     /// Run a JavaScript entry script directly under `node`.

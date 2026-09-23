@@ -111,7 +111,7 @@ const ko = {
   "newtrack.autoMode": "자동 · 가장 자율적인 모드 ({mode})",
   "newtrack.agentDefault": "에이전트 기본값 ({value})",
   "newtrack.noOptions": "이 에이전트는 세션 옵션을 알리지 않았습니다. 설정에서 다시 감지하면 갱신됩니다.",
-  "newtrack.modeNote": "모드는 에이전트가 도구를 쓰기 전에 얼마나 묻는지입니다. 자동은 묻지 않는 쪽을 고릅니다. Orchestra는 권한 요청 대신 레인의 명시적 에스컬레이션만 사람에게 올립니다.",
+  "newtrack.modeNote": "모드는 에이전트가 도구를 쓰기 전에 얼마나 묻는지입니다. 자동은 묻지 않는 쪽을 고릅니다. Divixi는 권한 요청 대신 레인의 명시적 에스컬레이션만 사람에게 올립니다.",
 
   // Timeline
   "timeline.empty": "비어 있음",
@@ -309,7 +309,7 @@ const ko = {
   "settings.redetect": "다시 감지",
   "settings.openSetup": "SETUP 열기",
   "settings.agentsNote": "앱을 켜 둔 채 설치하거나 로그인해도 다시 감지하면 반영됩니다. 지휘자는 기본 에이전트로 열립니다. 컴포저에서 바꿀 수 있습니다.",
-  "settings.aboutNote": "ORCHESTRA_DB로 저장소 경로를, ORCHESTRA_ACP_ADAPTER로 Claude 어댑터 경로를 바꿀 수 있습니다.",
+  "settings.aboutNote": "DIVIXI_DB로 저장소 경로를, DIVIXI_ACP_ADAPTER로 Claude 어댑터 경로를 바꿀 수 있습니다.",
 } as const;
 
 export type Key = keyof typeof ko;
@@ -412,7 +412,7 @@ const en: Record<Key, string> = {
   "newtrack.autoMode": "Auto · most autonomous mode ({mode})",
   "newtrack.agentDefault": "Agent default ({value})",
   "newtrack.noOptions": "This agent advertised no session options. Re-detect in settings to refresh.",
-  "newtrack.modeNote": "The mode is how much the agent asks before using tools. Auto picks the one that does not ask. Orchestra raises a lane's explicit escalations to you instead of permission prompts.",
+  "newtrack.modeNote": "The mode is how much the agent asks before using tools. Auto picks the one that does not ask. Divixi raises a lane's explicit escalations to you instead of permission prompts.",
 
   "timeline.empty": "Empty",
   "timeline.emptyHint": "Send the conductor a first message below.",
@@ -602,7 +602,7 @@ const en: Record<Key, string> = {
   "settings.redetect": "Re-detect",
   "settings.openSetup": "Open setup",
   "settings.agentsNote": "Install or log in while the app is open, then re-detect. The conductor opens on the default agent; change it in the composer.",
-  "settings.aboutNote": "ORCHESTRA_DB overrides the store path, ORCHESTRA_ACP_ADAPTER the Claude adapter path.",
+  "settings.aboutNote": "DIVIXI_DB overrides the store path, DIVIXI_ACP_ADAPTER the Claude adapter path.",
 };
 
 const dicts: Record<Lang, Record<Key, string>> = { ko, en };

@@ -268,7 +268,7 @@ impl Store {
         Self::init(conn)
     }
 
-    /// An in-memory store, for tests and `ORCHESTRA_DB=:memory:`.
+    /// An in-memory store, for tests and `DIVISI_DB=:memory:`.
     pub fn in_memory() -> anyhow::Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }

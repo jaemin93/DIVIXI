@@ -4,7 +4,7 @@
 //! Run with:
 //!   cargo run -p orchestra-store --example persist -- "say hello in five words"
 //!
-//! `ORCHESTRA_DB` picks the database file; the default is a temp file that is
+//! `DIVISI_DB` picks the database file; the default is a temp file that is
 //! deleted afterwards.
 
 use orchestra_acp::{run_lane, scrub_inherited_session_env, AgentSpec, LaneSpec};
@@ -31,7 +31,7 @@ async fn run() -> anyhow::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "Reply with exactly: ORCHESTRA OK".to_string());
 
-    let (path, ephemeral) = match std::env::var_os("ORCHESTRA_DB") {
+    let (path, ephemeral) = match std::env::var_os("DIVISI_DB") {
         Some(p) => (std::path::PathBuf::from(p), false),
         None => (
             std::env::temp_dir().join(format!("orchestra-persist-{}.db", std::process::id())),
