@@ -71,10 +71,12 @@
       <div class="mono empty">{t("lane.empty")}</div>
     {/if}
     {#each runs as run (run.id)}
-      <!-- What the conductor sent this lane. -->
-      <div class="turn from">
+      <!-- What the conductor sent this lane: on the right, as the human's words are on the track. -->
+      <div class="from">
         <div class="mlab">{t("lane.conductor")}</div>
-        <div class="ctext"><Markdown source={run.prompt} /></div>
+        <div class="turn bubble">
+          <div class="ctext"><Markdown source={run.prompt} /></div>
+        </div>
       </div>
 
       <!-- How the worker answered, as it happened. -->
@@ -184,8 +186,22 @@
     background: var(--card);
   }
 
-  .turn.from {
-    border-left: 2px solid var(--accln);
+  .from {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    margin-bottom: 18px;
+  }
+
+  .from .mlab {
+    margin-bottom: 7px;
+  }
+
+  .turn.bubble {
+    max-width: 540px;
+    margin-bottom: 0;
+    border: 1px solid var(--accln);
+    border-bottom: 2px solid var(--acc);
     background: var(--accbg);
   }
 

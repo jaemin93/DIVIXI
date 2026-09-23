@@ -43,8 +43,8 @@ const ko = {
   "tracks.lanes": "{n} lanes",
 
   // Track header
-  "track.activate": "활성화 (지휘자 세션 열기)",
-  "track.deactivate": "비활성화 (지휘자 세션 닫기)",
+  "track.activate": "활성화",
+  "track.deactivate": "비활성화",
   "track.active": "활성 · 지휘자 세션 열림",
   "track.inactive": "비활성 · 첫 메시지나 우클릭 → 활성화로 열립니다",
   "track.rename": "이름 변경",
@@ -323,8 +323,8 @@ const en: Record<Key, string> = {
   "tracks.lanes": "{n} lanes",
 
   // Track header
-  "track.activate": "Activate (open conductor session)",
-  "track.deactivate": "Deactivate (close conductor session)",
+  "track.activate": "Activate",
+  "track.deactivate": "Deactivate",
   "track.active": "Active · conductor session open",
   "track.inactive": "Inactive · opens on the first message or right-click → Activate",
   "track.rename": "Rename",
