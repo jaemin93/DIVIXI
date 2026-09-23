@@ -11,7 +11,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 const SIZE = 512;
 const CLEAR = [0, 0, 0, 0];
 const ACCENT = [224, 49, 39, 255];
-const STAVE = [200, 181, 143, 255];
+const STAVE = [168, 132, 61, 255];
 
 const px = Buffer.alloc(SIZE * SIZE * 4);
 const put = (x, y, [r, g, b, a]) => {

@@ -28,7 +28,7 @@
   // No tile: the staves are a deep beige that reads on the dark theme's page
   // and on the light theme's alike, and the X is the accent. Fixed colours,
   // so the rail and the app icon are one drawing.
-  const STAVE = "#c8b58f";
+  const STAVE = "#a8843d";
   const ACCENT = "#e03127";
 </script>
 
