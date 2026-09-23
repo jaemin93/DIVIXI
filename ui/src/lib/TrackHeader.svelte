@@ -17,7 +17,7 @@
     {#if track.color}<span class="swatch" style="background: {track.color}"></span>{/if}
     <span class="mlab">#{String(index).padStart(2, "0")} / TRACK</span>
     <span class="mono meta">{agentLabel(track.agent)}</span>
-    {#each track.tags as tag (tag)}<span class="mono tag">{tag}</span>{/each}
+    {#each track.tags as tag (tag)}<span class="mono tag" style="color: {store.tagColor(tag)}; border-color: {store.tagColor(tag)}">{tag}</span>{/each}
     <span class="grow"></span>
     <button class="tog" class:on={store.panelOpen} type="button" title={t("ws.toggle")} aria-pressed={store.panelOpen} onclick={() => store.setPanel(!store.panelOpen)}>
       <Icon name="panel" size={14} />
@@ -57,8 +57,7 @@
   .tag {
     font-size: 9px;
     letter-spacing: 0.1em;
-    color: var(--dim);
-    border: 1px solid var(--line);
+    border: 1px solid;
     padding: 1px 6px;
   }
 

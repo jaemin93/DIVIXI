@@ -5,14 +5,15 @@
 
   /**
    * Tagging a track, in the middle of the screen as Kiro Crew does it: the
-   * tags the user has made so far (every tag on any track), each toggling
-   * on this track, and a line to make a new one. No presets.
+   * user's tags (a persisted pool, each with a colour dealt at creation),
+   * each toggling on this track, and a line to make a new one. No presets.
    */
   let draft = $state("");
   let input = $state<HTMLInputElement>();
 
   const track = $derived(store.tracks.find((x) => x.id === store.tagDialog));
-  const pool = $derived(store.allTags);
+  const pool = $derived(store.tagPool);
+  let confirmDelete = $state("");
 
   $effect(() => {
     input?.focus();
@@ -30,10 +31,16 @@
 
   async function add(e: Event) {
     e.preventDefault();
-    const tag = draft.trim();
-    if (!track || !tag) return;
+    const name = draft.trim();
+    if (!track || !name) return;
     draft = "";
-    if (!track.tags.includes(tag)) await store.updateTrack(track.id, { tags: [...track.tags, tag] });
+    const tag = await store.createTag(name);
+    if (tag && !track.tags.includes(tag.name)) await store.updateTrack(track.id, { tags: [...track.tags, tag.name] });
+  }
+
+  async function remove(name: string) {
+    confirmDelete = "";
+    await store.deleteTag(name);
   }
 
   function onKey(e: KeyboardEvent) {
@@ -58,14 +65,22 @@
       </div>
 
       <div class="list">
-        {#each pool as tag (tag)}
-          {@const on = track.tags.includes(tag)}
-          <button class="row" class:on role="checkbox" aria-checked={on} onclick={() => toggle(tag)}>
-            <span class="box" class:on></span>
-            <span class="mono name">{tag}</span>
-            <span class="grow"></span>
-            <span class="mono count">{store.tracks.filter((x) => x.tags.includes(tag)).length}</span>
-          </button>
+        {#each pool as tag (tag.name)}
+          {@const on = track.tags.includes(tag.name)}
+          <div class="row" class:on>
+            <button class="pickrow" role="checkbox" aria-checked={on} onclick={() => toggle(tag.name)}>
+              <span class="tdot" style="background: {tag.color}"></span>
+              <span class="mono name">{tag.name}</span>
+              <span class="grow"></span>
+              {#if on}<span class="mono check">✓</span>{/if}
+              <span class="mono count">{store.tracks.filter((x) => x.tags.includes(tag.name)).length}</span>
+            </button>
+            {#if confirmDelete === tag.name}
+              <button class="del confirm mono" onclick={() => remove(tag.name)}>{t("track.confirmDelete")}</button>
+            {:else}
+              <button class="del" onclick={() => (confirmDelete = tag.name)} title={t("track.deleteTag")} aria-label={t("track.deleteTag")}><Icon name="close" size={10} /></button>
+            {/if}
+          </div>
         {/each}
         {#if pool.length === 0}
           <div class="mono empty">{t("track.noTags")}</div>
@@ -147,15 +162,8 @@
   }
 
   .row {
-    width: 100%;
-    height: 32px;
     display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 0 14px;
-    background: transparent;
-    border: 0;
-    text-align: left;
+    align-items: stretch;
     color: var(--dim);
   }
 
@@ -168,17 +176,59 @@
     color: var(--hi);
   }
 
-  /* A square box; filled when the tag is on this track. */
-  .box {
-    width: 10px;
-    height: 10px;
-    flex-shrink: 0;
-    border: 1px solid var(--lines);
+  .pickrow {
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 8px 0 14px;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    color: inherit;
   }
 
-  .box.on {
-    background: var(--acc);
-    border-color: var(--acc);
+  .tdot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .check {
+    color: var(--hi);
+    font-size: 11px;
+  }
+
+  /* Removing a tag from the pool, on hover; one more press to confirm. */
+  .del {
+    width: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 0;
+    color: var(--lab);
+    opacity: 0;
+  }
+
+  .row:hover .del,
+  .del.confirm {
+    opacity: 1;
+  }
+
+  .del.confirm {
+    width: auto;
+    padding: 0 10px;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    color: var(--acct);
+  }
+
+  .del:hover {
+    color: var(--hi);
   }
 
   .name {

@@ -60,6 +60,9 @@ export type TrackPatch = Partial<{
   tags: string[];
 }>;
 
+/** A tag the user made: its name and the colour it was dealt. */
+export type TagDef = { name: string; color: string };
+
 /** Colours a track can carry in the list; muted enough for both themes. */
 export const TRACK_COLORS = ["#7aa2f7", "#73daca", "#9ece6a", "#e0af68", "#ff9e64", "#f7768e", "#bb9af7", "#c0caf5"];
 
@@ -455,12 +458,44 @@ class Store {
   track = $state("");
   /** Track whose tag dialog is open; "" means closed. */
   tagDialog = $state("");
+  /** The user's tags, each with a colour; persisted as the `tags` setting. */
+  tagPool = $state<TagDef[]>([]);
 
-  /** Every tag the user has put on any track, sorted; the pool the dialog offers. */
-  get allTags(): string[] {
-    const set = new Set<string>();
-    for (const tr of this.tracks) for (const tag of tr.tags) set.add(tag);
-    return [...set].sort((a, b) => a.localeCompare(b));
+  /** A tag's colour, or the neutral label colour for one not in the pool. */
+  tagColor(name: string): string {
+    return this.tagPool.find((t) => t.name === name)?.color ?? "var(--lab)";
+  }
+
+  private async persistTags() {
+    try {
+      await invoke("set_setting", { key: "tags", value: JSON.stringify(this.tagPool) });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Make a tag with a colour drawn at random, avoiding ones already in use while possible. */
+  async createTag(name: string): Promise<TagDef | undefined> {
+    const clean = name.trim();
+    if (!clean) return undefined;
+    const existing = this.tagPool.find((t) => t.name === clean);
+    if (existing) return existing;
+    const used = new Set(this.tagPool.map((t) => t.color));
+    const free = TRACK_COLORS.filter((c) => !used.has(c));
+    const pick = free.length ? free : TRACK_COLORS;
+    const tag = { name: clean, color: pick[Math.floor(Math.random() * pick.length)] };
+    this.tagPool = [...this.tagPool, tag];
+    await this.persistTags();
+    return tag;
+  }
+
+  /** Drop a tag from the pool and from every track carrying it. */
+  async deleteTag(name: string) {
+    this.tagPool = this.tagPool.filter((t) => t.name !== name);
+    await this.persistTags();
+    for (const tr of this.tracks) {
+      if (tr.tags.includes(name)) await this.updateTrack(tr.id, { tags: tr.tags.filter((x) => x !== name) });
+    }
   }
   lastError = $state("");
   restored = $state(false);
@@ -788,7 +823,7 @@ class Store {
       if (this.themePref === "system") this.applyTheme();
     });
     try {
-      const [summaries, tracks, savedTrack, agents, theme, rail, tracklist, chatFont, panelWidth, railWidth, trackListWidth, uiFont, zoom, language, panel] =
+      const [summaries, tracks, savedTrack, agents, theme, rail, tracklist, chatFont, panelWidth, railWidth, trackListWidth, uiFont, zoom, language, panel, tagsJson] =
         await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<Track[]>("list_tracks"),
@@ -805,6 +840,7 @@ class Store {
         invoke<string | null>("get_setting", { key: "zoom" }),
         invoke<string | null>("get_setting", { key: "language" }),
         invoke<string | null>("get_setting", { key: "panel" }),
+        invoke<string | null>("get_setting", { key: "tags" }),
       ]);
       if (language === "system" || language === "ko" || language === "en") this.langPref = language;
       i18n.lang = this.langPref === "system" ? systemLang() : this.langPref;
@@ -816,6 +852,14 @@ class Store {
       const w = Number(panelWidth);
       if (Number.isFinite(w) && w > 0) this.setPanelWidth(w);
       this.panelOpen = panel === "open";
+      try {
+        const pool = tagsJson ? (JSON.parse(tagsJson) as unknown) : [];
+        if (Array.isArray(pool)) this.tagPool = pool.filter((t) => t && typeof t.name === "string" && typeof t.color === "string");
+      } catch {
+        this.tagPool = [];
+      }
+      // Tags on tracks that predate the pool (or lost it) still get a colour.
+      for (const tr of tracks) for (const tag of tr.tags) if (!this.tagPool.some((t) => t.name === tag)) void this.createTag(tag);
       const rw = Number(railWidth);
       if (Number.isFinite(rw) && rw > 0) this.setRailWidth(rw);
       const tw = Number(trackListWidth);

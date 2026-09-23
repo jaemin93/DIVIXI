@@ -548,3 +548,24 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("failed to start Orchestra");
 }
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+
+    #[test]
+    fn a_tags_only_patch_from_json_updates_the_track() {
+        let store = Store::in_memory().unwrap();
+        let created = store
+            .create_track(&TrackPatch { name: Some("t".into()), cwd: Some(".".into()), agent: Some("claude_code".into()), ..Default::default() })
+            .unwrap();
+        let mut patch: TrackPatch = serde_json::from_str(r#"{"tags":["rust","study"]}"#).unwrap();
+        check_patch(&mut patch).unwrap();
+        let after = store.update_track(&created.id, &patch).unwrap();
+        assert_eq!(after.tags, vec!["rust", "study"]);
+        let mut patch: TrackPatch = serde_json::from_str(r##"{"color":"#7aa2f7"}"##).unwrap();
+        check_patch(&mut patch).unwrap();
+        let after = store.update_track(&created.id, &patch).unwrap();
+        assert_eq!((after.color.as_str(), after.tags.len()), ("#7aa2f7", 2));
+    }
+}

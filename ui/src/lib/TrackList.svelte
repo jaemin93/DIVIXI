@@ -174,10 +174,16 @@
         </button>
         <button class="pick" onclick={() => store.selectTrack(tr.id)} title={tr.intent}>
           <span class="dot" class:pulse={tr.live} style="background: {tr.live ? 'var(--ok)' : 'var(--idle)'}"></span>
-          <span class="name">{tr.name}</span>
-          {#if tr.tags.length}
-            <span class="mono tags" title={tr.tags.join(", ")}>{tr.tags.slice(0, 2).join(" · ")}{tr.tags.length > 2 ? ` +${tr.tags.length - 2}` : ""}</span>
-          {/if}
+          <span class="lines">
+            {#if tr.tags.length}
+              <span class="tags">
+                {#each tr.tags as tag (tag)}
+                  <span class="mono chip" style="color: {store.tagColor(tag)}"><span class="tdot" style="background: {store.tagColor(tag)}"></span>{tag}</span>
+                {/each}
+              </span>
+            {/if}
+            <span class="name">{tr.name}</span>
+          </span>
           <span class="mono count">{tr.runs}</span>
         </button>
       </div>
@@ -320,7 +326,7 @@
 
   .track {
     width: 100%;
-    height: 40px;
+    min-height: 40px;
     display: flex;
     align-items: center;
     gap: 4px;
@@ -398,20 +404,47 @@
   }
 
   .name {
-    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
+  .lane .name {
+    flex: 1;
+  }
+
+  .lines {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+  }
+
+  /* Tags sit in a small line above the name, each in its own colour. */
   .tags {
-    max-width: 40%;
+    display: flex;
+    gap: 8px;
     overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
+    line-height: 1;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: 9px;
     letter-spacing: 0.08em;
-    color: var(--lab);
+    flex-shrink: 0;
+  }
+
+  .tdot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
   }
 
   .meta {
