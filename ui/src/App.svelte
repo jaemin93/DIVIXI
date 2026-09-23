@@ -4,7 +4,7 @@
   import TrackList from "./lib/TrackList.svelte";
   import Timeline from "./lib/Timeline.svelte";
   import Composer from "./lib/Composer.svelte";
-  import Inspector from "./lib/Inspector.svelte";
+  import Workspace from "./lib/Workspace.svelte";
   import Setup from "./lib/Setup.svelte";
   import Settings from "./lib/Settings.svelte";
   import LaneView from "./lib/LaneView.svelte";
@@ -66,8 +66,8 @@
         <Timeline />
         <Composer />
       </main>
-      {#if store.openRun}
-        <Inspector run={store.openRun} />
+      {#if store.panelOpen}
+        <Workspace />
       {/if}
     {/if}
   </div>

@@ -204,6 +204,29 @@ export const ZOOM_STEP = 10;
 /** Settings sections, in the settings column. */
 export type SettingsSection = "overview" | "appearance" | "chat" | "agents" | "about";
 
+/** Mirrors `workspace::Entry`: one file or folder, path relative to the track folder. */
+export type WsEntry = { path: string; name: string; dir: boolean; size: number };
+
+/** Mirrors `workspace::FileContent`. */
+export type WsFile = {
+  path: string;
+  name: string;
+  size: number;
+  kind: "markdown" | "text" | "image" | "binary" | "large";
+  ext: string;
+  text: string | null;
+  data_url: string | null;
+};
+
+/** Mirrors `workspace::Change`. */
+export type WsChange = { path: string; code: string; untracked: boolean; from: string | null };
+
+/** Mirrors `workspace::GitStatus`. */
+export type WsGit = { repo: boolean; branch: string; changes: WsChange[] };
+
+/** What the side panel shows: git changes, the file tree, or an open file. */
+export type PanelTab = "changes" | "files" | "file";
+
 /** Mirrors the `app_info` command. */
 export type AppInfo = {
   version: string;
@@ -251,10 +274,29 @@ class Store {
   /** Native webview zoom in percent. Persisted. */
   zoom = $state(100);
   info = $state<AppInfo | null>(null);
-  /** Column widths in px: the rail (expanded), the tracks column, the inspector. Persisted. */
+  /** Column widths in px: the rail (expanded), the tracks column, the side panel. Persisted. */
   railWidth = $state(200);
   trackListWidth = $state(264);
-  inspectorWidth = $state(430);
+  panelWidth = $state(460);
+
+  /** The side panel on the track: the working folder as files and changes. Persisted. */
+  panelOpen = $state(false);
+  panelTab = $state<PanelTab>("files");
+  /** Open file tabs, relative paths, in opening order; `activeFile` is the one shown. */
+  openFiles = $state<string[]>([]);
+  activeFile = $state("");
+  /** Show the tree beside an open file, as Kiro does. */
+  panelTree = $state(true);
+  tree = $state<WsEntry[]>([]);
+  treeLoading = $state(false);
+  git = $state<WsGit | null>(null);
+  gitLoading = $state(false);
+  /** The change whose diff is shown. */
+  diffPath = $state("");
+  diffs = $state<Record<string, string>>({});
+  files = $state<Record<string, WsFile>>({});
+  /** Markdown files render as a preview unless the raw text is asked for. */
+  rawMarkdown = $state<Record<string, boolean>>({});
 
   private persistWidth(key: string, value: number) {
     invoke("set_setting", { key, value: String(value) }).catch((err) => {
@@ -272,10 +314,130 @@ class Store {
     if (persist) this.persistWidth("tracklist_width", this.trackListWidth);
   }
 
-  setInspectorWidth(px: number, persist = false) {
-    const max = Math.max(360, Math.floor(window.innerWidth * 0.6));
-    this.inspectorWidth = Math.min(max, Math.max(320, Math.round(px)));
-    if (persist) this.persistWidth("inspector_width", this.inspectorWidth);
+  setPanelWidth(px: number, persist = false) {
+    const max = Math.max(360, Math.floor(window.innerWidth * 0.7));
+    this.panelWidth = Math.min(max, Math.max(320, Math.round(px)));
+    if (persist) this.persistWidth("panel_width", this.panelWidth);
+  }
+
+  /** Show or hide the side panel; persisted. Opening refreshes it. */
+  async setPanel(open: boolean) {
+    this.panelOpen = open;
+    if (open) void this.refreshWorkspace();
+    try {
+      await invoke("set_setting", { key: "panel", value: open ? "open" : "closed" });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Forget what the panel loaded; the next open track fills it again. */
+  private clearWorkspace() {
+    this.tree = [];
+    this.git = null;
+    this.diffs = {};
+    this.diffPath = "";
+    this.files = {};
+    this.openFiles = [];
+    this.activeFile = "";
+    if (this.panelTab === "file") this.panelTab = "files";
+  }
+
+  /** Reload the tree, the git status and every open file. */
+  async refreshWorkspace() {
+    if (!this.track) return;
+    await Promise.all([this.loadTree(), this.loadGit(), ...this.openFiles.map((p) => this.loadFile(p))]);
+    if (this.diffPath) await this.loadDiff(this.diffPath);
+  }
+
+  async loadTree() {
+    const track = this.track;
+    if (!track) return;
+    this.treeLoading = true;
+    try {
+      const entries = await invoke<WsEntry[]>("workspace_tree", { track });
+      if (this.track === track) this.tree = entries;
+    } catch (err) {
+      this.lastError = String(err);
+    } finally {
+      this.treeLoading = false;
+    }
+  }
+
+  async loadGit() {
+    const track = this.track;
+    if (!track) return;
+    this.gitLoading = true;
+    try {
+      const git = await invoke<WsGit>("workspace_git_status", { track });
+      if (this.track === track) {
+        this.git = git;
+        if (this.diffPath && !git.changes.some((c) => c.path === this.diffPath)) this.diffPath = "";
+      }
+    } catch (err) {
+      this.lastError = String(err);
+    } finally {
+      this.gitLoading = false;
+    }
+  }
+
+  /** Show one change's diff in the changes tab. */
+  async loadDiff(path: string) {
+    const track = this.track;
+    const change = this.git?.changes.find((c) => c.path === path);
+    if (!track || !change) return;
+    this.diffPath = path;
+    try {
+      const text = await invoke<string>("workspace_git_diff", { track, path, untracked: change.untracked });
+      if (this.track === track) this.diffs = { ...this.diffs, [path]: text };
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  private async loadFile(path: string) {
+    const track = this.track;
+    if (!track) return;
+    try {
+      const file = await invoke<WsFile>("workspace_read", { track, path });
+      if (this.track === track) this.files = { ...this.files, [path]: file };
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Open a file in its own panel tab and show it. */
+  async openFile(path: string) {
+    if (!this.openFiles.includes(path)) this.openFiles = [...this.openFiles, path];
+    this.activeFile = path;
+    this.panelTab = "file";
+    this.panelOpen = true;
+    await this.loadFile(path);
+  }
+
+  closeFile(path: string) {
+    const i = this.openFiles.indexOf(path);
+    this.openFiles = this.openFiles.filter((p) => p !== path);
+    const { [path]: _gone, ...rest } = this.files;
+    this.files = rest;
+    if (this.activeFile === path) {
+      const next = this.openFiles[Math.min(i, this.openFiles.length - 1)];
+      if (next) this.activeFile = next;
+      else {
+        this.activeFile = "";
+        this.panelTab = "files";
+      }
+    }
+  }
+
+  /** Select a file in the system file manager. */
+  async revealFile(path: string) {
+    if (!this.track) return;
+    try {
+      await invoke("workspace_reveal", { track: this.track, path });
+    } catch (err) {
+      this.lastError = String(err);
+    }
   }
   /** Every run of every track; views filter by `track`. */
   runs = $state<Run[]>([]);
@@ -283,8 +445,6 @@ class Store {
   tracks = $state<Track[]>([]);
   /** Id of the track in the main area. Persisted. */
   track = $state("");
-  /** Run id whose lane detail is open in the inspector; "" means closed. */
-  inspecting = $state("");
   lastError = $state("");
   restored = $state(false);
 
@@ -297,10 +457,6 @@ class Store {
   working = $state<Record<string, string>>({});
   /** Live download progress per agent id, while a download runs. */
   downloads = $state<Record<string, DownloadProgress>>({});
-
-  get openRun(): Run | undefined {
-    return this.runs.find((r) => r.id === this.inspecting);
-  }
 
   get currentTrack(): Track | undefined {
     return this.tracks.find((t) => t.id === this.track);
@@ -343,9 +499,13 @@ class Store {
   async selectTrack(id: string) {
     const track = this.tracks.find((t) => t.id === id);
     if (!track) return;
+    const changed = this.track !== id;
     this.track = id;
     this.view = "track";
-    this.inspecting = "";
+    if (changed) {
+      this.clearWorkspace();
+      if (this.panelOpen) void this.refreshWorkspace();
+    }
     if (this.readyAgents.some((a) => a.kind === track.agent)) this.agent = track.agent as AgentId;
     try {
       await invoke("set_setting", { key: "track", value: id });
@@ -611,7 +771,7 @@ class Store {
       if (this.themePref === "system") this.applyTheme();
     });
     try {
-      const [summaries, tracks, savedTrack, agents, theme, rail, tracklist, chatFont, inspectorWidth, railWidth, trackListWidth, uiFont, zoom, language] =
+      const [summaries, tracks, savedTrack, agents, theme, rail, tracklist, chatFont, panelWidth, railWidth, trackListWidth, uiFont, zoom, language, panel] =
         await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<Track[]>("list_tracks"),
@@ -621,12 +781,13 @@ class Store {
         invoke<string | null>("get_setting", { key: "rail" }),
         invoke<string | null>("get_setting", { key: "tracklist" }),
         invoke<string | null>("get_setting", { key: "chat_font" }),
-        invoke<string | null>("get_setting", { key: "inspector_width" }),
+        invoke<string | null>("get_setting", { key: "panel_width" }),
         invoke<string | null>("get_setting", { key: "rail_width" }),
         invoke<string | null>("get_setting", { key: "tracklist_width" }),
         invoke<string | null>("get_setting", { key: "ui_font" }),
         invoke<string | null>("get_setting", { key: "zoom" }),
         invoke<string | null>("get_setting", { key: "language" }),
+        invoke<string | null>("get_setting", { key: "panel" }),
       ]);
       if (language === "system" || language === "ko" || language === "en") this.langPref = language;
       i18n.lang = this.langPref === "system" ? systemLang() : this.langPref;
@@ -635,8 +796,9 @@ class Store {
       document.documentElement.dataset.uiFont = this.uiFont;
       const z = Number(zoom);
       if (Number.isFinite(z) && z >= ZOOM_MIN && z <= ZOOM_MAX && z !== 100) void this.setZoom(z, false);
-      const w = Number(inspectorWidth);
-      if (Number.isFinite(w) && w > 0) this.setInspectorWidth(w);
+      const w = Number(panelWidth);
+      if (Number.isFinite(w) && w > 0) this.setPanelWidth(w);
+      this.panelOpen = panel === "open";
       const rw = Number(railWidth);
       if (Number.isFinite(rw) && rw > 0) this.setRailWidth(rw);
       const tw = Number(trackListWidth);
@@ -659,6 +821,7 @@ class Store {
       if (current) {
         this.track = current.id;
         if (this.readyAgents.some((a) => a.kind === current.agent)) this.agent = current.agent as AgentId;
+        if (this.panelOpen) void this.refreshWorkspace();
       } else {
         this.view = "new-track";
       }
@@ -734,17 +897,6 @@ class Store {
       const { [agent]: _done, ...rest } = this.working;
       this.working = rest;
     }
-  }
-
-  /** Open (or close) a run in the inspector, loading its lane detail on demand. */
-  async inspect(id: string) {
-    if (this.inspecting === id) {
-      this.inspecting = "";
-      return;
-    }
-    this.inspecting = id;
-    const run = this.runs.find((r) => r.id === id);
-    if (run && !run.loaded) await this.hydrate(run);
   }
 
   /** Replay a run's event log into its below-membrane fields. */
@@ -852,6 +1004,10 @@ class Store {
       void this.refreshRun(env.run);
     }
     fold(run, env.at_ms, env.event);
+    // A finished run may have written files: the open panel catches up.
+    if (this.panelOpen && env.track === this.track && (env.event.kind === "finished" || env.event.kind === "failed")) {
+      void this.refreshWorkspace();
+    }
   }
 
   /** Fill a lane run's prompt and agent from the store once it exists there. */

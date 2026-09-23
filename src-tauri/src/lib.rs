@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 mod conductor;
+mod workspace;
 
 /// How often accumulated message text is flushed to the webview and the store.
 ///
@@ -264,6 +265,52 @@ fn app_info(state: State<'_, AppState>) -> Result<AppInfo, String> {
     })
 }
 
+// ----- the track's working folder, for the side panel -----
+
+/// A track's folder, checked to exist.
+fn track_root(state: &AppState, track: &str) -> Result<PathBuf, String> {
+    let info = state
+        .store
+        .track(track)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no track {track}"))?;
+    let root = PathBuf::from(&info.cwd);
+    if !root.is_dir() {
+        return Err(format!("the track's folder is gone: {}", info.cwd));
+    }
+    Ok(root)
+}
+
+/// Every file and folder under the track's folder, `.gitignore` honoured.
+#[tauri::command]
+fn workspace_tree(state: State<'_, AppState>, track: String) -> Result<Vec<workspace::Entry>, String> {
+    workspace::tree(&track_root(&state, &track)?)
+}
+
+/// One file's contents for preview. `path` is relative to the folder.
+#[tauri::command]
+fn workspace_read(state: State<'_, AppState>, track: String, path: String) -> Result<workspace::FileContent, String> {
+    workspace::read(&track_root(&state, &track)?, &path)
+}
+
+/// What git says has changed in the track's folder.
+#[tauri::command]
+fn workspace_git_status(state: State<'_, AppState>, track: String) -> Result<workspace::GitStatus, String> {
+    workspace::status(&track_root(&state, &track)?)
+}
+
+/// One path's diff against HEAD (all added when untracked).
+#[tauri::command]
+fn workspace_git_diff(state: State<'_, AppState>, track: String, path: String, untracked: bool) -> Result<String, String> {
+    workspace::diff(&track_root(&state, &track)?, &path, untracked)
+}
+
+/// Select a file in the system file manager.
+#[tauri::command]
+fn workspace_reveal(state: State<'_, AppState>, track: String, path: String) -> Result<(), String> {
+    workspace::reveal(&track_root(&state, &track)?, &path)
+}
+
 /// Namespace for user preferences in the store's `meta` table.
 const SETTING_PREFIX: &str = "setting:";
 
@@ -463,6 +510,11 @@ pub fn run() {
             get_setting,
             set_setting,
             app_info,
+            workspace_tree,
+            workspace_read,
+            workspace_git_status,
+            workspace_git_diff,
+            workspace_reveal,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;

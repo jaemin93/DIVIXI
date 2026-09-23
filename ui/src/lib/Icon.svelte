@@ -14,7 +14,12 @@
     | "chat"
     | "info"
     | "bot"
-    | "folder";
+    | "folder"
+    | "panel"
+    | "changes"
+    | "files"
+    | "refresh"
+    | "close";
 </script>
 
 <script lang="ts">
@@ -62,6 +67,16 @@
     <rect x="5" y="8" width="1.5" height="2" fill="currentColor" stroke="none" /><rect x="9.5" y="8" width="1.5" height="2" fill="currentColor" stroke="none" />
   {:else if name === "folder"}
     <path d="M2.5 4.5h4l1.5 1.5h5.5v7h-11z" />
+  {:else if name === "panel"}
+    <rect x="2.5" y="3" width="11" height="10" /><path d="M9.5 3v10" />
+  {:else if name === "changes"}
+    <circle cx="4.5" cy="4" r="1.5" /><circle cx="4.5" cy="12" r="1.5" /><circle cx="11.5" cy="12" r="1.5" /><path d="M4.5 5.5v5M11.5 10.5V8L7 5" />
+  {:else if name === "files"}
+    <path d="M2.5 3.5h3l1 1.5h7v8h-11z" /><path d="M2.5 7.5h11" />
+  {:else if name === "refresh"}
+    <path d="M13 8a5 5 0 1 1-1.5-3.5" /><path d="M13 2.5v3h-3" />
+  {:else if name === "close"}
+    <path d="M4 4l8 8M12 4l-8 8" />
   {/if}
 </svg>
 

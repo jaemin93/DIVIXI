@@ -5,7 +5,7 @@
 ## 설계 원칙
 
 **막(membrane).** Track 타임라인에는 Report / Decision / Running / 대화 네 가지만 올라옵니다.
-트랜스크립트, diff, 툴 호출은 레인에 남고 인스펙터로만 내려갑니다.
+트랜스크립트, diff, 툴 호출은 레인에 남고 레인 뷰로만 내려갑니다.
 `LaneEvent::above_membrane()`이 그 경계를 코드로 강제합니다.
 
 **메커니즘과 정책의 분리.** Rust 코어는 레인을 띄우고 이벤트를 나르기만 합니다.
@@ -29,7 +29,7 @@ crates/agents/      에이전트 카탈로그 — CLI 탐색, ACP 프로브·로
 crates/mcp/         앱 내장 HTTP MCP 서버 — 지휘자에게 주는 도구
 crates/store/       이벤트 스토어 — SQLite, append-only 로그 + runs 투영 + FTS5
 src-tauri/          앱 셸 — run 식별자, 이벤트 영속화, 코얼레싱, IPC
-ui/                 Svelte 5 — 타임라인, 인스펙터, 두 테마
+ui/                 Svelte 5 — 타임라인, 레인 뷰, 작업 폴더 패널, 두 테마
 refs/               디자인 레퍼런스
 ```
 
@@ -94,7 +94,7 @@ cargo run -p orchestra-agents --example lane -- codex "prompt"  # 특정 에이�
 
 **이벤트 스토어.** 레인 이벤트는 전부 `events` 테이블에 append-only로 쌓이고,
 `runs` 테이블은 그 로그를 런 종료 시점에 접은(fold) 투영입니다. 타임라인은 `runs`만
-읽어서 복원하고, 인스펙터를 열 때만 그 런의 `events`를 재생합니다 — 막이 저장소
+읽어서 복원하고, 레인 뷰를 열 때만 그 레인 런들의 `events`를 재생합니다 — 막이 저장소
 레벨에서도 지켜집니다. 종료된 런은 프롬프트·출력·툴 제목이 FTS5로 색인됩니다.
 앱이 실행 중이던 런을 남기고 죽으면 다음 기동 때 `failed`로 닫습니다.
 파일은 앱 데이터 폴더의 `orchestra.db`이고 `ORCHESTRA_DB`로 바꿀 수 있습니다
@@ -109,7 +109,8 @@ cargo run -p orchestra-store --example persist -- "Reply with exactly: ORCHESTRA
 되는 것: 첫 실행 setup의 에이전트 감지·로그인·다운로드와 테마·언어, 설정의 재감지,
 Track 생성(이름·의도·폴더·지휘자 에이전트)과 편집·삭제, 트랙마다 지휘자 세션(오래 살고,
 재시작 후 `session/load`로 이어짐), 비동기 레인(`[lane-report]`로 지휘자에게 보고, 닫힌 레인
-재개, 전체 레인 목록), 레인 뷰(지휘자↔워커 대화), 스트리밍과 마크다운 렌더링, Kiro식 창
+재개, 전체 레인 목록), 레인 뷰(지휘자↔워커 대화), 작업 폴더 패널(git 변경 사항과 diff, 파일
+트리, 마크다운 미리보기·코드·이미지 뷰어), 스트리밍과 마크다운 렌더링, Kiro식 창
 크롬·레일·Tracks 열·설정, 대화창 폰트·확대·서체·언어(ko/en), SQLite 이벤트 스토어(재시작 후
 타임라인 복원, 전문 검색 API).
 

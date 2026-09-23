@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store, agentLabel, type Track } from "./store.svelte";
+  import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
 
   /** The track's name and intent; editing opens the track form, deletion asks twice. */
@@ -28,6 +29,9 @@
     {:else}
       <button class="btn" type="button" onclick={() => (store.view = "edit-track")}>{t("track.edit")}</button>
       <button class="btn" type="button" onclick={() => (confirming = true)}>{t("track.delete")}</button>
+      <button class="tog" class:on={store.panelOpen} type="button" title={t("ws.toggle")} aria-pressed={store.panelOpen} onclick={() => store.setPanel(!store.panelOpen)}>
+        <Icon name="panel" size={14} />
+      </button>
     {/if}
   </div>
 
@@ -62,6 +66,28 @@
   .note {
     font-size: 11px;
     color: var(--dim);
+  }
+
+  .tog {
+    width: 28px;
+    height: 28px;
+    margin-left: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--dim);
+  }
+
+  .tog:hover {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .tog.on {
+    color: var(--hi);
+    border-color: var(--acc);
   }
 
   .btn.danger:not(:disabled) {
