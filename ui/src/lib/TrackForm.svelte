@@ -20,8 +20,11 @@
   // form (keyed by track id) when another track is edited.
   // svelte-ignore state_referenced_locally
   const seed = track;
-  let name = $state(seed?.name ?? "");
-  let intent = $state(seed?.intent ?? "");
+  // A draft carried into a new track brings its name and goal.
+  // svelte-ignore state_referenced_locally
+  const fromDraft = seed ? null : store.trackSeed;
+  let name = $state(seed?.name ?? fromDraft?.name ?? "");
+  let intent = $state(seed?.intent ?? fromDraft?.intent ?? "");
   let cwd = $state(seed?.cwd ?? "");
   let agent = $state<AgentId>((seed?.agent as AgentId) ?? store.agent);
   let conductorConfig = $state<OptionConfig>({ ...(seed?.conductor_config ?? {}) });

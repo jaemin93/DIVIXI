@@ -224,7 +224,40 @@ export type Run = {
   segments: Segment[];
 };
 
-export type View = "track" | "settings" | "lane" | "new-track" | "edit-track";
+export type View = "track" | "settings" | "lane" | "new-track" | "edit-track" | "draft";
+
+// ----- drafts: a sketch board worked out with an agent before a track -----
+export type DraftInfo = { id: string; title: string; agent: string; created_at: number; updated_at: number };
+export type Stroke = { points: [number, number, number][]; color: string; size: number };
+export type DraftTag = "" | "goal" | "constraint" | "question" | "idea";
+export type DraftNode = {
+  id: string;
+  kind: "note" | "sketch";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+  tag: DraftTag;
+  strokes: Stroke[];
+  by: string;
+};
+export type DraftEdge = { id: string; from: string; to: string; label: string; by: string };
+export type DraftChange = { id: number; target: string; run: string | null; before: unknown; after: unknown };
+export type DraftDoc = { version: number; nodes: DraftNode[]; edges: DraftEdge[]; changes: DraftChange[]; next: number };
+/** One edit to a board, as the core applies it. */
+export type DraftOp =
+  | { op: "create_note"; x: number; y: number; w?: number; h?: number; text?: string; tag?: DraftTag }
+  | { op: "set_sketch"; id?: string; x: number; y: number; w: number; h: number; strokes: Stroke[] }
+  | { op: "update"; id: string; text?: string; tag?: DraftTag }
+  | { op: "move"; id: string; x: number; y: number; w?: number; h?: number }
+  | { op: "delete"; ids: string[] }
+  | { op: "connect"; from: string; to: string; label?: string };
+export type DraftResult = { ok: boolean; id?: string; error?: string };
+export const DRAFT_LANE = "drafter";
+/** Draft conversations are kept under this key, apart from tracks. */
+export const draftKey = (id: string) => `draft:${id}`;
+const EMPTY_DOC: DraftDoc = { version: 0, nodes: [], edges: [], changes: [], next: 0 };
 
 /** Prefix of conductor prompts Orchestra injects itself (lane reports). Language-neutral. */
 export const REPORT_PREFIX = "[lane-report]";
@@ -375,6 +408,16 @@ class Store {
   termOpen = $state(false);
   termHeight = $state(280);
   termMounted = $state(false);
+
+  /** Drafts, most recently touched first, and the one open. */
+  drafts = $state<DraftInfo[]>([]);
+  draft = $state("");
+  draftDoc = $state<DraftDoc>({ ...EMPTY_DOC });
+  /** The draft whose board `draftDoc` holds. */
+  draftLoaded = $state("");
+  /** Carried from a draft into the new-track form and the first message. */
+  trackSeed = $state<{ name: string; intent: string } | null>(null);
+  composerSeed = $state("");
 
   /** Files in the composer, waiting for the next message. */
   attachments = $state<Attachment[]>([]);
@@ -779,6 +822,176 @@ class Store {
     return `${root.replace(/[\\/]+$/, "")}${sep}${rel.split("/").join(sep)}`;
   }
 
+  // ----- drafts -----
+
+  get currentDraft(): DraftInfo | undefined {
+    return this.drafts.find((d) => d.id === this.draft);
+  }
+
+  /** The open draft's conversation, oldest first. */
+  get draftRuns(): Run[] {
+    const key = draftKey(this.draft);
+    return this.runs.filter((r) => r.track === key);
+  }
+
+  get draftBusy(): boolean {
+    return this.draftRuns.some((r) => r.status === "running" || r.status === "connecting");
+  }
+
+  async loadDrafts() {
+    try {
+      this.drafts = await invoke<DraftInfo[]>("list_drafts");
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Show the drafts: the last one open, else the newest. */
+  async showDrafts() {
+    this.view = "draft";
+    if (!this.drafts.length) await this.loadDrafts();
+    const pick = this.drafts.find((d) => d.id === this.draft) ?? this.drafts[0];
+    if (pick) await this.openDraft(pick.id);
+  }
+
+  async openDraft(id: string) {
+    this.draft = id;
+    this.view = "draft";
+    if (this.draftLoaded !== id) {
+      this.draftLoaded = "";
+      this.draftDoc = { ...EMPTY_DOC };
+    }
+    try {
+      const doc = await invoke<DraftDoc>("draft_doc", { id });
+      if (this.draft === id) {
+        this.draftDoc = doc;
+        this.draftLoaded = id;
+      }
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  async createDraft(title: string) {
+    const agent = this.readyAgents.some((a) => a.kind === this.agent) ? this.agent : this.readyAgents[0]?.kind;
+    if (!agent) {
+      this.lastError = "no agent is ready";
+      return;
+    }
+    try {
+      const d = await invoke<DraftInfo>("create_draft", { title, agent });
+      this.drafts = [d, ...this.drafts];
+      await this.openDraft(d.id);
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  async updateDraft(id: string, patch: { title?: string; agent?: string }) {
+    try {
+      const d = await invoke<DraftInfo>("update_draft", { id, ...patch });
+      this.drafts = this.drafts.map((x) => (x.id === id ? d : x));
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  async deleteDraft(id: string) {
+    try {
+      await invoke("delete_draft", { id });
+    } catch (err) {
+      this.lastError = String(err);
+      return;
+    }
+    this.drafts = this.drafts.filter((d) => d.id !== id);
+    this.runs = this.runs.filter((r) => r.track !== draftKey(id));
+    if (this.draft === id) {
+      const next = this.drafts[0];
+      if (next) await this.openDraft(next.id);
+      else {
+        this.draft = "";
+        this.draftDoc = { ...EMPTY_DOC };
+      }
+    }
+  }
+
+  /** Edit the open board. The core answers with the new board as an event. */
+  async draftApply(ops: DraftOp[]): Promise<DraftResult[]> {
+    const id = this.draft;
+    if (!id || !ops.length) return [];
+    try {
+      return await invoke<DraftResult[]>("draft_apply", { id, ops });
+    } catch (err) {
+      this.lastError = String(err);
+      return [];
+    }
+  }
+
+  async draftReview(changes: number[], keep: boolean) {
+    if (!this.draft || !changes.length) return;
+    try {
+      await invoke("draft_review", { id: this.draft, changes, keep });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Take a board the core sent, when it is the open one and newer. */
+  takeDraft(id: string, doc: DraftDoc) {
+    if (id === this.draft && this.draftLoaded === id && doc.version >= this.draftDoc.version) this.draftDoc = doc;
+    const d = this.drafts.find((x) => x.id === id);
+    if (d) d.updated_at = Date.now();
+  }
+
+  /** One message to the draft's agent, with the board picture and the selection. */
+  async draftSend(text: string, image: string | null, selected: string[]) {
+    const id = this.draft;
+    const d = this.currentDraft;
+    if (!id || !d || this.draftBusy) return;
+    this.lastError = "";
+    const pending: Run = {
+      id: `pending-${Date.now()}`,
+      track: draftKey(id),
+      lane: DRAFT_LANE,
+      agent: d.agent,
+      prompt: text,
+      status: "connecting",
+      startedAt: Date.now(),
+      message: "",
+      plan: [],
+      toolCount: 0,
+      loaded: true,
+      thought: "",
+      tools: [],
+      transcript: [],
+      segments: [],
+    };
+    const pendingId = pending.id;
+    this.runs.push(pending);
+    try {
+      const run = await invoke<string>("draft_prompt", { id, text, image, selected, lang: i18n.lang });
+      const r = this.runs.find((x) => x.id === pendingId || x.id === run);
+      if (r) r.id = run;
+    } catch (err) {
+      this.runs = this.runs.filter((x) => x.id !== pendingId);
+      this.lastError = String(err);
+    }
+  }
+
+  async draftCancel() {
+    if (this.draft) await invoke("draft_cancel", { id: this.draft }).catch(() => {});
+  }
+
+  /** Carry a draft into a new track: its name, its goal as the intent, and
+   *  the whole board as a brief waiting in the first message. */
+  promoteDraft(brief: string, goal: string) {
+    const d = this.currentDraft;
+    if (!d) return;
+    this.trackSeed = { name: d.title, intent: goal };
+    this.composerSeed = brief;
+    this.view = "new-track";
+  }
+
   /** Take a decision the core sent or returned, new or changed. */
   upsertDecision(d: Decision) {
     const i = this.decisions.findIndex((x) => x.id === d.id);
@@ -840,6 +1053,7 @@ class Store {
 
   /** Create a track and open it. */
   async createTrack(patch: TrackPatch): Promise<boolean> {
+    this.trackSeed = null;
     this.lastError = "";
     try {
       const track = await invoke<Track>("create_track", { patch });
@@ -1218,6 +1432,7 @@ class Store {
       // restored can be in flight.
       this.runs = summaries.map(fromSummary);
       this.tracks = tracks;
+      void this.loadDrafts();
       try {
         this.decisions = await invoke<Decision[]>("list_decisions", { track: null });
       } catch (err) {
@@ -1403,9 +1618,9 @@ class Store {
   /** Fold one live lane event into the run it belongs to, creating lane runs on first sight. */
   apply(env: Envelope) {
     let run = this.runs.find((r) => r.id === env.run);
-    if (!run && env.lane === "conductor") {
-      // The conductor turn we just sent, still waiting for its id.
-      run = this.runs.find((r) => r.track === env.track && r.lane === "conductor" && r.id.startsWith("pending-"));
+    if (!run && (env.lane === "conductor" || env.lane === DRAFT_LANE)) {
+      // The conductor (or draft agent) turn we just sent, still waiting for its id.
+      run = this.runs.find((r) => r.track === env.track && r.lane === env.lane && r.id.startsWith("pending-"));
       if (run) run.id = env.run;
     }
     if (!run) {
@@ -1604,5 +1819,6 @@ export async function connectEvents() {
     listen<Envelope>("lane", (e) => store.apply(e.payload)),
     listen<DownloadProgress>("agent_download", (e) => store.progress(e.payload)),
     listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
+    listen<{ id: string; doc: DraftDoc }>("draft", (e) => store.takeDraft(e.payload.id, e.payload.doc)),
   ]);
 }

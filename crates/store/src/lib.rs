@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -103,6 +103,15 @@ const MIGRATIONS: &[&str] = &[
         FROM meta m, json_each(m.value) d
         WHERE m.key = 'decisions' AND json_valid(m.value);
     DELETE FROM meta WHERE key = 'decisions';",
+    // 6 -> 7: drafts, sketch boards worked out with an agent before a track.
+    "CREATE TABLE IF NOT EXISTS drafts (
+        id         TEXT    PRIMARY KEY,
+        title      TEXT    NOT NULL,
+        agent      TEXT    NOT NULL,
+        doc        TEXT    NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );",
 ];
 
 const SCHEMA: &str = r#"
@@ -175,6 +184,15 @@ CREATE TABLE IF NOT EXISTS decisions (
     decided_at  INTEGER
 );
 CREATE INDEX IF NOT EXISTS decisions_by_track ON decisions(track, id);
+
+CREATE TABLE IF NOT EXISTS drafts (
+    id         TEXT    PRIMARY KEY,
+    title      TEXT    NOT NULL,
+    agent      TEXT    NOT NULL,
+    doc        TEXT    NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS runs_fts USING fts5(
     run_id UNINDEXED,
@@ -317,6 +335,17 @@ fn row_to_decision(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decision> {
         created_at: r.get(12)?,
         decided_at: r.get(13)?,
     })
+}
+
+/// A draft: a sketch board and the agent working it out with the human.
+/// The board itself is JSON the app owns (`doc`); the store keeps it whole.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DraftInfo {
+    pub id: String,
+    pub title: String,
+    pub agent: String,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 /// A track: one conductor, its lanes, one working directory.
@@ -551,6 +580,82 @@ impl Store {
         let mut stmt = conn.prepare(&format!("{TRACK_SELECT} ORDER BY t.created_at, t.id"))?;
         let rows = stmt.query_map([], row_to_track)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Start a draft; ids are `dr001`, `dr002`, … in creation order.
+    pub fn create_draft(&self, title: &str, agent: &str, doc: &str) -> anyhow::Result<DraftInfo> {
+        let conn = self.conn.lock();
+        let next: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(CAST(substr(id, 3) AS INTEGER)), 0) + 1 FROM drafts",
+            [],
+            |r| r.get(0),
+        )?;
+        let id = format!("dr{next:03}");
+        let now = now_ms();
+        conn.execute(
+            "INSERT INTO drafts(id, title, agent, doc, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![id, title, agent, doc, now],
+        )?;
+        Ok(DraftInfo { id, title: title.to_string(), agent: agent.to_string(), created_at: now, updated_at: now })
+    }
+
+    /// Every draft, most recently touched first.
+    pub fn drafts(&self) -> anyhow::Result<Vec<DraftInfo>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT id, title, agent, created_at, updated_at FROM drafts ORDER BY updated_at DESC, id DESC")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(DraftInfo { id: r.get(0)?, title: r.get(1)?, agent: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)? })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// One draft and its board JSON.
+    pub fn draft(&self, id: &str) -> anyhow::Result<Option<(DraftInfo, String)>> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(
+                "SELECT id, title, agent, created_at, updated_at, doc FROM drafts WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok((
+                        DraftInfo { id: r.get(0)?, title: r.get(1)?, agent: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)? },
+                        r.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?)
+    }
+
+    /// Keep a draft's board; the title and agent change only when given.
+    pub fn save_draft(&self, id: &str, doc: Option<&str>, title: Option<&str>, agent: Option<&str>) -> anyhow::Result<DraftInfo> {
+        {
+            let conn = self.conn.lock();
+            let changed = conn.execute(
+                "UPDATE drafts SET doc = COALESCE(?2, doc), title = COALESCE(?3, title), agent = COALESCE(?4, agent), updated_at = ?5 WHERE id = ?1",
+                params![id, doc, title, agent, now_ms()],
+            )?;
+            if changed == 0 {
+                anyhow::bail!("no draft {id}");
+            }
+        }
+        self.draft(id)?.map(|(d, _)| d).ok_or_else(|| anyhow::anyhow!("draft {id} vanished"))
+    }
+
+    /// Delete a draft with its conversation.
+    pub fn delete_draft(&self, id: &str) -> anyhow::Result<()> {
+        let key = format!("draft:{id}");
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM runs_fts WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![key])?;
+        tx.execute("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![key])?;
+        tx.execute("DELETE FROM runs WHERE track = ?1", params![key])?;
+        tx.execute("DELETE FROM meta WHERE key LIKE 'draft_session:' || ?1 || ':%'", params![id])?;
+        let changed = tx.execute("DELETE FROM drafts WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            anyhow::bail!("no draft {id}");
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// One track by id.
@@ -1250,6 +1355,24 @@ mod tests {
             .unwrap();
         assert_eq!(apart.lane_agent(), "codex");
         assert!(apart.lane_config().is_empty(), "a worker set apart keeps its own options");
+    }
+
+    #[test]
+    fn drafts_are_kept_listed_and_deleted_with_their_runs() {
+        let store = Store::in_memory().unwrap();
+        let a = store.create_draft("wrap-up", "claude_code", "{}").unwrap();
+        let b = store.create_draft("second", "codex", "{}").unwrap();
+        assert_eq!((a.id.as_str(), b.id.as_str()), ("dr001", "dr002"));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let saved = store.save_draft(&a.id, Some("{\"v\":1}"), Some("renamed"), None).unwrap();
+        assert_eq!((saved.title.as_str(), saved.agent.as_str()), ("renamed", "claude_code"));
+        assert_eq!(store.draft(&a.id).unwrap().unwrap().1, "{\"v\":1}");
+        assert_eq!(store.drafts().unwrap()[0].id, "dr001", "most recently touched first");
+        let run = store.begin_run("draft:dr001", "drafter", "claude_code", "hi", ".").unwrap();
+        store.delete_draft(&a.id).unwrap();
+        assert!(store.draft(&a.id).unwrap().is_none());
+        assert!(store.run(&run).unwrap().is_none(), "its conversation goes with it");
+        assert!(store.delete_draft(&a.id).is_err());
     }
 
     #[test]

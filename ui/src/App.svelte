@@ -11,6 +11,7 @@
   import LaneView from "./lib/LaneView.svelte";
   import TrackForm from "./lib/TrackForm.svelte";
   import TrackHeader from "./lib/TrackHeader.svelte";
+  import DraftView from "./lib/DraftView.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
   import { slide } from "svelte/transition";
@@ -21,7 +22,7 @@
   const side = { axis: "x" as const, duration: reduced ? 0 : 200, easing: cubicOut };
 
   /** The track list sits beside every view but settings, once a track exists. */
-  const listShown = $derived(store.view !== "settings" && store.trackListOpen && store.tracks.length > 0);
+  const listShown = $derived(store.view !== "settings" && store.view !== "draft" && store.trackListOpen && store.tracks.length > 0);
 
   // Browser-style zoom keys, app-wide.
   function onKey(e: KeyboardEvent) {
@@ -67,6 +68,8 @@
     {/if}
     {#if store.view === "settings"}
       <Settings />
+    {:else if store.view === "draft"}
+      <DraftView />
     {:else if store.view === "lane"}
       <LaneView />
     {:else if store.view === "new-track" || !store.currentTrack}

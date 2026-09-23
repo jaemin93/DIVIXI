@@ -622,7 +622,7 @@ async fn lane_list(state: &AppState, track: &str) -> Vec<Value> {
 /// The agent's mode option is sent as `session/set_mode`; every other
 /// option goes through `session/set_config_option`. No mode chosen means
 /// the most autonomous one the agent offers.
-fn session_options(
+pub(crate) fn session_options(
     state: &AppState,
     agent: &str,
     cwd: &str,

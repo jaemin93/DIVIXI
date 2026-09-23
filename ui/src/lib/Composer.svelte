@@ -7,7 +7,9 @@
   import Popover from "./Popover.svelte";
   import { t } from "./i18n.svelte";
 
-  let draft = $state("");
+  // A promoted draft's brief waits here for the human to send.
+  let draft = $state(store.composerSeed);
+  if (store.composerSeed) store.composerSeed = "";
   let contextOpen = $state(false);
   let box = $state<HTMLTextAreaElement>();
   /** Highlighted row in the slash list. */

@@ -11,12 +11,13 @@ use std::time::Duration;
 use orchestra_acp::{AgentSpec, ConfigOptionInfo};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
 use orchestra_core::{LaneEnvelope, LaneEvent};
-use orchestra_store::{Decision, RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
+use orchestra_store::{Decision, DraftInfo, RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 mod conductor;
+pub mod draft;
 mod metrics;
 mod terminal;
 mod workspace;
@@ -43,6 +44,10 @@ pub struct AppState {
     adapters_dir: PathBuf,
     /// Where pasted images are kept so they can be attached by path.
     attachments_dir: PathBuf,
+    /// One working folder per draft, for its agent.
+    pub(crate) drafts_dir: PathBuf,
+    /// Draft boards and their agents.
+    pub(crate) drafts: draft::Drafts,
     /// Last detection result, mirrored from the store for quick lookups.
     agents: Mutex<Option<Vec<AgentStatus>>>,
     /// Conductor and lane sessions, across tracks.
@@ -239,6 +244,89 @@ async fn conductor_prompt(
 ) -> Result<String, String> {
     let files = check_attachments(files.unwrap_or_default())?;
     conductor::conductor_turn(app, track, prompt, agent.filter(|a| !a.is_empty()), lang.unwrap_or_default(), files).await
+}
+
+// ----- drafts -----
+
+/// Every draft, most recently touched first.
+#[tauri::command(async)]
+fn list_drafts(state: State<'_, AppState>) -> Result<Vec<DraftInfo>, String> {
+    state.store.drafts().map_err(|e| e.to_string())
+}
+
+/// Start an empty draft on an agent.
+#[tauri::command(async)]
+fn create_draft(state: State<'_, AppState>, title: String, agent: String) -> Result<DraftInfo, String> {
+    let title = title.trim();
+    let title = if title.is_empty() { "Draft" } else { title };
+    state.spec_for(&agent)?;
+    let doc = serde_json::to_string(&draft::Doc::default()).map_err(|e| e.to_string())?;
+    state.store.create_draft(title, &agent, &doc).map_err(|e| e.to_string())
+}
+
+/// Rename a draft or move it to another agent (from the next message).
+#[tauri::command(async)]
+fn update_draft(state: State<'_, AppState>, id: String, title: Option<String>, agent: Option<String>) -> Result<DraftInfo, String> {
+    if let Some(a) = &agent {
+        state.spec_for(a)?;
+    }
+    let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    state.store.save_draft(&id, None, title.as_deref(), agent.as_deref()).map_err(|e| e.to_string())
+}
+
+/// Delete a draft, its board, its conversation and its agent session.
+#[tauri::command]
+async fn delete_draft(app: AppHandle, id: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if state.drafts.is_busy(&id) {
+        return Err("the draft's agent is still responding; wait for it to finish".to_string());
+    }
+    state.drafts.close(&id).await;
+    state.store.delete_draft(&id).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(state.drafts_dir.join(&id));
+    Ok(())
+}
+
+/// A draft's board as it is now.
+#[tauri::command(async)]
+fn draft_doc(state: State<'_, AppState>, id: String) -> Result<draft::Doc, String> {
+    draft::doc(&state, &id)
+}
+
+/// The human edits the board.
+#[tauri::command(async)]
+fn draft_apply(app: AppHandle, id: String, ops: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>, String> {
+    let ops: Vec<draft::Op> = ops
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("bad edit: {e}"))?;
+    draft::apply(&app, &id, ops, draft::Actor::Human)
+}
+
+/// Keep or revert the agent's suggestions.
+#[tauri::command(async)]
+fn draft_review(app: AppHandle, id: String, changes: Vec<u64>, keep: bool) -> Result<(), String> {
+    draft::review(&app, &id, &changes, keep)
+}
+
+/// One message to the draft's agent, with a picture of the board when it has ink.
+#[tauri::command]
+async fn draft_prompt(
+    app: AppHandle,
+    id: String,
+    text: String,
+    image: Option<String>,
+    selected: Option<Vec<String>>,
+    lang: Option<String>,
+) -> Result<String, String> {
+    draft::turn(app, id, text, image, selected.unwrap_or_default(), lang.unwrap_or_default()).await
+}
+
+/// Stop the draft agent's turn.
+#[tauri::command]
+async fn draft_cancel(app: AppHandle, id: String) {
+    draft::cancel(&app, &id).await;
 }
 
 /// How many files one message may carry.
@@ -745,6 +833,15 @@ pub fn run() {
             list_runs,
             run_events,
             list_decisions,
+            list_drafts,
+            create_draft,
+            update_draft,
+            delete_draft,
+            draft_doc,
+            draft_apply,
+            draft_review,
+            draft_prompt,
+            draft_cancel,
             file_stats,
             pick_files,
             save_attachment,
@@ -786,11 +883,14 @@ pub fn run() {
             let (store, db_path) = open_store(&data_dir)?;
             let adapters_dir = data_dir.join("adapters");
             let attachments_dir = data_dir.join("attachments");
+            let drafts_dir = data_dir.join("drafts");
             app.manage(AppState {
                 store,
                 db_path,
                 adapters_dir,
                 attachments_dir,
+                drafts_dir,
+                drafts: draft::Drafts::default(),
                 agents: Mutex::new(None),
                 sessions: conductor::Sessions::default(),
                 meter: metrics::Meter::default(),
