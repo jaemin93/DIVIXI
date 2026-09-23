@@ -314,9 +314,8 @@
           {isOpen(tr.id) ? "▾" : "▸"}
         </button>
         <button class="pick" onclick={() => store.selectTrack(tr.id)} title={tr.intent}>
-          <!-- The small line: agent and tags on the left, last activity on the right. -->
+          <!-- The small line: tags on the left, last activity on the right. -->
           <span class="top">
-            <span class="mono agent">{agentLabel(tr.agent)}</span>
             {#each tr.tags as tag (tag)}
               <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
             {/each}
@@ -745,13 +744,6 @@
     overflow: hidden;
     white-space: nowrap;
     line-height: 1.3;
-  }
-
-  .agent {
-    font-size: 9px;
-    letter-spacing: 0.1em;
-    color: var(--lab);
-    flex-shrink: 0;
   }
 
   .when {
