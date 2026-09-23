@@ -316,10 +316,12 @@
         <button class="pick" onclick={() => store.selectTrack(tr.id)} title={tr.intent}>
           <!-- The small line: tags on the left, last activity on the right. -->
           <span class="top">
-            {#each tr.tags as tag (tag)}
-              <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
-            {/each}
-            <span class="grow"></span>
+            <!-- Tags give way first: the run of chips is cut with an ellipsis; the time always shows. -->
+            <span class="taglist" title={tr.tags.join(", ")}>
+              {#each tr.tags as tag (tag)}
+                <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
+              {/each}
+            </span>
             <span class="mono when" title={whenFull(tr.lastAt, store.lang)}>{whenLabel(tr.lastAt, store.now, store.lang)}</span>
           </span>
           <span class="main">
@@ -753,10 +755,21 @@
     flex-shrink: 0;
   }
 
+  .taglist {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .chip {
     font-size: 9px;
     letter-spacing: 0.08em;
-    flex-shrink: 0;
+  }
+
+  .chip + .chip {
+    margin-left: 8px;
   }
 
   .meta {
