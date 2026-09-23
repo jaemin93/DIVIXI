@@ -178,7 +178,7 @@
             {#if tr.tags.length}
               <span class="tags">
                 {#each tr.tags as tag (tag)}
-                  <span class="mono chip" style="color: {store.tagColor(tag)}"><span class="tdot" style="background: {store.tagColor(tag)}"></span>{tag}</span>
+                  <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
                 {/each}
               </span>
             {/if}
@@ -326,7 +326,7 @@
 
   .track {
     width: 100%;
-    min-height: 40px;
+    min-height: 46px;
     display: flex;
     align-items: center;
     gap: 4px;
@@ -429,22 +429,13 @@
     gap: 8px;
     overflow: hidden;
     white-space: nowrap;
-    line-height: 1;
+    line-height: 1.3;
   }
 
   .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
     font-size: 9px;
     letter-spacing: 0.08em;
     flex-shrink: 0;
-  }
-
-  .tdot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
   }
 
   .meta {
