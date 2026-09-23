@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { store, agentLabel, TRACK_COLORS } from "./store.svelte";
+  import { store, agentLabel, TRACK_COLORS, type TrackSort } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import SplitHandle from "./SplitHandle.svelte";
   import { t } from "./i18n.svelte";
+  import { whenLabel, whenFull, WINDOWS } from "./time";
 
   /**
    * Second column: every track, newest activity first, each unfolding into
@@ -24,8 +25,10 @@
           id: tr.id,
           name: tr.name,
           intent: tr.intent,
+          agent: tr.agent,
           color: tr.color,
           tags: tr.tags,
+          createdAt: tr.created_at,
           runs: runs.length,
           live: runs.some(live),
           busy: runs.some((r) => r.lane === "conductor" && live(r)),
@@ -44,12 +47,50 @@
       .sort((a, b) => b.lastAt - a.lastAt),
   );
 
-  const shown = $derived(
-    tracks.filter((tr) => {
-      const q = query.trim().toLowerCase();
-      return !q || tr.name.toLowerCase().includes(q) || tr.intent.toLowerCase().includes(q) || tr.tags.some((g) => g.toLowerCase().includes(q));
-    }),
+  // ----- filter, sort, fold -----
+  const filter = $derived(store.trackFilter);
+  const filterActive = $derived(filter.running || filter.active || filter.recent !== "" || filter.tags.length > 0);
+  let filterOpen = $state(false);
+  let filterEl = $state<HTMLDivElement>();
+  let showDormant = $state(false);
+
+  const sorters: Record<TrackSort, (a: (typeof tracks)[number], b: (typeof tracks)[number]) => number> = {
+    recent: (a, b) => b.lastAt - a.lastAt,
+    oldest: (a, b) => a.lastAt - b.lastAt,
+    "created-desc": (a, b) => b.createdAt - a.createdAt,
+    "created-asc": (a, b) => a.createdAt - b.createdAt,
+    az: (a, b) => a.name.localeCompare(b.name),
+    za: (a, b) => b.name.localeCompare(a.name),
+  };
+
+  const matched = $derived(
+    tracks
+      .filter((tr) => {
+        const q = query.trim().toLowerCase();
+        if (q && !(tr.name.toLowerCase().includes(q) || tr.intent.toLowerCase().includes(q) || tr.tags.some((g) => g.toLowerCase().includes(q)))) return false;
+        if (filter.running && !tr.live) return false;
+        if (filter.active && !store.isActive(tr.id)) return false;
+        if (filter.recent && store.now - tr.lastAt > WINDOWS[filter.recent]) return false;
+        if (filter.tags.length && !filter.tags.every((g) => tr.tags.includes(g))) return false;
+        return true;
+      })
+      .sort(sorters[filter.sort]),
   );
+
+  /** Tracks idle past the fold threshold sit under a header at the bottom; the open one never folds. */
+  const foldMs = $derived(filter.fold * 24 * 60 * 60 * 1000);
+  const shown = $derived(foldMs ? matched.filter((tr) => tr.id === store.track || store.now - tr.lastAt <= foldMs) : matched);
+  const dormant = $derived(foldMs ? matched.filter((tr) => tr.id !== store.track && store.now - tr.lastAt > foldMs) : []);
+
+  /** How many tracks carry a tag, for the filter's tag rows. */
+  function tagCount(tag: string): number {
+    return store.tracks.filter((x) => x.tags.includes(tag)).length;
+  }
+
+  function toggleTagFilter(tag: string) {
+    const tags = filter.tags.includes(tag) ? filter.tags.filter((x) => x !== tag) : [...filter.tags, tag];
+    void store.setTrackFilter({ tags });
+  }
 
   function isOpen(id: string): boolean {
     return id in folded ? !folded[id] : id === store.track;
@@ -99,10 +140,14 @@
 
   function onDocClick(e: MouseEvent) {
     if (menu && menuEl && !menuEl.contains(e.target as Node)) closeMenu();
+    if (filterOpen && filterEl && !filterEl.contains(e.target as Node)) filterOpen = false;
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape" && menu) closeMenu();
+    if (e.key === "Escape") {
+      if (menu) closeMenu();
+      filterOpen = false;
+    }
   }
 
   function startRename() {
@@ -157,10 +202,96 @@
     </button>
   </div>
 
-  <input class="search" type="text" bind:value={query} placeholder={t("tracks.search")} aria-label={t("tracks.search")} />
+  <div class="searchrow" bind:this={filterEl}>
+    <input class="search" type="text" bind:value={query} placeholder={t("tracks.search")} aria-label={t("tracks.search")} />
+    <button class="fbtn" class:on={filterActive || filterOpen} onclick={() => (filterOpen = !filterOpen)} title={t("tracks.filter")} aria-haspopup="menu" aria-expanded={filterOpen}>
+      <Icon name="filter" size={14} />
+    </button>
+
+    {#if filterOpen}
+      <!-- The filter menu, after Kiro Crew's: what to show, in what order, what to fold, which tags. -->
+      <div class="fmenu" role="menu" aria-label={t("tracks.filter")}>
+        <div class="mlab-sm fhead">{t("tracks.filterTitle")}</div>
+        <button class="fitem" class:on={filter.running} role="menuitemcheckbox" aria-checked={filter.running} onclick={() => store.setTrackFilter({ running: !filter.running })}>
+          <span class="dot" style="background: var(--ok)"></span>{t("tracks.running")}
+        </button>
+        <button class="fitem" class:on={filter.active} role="menuitemcheckbox" aria-checked={filter.active} onclick={() => store.setTrackFilter({ active: !filter.active })}>
+          <span class="dot" style="background: var(--idle)"></span>{t("tracks.active")}
+        </button>
+        <div class="fitem static">
+          <span>{t("tracks.recent")}</span>
+          <span class="grow"></span>
+          <span class="seg">
+            {#each ["", "1h", "24h", "7d"] as w (w)}
+              <button class="segopt mono" class:on={filter.recent === w} onclick={() => store.setTrackFilter({ recent: w as typeof filter.recent })}>{w || t("tracks.recentAll")}</button>
+            {/each}
+          </span>
+        </div>
+
+        <div class="rule"></div>
+        <div class="mlab-sm fhead">{t("tracks.sortTitle")}</div>
+        {#each [["recent", t("tracks.sort.recent")], ["oldest", t("tracks.sort.oldest")], ["created-desc", t("tracks.sort.createdDesc")], ["created-asc", t("tracks.sort.createdAsc")], ["az", "A → Z"], ["za", "Z → A"]] as [id, label] (id)}
+          <button class="fitem" class:on={filter.sort === id} role="menuitemradio" aria-checked={filter.sort === id} onclick={() => store.setTrackFilter({ sort: id as TrackSort })}>
+            {label}<span class="grow"></span>{#if filter.sort === id}<span class="mono check">✓</span>{/if}
+          </button>
+        {/each}
+
+        <div class="rule"></div>
+        <div class="fitem static">
+          <span>{t("tracks.fold")}</span>
+          <span class="grow"></span>
+          <span class="seg">
+            {#each [0, 1, 7, 30] as d (d)}
+              <button class="segopt mono" class:on={filter.fold === d} onclick={() => store.setTrackFilter({ fold: d as typeof filter.fold })}>{d === 0 ? t("tracks.foldOff") : t("tracks.foldDays", { n: d })}</button>
+            {/each}
+          </span>
+        </div>
+
+        <div class="rule"></div>
+        <div class="mlab-sm fhead">{t("tracks.tagsTitle")}</div>
+        {#each store.tagPool as tag (tag.name)}
+          <button class="fitem" class:on={filter.tags.includes(tag.name)} role="menuitemcheckbox" aria-checked={filter.tags.includes(tag.name)} onclick={() => toggleTagFilter(tag.name)}>
+            <span class="box" class:on={filter.tags.includes(tag.name)} style="border-color: {tag.color}; background: {filter.tags.includes(tag.name) ? tag.color : 'transparent'}"></span>
+            <span class="mono">{tag.name}</span>
+            <span class="grow"></span>
+            <span class="mono count">{tagCount(tag.name)}</span>
+          </button>
+        {/each}
+        {#if store.tagPool.length === 0}
+          <div class="fitem static dim">{t("tracks.noTagsYet")}</div>
+        {/if}
+        {#if filterActive}
+          <div class="rule"></div>
+          <button class="fitem" onclick={() => store.setTrackFilter({ running: false, active: false, recent: "", tags: [] })}>{t("tracks.clear")}</button>
+        {/if}
+      </div>
+    {/if}
+  </div>
 
   <div class="list">
     {#each shown as tr (tr.id)}
+      {@render row(tr)}
+    {/each}
+    {#if dormant.length}
+      <button class="dormant" onclick={() => (showDormant = !showDormant)}>
+        <span class="mono chev">{showDormant ? "▾" : "▸"}</span>
+        <span>{t("tracks.dormant")}</span>
+        <span class="mono count">{dormant.length}</span>
+      </button>
+      {#if showDormant}
+        {#each dormant as tr (tr.id)}
+          {@render row(tr)}
+        {/each}
+      {/if}
+    {/if}
+    {#if shown.length === 0 && dormant.length === 0}
+      <div class="mono empty">{t("tracks.none")}</div>
+    {/if}
+  </div>
+</aside>
+
+<!-- One track and, when unfolded, its lanes. -->
+{#snippet row(tr: (typeof tracks)[number])}
       <div
         class="track"
         class:on={store.view === "track" && store.track === tr.id}
@@ -173,13 +304,15 @@
           {isOpen(tr.id) ? "▾" : "▸"}
         </button>
         <button class="pick" onclick={() => store.selectTrack(tr.id)} title={tr.intent}>
-          {#if tr.tags.length}
-            <span class="tags">
-              {#each tr.tags as tag (tag)}
-                <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
-              {/each}
-            </span>
-          {/if}
+          <!-- The small line: agent and tags on the left, last activity on the right. -->
+          <span class="top">
+            <span class="mono agent">{agentLabel(tr.agent)}</span>
+            {#each tr.tags as tag (tag)}
+              <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
+            {/each}
+            <span class="grow"></span>
+            <span class="mono when" title={whenFull(tr.lastAt, store.lang)}>{whenLabel(tr.lastAt, store.now, store.lang)}</span>
+          </span>
           <span class="main">
             <!-- The session: grey when closed, green when active, pulsing while it works. -->
             <span
@@ -211,12 +344,7 @@
           </button>
         {/each}
       {/if}
-    {/each}
-    {#if shown.length === 0}
-      <div class="mono empty">{t("tracks.none")}</div>
-    {/if}
-  </div>
-</aside>
+{/snippet}
 
 {#if menu && menuTrack}
   <div class="menu" bind:this={menuEl} style="left: {menu.x}px; top: {menu.y}px" role="menu" aria-label={t("track.menu")}>
@@ -313,8 +441,144 @@
     background: var(--sel);
   }
 
-  .search {
+  .searchrow {
+    position: relative;
+    display: flex;
+    gap: 6px;
     margin: 10px 12px 6px;
+  }
+
+  .fbtn {
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--inp);
+    border: 1px solid var(--line);
+    color: var(--lab);
+  }
+
+  .fbtn:hover,
+  .fbtn.on {
+    color: var(--hi);
+    border-color: var(--acc);
+  }
+
+  /* The filter menu hangs under the search row. */
+  .fmenu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    z-index: 30;
+    max-height: 70vh;
+    overflow-y: auto;
+    background: var(--card);
+    border: 1px solid var(--lines);
+    padding: 4px 0 6px;
+  }
+
+  .fhead {
+    padding: 10px 14px 4px;
+  }
+
+  .fitem {
+    width: 100%;
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 4px 14px;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    font-size: 12px;
+    color: var(--dim);
+  }
+
+  .fitem:not(.static):hover {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .fitem.on {
+    color: var(--hi);
+  }
+
+  .fitem.dim {
+    color: var(--lab);
+    font-size: 11px;
+  }
+
+  .fitem .check {
+    color: var(--acct);
+    font-size: 11px;
+  }
+
+  .fitem .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+
+  .fitem .box {
+    width: 10px;
+    height: 10px;
+    border: 1px solid;
+    flex-shrink: 0;
+  }
+
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--line);
+  }
+
+  .segopt {
+    height: 22px;
+    padding: 0 8px;
+    background: transparent;
+    border: 0;
+    border-right: 1px solid var(--line);
+    color: var(--lab);
+    font-size: 9px;
+    letter-spacing: 0.08em;
+  }
+
+  .segopt:last-child {
+    border-right: 0;
+  }
+
+  .segopt.on {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .dormant {
+    width: 100%;
+    height: 34px;
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 16px 0 10px;
+    background: transparent;
+    border: 0;
+    border-top: 1px solid var(--lineq);
+    text-align: left;
+    font-size: 12px;
+    color: var(--lab);
+  }
+
+  .dormant:hover {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .search {
+    flex: 1;
+    min-width: 0;
     height: 32px;
     background: var(--inp);
     border: 1px solid var(--line);
@@ -336,11 +600,11 @@
     padding: 4px 0 12px;
   }
 
-  /* The chevron and the name line sit at the bottom; a tag line, when
-     there is one, stacks above and makes the row taller. */
+  /* Two lines per track: agent, tags and time above; dot, name and runs
+     below. The chevron sits with the name line. */
   .track {
     width: 100%;
-    min-height: 44px;
+    min-height: 52px;
     display: flex;
     align-items: flex-end;
     gap: 4px;
@@ -376,7 +640,7 @@
 
   .chev {
     width: 18px;
-    height: 44px;
+    height: 36px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -431,7 +695,7 @@
   }
 
   .main {
-    height: 44px;
+    height: 36px;
     display: flex;
     align-items: center;
     gap: 10px;
@@ -442,15 +706,30 @@
     flex: 1;
   }
 
-  /* Tags sit in a small line above the name, each in its own colour. */
-  .tags {
+  /* The small line above the name: agent, tags, and when the track last moved. */
+  .top {
     display: flex;
+    align-items: center;
     gap: 8px;
     padding: 8px 0 0 16px;
-    margin-bottom: -6px;
+    margin-bottom: -4px;
     overflow: hidden;
     white-space: nowrap;
     line-height: 1.3;
+  }
+
+  .agent {
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    color: var(--lab);
+    flex-shrink: 0;
+  }
+
+  .when {
+    font-size: 9px;
+    letter-spacing: 0.04em;
+    color: var(--lab);
+    flex-shrink: 0;
   }
 
   .chip {

@@ -19,7 +19,8 @@
     | "changes"
     | "files"
     | "refresh"
-    | "close";
+    | "close"
+    | "filter";
 </script>
 
 <script lang="ts">
@@ -77,6 +78,8 @@
     <path d="M13 8a5 5 0 1 1-1.5-3.5" /><path d="M13 2.5v3h-3" />
   {:else if name === "close"}
     <path d="M4 4l8 8M12 4l-8 8" />
+  {:else if name === "filter"}
+    <path d="M2.5 4.5h11M4.5 8h7M6.5 11.5h3" />
   {/if}
 </svg>
 

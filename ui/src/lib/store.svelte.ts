@@ -67,6 +67,23 @@ export type TrackPatch = Partial<{
   tags: string[];
 }>;
 
+/** How the track list is narrowed, ordered and folded. Persisted as the `tracks_filter` setting. */
+export type TrackSort = "recent" | "oldest" | "created-desc" | "created-asc" | "az" | "za";
+export type TrackFilter = {
+  /** Only tracks with a run in flight. */
+  running: boolean;
+  /** Only tracks whose conductor session is open. */
+  active: boolean;
+  /** Only tracks with activity inside this window; empty means any. */
+  recent: "" | "1h" | "24h" | "7d";
+  sort: TrackSort;
+  /** Tracks idle longer than this many days fold away; 0 keeps them all in place. */
+  fold: 0 | 1 | 7 | 30;
+  /** Only tracks carrying every one of these tags. */
+  tags: string[];
+};
+export const DEFAULT_TRACK_FILTER: TrackFilter = { running: false, active: false, recent: "", sort: "recent", fold: 7, tags: [] };
+
 /** A tag the user made: its name and the colour it was dealt. */
 export type TagDef = { name: string; color: string };
 
@@ -564,6 +581,20 @@ class Store {
   }
   /** The user's tags, each with a colour; persisted as the `tags` setting. */
   tagPool = $state<TagDef[]>([]);
+  /** The wall clock, refreshed every half minute, so "today" and "yesterday" stay right. */
+  now = $state(Date.now());
+  /** The track list's filter, sort and fold. Persisted. */
+  trackFilter = $state<TrackFilter>({ ...DEFAULT_TRACK_FILTER });
+
+  /** Change part of the list's filter; persisted. */
+  async setTrackFilter(patch: Partial<TrackFilter>) {
+    this.trackFilter = { ...this.trackFilter, ...patch };
+    try {
+      await invoke("set_setting", { key: "tracks_filter", value: JSON.stringify(this.trackFilter) });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
 
   /** A tag's colour, or the neutral label colour for one not in the pool. */
   tagColor(name: string): string {
@@ -948,6 +979,13 @@ class Store {
         invoke<string | null>("get_setting", { key: "tags" }),
         ...AGENT_IDS.map((id) => invoke<string | null>("get_setting", { key: `commands:${id}` })),
       ]);
+      try {
+        const saved = await invoke<string | null>("get_setting", { key: "tracks_filter" });
+        if (saved) this.trackFilter = { ...DEFAULT_TRACK_FILTER, ...(JSON.parse(saved) as Partial<TrackFilter>) };
+      } catch {
+        this.trackFilter = { ...DEFAULT_TRACK_FILTER };
+      }
+      setInterval(() => (this.now = Date.now()), 30_000);
       const cache: Record<string, SlashCommand[]> = {};
       AGENT_IDS.forEach((id, i) => {
         try {
