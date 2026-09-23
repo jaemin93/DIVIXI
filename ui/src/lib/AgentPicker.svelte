@@ -75,9 +75,10 @@
   {#snippet trigger()}
     <button class="chip" onclick={() => (open = !open)} title={t("picker.title")} aria-haspopup="dialog" aria-expanded={open}>
       <Icon name="bot" size={14} />
-      <span class="mono">{summary.conductor}</span>
-      {#if summary.model}<span class="mono dim">{summary.model}</span>{/if}
-      {#if summary.workers}<span class="mono sep">/</span><span class="mono dim">{t("picker.worker")}</span><span class="mono">{summary.workers}</span>{/if}
+      <!-- One line, cut with an ellipsis when the column is narrow; never wrapped. -->
+      <span class="label mono">
+        {summary.conductor}{#if summary.model}<span class="dim">{summary.model}</span>{/if}{#if summary.workers}<span class="sep">/</span><span class="dim">{t("picker.worker")}</span><span>{summary.workers}</span>{/if}
+      </span>
     </button>
   {/snippet}
 
@@ -171,6 +172,23 @@
   .chip:hover {
     color: var(--hi);
     background: var(--sel);
+  }
+
+  .chip {
+    min-width: 0;
+    flex-shrink: 1;
+    white-space: nowrap;
+  }
+
+  .label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .label > span {
+    margin-left: 7px;
   }
 
   .chip .dim,

@@ -293,19 +293,28 @@
     color: var(--acct);
   }
 
+  /* Open-file tabs share the strip and truncate; no scrollbar ever
+     appears inside the strip, which would push it off its line. */
   .filetabs {
     display: flex;
     min-width: 0;
-    overflow-x: auto;
+    overflow: hidden;
     border-left: 1px solid var(--line);
     margin-left: 4px;
   }
 
   .tab.file {
+    flex: 1 1 auto;
+    min-width: 56px;
+    max-width: 180px;
     padding: 0 4px 0 10px;
     gap: 4px;
-    max-width: 180px;
     border-right: 1px solid var(--lineq);
+  }
+
+  .tab.file .fname {
+    flex: 1;
+    min-width: 0;
   }
 
   .fname {

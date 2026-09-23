@@ -117,12 +117,16 @@
     color: var(--acct);
   }
 
+  /* One row, always: chips shrink and cut before anything wraps. */
   .status {
     display: flex;
     align-items: center;
     gap: 14px;
     height: 32px;
     margin-top: 6px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
   }
 
   .chip {
@@ -145,6 +149,8 @@
 
   .chip.static {
     color: var(--lab);
+    min-width: 0;
+    flex-shrink: 1;
   }
 
   .path {
