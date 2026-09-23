@@ -70,7 +70,7 @@ async fn run() -> anyhow::Result<()> {
                 name: "orchestra".to_string(),
                 url: server.url(),
                 headers: vec![server.auth_header()],
-            }],
+            }.into()],
             resume: resume.clone(),
         },
     )

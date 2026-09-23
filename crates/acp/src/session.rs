@@ -21,8 +21,8 @@ use std::time::Duration;
 use agent_client_protocol::{
     schema::{
         v1::{
-            HttpHeader, InitializeRequest, LoadSessionRequest, McpServer, McpServerHttp,
-            NewSessionRequest, SessionConfigOptionValue, SessionNotification,
+            EnvVariable, HttpHeader, InitializeRequest, LoadSessionRequest, McpServer, McpServerHttp,
+            McpServerStdio, NewSessionRequest, SessionConfigOptionValue, SessionNotification,
             SetSessionConfigOptionRequest, SetSessionModeRequest,
         },
         ProtocolVersion,
@@ -44,6 +44,37 @@ pub struct McpHttp {
     pub headers: Vec<(String, String)>,
 }
 
+/// An MCP server the agent launches itself and talks to over stdio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpStdio {
+    pub name: String,
+    /// Executable, as the agent will resolve it.
+    pub command: String,
+    pub args: Vec<String>,
+    /// `(name, value)` environment variables for the server process.
+    pub env: Vec<(String, String)>,
+}
+
+/// An MCP server handed to the session, by transport. Every agent takes
+/// stdio; HTTP needs `mcp_capabilities.http`, which all four advertise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpServerSpec {
+    Http(McpHttp),
+    Stdio(McpStdio),
+}
+
+impl From<McpHttp> for McpServerSpec {
+    fn from(m: McpHttp) -> Self {
+        McpServerSpec::Http(m)
+    }
+}
+
+impl From<McpStdio> for McpServerSpec {
+    fn from(m: McpStdio) -> Self {
+        McpServerSpec::Stdio(m)
+    }
+}
+
 /// How to open a session.
 #[derive(Debug, Clone, Default)]
 pub struct SessionOptions {
@@ -53,7 +84,7 @@ pub struct SessionOptions {
     /// `(option id, value id)` pairs, e.g. the model.
     pub config: Vec<(String, String)>,
     /// MCP servers to hand the agent in `session/new` or `session/load`.
-    pub mcp_servers: Vec<McpHttp>,
+    pub mcp_servers: Vec<McpServerSpec>,
     /// A session id from an earlier run of the same agent to bring back with
     /// its history. When loading fails, a fresh session is opened instead and
     /// [`AgentSession::resumed`] says so.
@@ -112,14 +143,22 @@ impl AgentSession {
                     let mcp = |o: &SessionOptions| -> Vec<McpServer> {
                         o.mcp_servers
                             .iter()
-                            .map(|m| {
-                                let mut http = McpServerHttp::new(m.name.clone(), m.url.clone());
-                                http.headers = m
-                                    .headers
-                                    .iter()
-                                    .map(|(n, v)| HttpHeader::new(n.clone(), v.clone()))
-                                    .collect();
-                                McpServer::Http(http)
+                            .map(|m| match m {
+                                McpServerSpec::Http(m) => {
+                                    let mut http = McpServerHttp::new(m.name.clone(), m.url.clone());
+                                    http.headers = m
+                                        .headers
+                                        .iter()
+                                        .map(|(n, v)| HttpHeader::new(n.clone(), v.clone()))
+                                        .collect();
+                                    McpServer::Http(http)
+                                }
+                                McpServerSpec::Stdio(m) => {
+                                    let mut stdio = McpServerStdio::new(m.name.clone(), m.command.clone());
+                                    stdio.args = m.args.clone();
+                                    stdio.env = m.env.iter().map(|(n, v)| EnvVariable::new(n.clone(), v.clone())).collect();
+                                    McpServer::Stdio(stdio)
+                                }
                             })
                             .collect()
                     };

@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 mod conductor;
+mod library;
 
 /// How often accumulated message text is flushed to the webview and the store.
 ///
@@ -38,6 +39,10 @@ pub struct AppState {
     db_path: String,
     /// Where downloaded ACP servers live (`<app data>/adapters`).
     adapters_dir: PathBuf,
+    /// The library's skills (`<app data>/skills`).
+    skills_dir: PathBuf,
+    /// The user's home, where agents keep their own configs and skills.
+    home_dir: PathBuf,
     /// Last detection result, mirrored from the store for quick lookups.
     agents: Mutex<Option<Vec<AgentStatus>>>,
     /// Conductor and lane sessions, across tracks.
@@ -248,6 +253,9 @@ struct AppInfo {
     version: String,
     db_path: String,
     adapters_dir: String,
+    skills_dir: String,
+    /// Each agent's user skills directory, by agent id.
+    agent_skill_dirs: std::collections::BTreeMap<String, String>,
     workspace: String,
     runs: usize,
 }
@@ -259,9 +267,84 @@ fn app_info(state: State<'_, AppState>) -> Result<AppInfo, String> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         db_path: state.db_path.clone(),
         adapters_dir: state.adapters_dir.display().to_string(),
+        skills_dir: state.skills_dir.display().to_string(),
+        agent_skill_dirs: library::skill_dirs_of(&state.home_dir),
         workspace: workspace_root().display().to_string(),
         runs,
     })
+}
+
+// ----- library: MCP servers and skills shared across agents -----
+
+#[tauri::command]
+fn list_mcp_servers(state: State<'_, AppState>) -> Result<Vec<library::McpServerDef>, String> {
+    library::load_mcp(&state.store)
+}
+
+/// Add or replace a library MCP server. Sessions opened from now on get it.
+#[tauri::command]
+fn save_mcp_server(state: State<'_, AppState>, def: library::McpServerDef) -> Result<Vec<library::McpServerDef>, String> {
+    library::save_mcp(&state.store, def)
+}
+
+#[tauri::command]
+fn delete_mcp_server(state: State<'_, AppState>, name: String) -> Result<Vec<library::McpServerDef>, String> {
+    library::delete_mcp(&state.store, &name)
+}
+
+/// The MCP servers each agent has in its own config files. Read only.
+#[tauri::command]
+fn agent_mcp_servers(state: State<'_, AppState>) -> Result<Vec<library::AgentMcp>, String> {
+    Ok(library::read_agent_mcp(&state.store, &state.home_dir))
+}
+
+#[tauri::command]
+fn import_mcp_server(state: State<'_, AppState>, agent: String, name: String) -> Result<Vec<library::McpServerDef>, String> {
+    library::import_agent_mcp(&state.store, &state.home_dir, &agent, &name)
+}
+
+#[tauri::command]
+fn list_skills(state: State<'_, AppState>) -> Result<Vec<library::SkillInfo>, String> {
+    Ok(library::list_skills(&state.skills_dir, &state.home_dir))
+}
+
+#[tauri::command]
+fn agent_skills(state: State<'_, AppState>) -> Result<Vec<library::AgentSkill>, String> {
+    Ok(library::read_agent_skills(&state.skills_dir, &state.home_dir))
+}
+
+/// Copy the library's skills into the given agents' skill directories.
+#[tauri::command]
+fn sync_skills(state: State<'_, AppState>, agents: Vec<String>) -> Result<library::SyncReport, String> {
+    library::sync_skills(&state.skills_dir, &state.home_dir, &agents)
+}
+
+#[tauri::command]
+fn create_skill(state: State<'_, AppState>, name: String, description: String) -> Result<String, String> {
+    library::create_skill(&state.skills_dir, &name, &description).map(|p| p.display().to_string())
+}
+
+#[tauri::command]
+fn import_skill(state: State<'_, AppState>, agent: String, name: String) -> Result<String, String> {
+    library::import_skill(&state.skills_dir, &state.home_dir, &agent, &name).map(|p| p.display().to_string())
+}
+
+#[tauri::command]
+fn remove_skill(state: State<'_, AppState>, name: String) -> Result<Vec<String>, String> {
+    library::remove_skill(&state.skills_dir, &state.home_dir, &name)
+}
+
+/// Open a folder in the system file manager. Only paths under the app's
+/// data directory or an agent's skills directory are opened.
+#[tauri::command]
+fn reveal_path(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    let allowed = p.starts_with(&state.skills_dir)
+        || library::skill_dirs_of(&state.home_dir).values().any(|d| p.starts_with(d));
+    if !allowed {
+        return Err(format!("not a library path: {path}"));
+    }
+    library::reveal(&p)
 }
 
 /// Namespace for user preferences in the store's `meta` table.
@@ -463,16 +546,33 @@ pub fn run() {
             get_setting,
             set_setting,
             app_info,
+            list_mcp_servers,
+            save_mcp_server,
+            delete_mcp_server,
+            agent_mcp_servers,
+            import_mcp_server,
+            list_skills,
+            agent_skills,
+            sync_skills,
+            create_skill,
+            import_skill,
+            remove_skill,
+            reveal_path,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let (store, db_path) = open_store(&data_dir)?;
             let adapters_dir = data_dir.join("adapters");
+            let skills_dir = library::skills_dir(&data_dir);
+            std::fs::create_dir_all(&skills_dir)?;
+            let home_dir = app.path().home_dir()?;
             app.manage(AppState {
                 store,
                 db_path,
                 adapters_dir,
+                skills_dir,
+                home_dir,
                 agents: Mutex::new(None),
                 sessions: conductor::Sessions::default(),
             });

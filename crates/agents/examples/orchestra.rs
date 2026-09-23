@@ -92,7 +92,7 @@ async fn run() -> anyhow::Result<()> {
             &spec,
             SessionOptions {
                 cwd: cwd.clone(),
-                mcp_servers: vec![McpHttp { name: "orchestra".into(), url: server.url(), headers: vec![server.auth_header()] }],
+                mcp_servers: vec![McpHttp { name: "orchestra".into(), url: server.url(), headers: vec![server.auth_header()] }.into()],
                 ..Default::default()
             },
         )

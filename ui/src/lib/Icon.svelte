@@ -14,7 +14,8 @@
     | "chat"
     | "info"
     | "bot"
-    | "folder";
+    | "folder"
+    | "library";
 </script>
 
 <script lang="ts">
@@ -62,6 +63,8 @@
     <rect x="5" y="8" width="1.5" height="2" fill="currentColor" stroke="none" /><rect x="9.5" y="8" width="1.5" height="2" fill="currentColor" stroke="none" />
   {:else if name === "folder"}
     <path d="M2.5 4.5h4l1.5 1.5h5.5v7h-11z" />
+  {:else if name === "library"}
+    <path d="M2.5 2.5h3v11h-3zM6.5 2.5h3v11h-3zM10.5 3.5l2.8-.8 2.2 10-2.8.8z" />
   {/if}
 </svg>
 
