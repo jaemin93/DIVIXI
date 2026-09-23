@@ -96,6 +96,18 @@
     return id in folded ? !folded[id] : id === store.track;
   }
 
+  type Row = (typeof tracks)[number];
+  function dotColor(tr: Row): string {
+    if (tr.live || store.conductorOpening === tr.id) return "var(--ok)";
+    if (store.openDecisions(tr.id) > 0) return "var(--warn)";
+    return store.isActive(tr.id) ? "var(--ok)" : "var(--idle)";
+  }
+  function dotTitle(tr: Row): string {
+    const waiting = store.openDecisions(tr.id);
+    const session = store.isActive(tr.id) ? t("track.active") : t("track.inactive");
+    return waiting > 0 ? `${t("tracks.decisionsOpen", { n: waiting })} · ${session}` : session;
+  }
+
   function toggle(id: string) {
     folded = { ...folded, [id]: isOpen(id) };
   }
@@ -310,9 +322,19 @@
         oncontextmenu={(e) => openMenu(e, tr.id)}
         role="presentation"
       >
-        <button class="chev mono" onclick={() => toggle(tr.id)} aria-label={isOpen(tr.id) ? t("tracks.foldLanes") : t("tracks.unfoldLanes")}>
-          {isOpen(tr.id) ? "▾" : "▸"}
-        </button>
+        <!-- The session state over the fold toggle: grey closed, green active,
+             pulsing while it works, orange while a decision waits on the human. -->
+        <div class="side">
+          <span
+            class="dot"
+            class:pulse={tr.live || store.conductorOpening === tr.id}
+            style="background: {dotColor(tr)}"
+            title={dotTitle(tr)}
+          ></span>
+          <button class="chev" onclick={() => toggle(tr.id)} aria-label={isOpen(tr.id) ? t("tracks.foldLanes") : t("tracks.unfoldLanes")}>
+            {isOpen(tr.id) ? "▾" : "▸"}
+          </button>
+        </div>
         <button class="pick" onclick={() => store.selectTrack(tr.id)} title={tr.intent}>
           <!-- The small line: tags on the left, last activity on the right. -->
           <span class="top">
@@ -325,13 +347,6 @@
             <span class="mono when" title={whenFull(tr.lastAt, store.lang)}>{whenLabel(tr.lastAt, store.now, store.lang)}</span>
           </span>
           <span class="main">
-            <!-- The session: grey when closed, green when active, pulsing while it works. -->
-            <span
-              class="dot"
-              class:pulse={tr.live || store.conductorOpening === tr.id}
-              style="background: {tr.live || store.isActive(tr.id) || store.conductorOpening === tr.id ? 'var(--ok)' : 'var(--idle)'}"
-              title={store.isActive(tr.id) ? t("track.active") : t("track.inactive")}
-            ></span>
             <span class="name">{tr.name}</span>
             <span class="mono count">{tr.runs}</span>
           </span>
@@ -668,8 +683,23 @@
     background: var(--sel);
   }
 
+  /* Left of the name: the session dot on the small line, the fold toggle on the name line. */
+  .side {
+    align-self: stretch;
+    width: 22px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .side .dot {
+    margin-top: 11px;
+  }
+
   .chev {
-    width: 18px;
+    margin-top: auto;
+    width: 22px;
     height: 36px;
     display: flex;
     align-items: center;
@@ -677,8 +707,13 @@
     background: transparent;
     border: 0;
     color: var(--lab);
-    font-size: 10px;
+    font-size: 14px;
+    line-height: 1;
     padding: 0;
+  }
+
+  .chev:hover {
+    color: var(--hi);
   }
 
   .lane {
@@ -741,7 +776,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 0 0 16px;
+    padding: 8px 0 0 0;
     margin-bottom: -4px;
     overflow: hidden;
     white-space: nowrap;

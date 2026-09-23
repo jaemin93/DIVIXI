@@ -222,6 +222,30 @@ export type View = "track" | "settings" | "lane" | "new-track" | "edit-track";
 
 /** Prefix of conductor prompts Orchestra injects itself (lane reports). Language-neutral. */
 export const REPORT_PREFIX = "[lane-report]";
+/** First line of the turn that carries the human's answer to a decision card. */
+export const DECISION_PREFIX = "[decision]";
+
+/** A question the conductor put to the human, as the core keeps it. */
+export type DecisionOption = { label: string; detail: string };
+export type DecisionStatus = "open" | "decided" | "dismissed";
+export type Decision = {
+  id: number;
+  track: string;
+  /** The conductor run that asked. */
+  run: string | null;
+  question: string;
+  context: string;
+  options: DecisionOption[];
+  recommended: number | null;
+  allow_other: boolean;
+  status: DecisionStatus;
+  /** Index of the chosen option; null for an answer in the human's own words. */
+  choice: number | null;
+  answer: string | null;
+  note: string;
+  created_at: number;
+  decided_at: number | null;
+};
 
 /** What the user asked for; `system` follows the OS. */
 export type ThemePref = "system" | "dark" | "light";
@@ -314,6 +338,11 @@ class Store {
   railWidth = $state(200);
   trackListWidth = $state(264);
   panelWidth = $state(460);
+
+  /** Every decision of every track, oldest first. */
+  decisions = $state<Decision[]>([]);
+  /** The decision whose answer is on its way. */
+  answering = $state<number | null>(null);
 
   /** The side panel on the track: the working folder as files and changes. Persisted. */
   panelOpen = $state(false);
@@ -647,6 +676,46 @@ class Store {
 
   get currentTrack(): Track | undefined {
     return this.tracks.find((t) => t.id === this.track);
+  }
+
+  /** Take a decision the core sent or returned, new or changed. */
+  upsertDecision(d: Decision) {
+    const i = this.decisions.findIndex((x) => x.id === d.id);
+    if (i >= 0) this.decisions[i] = d;
+    else this.decisions.push(d);
+  }
+
+  /** The current track's decisions, oldest first. */
+  get trackDecisions(): Decision[] {
+    return this.decisions.filter((d) => d.track === this.track);
+  }
+
+  /** How many of a track's decisions wait on the human. */
+  openDecisions(track: string): number {
+    return this.decisions.filter((d) => d.track === track && d.status === "open").length;
+  }
+
+  /** Answer a decision card; the core hands the answer to the conductor. */
+  async answerDecision(id: number, choice: number | null, answer: string | null, note: string): Promise<boolean> {
+    this.answering = id;
+    try {
+      this.upsertDecision(await invoke<Decision>("answer_decision", { id, choice, answer, note }));
+      return true;
+    } catch (err) {
+      this.lastError = String(err);
+      return false;
+    } finally {
+      this.answering = null;
+    }
+  }
+
+  /** Set a decision aside; the conductor is not told. */
+  async dismissDecision(id: number) {
+    try {
+      this.upsertDecision(await invoke<Decision>("dismiss_decision", { id }));
+    } catch (err) {
+      this.lastError = String(err);
+    }
   }
 
   /** The current track's runs, oldest first. */
@@ -1028,6 +1097,11 @@ class Store {
       // restored can be in flight.
       this.runs = summaries.map(fromSummary);
       this.tracks = tracks;
+      try {
+        this.decisions = await invoke<Decision[]>("list_decisions", { track: null });
+      } catch (err) {
+        this.lastError = String(err);
+      }
       this.agents = agents;
       this.pickDefaultAgent();
       // Reopen on the track that was open, else the newest; none means the
@@ -1392,5 +1466,6 @@ export async function connectEvents() {
   await Promise.all([
     listen<Envelope>("lane", (e) => store.apply(e.payload)),
     listen<DownloadProgress>("agent_download", (e) => store.progress(e.payload)),
+    listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
   ]);
 }

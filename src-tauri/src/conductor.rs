@@ -32,9 +32,9 @@ use std::time::Duration;
 use orchestra_acp::{AgentSession, AgentSpec, McpHttp, SessionOptions};
 use orchestra_core::LaneEvent;
 use orchestra_mcp::{McpServer, Tool};
-use orchestra_store::TrackInfo;
+use orchestra_store::{Decision, DecisionOption, NewDecision, TrackInfo};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
 use crate::{pump, AppState};
@@ -46,6 +46,8 @@ pub const CONDUCTOR_LANE: &str = "conductor";
 /// Language-neutral; the timeline shows these as system lines, not as the
 /// human speaking, and the preamble tells the conductor what it means.
 pub const REPORT_PREFIX: &str = "[lane-report]";
+/// First line of a turn that carries the human's answer to a decision card.
+pub const DECISION_PREFIX: &str = "[decision]";
 
 /// A lane run waits at most this long for the agent to finish a turn.
 const LANE_TURN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -164,7 +166,7 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
 - 레인 목록은 열린 것과 닫힌 것 모두 `lane_status`로 봅니다. 터미널이나 파일을 뒤져 레인을 찾지 않습니다.
 - 닫힌 레인은 같은 이름으로 `spawn_lane`이나 `ask_lane`을 부르면 이전 대화를 기억한 채 다시 열립니다. 기억을 버리고 처음부터 시작하려면 `spawn_lane`에 fresh=true를 줍니다. `close_lane`은 세션만 닫고 기록은 남깁니다.
 - 도구가 오류를 돌려주면 오류 문구에 적힌 대로 한 번만 다시 시도하고, 그래도 안 되면 사람에게 무엇이 막혔는지 말합니다. 같은 도구를 반복해서 부르지 않습니다.
-- 사람이 결정해야 할 일(되돌리기 어려운 변경, 여러 갈래 중 선택)은 스스로 정하지 말고 선택지를 제시하고 묻습니다. 사람이 정하면 `record_decision`으로 남깁니다.
+- 사람이 골라야 할 일(여러 갈래 중 선택, 되돌리기 어려운 변경, 취향이나 우선순위)은 스스로 정하지 않습니다. 선택지를 본문에 A/B/C로 늘어놓지 말고 `request_decision`을 부르세요. 앱이 선택지를 버튼이 있는 결정 카드로 보여 줍니다. 부른 뒤에는 무엇을 물었는지 한 문장만 말하고 턴을 끝냅니다. 사람의 답은 `{DECISION_PREFIX}`로 시작하는 메시지로 옵니다. 레인 보고에 사람이 정해야 할 질문이 있으면 그것도 `request_decision`으로 올립니다. 사람이 대화 중에 직접 정한 것은 `record_decision`으로 남깁니다.
 - 한국어로 말합니다. 짧게, 명확하게.
 
 작업 디렉터리는 {cwd} 입니다. 레인도 같은 디렉터리에서 일합니다.
@@ -190,7 +192,7 @@ Rules:
 - `lane_status` lists every lane, open and closed. Never hunt for lanes through the terminal or files.
 - A closed lane reopens with its earlier conversation when you call `spawn_lane` or `ask_lane` with its name. To drop that memory and start over, pass fresh=true to `spawn_lane`. `close_lane` only closes the session; the record stays.
 - If a tool returns an error, retry once as the message suggests; if that fails, tell the human what is blocked. Never call the same tool repeatedly.
-- Decisions that belong to the human (hard-to-undo changes, a choice between directions) are not yours to make: present the options and ask. Once the human decides, record it with `record_decision`.
+- Choices that belong to the human (a choice between directions, hard-to-undo changes, taste or priorities) are not yours to make. Do not list options as A/B/C in prose: call `request_decision`, and the app shows them as a decision card with buttons. After calling it, say in one sentence what you asked and end your turn. The human's answer arrives as a message starting with `{DECISION_PREFIX}`. If a lane report raises a question only the human can answer, put that to them with `request_decision` too. Decisions the human makes in conversation are recorded with `record_decision`.
 - Speak English. Short and clear.
 
 The working directory is {cwd}. Lanes work in the same directory.
@@ -209,6 +211,7 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
     let status = (app.clone(), track.clone());
     let report = app.clone();
     let close = (app.clone(), track.clone());
+    let ask_human = (app.clone(), track.clone());
     let decide = (app, track);
 
     vec![
@@ -318,8 +321,82 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
             },
         ),
         Tool::new(
+            "request_decision",
+            &format!("Put a choice to the human as a decision card with one button per option. Use it whenever the human has to pick (directions, hard-to-undo changes, taste, priorities) instead of listing options in prose. Returns at once: tell the human in one sentence what you asked, then end your turn. Their answer arrives later as a message starting with {DECISION_PREFIX}. Several decisions may be open at once."),
+            json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "description": "The question, one sentence, in the human's language." },
+                    "context": { "type": "string", "description": "Why it matters or what it depends on, one to three sentences. Optional." },
+                    "options": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 6,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Short: what the button says." },
+                                "detail": { "type": "string", "description": "What choosing it means: consequences, trade-offs, cost of undoing." }
+                            },
+                            "required": ["label"]
+                        }
+                    },
+                    "recommended": { "type": "integer", "description": "0-based index of the option you recommend, if any." },
+                    "allow_other": { "type": "boolean", "description": "Let the human answer in their own words too. Default true." }
+                },
+                "required": ["question", "options"]
+            }),
+            move |args| {
+                let (app, track) = ask_human.clone();
+                async move {
+                    let question = str_arg(&args, "question")?;
+                    let options: Vec<DecisionOption> = args
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|list| {
+                            list.iter()
+                                .filter_map(|o| match o {
+                                    // Tolerate a bare list of strings.
+                                    Value::String(s) => Some(DecisionOption { label: s.trim().to_string(), detail: String::new() }),
+                                    Value::Object(_) => Some(DecisionOption {
+                                        label: o.get("label").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
+                                        detail: o.get("detail").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
+                                    }),
+                                    _ => None,
+                                })
+                                .filter(|o| !o.label.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if options.len() < 2 {
+                        return Err("request_decision needs at least two options, each with a label".to_string());
+                    }
+                    let state = app.state::<AppState>();
+                    let run = conductor_run(&state, &track).await;
+                    let decision = state
+                        .store
+                        .open_decision(&NewDecision {
+                            track: track.clone(),
+                            run,
+                            question,
+                            context: args.get("context").and_then(Value::as_str).unwrap_or_default().to_string(),
+                            options,
+                            recommended: args.get("recommended").and_then(Value::as_u64).map(|i| i as usize),
+                            allow_other: args.get("allow_other").and_then(Value::as_bool).unwrap_or(true),
+                        })
+                        .map_err(|e| e.to_string())?;
+                    let _ = app.emit("decision", &decision);
+                    Ok(json!({
+                        "decision": decision.id,
+                        "status": "waiting for the human",
+                        "note": format!("The human sees this as a card with buttons. Do not repeat the options in prose; say in one sentence what you asked and end your turn. The answer arrives as a {DECISION_PREFIX} message."),
+                    }))
+                }
+            },
+        ),
+        Tool::new(
             "record_decision",
-            "Record a decision the human made: the question, the options, the choice and the rationale. Use after the human decides, never to decide for them.",
+            "Record a decision the human made in conversation: the question, the options, the choice and the rationale. Use after the human decides, never to decide for them. Answers given on a decision card are recorded already.",
             json!({
                 "type": "object",
                 "properties": {
@@ -334,22 +411,21 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                 let (app, track) = decide.clone();
                 async move {
                     let state = app.state::<AppState>();
-                    let mut list: Vec<Value> = state
-                        .store
-                        .get_meta("decisions")
-                        .map_err(|e| e.to_string())?
-                        .and_then(|s| serde_json::from_str(&s).ok())
+                    let question = str_arg(&args, "question")?;
+                    let choice = str_arg(&args, "choice")?;
+                    let options: Vec<String> = args
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|l| l.iter().filter_map(Value::as_str).map(str::to_owned).collect())
                         .unwrap_or_default();
-                    let mut entry = args.clone();
-                    entry["track"] = json!(track);
-                    entry["at"] = json!(now_ms());
-                    entry["n"] = json!(list.len() + 1);
-                    list.push(entry.clone());
-                    state
+                    let rationale = args.get("rationale").and_then(Value::as_str).unwrap_or_default();
+                    let run = conductor_run(&state, &track).await;
+                    let decision = state
                         .store
-                        .set_meta("decisions", &serde_json::to_string(&list).map_err(|e| e.to_string())?)
+                        .record_decision(&track, run.as_deref(), &question, &options, &choice, rationale)
                         .map_err(|e| e.to_string())?;
-                    Ok(json!({ "recorded": entry["n"] }))
+                    let _ = app.emit("decision", &decision);
+                    Ok(json!({ "recorded": decision.id }))
                 }
             },
         ),
@@ -364,11 +440,76 @@ fn str_arg(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing argument: {key}"))
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+/// The conductor run in flight on a track, if any: what a decision hangs off.
+async fn conductor_run(state: &AppState, track: &str) -> Option<String> {
+    state.sessions.conductors.lock().await.get(track).and_then(|c| c.live.running.clone())
+}
+
+/// The turn that hands the human's answer to the conductor.
+fn decision_text(d: &Decision) -> String {
+    let letter = |i: usize| char::from(b'A' + (i % 26) as u8);
+    let answer = match (d.choice, d.answer.as_deref()) {
+        (Some(i), Some(label)) => format!("{}. {label}", letter(i)),
+        (None, Some(own)) => format!("(in their own words) {own}"),
+        _ => "(no answer)".to_string(),
+    };
+    let mut text = format!("{DECISION_PREFIX} #{}\nquestion: {}\nanswer: {answer}", d.id, d.question);
+    if !d.note.is_empty() {
+        text.push_str(&format!("\nnote: {}", d.note));
+    }
+    text.push_str("\n\nThe human decided on the card. Carry on accordingly; this is recorded already.");
+    text
+}
+
+/// Record the human's answer and hand it to the conductor as a turn,
+/// opening the conductor if it is closed and waiting while it is busy.
+pub async fn answer_decision(
+    app: AppHandle,
+    id: i64,
+    choice: Option<usize>,
+    own: Option<String>,
+    note: String,
+) -> Result<Decision, String> {
+    let st = app.state::<AppState>();
+    let decision = st
+        .store
+        .answer_decision(id, choice, own.as_deref(), &note)
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("decision", &decision);
+    let text = decision_text(&decision);
+    let track = decision.track.clone();
+    tauri::async_runtime::spawn(deliver(app.clone(), track, text, true, format!("decision #{id}")));
+    Ok(decision)
+}
+
+/// Run `text` as a conductor turn once the conductor is free. The turn
+/// itself claims the busy mark, so a refusal is retried rather than
+/// trusting an earlier free check that another turn may have overtaken.
+/// `open` lets it start a closed conductor; a lane report does not.
+async fn deliver(app: AppHandle, track: String, text: String, open: bool, what: String) {
+    let state = app.state::<AppState>();
+    let deadline = std::time::Instant::now() + REPORT_WAIT;
+    let lang = state.store.get_meta("setting:language").ok().flatten().unwrap_or_default();
+    loop {
+        if !open && !state.sessions.conductors.lock().await.contains_key(&track) {
+            tracing::warn!(%track, %what, "no conductor session to deliver to");
+            return;
+        }
+        match conductor_turn(app.clone(), track.clone(), text.clone(), None, lang.clone()).await {
+            Ok(_) => return,
+            Err(err) if err == BUSY => {
+                if std::time::Instant::now() > deadline {
+                    tracing::warn!(%track, %what, "conductor stayed busy; dropped");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(err) => {
+                tracing::warn!(%track, %what, %err, "could not deliver to the conductor");
+                return;
+            }
+        }
+    }
 }
 
 /// What the store remembers about a lane's last agent session, so the lane
@@ -703,31 +844,7 @@ async fn report_to_conductor(app: AppHandle, track: String, lane: String, run: S
         if output.is_empty() { "(no text output)" } else { &output },
     );
 
-    // Run the report as a turn once the conductor is free. The turn itself
-    // claims the busy mark, so a refusal is retried rather than trusting an
-    // earlier free check that another turn may have overtaken.
-    let deadline = std::time::Instant::now() + REPORT_WAIT;
-    let lang = state.store.get_meta("setting:language").ok().flatten().unwrap_or_default();
-    loop {
-        if !state.sessions.conductors.lock().await.contains_key(&track) {
-            tracing::warn!(%track, %lane, %run, "no conductor session to report to");
-            return;
-        }
-        match conductor_turn(app.clone(), track.clone(), text.clone(), None, lang.clone()).await {
-            Ok(_) => return,
-            Err(err) if err == BUSY => {
-                if std::time::Instant::now() > deadline {
-                    tracing::warn!(%track, %lane, %run, "conductor stayed busy; report dropped");
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Err(err) => {
-                tracing::warn!(%track, %lane, %run, %err, "could not deliver lane report to the conductor");
-                return;
-            }
-        }
-    }
+    deliver(app.clone(), track, text, false, format!("report of {lane} run {run}")).await;
 }
 
 /// The track's conductor session, opened (or reopened after its agent or
@@ -905,6 +1022,10 @@ pub async fn conductor_turn(
             .store
             .begin_run(&track, CONDUCTOR_LANE, &agent, &prompt, &info.cwd)
             .map_err(|e| e.to_string())?;
+        // Tools called during the turn (decisions) hang off this run.
+        if let Some(c) = st.sessions.conductors.lock().await.get_mut(&track) {
+            c.live.running = Some(run.clone());
+        }
 
         let text = if first { format!("{}\n\n---\n\n{prompt}", preamble(&lang, &info)) } else { prompt };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -925,10 +1046,17 @@ pub async fn conductor_turn(
             tracing::info!(track = %track_for_turn, run = %run_for_turn, "conductor turn starting");
             let result = session.prompt(text, tx.clone()).await;
             tracing::info!(run = %run_for_turn, elapsed_ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "conductor turn ended");
-            if let Err(err) = result {
-                let _ = tx.send(LaneEvent::Failed { error: err.to_string() });
-                // A failed turn kills the session; drop it so the next prompt reopens.
-                st.sessions.conductors.lock().await.remove(&track_for_turn);
+            {
+                let mut conductors = st.sessions.conductors.lock().await;
+                if let Err(err) = result {
+                    let _ = tx.send(LaneEvent::Failed { error: err.to_string() });
+                    // A failed turn kills the session; drop it so the next prompt reopens.
+                    conductors.remove(&track_for_turn);
+                } else if let Some(c) = conductors.get_mut(&track_for_turn) {
+                    if c.live.running.as_deref() == Some(run_for_turn.as_str()) {
+                        c.live.running = None;
+                    }
+                }
             }
             st.sessions.end_turn(&track_for_turn);
         });

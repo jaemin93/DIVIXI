@@ -11,7 +11,7 @@ use std::time::Duration;
 use orchestra_acp::{AgentSpec, ConfigOptionInfo};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
 use orchestra_core::{LaneEnvelope, LaneEvent};
-use orchestra_store::{RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
+use orchestra_store::{Decision, RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -259,6 +259,33 @@ async fn conductor_cancel(app: AppHandle, track: String) -> Result<(), String> {
 #[tauri::command]
 async fn conductor_close(app: AppHandle, track: String) -> Result<conductor::ConductorState, String> {
     conductor::conductor_close(app, track).await
+}
+
+/// Decisions of one track, or of every track, oldest first.
+#[tauri::command(async)]
+fn list_decisions(state: State<'_, AppState>, track: Option<String>) -> Result<Vec<Decision>, String> {
+    state.store.decisions(track.as_deref()).map_err(|e| e.to_string())
+}
+
+/// The human answers a decision card: an option by index, or their own
+/// words. The answer goes to the conductor as a turn.
+#[tauri::command]
+async fn answer_decision(
+    app: AppHandle,
+    id: i64,
+    choice: Option<usize>,
+    answer: Option<String>,
+    note: Option<String>,
+) -> Result<Decision, String> {
+    conductor::answer_decision(app, id, choice, answer, note.unwrap_or_default()).await
+}
+
+/// The human sets a decision aside; the conductor is not told.
+#[tauri::command]
+fn dismiss_decision(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<Decision, String> {
+    let decision = state.store.dismiss_decision(id).map_err(|e| e.to_string())?;
+    let _ = app.emit("decision", &decision);
+    Ok(decision)
 }
 
 /// Every run, oldest first: what the timeline is rebuilt from at startup.
@@ -573,6 +600,9 @@ pub fn run() {
             conductor_cancel,
             list_runs,
             run_events,
+            list_decisions,
+            answer_decision,
+            dismiss_decision,
             search_runs,
             agent_statuses,
             detect_agents,

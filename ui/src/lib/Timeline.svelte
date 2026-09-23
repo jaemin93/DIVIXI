@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { store, agentLabel, REPORT_PREFIX, type Segment, type Tool } from "./store.svelte";
+  import { store, agentLabel, REPORT_PREFIX, DECISION_PREFIX, type Decision, type Segment, type Tool } from "./store.svelte";
   import Mark from "./Mark.svelte";
+  import DecisionCard from "./DecisionCard.svelte";
   import Working from "./Working.svelte";
   import Markdown from "./Markdown.svelte";
   import { t } from "./i18n.svelte";
@@ -12,6 +13,7 @@
     void store.trackRuns.length;
     void store.activeRun?.message.length;
     void store.activeRun?.toolCount;
+    void store.trackDecisions.length;
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   });
 
@@ -46,6 +48,28 @@
     return out;
   }
 
+  /** Decisions sit under the conductor turn that asked; the rest (asked
+   *  by a run no longer here) go at the end. */
+  const conductorRuns = $derived(store.trackRuns.filter((r) => r.lane === "conductor"));
+  const decisionsByRun = $derived.by(() => {
+    const byRun: Record<string, Decision[]> = {};
+    const orphans: Decision[] = [];
+    const ids = new Set(conductorRuns.map((r) => r.id));
+    for (const d of store.trackDecisions) {
+      if (d.run && ids.has(d.run)) (byRun[d.run] ??= []).push(d);
+      else orphans.push(d);
+    }
+    return { byRun, orphans };
+  });
+
+  /** "#3 · B. label" from the turn that carried an answer to the conductor. */
+  function decisionLine(prompt: string): string {
+    const lines = prompt.split("\n");
+    const id = lines[0].replace(DECISION_PREFIX, "").trim();
+    const answer = lines.find((l) => l.startsWith("answer: "))?.slice(8) ?? "";
+    return answer ? `${id} · ${answer}` : id;
+  }
+
   /** Tool titles from MCP arrive as `mcp__orchestra__spawn_lane`; show the tool. */
   function toolLabel(title: string): string {
     return title.replace(/^mcp__[a-z0-9_-]+__/i, "").replace(/^mcp\.[a-z0-9_-]+\./i, "");
@@ -64,9 +88,11 @@
 
   <!-- The track is the human and the conductor. Lane work is the conductor's
        to relay; lanes themselves are read in their own view. -->
-  {#each store.trackRuns.filter((r) => r.lane === "conductor") as run (run.id)}
+  {#each conductorRuns as run (run.id)}
     {#if run.prompt.startsWith(REPORT_PREFIX)}
       <div class="sys mono">{t("timeline.reportArrived")} · {run.prompt.split("\n")[0].replace(REPORT_PREFIX, "").trim()}</div>
+    {:else if run.prompt.startsWith(DECISION_PREFIX)}
+      <div class="sys mono decided">{t("timeline.decisionSent")} · {decisionLine(run.prompt)}</div>
     {:else}
       <div class="me">
         <div class="mlab">{t("timeline.me")}</div>
@@ -110,6 +136,12 @@
         <p class="ctext dim">{t("timeline.thinking")}</p>
       {/if}
     </div>
+    {#each decisionsByRun.byRun[run.id] ?? [] as d (d.id)}
+      <DecisionCard decision={d} />
+    {/each}
+  {/each}
+  {#each decisionsByRun.orphans as d (d.id)}
+    <DecisionCard decision={d} />
   {/each}
 </div>
 
@@ -144,6 +176,10 @@
     font-size: 10px;
     letter-spacing: 0.12em;
     color: var(--lab);
+  }
+
+  .sys.decided {
+    color: var(--warn);
   }
 
   .me {

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -71,6 +71,38 @@ const MIGRATIONS: &[&str] = &[
     // 4 -> 5: a colour and tags per track, for the track list.
     "ALTER TABLE tracks ADD COLUMN color TEXT NOT NULL DEFAULT '';
     ALTER TABLE tracks ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
+    // 5 -> 6: decisions get a table. The ones `record_decision` kept as a
+    // JSON list in meta move over as decided, their options as labels.
+    "CREATE TABLE IF NOT EXISTS decisions (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        track       TEXT    NOT NULL,
+        run         TEXT,
+        question    TEXT    NOT NULL,
+        context     TEXT    NOT NULL DEFAULT '',
+        options     TEXT    NOT NULL DEFAULT '[]',
+        recommended INTEGER,
+        allow_other INTEGER NOT NULL DEFAULT 1,
+        status      TEXT    NOT NULL,
+        choice      INTEGER,
+        answer      TEXT,
+        note        TEXT    NOT NULL DEFAULT '',
+        created_at  INTEGER NOT NULL,
+        decided_at  INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS decisions_by_track ON decisions(track, id);
+    INSERT INTO decisions(track, question, options, allow_other, status, answer, note, created_at, decided_at)
+        SELECT COALESCE(json_extract(d.value, '$.track'), ''),
+               COALESCE(json_extract(d.value, '$.question'), ''),
+               COALESCE((SELECT json_group_array(json_object('label', o.value, 'detail', ''))
+                         FROM json_each(json_extract(d.value, '$.options')) o), '[]'),
+               0, 'decided',
+               json_extract(d.value, '$.choice'),
+               COALESCE(json_extract(d.value, '$.rationale'), ''),
+               COALESCE(json_extract(d.value, '$.at'), 0),
+               COALESCE(json_extract(d.value, '$.at'), 0)
+        FROM meta m, json_each(m.value) d
+        WHERE m.key = 'decisions' AND json_valid(m.value);
+    DELETE FROM meta WHERE key = 'decisions';",
 ];
 
 const SCHEMA: &str = r#"
@@ -126,6 +158,24 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_by_run ON events(run_id, seq);
 
+CREATE TABLE IF NOT EXISTS decisions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    track       TEXT    NOT NULL,
+    run         TEXT,
+    question    TEXT    NOT NULL,
+    context     TEXT    NOT NULL DEFAULT '',
+    options     TEXT    NOT NULL DEFAULT '[]',
+    recommended INTEGER,
+    allow_other INTEGER NOT NULL DEFAULT 1,
+    status      TEXT    NOT NULL,
+    choice      INTEGER,
+    answer      TEXT,
+    note        TEXT    NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL,
+    decided_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS decisions_by_track ON decisions(track, id);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS runs_fts USING fts5(
     run_id UNINDEXED,
     prompt,
@@ -165,6 +215,108 @@ pub struct RunSummary {
     /// The last plan the agent published.
     pub plan: Vec<String>,
     pub tool_count: u32,
+}
+
+/// One choice a decision offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionOption {
+    /// Short, what the human clicks.
+    pub label: String,
+    /// What choosing it means: consequences, trade-offs. May be empty.
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// Where a decision stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionStatus {
+    /// Waiting for the human.
+    Open,
+    /// The human chose.
+    Decided,
+    /// The human set it aside without choosing.
+    Dismissed,
+}
+
+impl DecisionStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            DecisionStatus::Open => "open",
+            DecisionStatus::Decided => "decided",
+            DecisionStatus::Dismissed => "dismissed",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "open" => DecisionStatus::Open,
+            "dismissed" => DecisionStatus::Dismissed,
+            _ => DecisionStatus::Decided,
+        }
+    }
+}
+
+/// A question the conductor put to the human, with the options it offered
+/// and, once answered, what the human chose.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Decision {
+    pub id: i64,
+    pub track: String,
+    /// The conductor run that asked, when known.
+    pub run: Option<String>,
+    pub question: String,
+    /// Why it matters, in a sentence or two.
+    pub context: String,
+    pub options: Vec<DecisionOption>,
+    /// Index into `options` the conductor recommends.
+    pub recommended: Option<usize>,
+    /// Whether the human may answer in their own words.
+    pub allow_other: bool,
+    pub status: DecisionStatus,
+    /// Index into `options` the human chose; `None` for an answer in their own words.
+    pub choice: Option<usize>,
+    /// The chosen option's label, or the human's own words.
+    pub answer: Option<String>,
+    pub note: String,
+    /// Unix milliseconds.
+    pub created_at: i64,
+    pub decided_at: Option<i64>,
+}
+
+/// What a new open decision carries.
+#[derive(Debug, Clone, Default)]
+pub struct NewDecision {
+    pub track: String,
+    pub run: Option<String>,
+    pub question: String,
+    pub context: String,
+    pub options: Vec<DecisionOption>,
+    pub recommended: Option<usize>,
+    pub allow_other: bool,
+}
+
+const DECISION_SELECT: &str = "SELECT id, track, run, question, context, options, recommended, allow_other, status, choice, answer, note, created_at, decided_at FROM decisions";
+
+fn row_to_decision(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decision> {
+    let options: String = r.get(5)?;
+    let status: String = r.get(8)?;
+    Ok(Decision {
+        id: r.get(0)?,
+        track: r.get(1)?,
+        run: r.get(2)?,
+        question: r.get(3)?,
+        context: r.get(4)?,
+        options: serde_json::from_str(&options).unwrap_or_default(),
+        recommended: r.get::<_, Option<i64>>(6)?.and_then(|i| usize::try_from(i).ok()),
+        allow_other: r.get::<_, i64>(7)? != 0,
+        status: DecisionStatus::parse(&status),
+        choice: r.get::<_, Option<i64>>(9)?.and_then(|i| usize::try_from(i).ok()),
+        answer: r.get(10)?,
+        note: r.get(11)?,
+        created_at: r.get(12)?,
+        decided_at: r.get(13)?,
+    })
 }
 
 /// A track: one conductor, its lanes, one working directory.
@@ -449,6 +601,7 @@ impl Store {
         tx.execute("DELETE FROM runs_fts WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![id])?;
         tx.execute("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![id])?;
         tx.execute("DELETE FROM runs WHERE track = ?1", params![id])?;
+        tx.execute("DELETE FROM decisions WHERE track = ?1", params![id])?;
         tx.execute(
             "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'lane_session:' || ?1 || '/%'",
             params![id],
@@ -560,6 +713,131 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Put a question to the human. It stays open until answered or dismissed.
+    pub fn open_decision(&self, new: &NewDecision) -> anyhow::Result<Decision> {
+        if new.question.trim().is_empty() {
+            anyhow::bail!("a decision needs a question");
+        }
+        if new.options.len() < 2 && !new.allow_other {
+            anyhow::bail!("a decision needs at least two options, or allow_other");
+        }
+        if new.recommended.is_some_and(|i| i >= new.options.len()) {
+            anyhow::bail!("recommended is not one of the options");
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO decisions(track, run, question, context, options, recommended, allow_other, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                new.track,
+                new.run,
+                new.question.trim(),
+                new.context.trim(),
+                serde_json::to_string(&new.options)?,
+                new.recommended.map(|i| i as i64),
+                new.allow_other as i64,
+                DecisionStatus::Open.as_str(),
+                now_ms(),
+            ],
+        )?;
+        let id = conn.last_insert_rowid();
+        drop(conn);
+        self.decision(id)?.ok_or_else(|| anyhow::anyhow!("decision {id} vanished"))
+    }
+
+    /// Keep a decision the human made in conversation, already decided.
+    pub fn record_decision(
+        &self,
+        track: &str,
+        run: Option<&str>,
+        question: &str,
+        options: &[String],
+        choice: &str,
+        rationale: &str,
+    ) -> anyhow::Result<Decision> {
+        let options: Vec<DecisionOption> = options
+            .iter()
+            .map(|label| DecisionOption { label: label.clone(), detail: String::new() })
+            .collect();
+        let index = options.iter().position(|o| o.label == choice);
+        let now = now_ms();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO decisions(track, run, question, options, allow_other, status, choice, answer, note, created_at, decided_at)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9, ?9)",
+            params![
+                track,
+                run,
+                question,
+                serde_json::to_string(&options)?,
+                DecisionStatus::Decided.as_str(),
+                index.map(|i| i as i64),
+                choice,
+                rationale,
+                now,
+            ],
+        )?;
+        let id = conn.last_insert_rowid();
+        drop(conn);
+        self.decision(id)?.ok_or_else(|| anyhow::anyhow!("decision {id} vanished"))
+    }
+
+    /// One decision, if it exists.
+    pub fn decision(&self, id: i64) -> anyhow::Result<Option<Decision>> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(&format!("{DECISION_SELECT} WHERE id = ?1"), params![id], row_to_decision)
+            .optional()?)
+    }
+
+    /// A track's decisions, or every track's, oldest first.
+    pub fn decisions(&self, track: Option<&str>) -> anyhow::Result<Vec<Decision>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&format!("{DECISION_SELECT} WHERE ?1 IS NULL OR track = ?1 ORDER BY id"))?;
+        let rows = stmt.query_map(params![track], row_to_decision)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Answer an open decision: one of its options, or the human's own
+    /// words when the decision allows them.
+    pub fn answer_decision(&self, id: i64, choice: Option<usize>, own: Option<&str>, note: &str) -> anyhow::Result<Decision> {
+        let d = self.decision(id)?.ok_or_else(|| anyhow::anyhow!("no decision {id}"))?;
+        if d.status != DecisionStatus::Open {
+            anyhow::bail!("decision {id} is already {}", d.status.as_str());
+        }
+        let answer = match (choice, own.map(str::trim).filter(|s| !s.is_empty())) {
+            (Some(i), _) => d
+                .options
+                .get(i)
+                .map(|o| o.label.clone())
+                .ok_or_else(|| anyhow::anyhow!("decision {id} has no option {i}"))?,
+            (None, Some(text)) if d.allow_other => text.to_string(),
+            (None, Some(_)) => anyhow::bail!("decision {id} takes one of its options"),
+            (None, None) => anyhow::bail!("choose an option or write an answer"),
+        };
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE decisions SET status = ?2, choice = ?3, answer = ?4, note = ?5, decided_at = ?6 WHERE id = ?1",
+            params![id, DecisionStatus::Decided.as_str(), choice.map(|i| i as i64), answer, note.trim(), now_ms()],
+        )?;
+        drop(conn);
+        self.decision(id)?.ok_or_else(|| anyhow::anyhow!("decision {id} vanished"))
+    }
+
+    /// Set an open decision aside without answering it.
+    pub fn dismiss_decision(&self, id: i64) -> anyhow::Result<Decision> {
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE decisions SET status = ?2, decided_at = ?3 WHERE id = ?1 AND status = 'open'",
+            params![id, DecisionStatus::Dismissed.as_str(), now_ms()],
+        )?;
+        drop(conn);
+        if changed == 0 {
+            anyhow::bail!("decision {id} is not open");
+        }
+        self.decision(id)?.ok_or_else(|| anyhow::anyhow!("decision {id} vanished"))
     }
 
     /// One run's summary, if it exists.
@@ -907,6 +1185,11 @@ mod tests {
             conn.execute("INSERT INTO meta(key, value) VALUES ('conductor_session:claude_code', 'sess-c')", []).unwrap();
             conn.execute("INSERT INTO meta(key, value) VALUES ('lane_session:ui', '{\"a\":1}')", []).unwrap();
             conn.execute("INSERT INTO meta(key, value) VALUES ('setting:models', '{\"claude_code\":\"opus[1m]\",\"codex\":\"gpt-5.5\"}')", []).unwrap();
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES ('decisions', '[{\"track\":\"tr001\",\"question\":\"Which db?\",\"options\":[\"sqlite\",\"pg\"],\"choice\":\"sqlite\",\"rationale\":\"local\",\"at\":7,\"n\":1}]')",
+                [],
+            )
+            .unwrap();
         }
 
         let store = Store::open(&path).unwrap();
@@ -915,6 +1198,13 @@ mod tests {
         let first = store.track("tr001").unwrap().unwrap();
         assert_eq!(first.conductor_config.get("model").map(String::as_str), Some("opus[1m]"));
         assert_eq!(store.get_meta("setting:models").unwrap(), None);
+        // Decisions kept in meta moved into their table.
+        let old_decisions = store.decisions(Some("tr001")).unwrap();
+        assert_eq!(old_decisions.len(), 1);
+        assert_eq!(old_decisions[0].status, DecisionStatus::Decided);
+        assert_eq!(old_decisions[0].answer.as_deref(), Some("sqlite"));
+        assert_eq!(old_decisions[0].options[1].label, "pg");
+        assert_eq!(store.get_meta("decisions").unwrap(), None);
         let old = store.run("t001").unwrap().unwrap();
         assert_eq!(old.agent, "claude_code", "pre-migration runs default to Claude");
         assert_eq!(old.track, "tr001", "pre-migration runs join the first track");
@@ -929,6 +1219,45 @@ mod tests {
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decisions_open_answer_dismiss() {
+        let store = Store::in_memory().unwrap();
+        let opt = |l: &str| DecisionOption { label: l.into(), detail: String::new() };
+        let new = NewDecision {
+            track: "tr001".into(),
+            run: Some("t001".into()),
+            question: "Which layout?".into(),
+            context: "Affects every page".into(),
+            options: vec![opt("A"), opt("B"), opt("C")],
+            recommended: Some(1),
+            allow_other: true,
+        };
+        let d = store.open_decision(&new).unwrap();
+        assert_eq!((d.status, d.recommended, d.run.as_deref()), (DecisionStatus::Open, Some(1), Some("t001")));
+        assert!(store.answer_decision(d.id, Some(5), None, "").is_err(), "out of range");
+        assert!(store.answer_decision(d.id, None, Some("  "), "").is_err(), "empty answer");
+        let done = store.answer_decision(d.id, Some(2), None, " go ").unwrap();
+        assert_eq!((done.status, done.choice, done.answer.as_deref(), done.note.as_str()), (DecisionStatus::Decided, Some(2), Some("C"), "go"));
+        assert!(store.answer_decision(d.id, Some(0), None, "").is_err(), "answered once");
+
+        let own = store.open_decision(&new).unwrap();
+        let mine = store.answer_decision(own.id, None, Some("neither"), "").unwrap();
+        assert_eq!((mine.choice, mine.answer.as_deref()), (None, Some("neither")));
+
+        let closed = store.open_decision(&NewDecision { allow_other: false, ..new.clone() }).unwrap();
+        assert!(store.answer_decision(closed.id, None, Some("x"), "").is_err(), "options only");
+        assert_eq!(store.dismiss_decision(closed.id).unwrap().status, DecisionStatus::Dismissed);
+        assert!(store.dismiss_decision(closed.id).is_err());
+
+        assert!(store.open_decision(&NewDecision { recommended: Some(3), ..new.clone() }).is_err());
+        assert!(store.open_decision(&NewDecision { options: vec![opt("only")], allow_other: false, ..new.clone() }).is_err());
+
+        let rec = store.record_decision("tr002", None, "Name?", &["x".into(), "y".into()], "y", "shorter").unwrap();
+        assert_eq!((rec.status, rec.choice, rec.note.as_str()), (DecisionStatus::Decided, Some(1), "shorter"));
+        assert_eq!(store.decisions(Some("tr001")).unwrap().len(), 3);
+        assert_eq!(store.decisions(None).unwrap().len(), 4);
     }
 
     #[test]
