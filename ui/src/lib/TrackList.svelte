@@ -790,7 +790,11 @@
     flex-shrink: 0;
   }
 
+  /* The chips are 9px but the list would inherit the row's 13px line box and
+     sit on its baseline, a pixel or two under the time and the dot. */
   .taglist {
+    font-size: 9px;
+    line-height: 1.3;
     flex: 1;
     min-width: 0;
     overflow: hidden;
