@@ -25,10 +25,10 @@
 
   // Geometry on a 64-unit box; the icon script draws the same numbers.
   const staves = [22, 30, 38, 46];
-  // No tile: the staves are a mid grey that reads on the dark theme's page
+  // No tile: the staves are a deep beige that reads on the dark theme's page
   // and on the light theme's alike, and the X is the accent. Fixed colours,
   // so the rail and the app icon are one drawing.
-  const STAVE = "#8c8c8c";
+  const STAVE = "#c8b58f";
   const ACCENT = "#e03127";
 </script>
 
