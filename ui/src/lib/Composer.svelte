@@ -315,7 +315,8 @@
     color: var(--acct);
   }
 
-  /* One row, always: chips shrink and cut before anything wraps. */
+  /* One row, always: chips shrink and cut before anything wraps. No
+     overflow clipping here: the popovers open upward out of this row. */
   .status {
     display: flex;
     align-items: center;
@@ -323,7 +324,6 @@
     height: 32px;
     margin-top: 6px;
     min-width: 0;
-    overflow: hidden;
     white-space: nowrap;
   }
 
