@@ -218,14 +218,18 @@
         <button class="fitem" class:on={filter.active} role="menuitemcheckbox" aria-checked={filter.active} onclick={() => store.setTrackFilter({ active: !filter.active })}>
           <span class="dot" style="background: var(--idle)"></span>{t("tracks.active")}
         </button>
-        <div class="fitem static">
-          <span>{t("tracks.recent")}</span>
+        <div class="fitem sub" class:on={filter.recent !== ""} role="menuitem" aria-haspopup="menu">
+          <span>{t("tracks.recent")}{filter.recent ? ` · ${filter.recent}` : ""}</span>
           <span class="grow"></span>
-          <span class="seg">
+          <span class="mono arrow">›</span>
+          <div class="submenu" role="menu">
+            <div class="subhead">{t("tracks.recentHead")}</div>
             {#each ["", "1h", "24h", "7d"] as w (w)}
-              <button class="segopt mono" class:on={filter.recent === w} onclick={() => store.setTrackFilter({ recent: w as typeof filter.recent })}>{w || t("tracks.recentAll")}</button>
+              <button class="fitem" class:on={filter.recent === w} role="menuitemradio" aria-checked={filter.recent === w} onclick={() => store.setTrackFilter({ recent: w as typeof filter.recent })}>
+                {w || t("tracks.recentAll")}<span class="grow"></span>{#if filter.recent === w}<span class="mono check">✓</span>{/if}
+              </button>
             {/each}
-          </span>
+          </div>
         </div>
 
         <div class="rule"></div>
@@ -237,18 +241,23 @@
         {/each}
 
         <div class="rule"></div>
-        <div class="fitem static">
-          <span>{t("tracks.fold")}</span>
+        <div class="fitem sub" class:on={filter.fold > 0} role="menuitem" aria-haspopup="menu">
+          <span>{t("tracks.fold")}{filter.fold > 0 ? ` · ${filter.fold}d` : ""}</span>
           <span class="grow"></span>
-          <span class="seg">
-            {#each [0, 1, 7, 30] as d (d)}
-              <button class="segopt mono" class:on={filter.fold === d} onclick={() => store.setTrackFilter({ fold: d as typeof filter.fold })}>{d === 0 ? t("tracks.foldOff") : t("tracks.foldDays", { n: d })}</button>
+          <span class="mono arrow">›</span>
+          <div class="submenu" role="menu">
+            <div class="subhead">{t("tracks.foldHead")}</div>
+            {#each [0, 1, 2, 7, 14] as d (d)}
+              <button class="fitem" class:on={filter.fold === d} role="menuitemradio" aria-checked={filter.fold === d} onclick={() => store.setTrackFilter({ fold: d })}>
+                {d === 0 ? t("tracks.foldOff") : `${d}d`}<span class="grow"></span>{#if filter.fold === d}<span class="mono check">✓</span>{/if}
+              </button>
             {/each}
-          </span>
+          </div>
         </div>
 
         <div class="rule"></div>
         <div class="mlab-sm fhead">{t("tracks.tagsTitle")}</div>
+        <div class="taglist">
         {#each store.tagPool as tag (tag.name)}
           <button class="fitem" class:on={filter.tags.includes(tag.name)} role="menuitemcheckbox" aria-checked={filter.tags.includes(tag.name)} onclick={() => toggleTagFilter(tag.name)}>
             <span class="box" class:on={filter.tags.includes(tag.name)} style="border-color: {tag.color}; background: {filter.tags.includes(tag.name) ? tag.color : 'transparent'}"></span>
@@ -260,6 +269,7 @@
         {#if store.tagPool.length === 0}
           <div class="fitem static dim">{t("tracks.noTagsYet")}</div>
         {/if}
+        </div>
         {#if filterActive}
           <div class="rule"></div>
           <button class="fitem" onclick={() => store.setTrackFilter({ running: false, active: false, recent: "", tags: [] })}>{t("tracks.clear")}</button>
@@ -473,11 +483,55 @@
     left: 0;
     right: 0;
     z-index: 30;
-    max-height: 70vh;
-    overflow-y: auto;
     background: var(--card);
     border: 1px solid var(--lines);
     padding: 4px 0 6px;
+  }
+
+  .taglist {
+    max-height: 30vh;
+    overflow-y: auto;
+  }
+
+  /* A row with a submenu: hovering opens it to the right, as Kiro does. */
+  .fitem.sub {
+    position: relative;
+  }
+
+  .arrow {
+    color: var(--lab);
+    font-size: 12px;
+  }
+
+  .submenu {
+    display: none;
+    position: absolute;
+    top: -5px;
+    left: calc(100% - 6px);
+    min-width: 200px;
+    z-index: 31;
+    background: var(--card);
+    border: 1px solid var(--lines);
+    padding: 4px 0 6px;
+    color: var(--dim);
+  }
+
+  .fitem.sub:hover,
+  .fitem.sub:focus-within {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .fitem.sub:hover > .submenu,
+  .fitem.sub:focus-within > .submenu {
+    display: block;
+  }
+
+  .subhead {
+    padding: 8px 14px 6px;
+    font-size: 11px;
+    color: var(--lab);
+    white-space: nowrap;
   }
 
   .fhead {
@@ -528,31 +582,6 @@
     height: 10px;
     border: 1px solid;
     flex-shrink: 0;
-  }
-
-  .seg {
-    display: inline-flex;
-    border: 1px solid var(--line);
-  }
-
-  .segopt {
-    height: 22px;
-    padding: 0 8px;
-    background: transparent;
-    border: 0;
-    border-right: 1px solid var(--line);
-    color: var(--lab);
-    font-size: 9px;
-    letter-spacing: 0.08em;
-  }
-
-  .segopt:last-child {
-    border-right: 0;
-  }
-
-  .segopt.on {
-    color: var(--hi);
-    background: var(--sel);
   }
 
   .dormant {

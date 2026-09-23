@@ -78,7 +78,7 @@ export type TrackFilter = {
   recent: "" | "1h" | "24h" | "7d";
   sort: TrackSort;
   /** Tracks idle longer than this many days fold away; 0 keeps them all in place. */
-  fold: 0 | 1 | 7 | 30;
+  fold: number;
   /** Only tracks carrying every one of these tags. */
   tags: string[];
 };
