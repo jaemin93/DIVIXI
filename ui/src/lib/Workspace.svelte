@@ -86,6 +86,14 @@
     return "var(--warn)";
   }
 
+  /** A plain mouse wheel over the tab strip scrolls it sideways. */
+  function scrollTabs(e: WheelEvent) {
+    const el = e.currentTarget as HTMLElement;
+    if (el.scrollWidth <= el.clientWidth || e.deltaX !== 0) return;
+    el.scrollLeft += e.deltaY;
+    e.preventDefault();
+  }
+
   const diffHtml = $derived(store.diffPath ? highlight(store.diffs[store.diffPath] ?? "", "diff") : "");
   const codeHtml = $derived(activeFile?.text != null ? highlight(activeFile.text, languageFor(activeFile.ext)) : "");
   const crumbs = $derived(store.activeFile ? store.activeFile.split("/") : []);
@@ -112,7 +120,7 @@
     <button class="tab icon" class:on={store.panelTab === "files"} title={t("ws.files")} onclick={() => { store.panelTab = "files"; if (!store.tree.length) store.loadTree(); }}>
       <Icon name="files" size={14} />
     </button>
-    <div class="filetabs">
+    <div class="filetabs" onwheel={scrollTabs}>
       {#each store.openFiles as path (path)}
         <div class="tab file" class:on={store.panelTab === "file" && store.activeFile === path}>
           <button class="fname mono" onclick={() => { store.activeFile = path; store.panelTab = "file"; }} title={path}>{path.split("/").at(-1)}</button>
@@ -293,28 +301,28 @@
     color: var(--acct);
   }
 
-  /* Open-file tabs share the strip and truncate; no scrollbar ever
-     appears inside the strip, which would push it off its line. */
+  /* Open-file tabs scroll sideways (wheel or trackpad) but draw no
+     scrollbar, which would push the strip off its line. */
   .filetabs {
     display: flex;
     min-width: 0;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
     border-left: 1px solid var(--line);
     margin-left: 4px;
   }
 
+  .filetabs::-webkit-scrollbar {
+    display: none;
+  }
+
   .tab.file {
-    flex: 1 1 auto;
-    min-width: 56px;
+    flex: 0 0 auto;
     max-width: 180px;
     padding: 0 4px 0 10px;
     gap: 4px;
     border-right: 1px solid var(--lineq);
-  }
-
-  .tab.file .fname {
-    flex: 1;
-    min-width: 0;
   }
 
   .fname {
