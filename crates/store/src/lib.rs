@@ -24,13 +24,37 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
 const MIGRATIONS: &[&str] = &[
     // 1 -> 2: runs record which agent ran them.
     "ALTER TABLE runs ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude_code';",
+    // 2 -> 3: tracks. Every run belongs to one; what was there before
+    // becomes the first track, and its conductor and lane sessions keep
+    // their memory under the track-scoped keys.
+    "CREATE TABLE IF NOT EXISTS tracks (
+        id         TEXT    PRIMARY KEY,
+        name       TEXT    NOT NULL,
+        intent     TEXT    NOT NULL DEFAULT '',
+        cwd        TEXT    NOT NULL,
+        agent      TEXT    NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    ALTER TABLE runs ADD COLUMN track TEXT NOT NULL DEFAULT '';
+    CREATE INDEX IF NOT EXISTS runs_by_track ON runs(track, n);
+    INSERT INTO tracks(id, name, intent, cwd, agent, created_at, updated_at)
+        SELECT 'tr001', 'Track 1', '',
+               (SELECT cwd FROM runs ORDER BY n LIMIT 1),
+               COALESCE((SELECT agent FROM runs WHERE lane = 'conductor' ORDER BY n DESC LIMIT 1), 'claude_code'),
+               (SELECT MIN(started_at) FROM runs),
+               (SELECT MAX(started_at) FROM runs)
+        WHERE EXISTS (SELECT 1 FROM runs);
+    UPDATE runs SET track = 'tr001';
+    UPDATE meta SET key = 'conductor_session:tr001:' || substr(key, 19) WHERE key LIKE 'conductor_session:%';
+    UPDATE meta SET key = 'lane_session:tr001/' || substr(key, 14) WHERE key LIKE 'lane_session:%';",
 ];
 
 const SCHEMA: &str = r#"
@@ -39,9 +63,20 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS tracks (
+    id         TEXT    PRIMARY KEY,
+    name       TEXT    NOT NULL,
+    intent     TEXT    NOT NULL DEFAULT '',
+    cwd        TEXT    NOT NULL,
+    agent      TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     n           INTEGER PRIMARY KEY AUTOINCREMENT,
     id          TEXT    NOT NULL UNIQUE,
+    track       TEXT    NOT NULL DEFAULT '',
     lane        TEXT    NOT NULL,
     prompt      TEXT    NOT NULL,
     cwd         TEXT    NOT NULL,
@@ -57,6 +92,8 @@ CREATE TABLE IF NOT EXISTS runs (
     tool_count  INTEGER NOT NULL DEFAULT 0,
     agent       TEXT    NOT NULL DEFAULT 'claude_code'
 );
+
+CREATE INDEX IF NOT EXISTS runs_by_track ON runs(track, n);
 
 CREATE TABLE IF NOT EXISTS events (
     seq     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,6 +124,8 @@ pub const INTERRUPTED: &str = "interrupted: the app closed while the run was liv
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunSummary {
     pub id: RunId,
+    /// The track this run belongs to.
+    pub track: String,
     pub lane: LaneId,
     /// Which agent ran it (`claude_code`, `codex`, …).
     pub agent: String,
@@ -105,6 +144,24 @@ pub struct RunSummary {
     /// The last plan the agent published.
     pub plan: Vec<String>,
     pub tool_count: u32,
+}
+
+/// A track: one conductor, its lanes, one working directory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackInfo {
+    pub id: String,
+    pub name: String,
+    /// One line on what the track is for; shown under the name.
+    pub intent: String,
+    /// Directory the conductor and its lanes work in.
+    pub cwd: String,
+    /// Agent the conductor runs on.
+    pub agent: String,
+    /// Unix milliseconds.
+    pub created_at: i64,
+    /// Unix milliseconds of the last run started in it, or its creation.
+    pub updated_at: i64,
+    pub runs: u32,
 }
 
 /// A lane as the record knows it: its runs, whoever ran them last.
@@ -226,18 +283,99 @@ impl Store {
         Ok(())
     }
 
-    /// Register a new run and return its id.
+    /// Create a track. Ids are `tr001`, `tr002`, … in creation order.
+    pub fn create_track(&self, name: &str, intent: &str, cwd: &str, agent: &str) -> anyhow::Result<TrackInfo> {
+        let id = {
+            let conn = self.conn.lock();
+            let next: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(CAST(substr(id, 3) AS INTEGER)), 0) + 1 FROM tracks",
+                [],
+                |r| r.get(0),
+            )?;
+            let id = format!("tr{next:03}");
+            let now = now_ms();
+            conn.execute(
+                "INSERT INTO tracks(id, name, intent, cwd, agent, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![id, name.trim(), intent.trim(), cwd, agent, now],
+            )?;
+            id
+        };
+        self.track(&id)?.ok_or_else(|| anyhow::anyhow!("track {id} vanished after insert"))
+    }
+
+    /// Every track, oldest first, with its run count.
+    pub fn tracks(&self) -> anyhow::Result<Vec<TrackInfo>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&format!("{TRACK_SELECT} ORDER BY t.created_at, t.id"))?;
+        let rows = stmt.query_map([], row_to_track)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// One track by id.
+    pub fn track(&self, id: &str) -> anyhow::Result<Option<TrackInfo>> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(&format!("{TRACK_SELECT} WHERE t.id = ?1"), params![id], row_to_track)
+            .optional()?)
+    }
+
+    /// Change a track's name, intent or conductor agent; `None` keeps a field.
+    pub fn update_track(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        intent: Option<&str>,
+        agent: Option<&str>,
+    ) -> anyhow::Result<TrackInfo> {
+        {
+            let conn = self.conn.lock();
+            let changed = conn.execute(
+                "UPDATE tracks SET name = COALESCE(?2, name), intent = COALESCE(?3, intent),
+                        agent = COALESCE(?4, agent)
+                 WHERE id = ?1",
+                params![id, name.map(str::trim), intent.map(str::trim), agent],
+            )?;
+            if changed == 0 {
+                anyhow::bail!("no track {id}");
+            }
+        }
+        self.track(id)?.ok_or_else(|| anyhow::anyhow!("no track {id}"))
+    }
+
+    /// Delete a track with every run, event and remembered session in it.
+    pub fn delete_track(&self, id: &str) -> anyhow::Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM runs_fts WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![id])?;
+        tx.execute("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![id])?;
+        tx.execute("DELETE FROM runs WHERE track = ?1", params![id])?;
+        tx.execute(
+            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'lane_session:' || ?1 || '/%'",
+            params![id],
+        )?;
+        let changed = tx.execute("DELETE FROM tracks WHERE id = ?1", params![id])?;
+        if changed == 0 {
+            anyhow::bail!("no track {id}");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Register a new run in a track and return its id.
     ///
     /// Ids are `t001`, `t002`, … in creation order, durable across restarts.
-    pub fn begin_run(&self, lane: &str, agent: &str, prompt: &str, cwd: &str) -> anyhow::Result<RunId> {
+    pub fn begin_run(&self, track: &str, lane: &str, agent: &str, prompt: &str, cwd: &str) -> anyhow::Result<RunId> {
         let conn = self.conn.lock();
         let next: i64 = conn.query_row("SELECT COALESCE(MAX(n), 0) + 1 FROM runs", [], |r| r.get(0))?;
         let id = format!("t{next:03}");
+        let now = now_ms();
         conn.execute(
-            "INSERT INTO runs(n, id, lane, agent, prompt, cwd, status, started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![next, id, lane, agent, prompt, cwd, RunStatus::Connecting.as_str(), now_ms()],
+            "INSERT INTO runs(n, id, track, lane, agent, prompt, cwd, status, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![next, id, track, lane, agent, prompt, cwd, RunStatus::Connecting.as_str(), now],
         )?;
+        conn.execute("UPDATE tracks SET updated_at = ?2 WHERE id = ?1", params![track, now])?;
         Ok(id)
     }
 
@@ -293,29 +431,25 @@ impl Store {
     /// Every run, oldest first. This is what rebuilds the Track timeline.
     pub fn runs(&self) -> anyhow::Result<Vec<RunSummary>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, lane, prompt, cwd, status, started_at, duration_ms, session_id,
-                    stop_reason, error, output, plan, tool_count, agent
-             FROM runs ORDER BY n",
-        )?;
+        let mut stmt = conn.prepare(&format!("{RUN_SELECT} ORDER BY n"))?;
         let rows = stmt.query_map([], row_to_summary)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Every lane that ever had a run, newest activity first, with the
-    /// agent and status of its latest run. Lanes outlive their sessions:
-    /// this is how a closed lane is still known.
-    pub fn lanes(&self) -> anyhow::Result<Vec<LaneInfo>> {
+    /// Every lane that ever had a run in a track, newest activity first,
+    /// with the agent and status of its latest run. Lanes outlive their
+    /// sessions: this is how a closed lane is still known.
+    pub fn lanes(&self, track: &str) -> anyhow::Result<Vec<LaneInfo>> {
         let conn = self.conn.lock();
         // The latest run per lane, joined back for its id, status and time.
         let mut stmt = conn.prepare(
             "SELECT r.lane, r.agent, c.runs, r.id, r.status, r.started_at
              FROM runs r
-             JOIN (SELECT lane, COUNT(*) AS runs, MAX(n) AS last_n FROM runs GROUP BY lane) c
+             JOIN (SELECT lane, COUNT(*) AS runs, MAX(n) AS last_n FROM runs WHERE track = ?1 GROUP BY lane) c
                ON c.lane = r.lane AND c.last_n = r.n
              ORDER BY r.n DESC",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map(params![track], |r| {
             let status: String = r.get(4)?;
             Ok(LaneInfo {
                 name: r.get(0)?,
@@ -333,13 +467,7 @@ impl Store {
     pub fn run(&self, id: &str) -> anyhow::Result<Option<RunSummary>> {
         let conn = self.conn.lock();
         Ok(conn
-            .query_row(
-                "SELECT id, lane, prompt, cwd, status, started_at, duration_ms, session_id,
-                        stop_reason, error, output, plan, tool_count, agent
-                 FROM runs WHERE id = ?1",
-                params![id],
-                row_to_summary,
-            )
+            .query_row(&format!("{RUN_SELECT} WHERE id = ?1"), params![id], row_to_summary)
             .optional()?)
     }
 
@@ -447,11 +575,35 @@ fn fts_query(query: &str) -> Option<String> {
     (!terms.is_empty()).then(|| terms.join(" "))
 }
 
+/// Columns of a run summary, in the order `row_to_summary` reads them.
+const RUN_SELECT: &str = "SELECT id, lane, prompt, cwd, status, started_at, duration_ms, session_id,
+                                 stop_reason, error, output, plan, tool_count, agent, track
+                          FROM runs";
+
+/// Columns of a track, in the order `row_to_track` reads them.
+const TRACK_SELECT: &str = "SELECT t.id, t.name, t.intent, t.cwd, t.agent, t.created_at, t.updated_at,
+                                   (SELECT COUNT(*) FROM runs r WHERE r.track = t.id)
+                            FROM tracks t";
+
+fn row_to_track(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackInfo> {
+    Ok(TrackInfo {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        intent: r.get(2)?,
+        cwd: r.get(3)?,
+        agent: r.get(4)?,
+        created_at: r.get(5)?,
+        updated_at: r.get(6)?,
+        runs: r.get::<_, i64>(7)? as u32,
+    })
+}
+
 fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
     let status: String = r.get(4)?;
     let plan: String = r.get(11)?;
     Ok(RunSummary {
         id: r.get(0)?,
+        track: r.get(14)?,
         lane: r.get(1)?,
         agent: r.get(13)?,
         prompt: r.get(2)?,
@@ -488,8 +640,11 @@ mod tests {
         }
     }
 
+    /// Track every test run goes into unless it says otherwise.
+    const TR: &str = "tr001";
+
     fn drive_run(store: &Store, lane: &str, prompt: &str, output: &[&str], tools: &[&str]) -> RunId {
-        let run = store.begin_run(lane, "claude_code", prompt, ".").unwrap();
+        let run = store.begin_run(TR, lane, "claude_code", prompt, ".").unwrap();
         store.append(&run, 10, &LaneEvent::Connected { protocol: "v1".into(), load_session: true }).unwrap();
         store.append(&run, 20, &LaneEvent::Started { session_id: "sess".into(), cwd: ".".into() }).unwrap();
         for (i, t) in tools.iter().enumerate() {
@@ -506,9 +661,50 @@ mod tests {
     #[test]
     fn ids_are_sequential() {
         let store = Store::in_memory().unwrap();
-        assert_eq!(store.begin_run("solo", "codex", "a", ".").unwrap(), "t001");
-        assert_eq!(store.begin_run("solo", "codex", "b", ".").unwrap(), "t002");
+        assert_eq!(store.begin_run(TR, "solo", "codex", "a", ".").unwrap(), "t001");
+        assert_eq!(store.begin_run(TR, "solo", "codex", "b", ".").unwrap(), "t002");
         assert_eq!(store.run("t001").unwrap().unwrap().agent, "codex");
+        assert_eq!(store.run("t001").unwrap().unwrap().track, TR);
+    }
+
+    #[test]
+    fn tracks_are_created_listed_updated_and_deleted() {
+        let store = Store::in_memory().unwrap();
+        let a = store.create_track("  Parser ", "fix the tokenizer", "C:/repo", "claude_code").unwrap();
+        let b = store.create_track("Docs", "", "C:/repo", "codex").unwrap();
+        assert_eq!((a.id.as_str(), a.name.as_str()), ("tr001", "Parser"));
+        assert_eq!(b.id, "tr002");
+        assert_eq!(store.tracks().unwrap().len(), 2);
+
+        // Runs count per track and bump its activity time.
+        let before = store.track("tr001").unwrap().unwrap().updated_at;
+        store.begin_run("tr001", "conductor", "claude_code", "hi", "C:/repo").unwrap();
+        store.begin_run("tr001", "ui", "claude_code", "fix", "C:/repo").unwrap();
+        store.begin_run("tr002", "conductor", "codex", "hi", "C:/repo").unwrap();
+        let a = store.track("tr001").unwrap().unwrap();
+        assert_eq!(a.runs, 2);
+        assert!(a.updated_at >= before);
+        assert_eq!(store.lanes("tr001").unwrap().len(), 2);
+        assert_eq!(store.lanes("tr002").unwrap().len(), 1);
+
+        let a = store.update_track("tr001", Some("Lexer"), None, Some("copilot")).unwrap();
+        assert_eq!((a.name.as_str(), a.intent.as_str(), a.agent.as_str()), ("Lexer", "fix the tokenizer", "copilot"));
+        assert!(store.update_track("tr009", Some("x"), None, None).is_err());
+
+        // Deleting takes the runs, their events and remembered sessions with it.
+        store.set_meta("conductor_session:tr001:copilot", "s1").unwrap();
+        store.set_meta("lane_session:tr001/ui", "{}").unwrap();
+        store.set_meta("lane_session:tr002/ui", "{}").unwrap();
+        store.delete_track("tr001").unwrap();
+        assert_eq!(store.tracks().unwrap().len(), 1);
+        assert!(store.run("t001").unwrap().is_none());
+        assert_eq!(store.runs().unwrap().len(), 1);
+        assert_eq!(store.get_meta("conductor_session:tr001:copilot").unwrap(), None);
+        assert_eq!(store.get_meta("lane_session:tr001/ui").unwrap(), None);
+        assert_eq!(store.get_meta("lane_session:tr002/ui").unwrap().as_deref(), Some("{}"));
+        assert!(store.delete_track("tr001").is_err());
+        // Ids never reuse a deleted number.
+        assert_eq!(store.create_track("Again", "", ".", "codex").unwrap().id, "tr003");
     }
 
     #[test]
@@ -528,23 +724,38 @@ mod tests {
         let path = dir.join("v1.db");
         let _ = std::fs::remove_file(&path);
 
-        // Build a v1 file by hand: the v1 schema had no `agent` column.
+        // Build a v1 file by hand: the v1 schema had no `agent` column and
+        // no tracks.
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(&SCHEMA.replace(",\n    agent       TEXT    NOT NULL DEFAULT 'claude_code'", "")).unwrap();
+            let v1 = SCHEMA
+                .replace(",\n    agent       TEXT    NOT NULL DEFAULT 'claude_code'", "")
+                .replace("    track       TEXT    NOT NULL DEFAULT '',\n", "")
+                .replace("CREATE INDEX IF NOT EXISTS runs_by_track ON runs(track, n);", "");
+            conn.execute_batch(&v1).unwrap();
+            conn.execute("DROP TABLE tracks", []).unwrap();
             conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')", []).unwrap();
             conn.execute(
-                "INSERT INTO runs(n, id, lane, prompt, cwd, status, started_at) VALUES (1, 't001', 'solo', 'old', '.', 'done', 0)",
+                "INSERT INTO runs(n, id, lane, prompt, cwd, status, started_at) VALUES (1, 't001', 'conductor', 'old', 'C:/old', 'done', 5)",
                 [],
             )
             .unwrap();
+            conn.execute("INSERT INTO meta(key, value) VALUES ('conductor_session:claude_code', 'sess-c')", []).unwrap();
+            conn.execute("INSERT INTO meta(key, value) VALUES ('lane_session:ui', '{\"a\":1}')", []).unwrap();
         }
 
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.get_meta("schema_version").unwrap().as_deref(), Some("2"));
+        assert_eq!(store.get_meta("schema_version").unwrap().as_deref(), Some("3"));
         let old = store.run("t001").unwrap().unwrap();
         assert_eq!(old.agent, "claude_code", "pre-migration runs default to Claude");
-        let new = store.begin_run("solo", "copilot", "new", ".").unwrap();
+        assert_eq!(old.track, "tr001", "pre-migration runs join the first track");
+        let tracks = store.tracks().unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!((tracks[0].cwd.as_str(), tracks[0].runs, tracks[0].created_at), ("C:/old", 1, 5));
+        // Remembered sessions move under the track so nothing forgets.
+        assert_eq!(store.get_meta("conductor_session:tr001:claude_code").unwrap().as_deref(), Some("sess-c"));
+        assert_eq!(store.get_meta("lane_session:tr001/ui").unwrap().as_deref(), Some("{\"a\":1}"));
+        let new = store.begin_run("tr001", "solo", "copilot", "new", ".").unwrap();
         assert_eq!(store.run(&new).unwrap().unwrap().agent, "copilot");
 
         drop(store);
@@ -577,7 +788,7 @@ mod tests {
     fn timeline_lists_runs_in_order_without_detail() {
         let store = Store::in_memory().unwrap();
         drive_run(&store, "solo", "first", &["x"], &[]);
-        let live = store.begin_run("solo", "claude_code", "second", ".").unwrap();
+        let live = store.begin_run(TR, "solo", "claude_code", "second", ".").unwrap();
         store.append(&live, 5, &LaneEvent::Started { session_id: "s2".into(), cwd: ".".into() }).unwrap();
 
         let runs = store.runs().unwrap();
@@ -595,7 +806,7 @@ mod tests {
         drive_run(&store, "ui", "more", &["z"], &[]);
         drive_run(&store, "docs", "write", &["w"], &[]);
 
-        let lanes = store.lanes().unwrap();
+        let lanes = store.lanes(TR).unwrap();
         let names: Vec<&str> = lanes.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["docs", "ui", "conductor"]);
         let ui = lanes.iter().find(|l| l.name == "ui").unwrap();
@@ -608,7 +819,7 @@ mod tests {
     #[test]
     fn failure_records_error_and_folds() {
         let store = Store::in_memory().unwrap();
-        let run = store.begin_run("solo", "claude_code", "p", ".").unwrap();
+        let run = store.begin_run(TR, "solo", "claude_code", "p", ".").unwrap();
         store.append(&run, 1, &LaneEvent::Message { text: "partial".into() }).unwrap();
         store.append(&run, 2, &LaneEvent::Failed { error: "boom".into() }).unwrap();
         let s = store.run(&run).unwrap().unwrap();
@@ -637,7 +848,7 @@ mod tests {
 
         let run = {
             let store = Store::open(&path).unwrap();
-            let run = store.begin_run("solo", "claude_code", "never finishes", ".").unwrap();
+            let run = store.begin_run(TR, "solo", "claude_code", "never finishes", ".").unwrap();
             store.append(&run, 7, &LaneEvent::Started { session_id: "s".into(), cwd: ".".into() }).unwrap();
             store.append(&run, 8, &LaneEvent::Message { text: "half".into() }).unwrap();
             run

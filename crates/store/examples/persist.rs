@@ -44,7 +44,8 @@ async fn run() -> anyhow::Result<()> {
     let run_id = {
         let store = Store::open(&path)?;
         let cwd = std::env::current_dir()?;
-        let run_id = store.begin_run("solo", "claude_code", &prompt, &cwd.display().to_string())?;
+        let track = store.create_track("persist", "example", &cwd.display().to_string(), "claude_code")?;
+        let run_id = store.begin_run(&track.id, "solo", "claude_code", &prompt, &cwd.display().to_string())?;
         println!("run: {run_id}");
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

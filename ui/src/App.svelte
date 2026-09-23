@@ -8,9 +8,10 @@
   import Setup from "./lib/Setup.svelte";
   import Settings from "./lib/Settings.svelte";
   import LaneView from "./lib/LaneView.svelte";
+  import NewTrack from "./lib/NewTrack.svelte";
+  import TrackHeader from "./lib/TrackHeader.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
-  import { t } from "./lib/i18n.svelte";
 
   // Browser-style zoom keys, app-wide.
   function onKey(e: KeyboardEvent) {
@@ -44,16 +45,17 @@
         <TrackList />
       {/if}
       <LaneView />
+    {:else if store.view === "new-track" || !store.currentTrack}
+      {#if store.trackListOpen && store.tracks.length > 0}
+        <TrackList />
+      {/if}
+      <NewTrack />
     {:else}
       {#if store.trackListOpen}
         <TrackList />
       {/if}
       <main>
-        <header>
-          <div class="mlab">#01 / Track</div>
-          <h1 class="serif">{t("track.placeholderName")}</h1>
-          <p>{t("track.placeholderBlurb")}</p>
-        </header>
+        <TrackHeader track={store.currentTrack} />
         <Timeline />
         <Composer />
       </main>
@@ -85,27 +87,5 @@
     flex-direction: column;
     background-image: radial-gradient(var(--dot) 1px, transparent 1px);
     background-size: 22px 22px;
-  }
-
-  header {
-    padding: 26px 34px 16px;
-    border-bottom: 1px solid var(--line);
-    flex-shrink: 0;
-  }
-
-  h1 {
-    margin: 8px 0 0;
-    font-weight: 400;
-    font-size: 36px;
-    line-height: 1.1;
-    color: var(--hi);
-  }
-
-  p {
-    margin: 9px 0 0;
-    font-size: 13px;
-    line-height: 1.6;
-    color: var(--dim);
-    max-width: 620px;
   }
 </style>

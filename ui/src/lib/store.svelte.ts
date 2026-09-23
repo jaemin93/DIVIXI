@@ -17,15 +17,29 @@ export type LaneEvent =
   | { kind: "failed"; error: string };
 
 export type Envelope = {
+  track: string;
   lane: string;
   run: string;
   at_ms: number;
   event: LaneEvent;
 };
 
+/** Mirrors `orchestra_store::TrackInfo`: one conductor, its lanes, one folder. */
+export type Track = {
+  id: string;
+  name: string;
+  intent: string;
+  cwd: string;
+  agent: string;
+  created_at: number;
+  updated_at: number;
+  runs: number;
+};
+
 /** Mirrors `orchestra_store::RunSummary`: one run as the timeline sees it. */
 export type RunSummary = {
   id: string;
+  track: string;
   lane: string;
   agent: string;
   prompt: string;
@@ -103,6 +117,7 @@ export type Usage = { used: number; size: number; cost?: number; currency?: stri
 
 export type Run = {
   id: string;
+  track: string;
   lane: string;
   agent: string;
   prompt: string;
@@ -132,7 +147,7 @@ export type Run = {
   segments: Segment[];
 };
 
-export type View = "track" | "settings" | "lane";
+export type View = "track" | "settings" | "lane" | "new-track";
 
 /** Prefix of conductor prompts Orchestra injects itself (lane reports). Language-neutral. */
 export const REPORT_PREFIX = "[lane-report]";
@@ -229,10 +244,14 @@ class Store {
     this.inspectorWidth = Math.min(max, Math.max(320, Math.round(px)));
     if (persist) this.persistWidth("inspector_width", this.inspectorWidth);
   }
+  /** Every run of every track; views filter by `track`. */
   runs = $state<Run[]>([]);
+  /** Every track, oldest first. */
+  tracks = $state<Track[]>([]);
+  /** Id of the track in the main area. Persisted. */
+  track = $state("");
   /** Run id whose lane detail is open in the inspector; "" means closed. */
   inspecting = $state("");
-  busy = $state(false);
   lastError = $state("");
   restored = $state(false);
 
@@ -250,8 +269,111 @@ class Store {
     return this.runs.find((r) => r.id === this.inspecting);
   }
 
+  get currentTrack(): Track | undefined {
+    return this.tracks.find((t) => t.id === this.track);
+  }
+
+  /** The current track's runs, oldest first. */
+  get trackRuns(): Run[] {
+    return this.runs.filter((r) => r.track === this.track);
+  }
+
   get activeRun(): Run | undefined {
-    return this.runs.find((r) => r.status === "running" || r.status === "connecting");
+    return this.trackRuns.find((r) => r.status === "running" || r.status === "connecting");
+  }
+
+  /** The current track's conductor has a turn in flight; the composer waits. */
+  get busy(): boolean {
+    return this.trackRuns.some((r) => r.lane === "conductor" && (r.status === "running" || r.status === "connecting"));
+  }
+
+  /** Any track has a run in flight; the brand mark pulses. */
+  get anyLive(): boolean {
+    return this.runs.some((r) => r.status === "running" || r.status === "connecting");
+  }
+
+  /** Create a track and open it. */
+  async createTrack(name: string, intent: string, cwd: string, agent: AgentId): Promise<boolean> {
+    this.lastError = "";
+    try {
+      const track = await invoke<Track>("create_track", { name, intent, cwd, agent });
+      this.tracks.push(track);
+      await this.selectTrack(track.id);
+      return true;
+    } catch (err) {
+      this.lastError = String(err);
+      return false;
+    }
+  }
+
+  /** Show a track in the main area; persisted so the app reopens on it. */
+  async selectTrack(id: string) {
+    const track = this.tracks.find((t) => t.id === id);
+    if (!track) return;
+    this.track = id;
+    this.view = "track";
+    this.inspecting = "";
+    if (this.readyAgents.some((a) => a.kind === track.agent)) this.agent = track.agent as AgentId;
+    try {
+      await invoke("set_setting", { key: "track", value: id });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Rename a track or change its intent. */
+  async updateTrack(id: string, patch: { name?: string; intent?: string }) {
+    this.lastError = "";
+    try {
+      const next = await invoke<Track>("update_track", { id, name: patch.name ?? null, intent: patch.intent ?? null, agent: null });
+      this.tracks = this.tracks.map((t) => (t.id === id ? next : t));
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Move the current track's conductor to another agent; it reopens there on the next message. */
+  async setTrackAgent(agent: AgentId) {
+    this.agent = agent;
+    const id = this.track;
+    if (!id) return;
+    try {
+      const next = await invoke<Track>("update_track", { id, name: null, intent: null, agent });
+      this.tracks = this.tracks.map((t) => (t.id === id ? next : t));
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Delete a track with its runs and memory; the app moves to a neighbour or to creation. */
+  async deleteTrack(id: string) {
+    this.lastError = "";
+    try {
+      await invoke("delete_track", { id });
+    } catch (err) {
+      this.lastError = String(err);
+      return;
+    }
+    this.tracks = this.tracks.filter((t) => t.id !== id);
+    this.runs = this.runs.filter((r) => r.track !== id);
+    if (this.track === id) {
+      const next = this.tracks.at(-1);
+      if (next) await this.selectTrack(next.id);
+      else {
+        this.track = "";
+        this.view = "new-track";
+      }
+    }
+  }
+
+  /** Native folder picker; empty when cancelled. */
+  async pickFolder(start: string): Promise<string> {
+    try {
+      return (await invoke<string | null>("pick_folder", { start })) ?? "";
+    } catch (err) {
+      this.lastError = String(err);
+      return "";
+    }
   }
 
   get readyAgents(): AgentStatus[] {
@@ -331,7 +453,7 @@ class Store {
     this.openLane = name;
     this.view = "lane";
     // Restored runs only carry their folded text; replay them for the full turn.
-    for (const run of this.runs) {
+    for (const run of this.trackRuns) {
       if (run.lane === name && !run.loaded) await this.hydrate(run);
     }
   }
@@ -427,9 +549,11 @@ class Store {
       if (this.themePref === "system") this.applyTheme();
     });
     try {
-      const [summaries, agents, theme, rail, tracklist, chatFont, models, inspectorWidth, railWidth, trackListWidth, uiFont, zoom, language] =
+      const [summaries, tracks, savedTrack, agents, theme, rail, tracklist, chatFont, models, inspectorWidth, railWidth, trackListWidth, uiFont, zoom, language] =
         await Promise.all([
         invoke<RunSummary[]>("list_runs"),
+        invoke<Track[]>("list_tracks"),
+        invoke<string | null>("get_setting", { key: "track" }),
         invoke<AgentStatus[] | null>("agent_statuses"),
         invoke<string | null>("get_setting", { key: "theme" }),
         invoke<string | null>("get_setting", { key: "rail" }),
@@ -468,12 +592,21 @@ class Store {
       this.trackListOpen = tracklist !== "closed";
       if (chatFont === "s" || chatFont === "m" || chatFont === "l") this.chatFont = chatFont;
       document.documentElement.dataset.chatFont = this.chatFont;
-      this.runs = summaries.map(fromSummary);
       // The core closes runs left live by a previous process, so nothing
       // restored can be in flight.
-      this.busy = false;
+      this.runs = summaries.map(fromSummary);
+      this.tracks = tracks;
       this.agents = agents;
       this.pickDefaultAgent();
+      // Reopen on the track that was open, else the newest; none means the
+      // first screen is creating one.
+      const current = tracks.find((t) => t.id === savedTrack) ?? tracks.at(-1);
+      if (current) {
+        this.track = current.id;
+        if (this.readyAgents.some((a) => a.kind === current.agent)) this.agent = current.agent as AgentId;
+      } else {
+        this.view = "new-track";
+      }
       // Setup comes first when nothing has been detected yet, or when the
       // last detection left nothing to run lanes on.
       if (agents === null || this.readyAgents.length === 0) {
@@ -585,8 +718,8 @@ class Store {
    */
   async send(prompt: string) {
     const text = prompt.trim();
-    if (!text || this.busy) return;
-    this.busy = true;
+    const track = this.track;
+    if (!text || !track || this.busy) return;
     this.lastError = "";
     const agent = this.agent;
 
@@ -595,6 +728,7 @@ class Store {
     // that arrive for the real id first are routed to it by `apply`.
     const pending: Run = {
       id: `pending-${Date.now()}`,
+      track,
       lane: "conductor",
       agent,
       prompt: text,
@@ -612,17 +746,20 @@ class Store {
     this.runs.push(pending);
 
     try {
-      const id = await invoke<string>("conductor_prompt", { prompt: text, agent, lang: i18n.lang });
+      const id = await invoke<string>("conductor_prompt", { track, prompt: text, agent, lang: i18n.lang });
       const run = this.runs.find((r) => r === pending || r.id === id);
       if (run) {
         run.id = id;
+        run.track = track;
         run.lane = "conductor";
         run.agent = agent;
         run.prompt = text;
       }
+      // The conductor now runs on this agent; keep the track's record in step.
+      const tr = this.tracks.find((t) => t.id === track);
+      if (tr && tr.agent !== agent) tr.agent = agent;
     } catch (err) {
       this.runs = this.runs.filter((r) => r !== pending);
-      this.busy = false;
       this.lastError = String(err);
     }
   }
@@ -632,16 +769,18 @@ class Store {
     let run = this.runs.find((r) => r.id === env.run);
     if (!run && env.lane === "conductor") {
       // The conductor turn we just sent, still waiting for its id.
-      run = this.runs.find((r) => r.lane === "conductor" && r.id.startsWith("pending-"));
+      run = this.runs.find((r) => r.track === env.track && r.lane === "conductor" && r.id.startsWith("pending-"));
       if (run) run.id = env.run;
     }
     if (!run) {
-      // A lane the conductor opened: the core registered it, we have not.
-      // Show it now; the prompt text comes with the summary on reload.
+      // A lane the conductor opened, or a report turn Orchestra injected:
+      // the core registered it, we have not. Show it now; the prompt text
+      // comes with the summary right after.
       run = {
         id: env.run,
+        track: env.track,
         lane: env.lane,
-        agent: this.agent,
+        agent: this.tracks.find((t) => t.id === env.track)?.agent ?? this.agent,
         prompt: "",
         status: "connecting",
         startedAt: Date.now(),
@@ -658,10 +797,6 @@ class Store {
       void this.refreshRun(env.run);
     }
     fold(run, env.at_ms, env.event);
-    // The composer unlocks when the conductor's turn ends; lanes end inside it.
-    if (run.lane === "conductor" && (env.event.kind === "finished" || env.event.kind === "failed")) {
-      this.busy = false;
-    }
   }
 
   /** Fill a lane run's prompt and agent from the store once it exists there. */
@@ -680,11 +815,15 @@ class Store {
     }
   }
 
-  /** Lane names seen in this track, in first-seen order, excluding the conductor. */
-  get laneNames(): string[] {
+  /** Lane names seen in a track, in first-seen order, excluding the conductor. */
+  laneNamesIn(track: string): string[] {
     const seen: string[] = [];
-    for (const r of this.runs) if (r.lane !== "conductor" && !seen.includes(r.lane)) seen.push(r.lane);
+    for (const r of this.runs) if (r.track === track && r.lane !== "conductor" && !seen.includes(r.lane)) seen.push(r.lane);
     return seen;
+  }
+
+  get laneNames(): string[] {
+    return this.laneNamesIn(this.track);
   }
 }
 
@@ -763,6 +902,7 @@ function fold(run: Run, ms: number, ev: LaneEvent) {
 function fromSummary(s: RunSummary): Run {
   return {
     id: s.id,
+    track: s.track,
     lane: s.lane,
     agent: s.agent,
     prompt: s.prompt,

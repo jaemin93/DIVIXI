@@ -8,7 +8,7 @@
    * sent it, then how the worker answered, turn by turn. The worker's turn
    * unfolds live with the same prose and tool lines as the conductor's.
    */
-  const runs = $derived(store.runs.filter((r) => r.lane === store.openLane));
+  const runs = $derived(store.trackRuns.filter((r) => r.lane === store.openLane));
   const agent = $derived(runs.at(-1)?.agent ?? "");
   const live = $derived(runs.some((r) => r.status === "running" || r.status === "connecting"));
 
@@ -27,7 +27,7 @@
       .replace(/\n{3,}/g, "\n\n");
   }
 
-  type Shown = Segment | { kind: "tools"; tools: Tool[] };
+  type Shown = Exclude<Segment, { kind: "tool" }> | { kind: "tools"; tools: Tool[] };
   function collapse(segments: Segment[]): Shown[] {
     const out: Shown[] = [];
     for (const seg of segments) {

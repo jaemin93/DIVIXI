@@ -36,9 +36,6 @@
     return parts.length > 3 ? `…${p.includes("\\") ? "\\" : "/"}${parts.slice(-2).join(p.includes("\\") ? "\\" : "/")}` : p;
   }
 
-  $effect(() => {
-    if (store.info === null) store.loadInfo();
-  });
 </script>
 
 <div class="composer">
@@ -72,7 +69,7 @@
             aria-selected={store.agent === a.kind}
             disabled={a.readiness !== "ready"}
             onclick={() => {
-              store.agent = a.kind;
+              store.setTrackAgent(a.kind);
               agentOpen = false;
             }}
           >
@@ -86,9 +83,9 @@
       </div>
     </Popover>
 
-    <span class="chip static" title={store.info?.workspace}>
+    <span class="chip static" title={store.currentTrack?.cwd}>
       <Icon name="folder" size={14} />
-      <span class="mono path">{shortPath(store.info?.workspace)}</span>
+      <span class="mono path">{shortPath(store.currentTrack?.cwd)}</span>
     </span>
 
     <span class="grow"></span>

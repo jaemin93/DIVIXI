@@ -24,7 +24,7 @@
         // Second click on the active item folds the list away.
         if ((store.view === "track" || store.view === "lane") && store.trackListOpen) store.setTrackList(false);
         else {
-          store.view = "track";
+          store.view = store.currentTrack ? "track" : "new-track";
           store.setTrackList(true);
         }
       },
@@ -40,13 +40,13 @@
   const collapsed = $derived(store.railCollapsed);
 
   function active(item: Item): boolean {
-    if (item.id === "tracks") return store.view === "track" || store.view === "lane";
+    if (item.id === "tracks") return store.view === "track" || store.view === "lane" || store.view === "new-track";
     if (item.id === "settings") return store.view === "settings";
     return false;
   }
 
   function badge(item: Item): string {
-    if (item.id === "tracks") return "1";
+    if (item.id === "tracks") return store.tracks.length ? String(store.tracks.length) : "";
     return "";
   }
 </script>
@@ -56,7 +56,7 @@
     <SplitHandle edge="right" width={store.railWidth} min={160} max={320} reset={200} label={t("rail.width")} onchange={(px, persist) => store.setRailWidth(px, persist)} />
   {/if}
   <div class="top">
-    <span class="brand" title="Orchestra"><Mark size={14} live={store.busy} />{#if !collapsed}<span class="mono name">ORCHESTRA</span>{/if}</span>
+    <span class="brand" title="Orchestra"><Mark size={14} live={store.anyLive} />{#if !collapsed}<span class="mono name">ORCHESTRA</span>{/if}</span>
     <span class="grow"></span>
     <button
       class="toggle"

@@ -8,7 +8,7 @@
 
   // Follow the tail while a run is live.
   $effect(() => {
-    void store.runs.length;
+    void store.trackRuns.length;
     void store.activeRun?.message.length;
     void store.activeRun?.toolCount;
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
@@ -41,7 +41,7 @@
    * Consecutive tool calls fold into one line that overwrites itself, the way
    * a terminal does with : the latest tool shows, earlier ones become a count.
    */
-  type Shown = Segment | { kind: "tools"; tools: Tool[] };
+  type Shown = Exclude<Segment, { kind: "tool" }> | { kind: "tools"; tools: Tool[] };
   function collapse(segments: Segment[]): Shown[] {
     const out: Shown[] = [];
     for (const seg of segments) {
@@ -72,7 +72,7 @@
 </script>
 
 <div class="scroll" bind:this={scroller}>
-  {#if store.runs.length === 0}
+  {#if store.trackRuns.length === 0}
     <div class="empty">
       <div class="emptymark"><Mark size={56} ink="var(--lines)" /></div>
       <div class="mlab">{t("timeline.empty")}</div>
@@ -82,7 +82,7 @@
 
   <!-- The track is the human and the conductor. Lane work is the conductor's
        to relay; lanes themselves are read in their own view. -->
-  {#each store.runs.filter((r) => r.lane === "conductor") as run (run.id)}
+  {#each store.trackRuns.filter((r) => r.lane === "conductor") as run (run.id)}
     {#if run.lane === "conductor"}
       {#if run.prompt.startsWith(REPORT_PREFIX)}
         <div class="sys mono">{t("timeline.reportArrived")} · {run.prompt.split("\n")[0].replace(REPORT_PREFIX, "").trim()}</div>
@@ -277,11 +277,6 @@
 
   .chead .dot {
     background: var(--ok);
-  }
-
-  .open {
-    height: 24px;
-    padding: 0 9px;
   }
 
   /* Conversation text follows the interface font and the conversation size. */

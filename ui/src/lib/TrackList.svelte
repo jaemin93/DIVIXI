@@ -5,37 +5,55 @@
   import { t } from "./i18n.svelte";
 
   /**
-   * Second column: every track, each unfolding into its lanes.
-   *
-   * Phase 0 has one track and one lane, so the list is short; the shape is
-   * the domain's (Workspace > Track > Lane), not a placeholder for it.
+   * Second column: every track, newest activity first, each unfolding into
+   * its lanes (Workspace > Track > Lane). The open track's lanes are shown
+   * unless folded by hand.
    */
   let query = $state("");
-  let open = $state<Record<string, boolean>>({ acp: true });
+  let folded = $state<Record<string, boolean>>({});
 
-  // Lanes are whatever the conductor has opened in this track, from the runs.
-  const tracks = $derived([
-    {
-      id: "acp",
-      name: t("track.placeholderName"),
-      runs: store.runs.length,
-      live: !!store.activeRun,
-      lanes: store.laneNames.map((name) => {
-        const runs = store.runs.filter((r) => r.lane === name);
-        const live = runs.some((r) => r.status === "running" || r.status === "connecting");
+  const live = (r: { status: string }) => r.status === "running" || r.status === "connecting";
+
+  // Lanes are whatever the conductor has opened in a track, from the runs.
+  const tracks = $derived(
+    store.tracks
+      .map((tr) => {
+        const runs = store.runs.filter((r) => r.track === tr.id);
         return {
-          name,
-          agent: runs.at(-1)?.agent ?? store.agent,
-          status: live ? "running" : "idle",
+          id: tr.id,
+          name: tr.name,
+          intent: tr.intent,
           runs: runs.length,
+          live: runs.some(live),
+          lastAt: Math.max(tr.updated_at, ...runs.map((r) => r.startedAt)),
+          lanes: store.laneNamesIn(tr.id).map((name) => {
+            const laneRuns = runs.filter((r) => r.lane === name);
+            return {
+              name,
+              agent: laneRuns.at(-1)?.agent ?? tr.agent,
+              live: laneRuns.some(live),
+              runs: laneRuns.length,
+            };
+          }),
         };
-      }),
-    },
-  ]);
+      })
+      .sort((a, b) => b.lastAt - a.lastAt),
+  );
 
   const shown = $derived(
-    tracks.filter((t) => !query.trim() || t.name.toLowerCase().includes(query.trim().toLowerCase())),
+    tracks.filter((tr) => {
+      const q = query.trim().toLowerCase();
+      return !q || tr.name.toLowerCase().includes(q) || tr.intent.toLowerCase().includes(q);
+    }),
   );
+
+  function isOpen(id: string): boolean {
+    return id in folded ? !folded[id] : id === store.track;
+  }
+
+  function toggle(id: string) {
+    folded = { ...folded, [id]: isOpen(id) };
+  }
 </script>
 
 <aside style="width: {store.trackListWidth}px">
@@ -43,7 +61,7 @@
   <div class="head">
     <span class="mlab">{t("tracks.title")}</span>
     <span class="grow"></span>
-    <button class="btn new" disabled title={t("tracks.newSoon")}>{t("tracks.new")}</button>
+    <button class="btn new" class:on={store.view === "new-track"} title={t("tracks.newTitle")} onclick={() => (store.view = "new-track")}>{t("tracks.new")}</button>
     <button class="x" onclick={() => store.setTrackList(false)} aria-label={t("tracks.close")} title={t("tracks.close")}>
       <Icon name="collapse" />
     </button>
@@ -53,29 +71,28 @@
 
   <div class="list">
     {#each shown as tr (tr.id)}
-      <div class="track" class:on={store.view === "track"}>
-        <button
-          class="chev mono"
-          onclick={() => (open = { ...open, [tr.id]: !open[tr.id] })}
-          aria-label={open[tr.id] ? t("tracks.foldLanes") : t("tracks.unfoldLanes")}
-        >
-          {open[tr.id] ? "▾" : "▸"}
+      <div class="track" class:on={store.view === "track" && store.track === tr.id}>
+        <button class="chev mono" onclick={() => toggle(tr.id)} aria-label={isOpen(tr.id) ? t("tracks.foldLanes") : t("tracks.unfoldLanes")}>
+          {isOpen(tr.id) ? "▾" : "▸"}
         </button>
-        <button class="pick" onclick={() => (store.view = "track")}>
+        <button class="pick" onclick={() => store.selectTrack(tr.id)} title={tr.intent}>
           <span class="dot" class:pulse={tr.live} style="background: {tr.live ? 'var(--ok)' : 'var(--idle)'}"></span>
           <span class="name">{tr.name}</span>
           <span class="mono count">{tr.runs}</span>
         </button>
       </div>
 
-      {#if open[tr.id]}
+      {#if isOpen(tr.id)}
         {#each tr.lanes as lane (lane.name)}
-          <button class="lane" class:on={store.view === "lane" && store.openLane === lane.name} onclick={() => store.openLaneView(lane.name)}>
-            <span
-              class="dot"
-              class:pulse={lane.status === "running"}
-              style="background: {lane.status === 'running' ? 'var(--ok)' : 'var(--idle)'}"
-            ></span>
+          <button
+            class="lane"
+            class:on={store.view === "lane" && store.track === tr.id && store.openLane === lane.name}
+            onclick={async () => {
+              if (store.track !== tr.id) await store.selectTrack(tr.id);
+              store.openLaneView(lane.name);
+            }}
+          >
+            <span class="dot" class:pulse={lane.live} style="background: {lane.live ? 'var(--ok)' : 'var(--idle)'}"></span>
             <span class="mono name">{lane.name}</span>
             <span class="mono meta">{agentLabel(lane.agent)}</span>
             <span class="mono count">{lane.runs}</span>
@@ -117,6 +134,11 @@
   .new {
     height: 26px;
     padding: 0 9px;
+  }
+
+  .new.on {
+    color: var(--hi);
+    border-color: var(--acc);
   }
 
   .x {

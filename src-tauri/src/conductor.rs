@@ -1,17 +1,21 @@
 //! The conductor and its lanes.
 //!
-//! The conductor is an agent session at Track level. What it can do to the
-//! app arrives as MCP tools (served in-process, see `orchestra_mcp`): open a
-//! lane, ask a lane a follow-up, check on it, read a report, record a
-//! decision. Whether a human message is a question to answer or work to
-//! delegate is the conductor's call, made in its prompt, not in Rust — the
-//! core is the mechanism, the agent is the policy.
+//! A track has one conductor: an agent session at Track level. What it can
+//! do to the app arrives as MCP tools (served in-process, see
+//! `orchestra_mcp`): open a lane, ask a lane a follow-up, check on it, read
+//! a report, record a decision. Whether a human message is a question to
+//! answer or work to delegate is the conductor's call, made in its prompt,
+//! not in Rust — the core is the mechanism, the agent is the policy.
 //!
-//! Lanes are agent sessions too, one per lane name, alive across runs, so
-//! a lane is a Claude Code (or Codex, …) session the conductor keeps
-//! talking to. Every turn, on the conductor or a lane, is one run in the
-//! store. A lane's session id is remembered in the store as well, so a
-//! closed lane (closed on purpose, or gone with an app restart) reopens
+//! Each track's conductor gets its own MCP server, so every tool call is
+//! already scoped to the track that made it; the conductor never names its
+//! track and cannot reach another.
+//!
+//! Lanes are agent sessions too, one per lane name within a track, alive
+//! across runs, so a lane is a Claude Code (or Codex, …) session the
+//! conductor keeps talking to. Every turn, on the conductor or a lane, is one
+//! run in the store. A lane's session id is remembered in the store as well,
+//! so a closed lane (closed on purpose, or gone with an app restart) reopens
 //! with its conversation when the conductor calls it by name again.
 //!
 //! Lane work is asynchronous from the conductor's point of view: `spawn_lane`
@@ -20,19 +24,20 @@
 //! blocking tool would trip the agent's own MCP call timeout on any lane
 //! that runs for minutes, which real work does.
 
-use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use orchestra_acp::{AgentSession, AgentSpec, McpHttp, SessionOptions};
 use orchestra_core::LaneEvent;
 use orchestra_mcp::{McpServer, Tool};
+use orchestra_store::TrackInfo;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
-use crate::{pump, workspace_root, AppState};
+use crate::{pump, AppState};
 
 /// The lane name conductor turns are recorded under.
 pub const CONDUCTOR_LANE: &str = "conductor";
@@ -59,23 +64,67 @@ pub struct Live {
     pub running: Option<String>,
 }
 
-/// Conductor and lane sessions. Held behind async mutexes because opening
-/// a session and running a turn both await.
+/// A track's conductor: its session and the MCP server that is its hands.
+pub struct Conductor {
+    pub live: Live,
+    /// Dropped with the conductor; the server stops then.
+    _mcp: McpServer,
+}
+
+/// Conductor and lane sessions, across tracks. Held behind async mutexes
+/// because opening a session and running a turn both await.
 #[derive(Default)]
 pub struct Sessions {
-    pub conductor: Mutex<Option<Live>>,
+    /// By track id.
+    pub conductors: Mutex<HashMap<String, Conductor>>,
+    /// By `track/lane` (see [`lane_key`]).
     pub lanes: Mutex<HashMap<String, Live>>,
-    /// Set while a conductor turn is in flight.
-    pub conductor_busy: std::sync::atomic::AtomicBool,
+    /// Tracks whose conductor has a turn in flight.
+    busy: parking_lot::Mutex<HashSet<String>>,
+}
+
+impl Sessions {
+    /// Mark a track's conductor busy; `false` if it already was.
+    fn begin_turn(&self, track: &str) -> bool {
+        self.busy.lock().insert(track.to_string())
+    }
+
+    fn end_turn(&self, track: &str) {
+        self.busy.lock().remove(track);
+    }
+
+    pub fn is_busy(&self, track: &str) -> bool {
+        self.busy.lock().contains(track)
+    }
+
+    /// Forget every session of a track (its conductor and lanes). Turns in
+    /// flight finish on their own; nothing new starts.
+    pub async fn close_track(&self, track: &str) {
+        self.conductors.lock().await.remove(track);
+        let prefix = lane_key(track, "");
+        self.lanes.lock().await.retain(|key, _| !key.starts_with(&prefix));
+    }
+}
+
+/// Key of a lane in [`Sessions::lanes`] and in the store's memory.
+fn lane_key(track: &str, lane: &str) -> String {
+    format!("{track}/{lane}")
 }
 
 /// What the conductor is told once, at the start of its session, in the
 /// interface language. Only the wording differs; the rules are the same.
-fn preamble(lang: &str) -> String {
+fn preamble(lang: &str, track: &TrackInfo) -> String {
+    let intent = track.intent.trim();
     if lang.starts_with("ko") {
+        let about = if intent.is_empty() {
+            String::new()
+        } else {
+            format!("\n이 트랙의 목적: {intent}\n")
+        };
         return format!(
             r#"당신은 Orchestra의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 레인(lane)이라는 별도의 에이전트 세션에 맡깁니다.
 
+트랙 이름: {name}{about}
 규칙:
 - 사람의 메시지가 질문이나 잡담이면 직접 답합니다. 레인을 열지 않습니다.
 - 코드를 읽거나 고치거나 조사하는 일처럼 실제 작업이 필요하면 `spawn_lane`으로 레인을 열어 맡깁니다. 레인 이름은 짧은 영문 소문자(예: fix-parser)로 짓고, task에는 레인이 혼자 끝낼 수 있을 만큼 구체적으로 적습니다.
@@ -87,13 +136,21 @@ fn preamble(lang: &str) -> String {
 - 사람이 결정해야 할 일(되돌리기 어려운 변경, 여러 갈래 중 선택)은 스스로 정하지 말고 선택지를 제시하고 묻습니다. 사람이 정하면 `record_decision`으로 남깁니다.
 - 한국어로 말합니다. 짧게, 명확하게.
 
-지금 작업 디렉터리는 사람이 연 저장소입니다. 레인도 같은 디렉터리에서 일합니다.
-"#
+작업 디렉터리는 {cwd} 입니다. 레인도 같은 디렉터리에서 일합니다.
+"#,
+            name = track.name,
+            cwd = track.cwd,
         );
     }
+    let about = if intent.is_empty() {
+        String::new()
+    } else {
+        format!("\nWhat this track is for: {intent}\n")
+    };
     format!(
         r#"You are Orchestra's conductor. You are the only one who talks to the human; real work is delegated to lanes, which are separate agent sessions.
 
+Track: {name}{about}
 Rules:
 - If the human's message is a question or small talk, answer it yourself. Do not open a lane.
 - If real work is needed (reading, changing or investigating code), open a lane with `spawn_lane`. Name it short and lowercase (e.g. fix-parser) and make the task specific enough for the lane to finish alone.
@@ -105,20 +162,23 @@ Rules:
 - Decisions that belong to the human (hard-to-undo changes, a choice between directions) are not yours to make: present the options and ask. Once the human decides, record it with `record_decision`.
 - Speak English. Short and clear.
 
-The working directory is the repository the human opened. Lanes work in the same directory.
-"#
+The working directory is {cwd}. Lanes work in the same directory.
+"#,
+        name = track.name,
+        cwd = track.cwd,
     )
 }
 
-/// Build the MCP tools that give the conductor its hands. Each captures the
-/// app handle and reaches the state through it.
-pub fn tools(app: AppHandle) -> Vec<Tool> {
-    let spawn_app = app.clone();
-    let ask_app = app.clone();
-    let status_app = app.clone();
-    let report_app = app.clone();
-    let close_app = app.clone();
-    let decide_app = app;
+/// Build the MCP tools that give one track's conductor its hands. Each
+/// captures the app handle and the track, and reaches the state through the
+/// handle.
+pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
+    let spawn = (app.clone(), track.clone());
+    let ask = (app.clone(), track.clone());
+    let status = (app.clone(), track.clone());
+    let report = app.clone();
+    let close = (app.clone(), track.clone());
+    let decide = (app, track);
 
     vec![
         Tool::new(
@@ -135,13 +195,13 @@ pub fn tools(app: AppHandle) -> Vec<Tool> {
                 "required": ["name", "task"]
             }),
             move |args| {
-                let app = spawn_app.clone();
+                let (app, track) = spawn.clone();
                 async move {
                     let name = str_arg(&args, "name")?;
                     let task = str_arg(&args, "task")?;
                     let agent = args.get("agent").and_then(Value::as_str).map(str::to_owned);
                     let fresh = args.get("fresh").and_then(Value::as_bool).unwrap_or(false);
-                    start_lane_turn(app, name, task, agent, true, fresh).await
+                    start_lane_turn(app, track, name, task, agent, true, fresh).await
                 }
             },
         ),
@@ -157,23 +217,23 @@ pub fn tools(app: AppHandle) -> Vec<Tool> {
                 "required": ["name", "message"]
             }),
             move |args| {
-                let app = ask_app.clone();
+                let (app, track) = ask.clone();
                 async move {
                     let name = str_arg(&args, "name")?;
                     let message = str_arg(&args, "message")?;
-                    start_lane_turn(app, name, message, None, false, false).await
+                    start_lane_turn(app, track, name, message, None, false, false).await
                 }
             },
         ),
         Tool::new(
             "lane_status",
-            "List every lane, open or closed: agent, whether its session is open, whether a turn is in flight (with its run id), how many runs it has, and its last run with status. A closed lane marked resumable reopens with its memory when you call spawn_lane or ask_lane with its name.",
+            "List every lane of this track, open or closed: agent, whether its session is open, whether a turn is in flight (with its run id), how many runs it has, and its last run with status. A closed lane marked resumable reopens with its memory when you call spawn_lane or ask_lane with its name.",
             json!({ "type": "object", "properties": {}, "additionalProperties": false }),
             move |_args| {
-                let app = status_app.clone();
+                let (app, track) = status.clone();
                 async move {
                     let state = app.state::<AppState>();
-                    Ok(Value::Array(lane_list(&state).await))
+                    Ok(Value::Array(lane_list(&state, &track).await))
                 }
             },
         ),
@@ -186,7 +246,7 @@ pub fn tools(app: AppHandle) -> Vec<Tool> {
                 "required": ["run"]
             }),
             move |args| {
-                let app = report_app.clone();
+                let app = report.clone();
                 async move {
                     let run = str_arg(&args, "run")?;
                     let state = app.state::<AppState>();
@@ -206,17 +266,17 @@ pub fn tools(app: AppHandle) -> Vec<Tool> {
                 "required": ["name"]
             }),
             move |args| {
-                let app = close_app.clone();
+                let (app, track) = close.clone();
                 async move {
                     let name = str_arg(&args, "name")?;
                     let state = app.state::<AppState>();
-                    let removed = state.sessions.lanes.lock().await.remove(&name);
+                    let removed = state.sessions.lanes.lock().await.remove(&lane_key(&track, &name));
                     match removed {
                         Some(live) => {
                             drop(live);
                             Ok(Value::String(format!("closed {name}")))
                         }
-                        None => Err(format!("no lane {name}")),
+                        None => Err(format!("no open lane {name}")),
                     }
                 }
             },
@@ -235,7 +295,7 @@ pub fn tools(app: AppHandle) -> Vec<Tool> {
                 "required": ["question", "choice"]
             }),
             move |args| {
-                let app = decide_app.clone();
+                let (app, track) = decide.clone();
                 async move {
                     let state = app.state::<AppState>();
                     let mut list: Vec<Value> = state
@@ -245,6 +305,7 @@ pub fn tools(app: AppHandle) -> Vec<Tool> {
                         .and_then(|s| serde_json::from_str(&s).ok())
                         .unwrap_or_default();
                     let mut entry = args.clone();
+                    entry["track"] = json!(track);
                     entry["at"] = json!(now_ms());
                     entry["n"] = json!(list.len() + 1);
                     list.push(entry.clone());
@@ -282,23 +343,23 @@ struct LaneRecord {
     agent: String,
 }
 
-fn lane_record_key(name: &str) -> String {
-    format!("lane_session:{name}")
+fn lane_record_key(track: &str, name: &str) -> String {
+    format!("lane_session:{}", lane_key(track, name))
 }
 
-fn lane_record(state: &AppState, name: &str) -> Option<LaneRecord> {
+fn lane_record(state: &AppState, track: &str, name: &str) -> Option<LaneRecord> {
     state
         .store
-        .get_meta(&lane_record_key(name))
+        .get_meta(&lane_record_key(track, name))
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
 }
 
-fn remember_lane(state: &AppState, name: &str, record: &LaneRecord) {
+fn remember_lane(state: &AppState, track: &str, name: &str, record: &LaneRecord) {
     match serde_json::to_string(record) {
         Ok(json) => {
-            if let Err(err) = state.store.set_meta(&lane_record_key(name), &json) {
+            if let Err(err) = state.store.set_meta(&lane_record_key(track, name), &json) {
                 tracing::warn!(lane = %name, %err, "could not remember lane session id");
             }
         }
@@ -306,10 +367,10 @@ fn remember_lane(state: &AppState, name: &str, record: &LaneRecord) {
     }
 }
 
-/// Every lane the store knows, merged with what is open right now. The
-/// conductor's own lane is not a lane to it.
-async fn lane_list(state: &AppState) -> Vec<Value> {
-    let history = state.store.lanes().unwrap_or_else(|err| {
+/// Every lane the store knows in a track, merged with what is open right
+/// now. The conductor's own lane is not a lane to it.
+async fn lane_list(state: &AppState, track: &str) -> Vec<Value> {
+    let history = state.store.lanes(track).unwrap_or_else(|err| {
         tracing::warn!(%err, "could not list lanes from the store");
         Vec::new()
     });
@@ -318,7 +379,7 @@ async fn lane_list(state: &AppState) -> Vec<Value> {
         .iter()
         .filter(|info| info.name != CONDUCTOR_LANE)
         .map(|info| {
-            let live = lanes.get(&info.name);
+            let live = lanes.get(&lane_key(track, &info.name));
             json!({
                 "name": info.name,
                 "agent": live.map(|l| l.agent.clone()).unwrap_or_else(|| info.agent.clone()),
@@ -329,13 +390,15 @@ async fn lane_list(state: &AppState) -> Vec<Value> {
                 "last_run": info.last_run,
                 "last_status": info.last_status.as_str(),
                 "last_at": info.last_at,
-                "resumable": live.is_none() && lane_record(state, &info.name).is_some(),
+                "resumable": live.is_none() && lane_record(state, track, &info.name).is_some(),
             })
         })
         .collect();
     // A lane opened so recently that its first run is not in the store yet.
-    for (name, live) in lanes.iter() {
-        if !history.iter().any(|h| &h.name == name) {
+    let prefix = lane_key(track, "");
+    for (key, live) in lanes.iter() {
+        let Some(name) = key.strip_prefix(&prefix) else { continue };
+        if !history.iter().any(|h| h.name == name) {
             list.push(json!({
                 "name": name,
                 "agent": live.agent,
@@ -350,14 +413,15 @@ async fn lane_list(state: &AppState) -> Vec<Value> {
     list
 }
 
-/// Session options for an agent: workspace, autonomous mode, chosen model.
-fn session_options(state: &AppState, agent: &str, mcp: Option<&McpServer>) -> SessionOptions {
+/// Session options for an agent: working directory, autonomous mode,
+/// chosen model, and the conductor's tools when it is the conductor.
+fn session_options(state: &AppState, agent: &str, cwd: &str, mcp: Option<&McpServer>) -> SessionOptions {
     let model = state.chosen_model(agent);
     let config = model
         .and_then(|m| state.model_option_id(agent).map(|id| vec![(id, m)]))
         .unwrap_or_default();
     SessionOptions {
-        cwd: workspace_root(),
+        cwd: PathBuf::from(cwd),
         mode: None,
         config,
         mcp_servers: mcp
@@ -373,6 +437,14 @@ fn session_options(state: &AppState, agent: &str, mcp: Option<&McpServer>) -> Se
     }
 }
 
+fn track_info(state: &AppState, track: &str) -> Result<TrackInfo, String> {
+    state
+        .store
+        .track(track)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no track {track}"))
+}
+
 /// Give a lane a turn and return at once. `open` is `spawn_lane` (a lane
 /// that is already open is refused); `ask_lane` needs the lane to exist,
 /// open or in the record. A lane that is not open but has a remembered
@@ -381,6 +453,7 @@ fn session_options(state: &AppState, agent: &str, mcp: Option<&McpServer>) -> Se
 /// conductor as a new turn.
 async fn start_lane_turn(
     app: AppHandle,
+    track: String,
     name: String,
     text: String,
     agent: Option<String>,
@@ -391,11 +464,13 @@ async fn start_lane_turn(
         return Err("that name is reserved".to_string());
     }
     let state = app.state::<AppState>();
+    let info = track_info(&state, &track)?;
+    let key = lane_key(&track, &name);
 
     // Resolve or open the lane session; refuse a second turn on a busy lane.
     let (agent_id, turns, session, resumed, note) = {
         let mut lanes = state.sessions.lanes.lock().await;
-        match (lanes.get_mut(&name), open) {
+        match (lanes.get_mut(&key), open) {
             (Some(live), true) => {
                 return Err(format!(
                     "lane {name} is already open (agent {}, {} turns). Send follow-ups with ask_lane(name=\"{name}\", message=...), or spawn_lane with a new name.",
@@ -412,45 +487,40 @@ async fn start_lane_turn(
                 (live.agent.clone(), live.turns, live.session.clone(), false, None)
             }
             (None, _) => {
-                let record = if fresh { None } else { lane_record(&state, &name) };
-                let history = state.store.lanes().unwrap_or_default();
+                let record = if fresh { None } else { lane_record(&state, &track, &name) };
+                let history = state.store.lanes(&track).unwrap_or_default();
                 let past = history.iter().find(|l| l.name == name);
                 if !open && record.is_none() && past.is_none() {
-                    let open_names: Vec<String> = lanes.keys().cloned().collect();
+                    let prefix = lane_key(&track, "");
+                    let open_names: Vec<&str> = lanes.keys().filter_map(|k| k.strip_prefix(&prefix)).collect();
                     let closed: Vec<&str> = history
                         .iter()
-                        .filter(|l| l.name != CONDUCTOR_LANE && !lanes.contains_key(&l.name))
+                        .filter(|l| l.name != CONDUCTOR_LANE && !lanes.contains_key(&lane_key(&track, &l.name)))
                         .map(|l| l.name.as_str())
                         .collect();
                     return Err(format!(
                         "no lane {name}. Open lanes: {open_names:?}. Closed lanes: {closed:?}. Use spawn_lane to create one."
                     ));
                 }
-                // Agent: the caller's choice, else the lane's earlier one, else the conductor's.
+                // Agent: the caller's choice, else the lane's earlier one, else the track's.
                 let agent_id = match (agent, &record, past) {
                     (Some(a), _, _) => a,
                     (None, Some(r), _) => r.agent.clone(),
                     (None, None, Some(p)) if !fresh => p.agent.clone(),
-                    _ => state
-                        .sessions
-                        .conductor
-                        .lock()
-                        .await
-                        .as_ref()
-                        .map(|c| c.agent.clone())
-                        .unwrap_or_else(|| "claude_code".to_string()),
+                    _ => info.agent.clone(),
                 };
                 // Memory only carries over on the agent that made it.
                 let resume = record.filter(|r| r.agent == agent_id).map(|r| r.session_id);
                 let wanted = resume.is_some();
                 let spec: AgentSpec = state.spec_for(&agent_id)?;
-                let mut opts = session_options(&state, &agent_id, None);
+                let mut opts = session_options(&state, &agent_id, &info.cwd, None);
                 opts.resume = resume;
-                tracing::info!(lane = %name, agent = %agent_id, resume = ?opts.resume, "opening lane session");
+                tracing::info!(%track, lane = %name, agent = %agent_id, resume = ?opts.resume, "opening lane session");
                 let session = Arc::new(AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?);
                 let resumed = session.resumed();
                 remember_lane(
                     &state,
+                    &track,
                     &name,
                     &LaneRecord {
                         session_id: session.session_id().to_string(),
@@ -459,7 +529,7 @@ async fn start_lane_turn(
                 );
                 let turns = if resumed { past.map(|p| p.runs).unwrap_or(0) + 1 } else { 1 };
                 lanes.insert(
-                    name.clone(),
+                    key.clone(),
                     Live {
                         agent: agent_id.clone(),
                         session: session.clone(),
@@ -483,21 +553,27 @@ async fn start_lane_turn(
 
     let run = state
         .store
-        .begin_run(&name, &agent_id, &text, &workspace_root().display().to_string())
+        .begin_run(&track, &name, &agent_id, &text, &info.cwd)
         .map_err(|e| e.to_string())?;
-    if let Some(live) = state.sessions.lanes.lock().await.get_mut(&name) {
+    if let Some(live) = state.sessions.lanes.lock().await.get_mut(&key) {
         live.running = Some(run.clone());
     }
 
     // The turn itself, in the background.
     let app_for_turn = app.clone();
-    let (name_t, run_t, text_t) = (name.clone(), run.clone(), text);
+    let (track_t, name_t, run_t, text_t, cwd_t) = (track.clone(), name.clone(), run.clone(), text, info.cwd.clone());
     tauri::async_runtime::spawn(async move {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let pump_task = tauri::async_runtime::spawn(pump(app_for_turn.clone(), name_t.clone(), run_t.clone(), rx));
+        let pump_task = tauri::async_runtime::spawn(pump(
+            app_for_turn.clone(),
+            track_t.clone(),
+            name_t.clone(),
+            run_t.clone(),
+            rx,
+        ));
         let _ = tx.send(LaneEvent::Started {
             session_id: session.session_id().to_string(),
-            cwd: workspace_root().display().to_string(),
+            cwd: cwd_t,
         });
         match tokio::time::timeout(LANE_TURN_TIMEOUT, session.prompt(text_t, tx.clone())).await {
             Ok(Ok(())) => {}
@@ -514,14 +590,14 @@ async fn start_lane_turn(
         {
             let state = app_for_turn.state::<AppState>();
             let mut lanes = state.sessions.lanes.lock().await;
-            if let Some(live) = lanes.get_mut(&name_t) {
+            if let Some(live) = lanes.get_mut(&lane_key(&track_t, &name_t)) {
                 if live.running.as_deref() == Some(run_t.as_str()) {
                     live.running = None;
                 }
             }
             drop(lanes);
         }
-        report_to_conductor(app_for_turn, name_t, run_t).await;
+        report_to_conductor(app_for_turn, track_t, name_t, run_t).await;
     });
 
     let mut result = json!({
@@ -539,8 +615,8 @@ async fn start_lane_turn(
     Ok(result)
 }
 
-/// Hand a finished lane run to the conductor as a new turn.
-async fn report_to_conductor(app: AppHandle, lane: String, run: String) {
+/// Hand a finished lane run to its track's conductor as a new turn.
+async fn report_to_conductor(app: AppHandle, track: String, lane: String, run: String) {
     let state = app.state::<AppState>();
     let summary = match state.store.run(&run) {
         Ok(Some(s)) => s,
@@ -552,7 +628,7 @@ async fn report_to_conductor(app: AppHandle, lane: String, run: String) {
     let mut output = summary.output.trim().to_string();
     const MAX: usize = 12_000;
     if output.chars().count() > MAX {
-        output = format!("{}…\n(잘림: 전체는 read_report(\"{run}\"))", output.chars().take(MAX).collect::<String>());
+        output = format!("{}…\n(truncated: read_report(\"{run}\") has it all)", output.chars().take(MAX).collect::<String>());
     }
     let text = format!(
         "{REPORT_PREFIX} lane={lane} run={run} status={} tools={} duration_ms={}{}\n\n{}",
@@ -560,70 +636,95 @@ async fn report_to_conductor(app: AppHandle, lane: String, run: String) {
         summary.tool_count,
         summary.duration_ms.unwrap_or(0),
         summary.error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default(),
-        if output.is_empty() { "(텍스트 출력 없음)" } else { &output },
+        if output.is_empty() { "(no text output)" } else { &output },
     );
 
     // Wait for the conductor to be free, then run the report as a turn.
     let deadline = std::time::Instant::now() + REPORT_WAIT;
-    while state.sessions.conductor_busy.load(Ordering::SeqCst) {
+    while state.sessions.is_busy(&track) {
         if std::time::Instant::now() > deadline {
-            tracing::warn!(%lane, %run, "conductor stayed busy; report dropped");
+            tracing::warn!(%track, %lane, %run, "conductor stayed busy; report dropped");
             return;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    let agent = state.sessions.conductor.lock().await.as_ref().map(|c| c.agent.clone());
-    let Some(agent) = agent else {
-        tracing::warn!(%lane, %run, "no conductor session to report to");
+    if !state.sessions.conductors.lock().await.contains_key(&track) {
+        tracing::warn!(%track, %lane, %run, "no conductor session to report to");
         return;
-    };
+    }
     let lang = state.store.get_meta("setting:language").ok().flatten().unwrap_or_default();
-    if let Err(err) = conductor_turn(app.clone(), text, agent, lang).await {
-        tracing::warn!(%lane, %run, %err, "could not deliver lane report to the conductor");
+    if let Err(err) = conductor_turn(app.clone(), track.clone(), text, None, lang).await {
+        tracing::warn!(%track, %lane, %run, %err, "could not deliver lane report to the conductor");
     }
 }
 
-/// Send one message to the conductor, opening (or resuming) its session on
-/// first use or when the chosen agent changed. Returns the conductor run
-/// id; the turn continues in the background and streams under that id.
-/// `lang` picks the preamble's language on a fresh session.
-pub async fn conductor_turn(app: AppHandle, prompt: String, agent: String, lang: String) -> Result<String, String> {
+/// Send one message to a track's conductor, opening (or resuming) its
+/// session on first use or when the agent changed. `agent` overrides the
+/// track's recorded agent and becomes it. Returns the conductor run id; the
+/// turn continues in the background and streams under that id. `lang`
+/// picks the preamble's language on a fresh session.
+pub async fn conductor_turn(
+    app: AppHandle,
+    track: String,
+    prompt: String,
+    agent: Option<String>,
+    lang: String,
+) -> Result<String, String> {
     let st = app.state::<AppState>();
-    if st.sessions.conductor_busy.swap(true, Ordering::SeqCst) {
+    let mut info = track_info(&st, &track)?;
+    if let Some(agent) = agent.filter(|a| *a != info.agent) {
+        info = st
+            .store
+            .update_track(&track, None, None, Some(&agent))
+            .map_err(|e| e.to_string())?;
+    }
+    let agent = info.agent.clone();
+
+    if !st.sessions.begin_turn(&track) {
         return Err("conductor is still responding".to_string());
     }
 
     let outcome: Result<String, String> = async {
-        let mut guard = st.sessions.conductor.lock().await;
-        let needs_open = match guard.as_ref() {
-            Some(live) => live.agent != agent,
+        let mut guard = st.sessions.conductors.lock().await;
+        let needs_open = match guard.get(&track) {
+            Some(c) => c.live.agent != agent,
             None => true,
         };
         if needs_open {
-            if let Some(old) = guard.take() {
-                tracing::info!(agent = %old.agent, "closing conductor session (agent changed)");
+            if let Some(old) = guard.remove(&track) {
+                tracing::info!(%track, agent = %old.live.agent, "closing conductor session (agent changed)");
                 drop(old);
             }
             let spec = st.spec_for(&agent)?;
-            let mut opts = session_options(&st, &agent, Some(&st.mcp));
-            // Bring back the conductor this agent had last time, with its memory.
-            let key = format!("conductor_session:{agent}");
+            // This track's tools, on their own server: every call is scoped.
+            let mcp = McpServer::start("orchestra", tools(app.clone(), track.clone()))
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut opts = session_options(&st, &agent, &info.cwd, Some(&mcp));
+            // Bring back the conductor this track had last time, with its memory.
+            let key = format!("conductor_session:{track}:{agent}");
             opts.resume = st.store.get_meta(&key).ok().flatten();
-            tracing::info!(agent = %agent, mcp = %st.mcp.url(), resume = ?opts.resume, "opening conductor session");
+            tracing::info!(%track, agent = %agent, mcp = %mcp.url(), resume = ?opts.resume, "opening conductor session");
             let session = AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?;
             let resumed = session.resumed();
             if let Err(err) = st.store.set_meta(&key, session.session_id()) {
                 tracing::warn!(%err, "could not remember conductor session id");
             }
-            *guard = Some(Live {
-                agent: agent.clone(),
-                session: Arc::new(session),
-                // A resumed session already had its preamble.
-                turns: if resumed { 1 } else { 0 },
-                running: None,
-            });
+            guard.insert(
+                track.clone(),
+                Conductor {
+                    live: Live {
+                        agent: agent.clone(),
+                        session: Arc::new(session),
+                        // A resumed session already had its preamble.
+                        turns: if resumed { 1 } else { 0 },
+                        running: None,
+                    },
+                    _mcp: mcp,
+                },
+            );
         }
-        let live = guard.as_mut().expect("conductor session just ensured");
+        let live = &mut guard.get_mut(&track).expect("conductor session just ensured").live;
         live.turns += 1;
         let first = live.turns == 1;
         let session_id = live.session.session_id().to_string();
@@ -632,33 +733,34 @@ pub async fn conductor_turn(app: AppHandle, prompt: String, agent: String, lang:
 
         let run = st
             .store
-            .begin_run(CONDUCTOR_LANE, &agent, &prompt, &workspace_root().display().to_string())
+            .begin_run(&track, CONDUCTOR_LANE, &agent, &prompt, &info.cwd)
             .map_err(|e| e.to_string())?;
 
-        let text = if first { format!("{}\n\n---\n\n{prompt}", preamble(&lang)) } else { prompt };
+        let text = if first { format!("{}\n\n---\n\n{prompt}", preamble(&lang, &info)) } else { prompt };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        tauri::async_runtime::spawn(pump(app.clone(), CONDUCTOR_LANE.to_string(), run.clone(), rx));
+        tauri::async_runtime::spawn(pump(app.clone(), track.clone(), CONDUCTOR_LANE.to_string(), run.clone(), rx));
         let _ = tx.send(LaneEvent::Started {
             session_id,
-            cwd: workspace_root().display().to_string(),
+            cwd: info.cwd.clone(),
         });
 
-        // The turn runs in the background; the busy flag clears when it ends.
+        // The turn runs in the background; the busy mark clears when it ends.
         let app_for_turn = app.clone();
         let run_for_turn = run.clone();
+        let track_for_turn = track.clone();
         tauri::async_runtime::spawn(async move {
             let st = app_for_turn.state::<AppState>();
             // No lock held during the turn: the tools it calls lock too.
             let started = std::time::Instant::now();
-            tracing::info!(run = %run_for_turn, "conductor turn starting");
+            tracing::info!(track = %track_for_turn, run = %run_for_turn, "conductor turn starting");
             let result = session.prompt(text, tx.clone()).await;
             tracing::info!(run = %run_for_turn, elapsed_ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "conductor turn ended");
             if let Err(err) = result {
                 let _ = tx.send(LaneEvent::Failed { error: err.to_string() });
                 // A failed turn kills the session; drop it so the next prompt reopens.
-                st.sessions.conductor.lock().await.take();
+                st.sessions.conductors.lock().await.remove(&track_for_turn);
             }
-            st.sessions.conductor_busy.store(false, Ordering::SeqCst);
+            st.sessions.end_turn(&track_for_turn);
         });
 
         Ok(run)
@@ -666,7 +768,7 @@ pub async fn conductor_turn(app: AppHandle, prompt: String, agent: String, lang:
     .await;
 
     if outcome.is_err() {
-        st.sessions.conductor_busy.store(false, Ordering::SeqCst);
+        st.sessions.end_turn(&track);
     }
     outcome
 }

@@ -196,6 +196,8 @@ impl LaneEvent {
 /// An event tagged with the lane and run it came from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaneEnvelope {
+    /// Which track the lane belongs to.
+    pub track: String,
     /// Which lane produced it.
     pub lane: LaneId,
     /// Which run produced it.

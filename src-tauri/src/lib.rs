@@ -8,13 +8,13 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use orchestra_acp::{run_lane, AgentSpec, LaneSpec};
+use orchestra_acp::AgentSpec;
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
 use orchestra_core::{LaneEnvelope, LaneEvent};
-use orchestra_mcp::McpServer;
-use orchestra_store::{RunSummary, SearchHit, Store, StoredEvent};
+use orchestra_store::{RunSummary, SearchHit, Store, StoredEvent, TrackInfo};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 mod conductor;
 
@@ -40,9 +40,7 @@ pub struct AppState {
     adapters_dir: PathBuf,
     /// Last detection result, mirrored from the store for quick lookups.
     agents: Mutex<Option<Vec<AgentStatus>>>,
-    /// The in-process MCP server that gives the conductor its tools.
-    pub(crate) mcp: McpServer,
-    /// Conductor and lane sessions.
+    /// Conductor and lane sessions, across tracks.
     pub(crate) sessions: conductor::Sessions,
 }
 
@@ -123,83 +121,106 @@ impl AppState {
     }
 }
 
-/// Open a lane on `agent`, run one prompt, and stream its events back as
-/// `lane` events.
-///
-/// Returns the run id immediately; the run proceeds in the background. The
-/// run is registered in the store before this returns, so a `list_runs`
-/// issued right after already includes it.
+/// Every track, oldest first.
 #[tauri::command]
-async fn start_run(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    lane: String,
-    prompt: String,
-    agent: Option<String>,
-    model: Option<String>,
-) -> Result<String, String> {
-    let agent = agent.unwrap_or_else(|| AgentKind::ClaudeCode.id().to_string());
-    let agent_spec = state.spec_for(&agent)?;
-    // A model choice is sent as the agent's own model config option, whose id
-    // detection recorded; an agent without one just ignores the choice.
-    let config: Vec<(String, String)> = match model.filter(|m| !m.is_empty()) {
-        Some(model) => state
-            .model_option_id(&agent)
-            .map(|id| vec![(id, model)])
-            .unwrap_or_default(),
-        None => Vec::new(),
-    };
-    let cwd = workspace_root();
-    let run = state
-        .store
-        .begin_run(&lane, &agent, &prompt, &cwd.display().to_string())
-        .map_err(|e| e.to_string())?;
-
-    let spec = LaneSpec {
-        agent: agent_spec,
-        cwd,
-        prompt,
-        // The most autonomous mode the agent offers is chosen per session.
-        mode: None,
-        config,
-    };
-
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let lane_for_task = lane.clone();
-    let run_for_task = run.clone();
-    let app_for_pump = app.clone();
-
-    tauri::async_runtime::spawn(async move {
-        pump(app_for_pump, lane_for_task, run_for_task, rx).await;
-    });
-
-    let lane_for_run = lane.clone();
-    let run_for_run = run.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Err(err) = run_lane(spec, tx.clone()).await {
-            // The lane channel may already be closed; emit through it anyway so
-            // the failure lands in the same ordered stream as everything else.
-            let _ = tx.send(LaneEvent::Failed {
-                error: err.to_string(),
-            });
-            tracing::error!(lane = %lane_for_run, run = %run_for_run, %err, "lane failed");
-        }
-    });
-
-    Ok(run)
+fn list_tracks(state: State<'_, AppState>) -> Result<Vec<TrackInfo>, String> {
+    state.store.tracks().map_err(|e| e.to_string())
 }
 
-/// Send one human message to the conductor. Returns the conductor run id;
-/// the turn streams under it, and any lanes it opens stream under theirs.
+/// Create a track. An empty working directory means the repository the app
+/// was launched from; an empty agent means Claude Code.
+#[tauri::command]
+fn create_track(
+    state: State<'_, AppState>,
+    name: String,
+    intent: Option<String>,
+    cwd: Option<String>,
+    agent: Option<String>,
+) -> Result<TrackInfo, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a track needs a name".to_string());
+    }
+    let cwd = match cwd.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()) {
+        Some(c) => {
+            if !std::path::Path::new(&c).is_dir() {
+                return Err(format!("not a directory: {c}"));
+            }
+            c
+        }
+        None => workspace_root().display().to_string(),
+    };
+    let agent = agent.filter(|a| !a.is_empty()).unwrap_or_else(|| AgentKind::ClaudeCode.id().to_string());
+    AgentKind::parse(&agent).ok_or_else(|| format!("unknown agent {agent}"))?;
+    state
+        .store
+        .create_track(name, intent.as_deref().unwrap_or(""), &cwd, &agent)
+        .map_err(|e| e.to_string())
+}
+
+/// Rename a track, change its intent, or move its conductor to another
+/// agent (the conductor reopens on that agent at the next message).
+#[tauri::command]
+fn update_track(
+    state: State<'_, AppState>,
+    id: String,
+    name: Option<String>,
+    intent: Option<String>,
+    agent: Option<String>,
+) -> Result<TrackInfo, String> {
+    if let Some(n) = name.as_deref() {
+        if n.trim().is_empty() {
+            return Err("a track needs a name".to_string());
+        }
+    }
+    if let Some(a) = agent.as_deref() {
+        AgentKind::parse(a).ok_or_else(|| format!("unknown agent {a}"))?;
+    }
+    state
+        .store
+        .update_track(&id, name.as_deref(), intent.as_deref(), agent.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a track: its sessions close, its runs and memory go.
+#[tauri::command]
+async fn delete_track(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    if state.sessions.is_busy(&id) {
+        return Err("the conductor is still responding; wait for it to finish".to_string());
+    }
+    state.sessions.close_track(&id).await;
+    state.store.delete_track(&id).map_err(|e| e.to_string())
+}
+
+/// Let the human pick a folder for a track. `None` when they cancel.
+#[tauri::command]
+async fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<String>, String> {
+    let mut dialog = app.dialog().file();
+    if let Some(dir) = start.filter(|s| !s.is_empty() && std::path::Path::new(s).is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    dialog.pick_folder(move |picked| {
+        let _ = tx.send(picked);
+    });
+    let picked = rx.await.map_err(|e| e.to_string())?;
+    Ok(picked
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.display().to_string()))
+}
+
+/// Send one human message to a track's conductor. Returns the conductor run
+/// id; the turn streams under it, and any lanes it opens stream under
+/// theirs. `agent`, when given, becomes the track's conductor agent.
 #[tauri::command]
 async fn conductor_prompt(
     app: AppHandle,
+    track: String,
     prompt: String,
     agent: Option<String>,
     lang: Option<String>,
 ) -> Result<String, String> {
-    let agent = agent.unwrap_or_else(|| AgentKind::ClaudeCode.id().to_string());
-    conductor::conductor_turn(app, prompt, agent, lang.unwrap_or_default()).await
+    conductor::conductor_turn(app, track, prompt, agent.filter(|a| !a.is_empty()), lang.unwrap_or_default()).await
 }
 
 /// Every run, oldest first: what the timeline is rebuilt from at startup.
@@ -334,6 +355,7 @@ async fn download_agent(
 /// the webview: losing history is bad, losing the live view is worse.
 pub(crate) async fn pump(
     app: AppHandle,
+    track: String,
     lane: String,
     run: String,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<LaneEvent>,
@@ -350,6 +372,7 @@ pub(crate) async fn pump(
         let _ = app.emit(
             "lane",
             LaneEnvelope {
+                track: track.clone(),
                 lane: lane.clone(),
                 run: run.clone(),
                 at_ms,
@@ -392,7 +415,8 @@ pub(crate) async fn pump(
     }
 }
 
-/// Directory handed to lanes: the repository the app was launched from.
+/// Default working directory for a new track: the repository the app was
+/// launched from.
 ///
 /// `tauri dev` starts the binary inside `src-tauri/`, so the plain working
 /// directory would point agents at the wrong folder. Walk up to the nearest
@@ -426,8 +450,13 @@ fn open_store(data_dir: &std::path::Path) -> anyhow::Result<(Store, String)> {
 /// Entry point shared by the desktop binary.
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            start_run,
+            list_tracks,
+            create_track,
+            update_track,
+            delete_track,
+            pick_folder,
             conductor_prompt,
             list_runs,
             run_events,
@@ -445,15 +474,11 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let (store, db_path) = open_store(&data_dir)?;
             let adapters_dir = data_dir.join("adapters");
-            // The conductor's tools, served from this process on localhost.
-            let tools = conductor::tools(app.handle().clone());
-            let mcp = tauri::async_runtime::block_on(McpServer::start("orchestra", tools))?;
             app.manage(AppState {
                 store,
                 db_path,
                 adapters_dir,
                 agents: Mutex::new(None),
-                mcp,
                 sessions: conductor::Sessions::default(),
             });
             if let Some(window) = app.get_webview_window("main") {
