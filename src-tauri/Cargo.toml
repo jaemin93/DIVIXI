@@ -3,6 +3,12 @@ name = "orchestra-app"
 version.workspace = true
 edition.workspace = true
 
+# The executable is the product: divixi.exe in the task bar and the task
+# manager. The crate keeps its orchestra-* name.
+[[bin]]
+name = "divixi"
+path = "src/main.rs"
+
 [lib]
 name = "orchestra_app"
 crate-type = ["staticlib", "cdylib", "rlib"]

@@ -3,6 +3,7 @@
   "productName": "Divixi",
   "version": "0.1.0",
   "identifier": "app.divixi",
+  "mainBinaryName": "divixi",
   "build": {
     "devUrl": "http://localhost:5183",
     "frontendDist": "../dist",
