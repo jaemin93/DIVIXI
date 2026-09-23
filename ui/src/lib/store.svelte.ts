@@ -453,6 +453,15 @@ class Store {
   tracks = $state<Track[]>([]);
   /** Id of the track in the main area. Persisted. */
   track = $state("");
+  /** Track whose tag dialog is open; "" means closed. */
+  tagDialog = $state("");
+
+  /** Every tag the user has put on any track, sorted; the pool the dialog offers. */
+  get allTags(): string[] {
+    const set = new Set<string>();
+    for (const tr of this.tracks) for (const tag of tr.tags) set.add(tag);
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }
   lastError = $state("");
   restored = $state(false);
 

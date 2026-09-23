@@ -45,7 +45,10 @@ const ko = {
   // Track header
   "track.rename": "이름 변경",
   "track.tags": "태그…",
-  "track.tagsPh": "쉼표로 구분",
+  "track.tagTitle": "태그 지정",
+  "track.newTag": "새 태그…",
+  "track.addTag": "추가",
+  "track.noTags": "아직 태그가 없습니다. 아래에 입력해 만드세요.",
   "track.settings": "Track 설정…",
   "track.color": "색",
   "track.noColor": "색 없음",
@@ -311,7 +314,10 @@ const en: Record<Key, string> = {
   // Track header
   "track.rename": "Rename",
   "track.tags": "Tags…",
-  "track.tagsPh": "comma separated",
+  "track.tagTitle": "Tags",
+  "track.newTag": "New tag…",
+  "track.addTag": "Add",
+  "track.noTags": "No tags yet. Type one below to make it.",
   "track.settings": "Track settings…",
   "track.color": "Colour",
   "track.noColor": "No colour",

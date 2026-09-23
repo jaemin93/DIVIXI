@@ -6,6 +6,7 @@
   import Composer from "./lib/Composer.svelte";
   import Workspace from "./lib/Workspace.svelte";
   import Setup from "./lib/Setup.svelte";
+  import TagDialog from "./lib/TagDialog.svelte";
   import Settings from "./lib/Settings.svelte";
   import LaneView from "./lib/LaneView.svelte";
   import TrackForm from "./lib/TrackForm.svelte";
@@ -35,6 +36,9 @@
   <WindowChrome />
   {#if store.setupOpen}
     <Setup />
+  {/if}
+  {#if store.tagDialog}
+    <TagDialog />
   {/if}
   <div class="body">
     <Rail />

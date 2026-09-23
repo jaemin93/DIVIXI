@@ -62,7 +62,7 @@
   // ----- context menu -----
   type Menu = { id: string; x: number; y: number };
   let menu = $state<Menu | null>(null);
-  let mode = $state<"" | "rename" | "tags" | "confirm">("");
+  let mode = $state<"" | "rename" | "confirm">("");
   let draft = $state("");
   let menuEl = $state<HTMLDivElement>();
   let draftInput = $state<HTMLInputElement>();
@@ -94,7 +94,7 @@
   });
 
   $effect(() => {
-    if (mode === "rename" || mode === "tags") draftInput?.focus();
+    if (mode === "rename") draftInput?.focus();
   });
 
   function onDocClick(e: MouseEvent) {
@@ -110,19 +110,16 @@
     mode = "rename";
   }
 
-  function startTags() {
-    draft = menuTrack?.tags.join(", ") ?? "";
-    mode = "tags";
+  function openTags() {
+    if (!menu) return;
+    store.tagDialog = menu.id;
+    closeMenu();
   }
 
   async function commit(e: Event) {
     e.preventDefault();
     if (!menu) return;
-    if (mode === "rename") {
-      if (draft.trim()) await store.updateTrack(menu.id, { name: draft.trim() });
-    } else if (mode === "tags") {
-      await store.updateTrack(menu.id, { tags: draft.split(",").map((s) => s.trim()).filter(Boolean) });
-    }
+    if (mode === "rename" && draft.trim()) await store.updateTrack(menu.id, { name: draft.trim() });
     closeMenu();
   }
 
@@ -164,12 +161,19 @@
 
   <div class="list">
     {#each shown as tr (tr.id)}
-      <div class="track" class:on={store.view === "track" && store.track === tr.id} class:menued={menu?.id === tr.id} oncontextmenu={(e) => openMenu(e, tr.id)} role="presentation">
+      <div
+        class="track"
+        class:on={store.view === "track" && store.track === tr.id}
+        class:menued={menu?.id === tr.id}
+        style="border-left-color: {tr.color || 'transparent'}"
+        oncontextmenu={(e) => openMenu(e, tr.id)}
+        role="presentation"
+      >
         <button class="chev mono" onclick={() => toggle(tr.id)} aria-label={isOpen(tr.id) ? t("tracks.foldLanes") : t("tracks.unfoldLanes")}>
           {isOpen(tr.id) ? "▾" : "▸"}
         </button>
         <button class="pick" onclick={() => store.selectTrack(tr.id)} title={tr.intent}>
-          <span class="dot" class:pulse={tr.live} style="background: {tr.live ? 'var(--ok)' : tr.color || 'var(--idle)'}"></span>
+          <span class="dot" class:pulse={tr.live} style="background: {tr.live ? 'var(--ok)' : 'var(--idle)'}"></span>
           <span class="name">{tr.name}</span>
           {#if tr.tags.length}
             <span class="mono tags" title={tr.tags.join(", ")}>{tr.tags.slice(0, 2).join(" · ")}{tr.tags.length > 2 ? ` +${tr.tags.length - 2}` : ""}</span>
@@ -204,19 +208,19 @@
 
 {#if menu && menuTrack}
   <div class="menu" bind:this={menuEl} style="left: {menu.x}px; top: {menu.y}px" role="menu" aria-label={t("track.menu")}>
-    {#if mode === "rename" || mode === "tags"}
+    {#if mode === "rename"}
       <form class="inline" onsubmit={commit}>
-        <span class="mlab-sm">{mode === "rename" ? t("track.rename") : t("track.tags")}</span>
-        <input type="text" bind:this={draftInput} bind:value={draft} placeholder={mode === "tags" ? t("track.tagsPh") : ""} maxlength={mode === "rename" ? 80 : 200} />
+        <span class="mlab-sm">{t("track.rename")}</span>
+        <input type="text" bind:this={draftInput} bind:value={draft} maxlength="80" />
         <div class="acts">
           <span class="grow"></span>
           <button class="btn sm" type="button" onclick={() => (mode = "")}>{t("track.cancel")}</button>
-          <button class="btn sm btn-acc" type="submit" disabled={mode === "rename" && !draft.trim()}>{t("newtrack.save")}</button>
+          <button class="btn sm btn-acc" type="submit" disabled={!draft.trim()}>{t("newtrack.save")}</button>
         </div>
       </form>
     {:else}
       <button class="item" role="menuitem" onclick={startRename}>{t("track.rename")}</button>
-      <button class="item" role="menuitem" onclick={startTags}>{t("track.tags")}</button>
+      <button class="item" role="menuitem" onclick={openTags}>{t("track.tags")}</button>
       <button class="item" role="menuitem" onclick={openSettings}>{t("track.settings")}</button>
       <div class="rule"></div>
       <div class="colors" role="group" aria-label={t("track.color")}>
@@ -348,7 +352,6 @@
 
   .track.on {
     color: var(--hi);
-    border-left-color: var(--acc);
     background: var(--sel);
   }
 
@@ -384,7 +387,6 @@
 
   .lane.on {
     color: var(--hi);
-    border-left-color: var(--acc);
     background: var(--sel);
   }
 

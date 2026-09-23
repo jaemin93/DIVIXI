@@ -43,8 +43,8 @@
   }
 
   .swatch {
-    width: 8px;
-    height: 8px;
+    width: 3px;
+    height: 16px;
     flex-shrink: 0;
   }
 
