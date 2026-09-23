@@ -801,6 +801,23 @@ pub async fn conductor_open(app: AppHandle, track: String) -> Result<ConductorSt
     Ok(conductor_state(&app, &track).await)
 }
 
+/// Stop the conductor's turn in flight (Ctrl+C). The session stays open;
+/// the run ends with the agent's `cancelled` stop reason.
+pub async fn conductor_cancel(app: AppHandle, track: String) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    if !st.sessions.is_busy(&track) {
+        return Ok(());
+    }
+    let guard = st.sessions.conductors.lock().await;
+    match guard.get(&track) {
+        Some(c) => {
+            c.live.session.cancel();
+            Ok(())
+        }
+        None => Err("no conductor session".to_string()),
+    }
+}
+
 /// Close the track's conductor session. Its memory stays in the store, so
 /// the next open resumes it. Refused while a turn is running.
 pub async fn conductor_close(app: AppHandle, track: String) -> Result<ConductorState, String> {

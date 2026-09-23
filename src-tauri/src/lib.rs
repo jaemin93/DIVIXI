@@ -249,6 +249,12 @@ async fn conductor_open(app: AppHandle, track: String) -> Result<conductor::Cond
     conductor::conductor_open(app, track).await
 }
 
+/// Stop the conductor's turn in flight, as Ctrl+C would.
+#[tauri::command]
+async fn conductor_cancel(app: AppHandle, track: String) -> Result<(), String> {
+    conductor::conductor_cancel(app, track).await
+}
+
 /// Close a track's conductor session; its memory stays for the next open.
 #[tauri::command]
 async fn conductor_close(app: AppHandle, track: String) -> Result<conductor::ConductorState, String> {
@@ -540,6 +546,7 @@ pub fn run() {
             conductor_states,
             conductor_open,
             conductor_close,
+            conductor_cancel,
             list_runs,
             run_events,
             search_runs,

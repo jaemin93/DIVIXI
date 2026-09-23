@@ -22,7 +22,7 @@ use agent_client_protocol::{
     schema::{
         v1::{
             HttpHeader, InitializeRequest, LoadSessionRequest, McpServer, McpServerHttp,
-            NewSessionRequest, SessionConfigOptionValue, SessionNotification,
+            CancelNotification, NewSessionRequest, SessionConfigOptionValue, SessionNotification,
             SetSessionConfigOptionRequest, SetSessionModeRequest,
         },
         ProtocolVersion,
@@ -79,6 +79,8 @@ struct Ready {
 /// A live session. Dropping it ends the session and kills the agent.
 pub struct AgentSession {
     turns: mpsc::Sender<Turn>,
+    /// One message per cancel request; the task forwards it as `session/cancel`.
+    cancel: mpsc::UnboundedSender<()>,
     session_id: String,
     resumed: bool,
     /// The latest slash-command list the agent sent.
@@ -104,6 +106,7 @@ impl AgentSession {
     pub async fn open(agent: &AgentSpec, opts: SessionOptions) -> anyhow::Result<Self> {
         let (process, transport) = process::spawn(agent)?;
         let (turn_tx, mut turn_rx) = mpsc::channel::<Turn>(1);
+        let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel::<()>();
         let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<Ready>>();
         let opts_for_task = opts.clone();
         let commands: Arc<Mutex<Vec<SlashCommand>>> = Arc::new(Mutex::new(Vec::new()));
@@ -223,7 +226,9 @@ impl AgentSession {
                         for ev in carried.drain(..) {
                             let _ = turn.tx.send(ev);
                         }
-                        let result = run_turn(&mut session, &turn.text, &turn.tx, &commands_task).await;
+                        // A cancel asked for before this turn is not for this turn.
+                        while cancel_rx.try_recv().is_ok() {}
+                        let result = run_turn(&mut session, &turn.text, &turn.tx, &commands_task, &mut cancel_rx).await;
                         if let Err(err) = &result {
                             let _ = turn.tx.send(LaneEvent::Failed { error: err.to_string() });
                         }
@@ -254,6 +259,7 @@ impl AgentSession {
         match ready_rx.await {
             Ok(Ok(ready)) => Ok(Self {
                 turns: turn_tx,
+                cancel: cancel_tx,
                 session_id: ready.session_id,
                 resumed: ready.resumed,
                 commands,
@@ -298,6 +304,13 @@ impl AgentSession {
             .map_err(|_| anyhow::anyhow!("agent session ended during the turn"))?
     }
 
+    /// Stop the turn in flight, as Ctrl+C would in the agent's own terminal.
+    /// The agent ends the turn with a `cancelled` stop reason; the session
+    /// stays open. Nothing happens when no turn is running.
+    pub fn cancel(&self) {
+        let _ = self.cancel.send(());
+    }
+
     /// End the session and wait for the agent to go away.
     pub async fn close(self) {
         drop(self.turns);
@@ -339,10 +352,24 @@ async fn run_turn(
     text: &str,
     tx: &mpsc::UnboundedSender<LaneEvent>,
     commands: &Arc<Mutex<Vec<SlashCommand>>>,
+    cancel: &mut mpsc::UnboundedReceiver<()>,
 ) -> anyhow::Result<()> {
     session.send_prompt(text)?;
     loop {
-        match session.read_update().await? {
+        // Read the next update, or forward a cancel and keep reading: the
+        // agent answers a cancel with its stop reason like any other end.
+        let update = tokio::select! {
+            update = session.read_update() => update?,
+            Some(()) = cancel.recv() => {
+                tracing::info!("cancelling the turn");
+                let id = session.session_id().clone();
+                if let Err(err) = session.connection().send_notification_to(Agent, CancelNotification::new(id)) {
+                    tracing::warn!(%err, "could not send session/cancel");
+                }
+                continue;
+            }
+        };
+        match update {
             SessionMessage::SessionMessage(dispatch) => {
                 let tx = tx.clone();
                 let commands = commands.clone();

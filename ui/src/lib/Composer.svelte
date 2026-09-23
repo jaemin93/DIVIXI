@@ -150,7 +150,12 @@
         oninput={grow}
       ></textarea>
     </div>
-    <button class="btn send" type="submit" disabled={store.busy || !draft.trim()} aria-label={t("composer.send")}>→</button>
+    {#if store.busy}
+      <!-- While the conductor answers, the send button is a stop button: Ctrl+C. -->
+      <button class="btn send stop" type="button" disabled={store.cancelling} onclick={() => store.cancelConductor()} title={t("composer.stopTitle")} aria-label={t("composer.stop")}>■</button>
+    {:else}
+      <button class="btn send" type="submit" disabled={!draft.trim()} aria-label={t("composer.send")}>→</button>
+    {/if}
   </form>
 
   <div class="status">
@@ -313,6 +318,11 @@
     letter-spacing: 0;
     border-color: var(--accln);
     color: var(--acct);
+  }
+
+  .send.stop {
+    font-size: 11px;
+    border-color: var(--acct);
   }
 
   /* One row, always: chips shrink and cut before anything wraps. No

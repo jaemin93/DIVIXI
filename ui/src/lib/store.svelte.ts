@@ -480,6 +480,8 @@ class Store {
   conductor = $state<Record<string, ConductorState>>({});
   /** Track whose conductor is being opened right now. */
   conductorOpening = $state("");
+  /** A cancel is on its way to the conductor. */
+  cancelling = $state(false);
 
   get conductorState(): ConductorState {
     return this.conductor[this.track] ?? { open: false, busy: false, agent: null, commands: [] };
@@ -522,6 +524,20 @@ class Store {
       this.lastError = String(err);
     } finally {
       this.conductorOpening = "";
+    }
+  }
+
+  /** Stop the conductor's turn in flight, as Ctrl+C would; the run ends as cancelled. */
+  async cancelConductor() {
+    const track = this.track;
+    if (!track || !this.busy) return;
+    this.cancelling = true;
+    try {
+      await invoke("conductor_cancel", { track });
+    } catch (err) {
+      this.lastError = String(err);
+    } finally {
+      this.cancelling = false;
     }
   }
 
