@@ -804,14 +804,15 @@ class Store {
   }
 
   /** Delete a track with its runs and memory; the app moves to a neighbour or to creation. */
-  async deleteTrack(id: string) {
+  /** Delete a track. Returns why the core refused, or "" when it is gone. */
+  async deleteTrack(id: string): Promise<string> {
     this.lastError = "";
     try {
       await invoke("delete_track", { id });
     } catch (err) {
-      this.lastError = String(err);
-      return;
+      return String(err);
     }
+    this.decisions = this.decisions.filter((d) => d.track !== id);
     this.tracks = this.tracks.filter((t) => t.id !== id);
     this.runs = this.runs.filter((r) => r.track !== id);
     if (this.track === id) {
@@ -822,6 +823,7 @@ class Store {
         this.view = "new-track";
       }
     }
+    return "";
   }
 
   /** Native folder picker; empty when cancelled. */

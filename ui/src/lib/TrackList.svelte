@@ -117,6 +117,8 @@
   let menu = $state<Menu | null>(null);
   let mode = $state<"" | "rename" | "confirm">("");
   let draft = $state("");
+  /** Why the core refused a delete, shown in the menu. */
+  let deleteError = $state("");
   let menuEl = $state<HTMLDivElement>();
   let draftInput = $state<HTMLInputElement>();
 
@@ -128,6 +130,7 @@
   function openMenu(e: MouseEvent, id: string) {
     e.preventDefault();
     mode = "";
+    deleteError = "";
     draft = "";
     menu = { id, x: e.clientX, y: e.clientY };
   }
@@ -150,9 +153,16 @@
     if (mode === "rename") draftInput?.focus();
   });
 
+  /** Whether a click happened inside `el`. The path is taken when the click
+   *  is dispatched, so a button the click itself replaced (Delete turning
+   *  into the confirm step) still counts as inside. */
+  function inside(e: MouseEvent, el: HTMLElement | undefined): boolean {
+    return !!el && e.composedPath().includes(el);
+  }
+
   function onDocClick(e: MouseEvent) {
-    if (menu && menuEl && !menuEl.contains(e.target as Node)) closeMenu();
-    if (filterOpen && filterEl && !filterEl.contains(e.target as Node)) filterOpen = false;
+    if (menu && !inside(e, menuEl)) closeMenu();
+    if (filterOpen && !inside(e, filterEl)) filterOpen = false;
   }
 
   function onKey(e: KeyboardEvent) {
@@ -196,8 +206,10 @@
   async function remove() {
     if (!menu) return;
     const id = menu.id;
-    closeMenu();
-    await store.deleteTrack(id);
+    deleteError = "";
+    const refused = await store.deleteTrack(id);
+    if (refused) deleteError = refused;
+    else closeMenu();
   }
 </script>
 
@@ -404,6 +416,7 @@
       <div class="rule"></div>
       {#if mode === "confirm"}
         <div class="mono note">{menuTrack.busy ? t("track.busyNote") : t("track.deleteNote")}</div>
+        {#if deleteError}<div class="mono note err">{deleteError}</div>{/if}
         <div class="acts pad">
           <button class="btn sm" type="button" onclick={() => (mode = "")}>{t("track.cancel")}</button>
           <span class="grow"></span>
@@ -899,6 +912,10 @@
     font-size: 10px;
     color: var(--dim);
     max-width: 260px;
+  }
+
+  .note.err {
+    color: var(--acct);
   }
 
   .inline {
