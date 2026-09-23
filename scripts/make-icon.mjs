@@ -1,7 +1,7 @@
 // Generates the source icon for `tauri icon`.
 //
 // The Divixi mark, as in ui/src/lib/Mark.svelte: four staves and an X
-// across them, on a charcoal tile that reads as a tile on dark and light alike. Same 64-unit geometry, scaled, so
+// across them, on a mid-grey tile, halfway between the two themes' backgrounds, so it reads as a tile on both. Same 64-unit geometry, scaled, so
 // the taskbar icon and the rail mark are one drawing.
 //
 //   node scripts/make-icon.mjs && npx tauri icon scripts/out/icon-source.png
@@ -9,10 +9,10 @@ import { deflateSync } from "node:zlib";
 import { writeFileSync, mkdirSync } from "node:fs";
 
 const SIZE = 512;
-const BG = [38, 38, 38, 255];
-const EDGE = [69, 69, 69, 255];
+const BG = [128, 128, 128, 255];
+const EDGE = [143, 143, 143, 255];
 const ACCENT = [224, 49, 39, 255];
-const PALE = [233, 231, 228, 255];
+const PALE = [247, 246, 244, 255];
 
 const px = Buffer.alloc(SIZE * SIZE * 4);
 const put = (x, y, [r, g, b, a]) => {

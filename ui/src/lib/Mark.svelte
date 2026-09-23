@@ -25,11 +25,11 @@
 
   // Geometry on a 64-unit box; the icon script draws the same numbers.
   const staves = [22, 30, 38, 46];
-  // Fixed colours. Charcoal, not near-black: on the dark theme a near-black
-  // tile vanished into the page; this one reads as a tile on both themes.
-  const TILE = "#262626";
-  const EDGE = "#454545";
-  const PALE = "#e9e7e4";
+  // Fixed colours. The tile sits halfway between the dark theme's page
+  // (#0b0b0b) and the light theme's (#faf9f7), so it reads as a tile on both.
+  const TILE = "#808080";
+  const EDGE = "#8f8f8f";
+  const PALE = "#f7f6f4";
   const ACCENT = "#e03127";
 </script>
 
