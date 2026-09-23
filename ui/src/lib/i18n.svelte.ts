@@ -133,7 +133,8 @@ const ko = {
   "ws.large": "너무 커서 표시하지 않습니다",
 
   // Composer
-  "composer.placeholder": "지휘자에게 메시지",
+  "composer.placeholder": "지휘자에게 메시지 · / 명령 · Shift+Enter 줄바꿈",
+  "composer.commands": "명령",
   "composer.busy": "지휘자가 응답 중입니다…",
   "composer.send": "보내기",
   "composer.agentTitle": "지휘자를 실행할 에이전트",
@@ -400,7 +401,8 @@ const en: Record<Key, string> = {
   "ws.binary": "Binary file",
   "ws.large": "Too large to show",
 
-  "composer.placeholder": "Message the conductor",
+  "composer.placeholder": "Message the conductor · / commands · Shift+Enter for a new line",
+  "composer.commands": "Commands",
   "composer.busy": "The conductor is responding…",
   "composer.send": "Send",
   "composer.agentTitle": "Agent that runs the conductor",

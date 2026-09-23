@@ -127,6 +127,12 @@ pub enum LaneEvent {
         /// Raw usage payload from the agent.
         raw: serde_json::Value,
     },
+    /// The slash commands the agent offers in this session (`/compact`,
+    /// `/review`, …). Sent when a session opens and whenever the set
+    /// changes; the composer completes them.
+    Commands {
+        commands: Vec<SlashCommand>,
+    },
     /// The turn ended.
     Finished {
         /// Why the turn stopped, e.g. `end_turn`.
@@ -166,6 +172,7 @@ impl LaneEvent {
             LaneEvent::ToolUpdate { .. } => "tool_update",
             LaneEvent::Plan { .. } => "plan",
             LaneEvent::Usage { .. } => "usage",
+            LaneEvent::Commands { .. } => "commands",
             LaneEvent::Finished { .. } => "finished",
             LaneEvent::Failed { .. } => "failed",
         }
@@ -187,10 +194,21 @@ impl LaneEvent {
             LaneEvent::ToolUpdate { .. } => "tool",
             LaneEvent::Plan { .. } => "plan",
             LaneEvent::Usage { .. } => "usage",
+            LaneEvent::Commands { .. } => "commands",
             LaneEvent::Finished { .. } => "done",
             LaneEvent::Failed { .. } => "error",
         }
     }
+}
+
+/// A slash command the agent offers, as the composer completes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlashCommand {
+    /// Name without the slash, e.g. `compact`.
+    pub name: String,
+    pub description: String,
+    /// What to type after the name, when the command takes input.
+    pub hint: Option<String>,
 }
 
 /// An event tagged with the lane and run it came from.
@@ -249,6 +267,7 @@ mod tests {
             LaneEvent::ToolUpdate { id: "1".into(), status: "completed".into() },
             LaneEvent::Plan { entries: vec![] },
             LaneEvent::Usage { raw: serde_json::Value::Null },
+            LaneEvent::Commands { commands: vec![] },
             LaneEvent::Finished { stop_reason: "end_turn".into() },
             LaneEvent::Failed { error: "boom".into() },
         ];

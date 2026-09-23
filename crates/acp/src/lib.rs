@@ -655,7 +655,8 @@ mod mode_tests {
     }
 }
 
-use agent_client_protocol::schema::v1::{ContentBlock, SessionUpdate};
+use agent_client_protocol::schema::v1::{AvailableCommandInput, ContentBlock, SessionUpdate};
+use orchestra_core::SlashCommand;
 
 /// Map one protocol update onto zero or more lane events.
 pub(crate) fn translate(update: SessionUpdate) -> Vec<LaneEvent> {
@@ -690,6 +691,20 @@ pub(crate) fn translate(update: SessionUpdate) -> Vec<LaneEvent> {
         }],
         SessionUpdate::UsageUpdate(usage) => vec![LaneEvent::Usage {
             raw: serde_json::to_value(&usage).unwrap_or(serde_json::Value::Null),
+        }],
+        SessionUpdate::AvailableCommandsUpdate(update) => vec![LaneEvent::Commands {
+            commands: update
+                .available_commands
+                .iter()
+                .map(|c| SlashCommand {
+                    name: c.name.clone(),
+                    description: c.description.clone(),
+                    hint: c.input.as_ref().and_then(|i| match i {
+                        AvailableCommandInput::Unstructured(u) => Some(u.hint.clone()),
+                        _ => None,
+                    }),
+                })
+                .collect(),
         }],
         _ => Vec::new(),
     }

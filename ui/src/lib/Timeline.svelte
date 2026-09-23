@@ -170,6 +170,8 @@
     font-size: var(--chat-fs);
     line-height: var(--chat-lh);
     color: var(--txt);
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
   /* The conductor's turn: the same surface as the other cards, with the

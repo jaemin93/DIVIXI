@@ -13,8 +13,12 @@ export type LaneEvent =
   | { kind: "tool_update"; id: string; status: string }
   | { kind: "plan"; entries: string[] }
   | { kind: "usage"; raw: unknown }
+  | { kind: "commands"; commands: SlashCommand[] }
   | { kind: "finished"; stop_reason: string }
   | { kind: "failed"; error: string };
+
+/** Mirrors `orchestra_core::SlashCommand`: one `/name` the agent offers. */
+export type SlashCommand = { name: string; description: string; hint: string | null };
 
 export type Envelope = {
   track: string;
@@ -98,6 +102,7 @@ export type StoredEvent = { seq: number; at_ms: number; event: LaneEvent };
 
 /** Mirrors `orchestra_agents::AgentKind` ids. */
 export type AgentId = "claude_code" | "codex" | "copilot" | "antigravity";
+export const AGENT_IDS: AgentId[] = ["claude_code", "codex", "copilot", "antigravity"];
 
 export type Readiness = "ready" | "needs_login" | "needs_download" | "not_installed" | "error";
 
@@ -458,6 +463,25 @@ class Store {
   track = $state("");
   /** Track whose tag dialog is open; "" means closed. */
   tagDialog = $state("");
+  /** Slash commands the conductor's session offered, by track id. */
+  commands = $state<Record<string, SlashCommand[]>>({});
+  /** The last list seen per agent id, kept as a setting so the composer can complete before a session opens. */
+  commandCache = $state<Record<string, SlashCommand[]>>({});
+
+  /** Commands to complete in the composer: this track's session's, else the agent's last known. */
+  get slashCommands(): SlashCommand[] {
+    return this.commands[this.track] ?? this.commandCache[this.agent] ?? [];
+  }
+
+  private rememberCommands(track: string, list: SlashCommand[]) {
+    this.commands = { ...this.commands, [track]: list };
+    const agent = this.tracks.find((t) => t.id === track)?.agent;
+    if (!agent) return;
+    this.commandCache = { ...this.commandCache, [agent]: list };
+    invoke("set_setting", { key: `commands:${agent}`, value: JSON.stringify(list) }).catch((err) => {
+      this.lastError = String(err);
+    });
+  }
   /** The user's tags, each with a colour; persisted as the `tags` setting. */
   tagPool = $state<TagDef[]>([]);
 
@@ -823,7 +847,7 @@ class Store {
       if (this.themePref === "system") this.applyTheme();
     });
     try {
-      const [summaries, tracks, savedTrack, agents, theme, rail, tracklist, chatFont, panelWidth, railWidth, trackListWidth, uiFont, zoom, language, panel, tagsJson] =
+      const [summaries, tracks, savedTrack, agents, theme, rail, tracklist, chatFont, panelWidth, railWidth, trackListWidth, uiFont, zoom, language, panel, tagsJson, ...commandJson] =
         await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<Track[]>("list_tracks"),
@@ -841,7 +865,18 @@ class Store {
         invoke<string | null>("get_setting", { key: "language" }),
         invoke<string | null>("get_setting", { key: "panel" }),
         invoke<string | null>("get_setting", { key: "tags" }),
+        ...AGENT_IDS.map((id) => invoke<string | null>("get_setting", { key: `commands:${id}` })),
       ]);
+      const cache: Record<string, SlashCommand[]> = {};
+      AGENT_IDS.forEach((id, i) => {
+        try {
+          const list = commandJson[i] ? (JSON.parse(commandJson[i] as string) as SlashCommand[]) : [];
+          if (Array.isArray(list)) cache[id] = list;
+        } catch {
+          // A stale cache is no cache.
+        }
+      });
+      this.commandCache = cache;
       if (language === "system" || language === "ko" || language === "en") this.langPref = language;
       i18n.lang = this.langPref === "system" ? systemLang() : this.langPref;
       document.documentElement.lang = i18n.lang;
@@ -1064,6 +1099,7 @@ class Store {
       this.runs.push(run);
       void this.refreshRun(env.run);
     }
+    if (env.event.kind === "commands" && env.lane === "conductor") this.rememberCommands(env.track, env.event.commands);
     fold(run, env.at_ms, env.event);
     // A finished run may have written files: the open panel catches up.
     if (this.panelOpen && env.track === this.track && (env.event.kind === "finished" || env.event.kind === "failed")) {
@@ -1143,6 +1179,9 @@ function fold(run: Run, ms: number, ev: LaneEvent) {
     case "plan":
       run.plan = ev.entries;
       push(run, ms, "plan", `${ev.entries.length} entries`, "dim");
+      break;
+    case "commands":
+      push(run, ms, "commands", `${ev.commands.length} slash commands`, "dim");
       break;
     case "usage": {
       const raw = ev.raw as { used?: number; size?: number; cost?: { amount?: number; currency?: string } } | null;

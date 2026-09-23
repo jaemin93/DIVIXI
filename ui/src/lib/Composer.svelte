@@ -7,12 +7,83 @@
 
   let draft = $state("");
   let contextOpen = $state(false);
+  let box = $state<HTMLTextAreaElement>();
+  /** Highlighted row in the slash list. */
+  let slashIndex = $state(0);
 
-  function submit(e: Event) {
-    e.preventDefault();
+  function submit(e?: Event) {
+    e?.preventDefault();
     const text = draft;
+    if (!text.trim() || store.busy) return;
     draft = "";
     store.send(text);
+    queueMicrotask(grow);
+  }
+
+  /** The box grows with its text, up to eight lines, then scrolls. */
+  function grow() {
+    if (!box) return;
+    box.style.height = "auto";
+    box.style.height = `${Math.min(box.scrollHeight, 8 * 22 + 24)}px`;
+  }
+
+  // ----- slash commands -----
+  /** The word being typed after a leading "/", or null when not completing. */
+  const slashQuery = $derived.by(() => {
+    if (!draft.startsWith("/") || draft.includes("\n")) return null;
+    const m = draft.match(/^\/([^\s]*)$/);
+    return m ? m[1].toLowerCase() : null;
+  });
+  const slashMatches = $derived(
+    slashQuery === null ? [] : store.slashCommands.filter((c) => c.name.toLowerCase().startsWith(slashQuery)),
+  );
+  const slashOpen = $derived(slashQuery !== null && slashMatches.length > 0);
+
+  $effect(() => {
+    void slashMatches.length;
+    slashIndex = 0;
+  });
+
+  /** Put a command in the box; one without input goes straight out. */
+  function complete(name: string) {
+    const cmd = store.slashCommands.find((c) => c.name === name);
+    draft = `/${name} `;
+    if (cmd && !cmd.hint) {
+      submit();
+      return;
+    }
+    box?.focus();
+    queueMicrotask(grow);
+  }
+
+  function onKey(e: KeyboardEvent) {
+    if (slashOpen) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        slashIndex = (slashIndex + 1) % slashMatches.length;
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        slashIndex = (slashIndex - 1 + slashMatches.length) % slashMatches.length;
+        return;
+      }
+      if (e.key === "Tab" || e.key === "Enter") {
+        e.preventDefault();
+        complete(slashMatches[slashIndex].name);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        draft = "";
+        return;
+      }
+    }
+    // Enter sends; Shift+Enter (and Ctrl/Alt+Enter) breaks the line.
+    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing) {
+      e.preventDefault();
+      submit();
+    }
   }
 
   const ctx = $derived(store.context);
@@ -32,13 +103,39 @@
 
 <div class="composer">
   <form onsubmit={submit}>
-    <input
-      type="text"
-      bind:value={draft}
-      disabled={store.busy}
-      placeholder={store.busy ? t("composer.busy") : t("composer.placeholder")}
-      aria-label={t("composer.placeholder")}
-    />
+    <div class="boxwrap">
+      {#if slashOpen}
+        <!-- The agent's slash commands, narrowed by what follows the "/". -->
+        <div class="slash" role="listbox" aria-label={t("composer.commands")}>
+          <div class="mlab-sm ph">{t("composer.commands")}</div>
+          {#each slashMatches as c, i (c.name)}
+            <button
+              type="button"
+              class="cmd"
+              class:on={i === slashIndex}
+              role="option"
+              aria-selected={i === slashIndex}
+              onmouseenter={() => (slashIndex = i)}
+              onclick={() => complete(c.name)}
+            >
+              <span class="mono cname">/{c.name}</span>
+              {#if c.hint}<span class="mono chint">{c.hint}</span>{/if}
+              <span class="cdesc">{c.description}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+      <textarea
+        bind:this={box}
+        bind:value={draft}
+        rows="1"
+        disabled={store.busy}
+        placeholder={store.busy ? t("composer.busy") : t("composer.placeholder")}
+        aria-label={t("composer.placeholder")}
+        onkeydown={onKey}
+        oninput={grow}
+      ></textarea>
+    </div>
     <button class="btn send" type="submit" disabled={store.busy || !draft.trim()} aria-label={t("composer.send")}>→</button>
   </form>
 
@@ -88,24 +185,94 @@
 
   form {
     display: flex;
+    align-items: flex-end;
     gap: 9px;
   }
 
-  input {
+  .boxwrap {
+    position: relative;
     flex: 1;
-    height: 44px;
+    min-width: 0;
+    display: flex;
+  }
+
+  textarea {
+    flex: 1;
+    min-height: 44px;
+    max-height: 200px;
     background: var(--inp);
     border: 1px solid var(--lines);
     color: var(--txt);
     font-family: var(--sans);
     font-size: 14px;
-    padding: 0 14px;
+    line-height: 22px;
+    padding: 11px 14px;
     outline: none;
+    resize: none;
+    overflow-y: auto;
   }
 
-  input:focus {
+  textarea:focus {
     border-color: var(--acc);
   }
+
+  /* The slash list, above the box. */
+  .slash {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(100% + 6px);
+    z-index: 30;
+    max-height: 280px;
+    overflow-y: auto;
+    background: var(--card);
+    border: 1px solid var(--lines);
+    padding-bottom: 4px;
+  }
+
+  .slash .ph {
+    padding: 10px 14px 6px;
+  }
+
+  .cmd {
+    width: 100%;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 7px 14px;
+    background: transparent;
+    border: 0;
+    border-left: 2px solid transparent;
+    text-align: left;
+    color: var(--dim);
+  }
+
+  .cmd.on {
+    color: var(--hi);
+    background: var(--sel);
+    border-left-color: var(--acc);
+  }
+
+  .cname {
+    font-size: 12px;
+    color: inherit;
+    flex-shrink: 0;
+  }
+
+  .chint {
+    font-size: 10px;
+    color: var(--lab);
+    flex-shrink: 0;
+  }
+
+  .cdesc {
+    font-size: 11px;
+    color: var(--lab);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
 
   .send {
     width: 44px;

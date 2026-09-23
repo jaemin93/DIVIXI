@@ -126,6 +126,8 @@ impl AgentSession {
 
                     // Bring an earlier session back, or open a fresh one.
                     let mut resumed = false;
+                    // Command lists seen during a replay, handed to the first turn.
+                    let mut carried: Vec<LaneEvent> = Vec::new();
                     let mut session: Option<ActiveSession<'static, Agent>> = None;
                     if let Some(id) = opts_for_task.resume.clone().filter(|_| can_load) {
                         let request = LoadSessionRequest::new(id.clone(), opts_for_task.cwd.clone())
@@ -133,9 +135,10 @@ impl AgentSession {
                         match cx.load_session_from(request).block_task().start_session().await {
                             Ok(restored) => {
                                 let mut s = restored.into_session();
-                                let replayed = drain_replay(&mut s).await;
-                                tracing::info!(session = %id, replayed, "resumed agent session");
+                                let (replayed, kept) = drain_replay(&mut s).await;
+                                tracing::info!(session = %id, replayed, kept = kept.len(), "resumed agent session");
                                 resumed = true;
+                                carried = kept;
                                 session = Some(s);
                             }
                             Err(err) => {
@@ -195,6 +198,9 @@ impl AgentSession {
 
                     // Turn loop: one prompt at a time, until the handle is dropped.
                     while let Some(turn) = turn_rx.recv().await {
+                        for ev in carried.drain(..) {
+                            let _ = turn.tx.send(ev);
+                        }
                         let result = run_turn(&mut session, &turn.text, &turn.tx).await;
                         if let Err(err) = &result {
                             let _ = turn.tx.send(LaneEvent::Failed { error: err.to_string() });
@@ -272,14 +278,30 @@ impl AgentSession {
 }
 
 /// Consume the history an agent replays after `session/load`. Returns how
-/// many messages were dropped. The replay has no end marker; a quiet gap
-/// is taken as the end.
-async fn drain_replay(session: &mut ActiveSession<'_, Agent>) -> usize {
+/// many messages were dropped and the command lists among them, which are
+/// not history and belong to the session ahead. The replay has no end
+/// marker; a quiet gap is taken as the end.
+async fn drain_replay(session: &mut ActiveSession<'_, Agent>) -> (usize, Vec<LaneEvent>) {
     let mut n = 0;
+    let mut kept = Vec::new();
     loop {
         match tokio::time::timeout(REPLAY_QUIET, session.read_update()).await {
+            Ok(Ok(SessionMessage::SessionMessage(dispatch))) => {
+                n += 1;
+                let _ = MatchDispatch::new(dispatch)
+                    .if_notification(async |notif: SessionNotification| {
+                        for ev in translate(notif.update) {
+                            if matches!(ev, LaneEvent::Commands { .. }) {
+                                kept.push(ev);
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await
+                    .otherwise_ignore();
+            }
             Ok(Ok(_)) => n += 1,
-            Ok(Err(_)) | Err(_) => return n,
+            Ok(Err(_)) | Err(_) => return (n, kept),
         }
     }
 }
