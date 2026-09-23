@@ -20,11 +20,14 @@
     queueMicrotask(grow);
   }
 
-  /** The box grows with its text, up to eight lines, then scrolls. */
+  /** The box grows with its text, up to eight lines; only past that does it scroll. */
+  const MAX_BOX = 8 * 22 + 24;
   function grow() {
     if (!box) return;
     box.style.height = "auto";
-    box.style.height = `${Math.min(box.scrollHeight, 8 * 22 + 24)}px`;
+    const wanted = box.scrollHeight;
+    box.style.height = `${Math.min(wanted, MAX_BOX)}px`;
+    box.style.overflowY = wanted > MAX_BOX ? "auto" : "hidden";
   }
 
   // ----- slash commands -----
@@ -221,7 +224,7 @@
     padding: 11px 14px;
     outline: none;
     resize: none;
-    overflow-y: auto;
+    overflow-y: hidden;
   }
 
   textarea:focus {
