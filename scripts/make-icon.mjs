@@ -1,7 +1,7 @@
 // Generates the source icon for `tauri icon`.
 //
 // The Divixi mark, as in ui/src/lib/Mark.svelte: four staves and an X
-// across them, on a mid-grey tile, halfway between the two themes' backgrounds, so it reads as a tile on both. Same 64-unit geometry, scaled, so
+// across them, on a transparent background. Same 64-unit geometry, scaled, so
 // the taskbar icon and the rail mark are one drawing.
 //
 //   node scripts/make-icon.mjs && npx tauri icon scripts/out/icon-source.png
@@ -9,10 +9,9 @@ import { deflateSync } from "node:zlib";
 import { writeFileSync, mkdirSync } from "node:fs";
 
 const SIZE = 512;
-const BG = [128, 128, 128, 255];
-const EDGE = [143, 143, 143, 255];
+const CLEAR = [0, 0, 0, 0];
 const ACCENT = [224, 49, 39, 255];
-const PALE = [247, 246, 244, 255];
+const STAVE = [140, 140, 140, 255];
 
 const px = Buffer.alloc(SIZE * SIZE * 4);
 const put = (x, y, [r, g, b, a]) => {
@@ -26,15 +25,19 @@ const get = (x, y) => {
   const i = (y * SIZE + x) * 4;
   return [px[i], px[i + 1], px[i + 2], px[i + 3]];
 };
-/** Blend `c` over the pixel with coverage `a` in 0..1. */
+/** Composite `c` over the pixel with coverage `a` in 0..1 (the pixel may be transparent). */
 const blend = (x, y, c, a) => {
   if (a <= 0) return;
   if (a >= 1) return put(x, y, c);
-  const [r, g, b] = get(x, y);
-  put(x, y, [Math.round(r + (c[0] - r) * a), Math.round(g + (c[1] - g) * a), Math.round(b + (c[2] - b) * a), 255]);
+  const [r, g, b, pa] = get(x, y);
+  const da = pa / 255;
+  const oa = a + da * (1 - a);
+  if (oa <= 0) return;
+  const mix = (top, under) => Math.round((top * a + under * da * (1 - a)) / oa);
+  put(x, y, [mix(c[0], r), mix(c[1], g), mix(c[2], b), Math.round(oa * 255)]);
 };
 
-for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) put(x, y, BG);
+for (let y = 0; y < SIZE; y++) for (let x = 0; x < SIZE; x++) put(x, y, CLEAR);
 
 // Mark coordinates (64-unit box) to pixels.
 const S = SIZE / 64;
@@ -73,13 +76,8 @@ const stroke = (ax, ay, bx, by, w, c) => {
   }
 };
 
-// The edge: a hairline the tile keeps on a dark task bar too (2 units = 1px at 32px).
-rect(0, 0, 64, 2, EDGE);
-rect(0, 62, 64, 2, EDGE);
-rect(0, 0, 2, 64, EDGE);
-rect(62, 0, 2, 64, EDGE);
 // The staves. Slightly heavier than the UI hairline so they survive 32px.
-for (const y of [22, 30, 38, 46]) rect(8, y - 1, 48, 2, PALE);
+for (const y of [22, 30, 38, 46]) rect(8, y - 1, 48, 2, STAVE);
 // The X: the beat across the staves.
 stroke(20, 12, 44, 56, 4, ACCENT);
 stroke(44, 12, 20, 56, 4, ACCENT);
