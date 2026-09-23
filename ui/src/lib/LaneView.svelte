@@ -50,7 +50,7 @@
   }
 
   function secs(ms?: number) {
-    if (ms == null) return "";
+    if (ms === undefined) return "";
     return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
   }
 </script>
@@ -84,7 +84,7 @@
       <div class="turn to" class:live={run.status === "running" || run.status === "connecting"} class:failed={run.status === "failed"}>
         <div class="head">
           <span class="mlab">{t("lane.worker")}</span>
-          <span class="mono meta">{run.id} · {t("lane.tools", { n: run.toolCount })}{run.durationMs != null ? ` · ${secs(run.durationMs)}` : ""}</span>
+          <span class="mono meta">{run.id} · {t("lane.tools", { n: run.toolCount })}{run.durationMs !== undefined && run.durationMs !== null ? ` · ${secs(run.durationMs)}` : ""}</span>
           {#if run.status === "running" || run.status === "connecting"}<Working />{/if}
         </div>
         {#each collapse(run.segments) as seg, i (i)}

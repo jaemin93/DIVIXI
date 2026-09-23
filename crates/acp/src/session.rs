@@ -158,7 +158,7 @@ impl AgentSession {
                                 session = Some(s);
                             }
                             Err(err) => {
-                                tracing::warn!(session = %id, %err, "session/load failed; opening a fresh session");
+                                tracing::info!(session = %id, %err, "session/load failed; opening a fresh session");
                             }
                         }
                     }
@@ -183,14 +183,29 @@ impl AgentSession {
                         .unwrap_or_default();
                     let current = session.modes().map(|m| m.current_mode_id.to_string());
                     tracing::info!(?available, ?current, "session modes");
-                    if let Some(wanted) = opts_for_task.mode.clone().or_else(|| pick_autonomous_mode(&available)) {
+                    let fallback = pick_autonomous_mode(&available);
+                    if let Some(wanted) = opts_for_task.mode.clone().or_else(|| fallback.clone()) {
                         if current.as_deref() != Some(wanted.as_str()) {
                             tracing::info!(mode = %wanted, "setting session mode");
-                            session
+                            let set = session
                                 .connection()
-                                .send_request_to(Agent, SetSessionModeRequest::new(session_id.clone(), wanted))
+                                .send_request_to(Agent, SetSessionModeRequest::new(session_id.clone(), wanted.clone()))
                                 .block_task()
-                                .await?;
+                                .await;
+                            match (set, fallback.filter(|f| *f != wanted)) {
+                                (Ok(_), _) => {}
+                                // A stored mode id the agent no longer knows: take
+                                // its autonomous mode rather than failing the open.
+                                (Err(err), Some(other)) => {
+                                    tracing::warn!(mode = %wanted, %err, fallback = %other, "agent rejected the session mode");
+                                    session
+                                        .connection()
+                                        .send_request_to(Agent, SetSessionModeRequest::new(session_id.clone(), other))
+                                        .block_task()
+                                        .await?;
+                                }
+                                (Err(err), None) => return Err(err),
+                            }
                         }
                     }
                     for (option, value) in &opts_for_task.config {
@@ -201,7 +216,7 @@ impl AgentSession {
                             SessionConfigOptionValue::ValueId { value: value.clone().into() },
                         );
                         if let Err(err) = session.connection().send_request_to(Agent, request).block_task().await {
-                            tracing::warn!(option, value, %err, "agent rejected session option");
+                            tracing::info!(option, value, %err, "agent rejected session option");
                         }
                     }
 
@@ -232,10 +247,11 @@ impl AgentSession {
                         if let Err(err) = &result {
                             let _ = turn.tx.send(LaneEvent::Failed { error: err.to_string() });
                         }
-                        let fatal = result.is_err();
+                        let fatal = result.as_ref().err().map(|e| e.to_string());
                         let _ = turn.done.send(result);
-                        if fatal {
+                        if let Some(cause) = fatal {
                             // The connection is in an unknown state; end the session.
+                            tracing::warn!(%cause, "turn failed; ending the agent session");
                             return Err(agent_client_protocol::Error::internal_error());
                         }
                     }
@@ -244,7 +260,7 @@ impl AgentSession {
                 .await;
 
             if let Err(err) = &outcome {
-                tracing::warn!(%err, "agent session ended with error");
+                tracing::info!(%err, "agent session ended with error");
             }
             if let Some(ready) = ready.lock().ok().and_then(|mut r| r.take()) {
                 let msg = match &outcome {

@@ -103,33 +103,41 @@ pub fn tree(root: &Path) -> Result<Vec<Entry>, String> {
             break;
         }
     }
-    out.sort_by(|a, b| {
-        let da: Vec<&str> = a.path.split('/').collect();
-        let db: Vec<&str> = b.path.split('/').collect();
-        // Compare component by component: folders before files at each level.
-        for (i, (x, y)) in da.iter().zip(db.iter()).enumerate() {
-            let last_a = i == da.len() - 1;
-            let last_b = i == db.len() - 1;
-            let a_dir = !last_a || a.dir;
-            let b_dir = !last_b || b.dir;
-            if a_dir != b_dir {
-                return b_dir.cmp(&a_dir);
-            }
-            let c = x.to_lowercase().cmp(&y.to_lowercase());
-            if c != std::cmp::Ordering::Equal {
-                return c;
-            }
-        }
-        da.len().cmp(&db.len())
-    });
+    // Folders before files at each level, then case-insensitive by name.
+    // The key is built once per entry: a folder component sorts first
+    // (false < true), so only a file's last component gets `true`.
+    let key = |e: &Entry| -> Vec<(bool, String)> {
+        let parts: Vec<&str> = e.path.split('/').collect();
+        let last = parts.len() - 1;
+        parts
+            .iter()
+            .enumerate()
+            .map(|(i, part)| (i == last && !e.dir, part.to_lowercase()))
+            .collect()
+    };
+    out.sort_by_cached_key(key);
     Ok(out)
+}
+
+/// A relative path made only of plain components: no parent, root or
+/// drive parts, and no alternate data stream (`:`) on Windows. Names that
+/// merely contain dots (`a..b.txt`) pass.
+fn check_rel(rel: &str) -> Result<(), String> {
+    use std::path::Component;
+    let plain = !rel.contains(':')
+        && Path::new(rel)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    if plain {
+        Ok(())
+    } else {
+        Err(format!("not a workspace path: {rel}"))
+    }
 }
 
 /// `rel` under `root`, or an error if it points outside.
 pub fn resolve(root: &Path, rel: &str) -> Result<PathBuf, String> {
-    if rel.contains("..") || rel.starts_with('/') || rel.starts_with('\\') || rel.contains(':') {
-        return Err(format!("not a workspace path: {rel}"));
-    }
+    check_rel(rel)?;
     let root_c = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?;
     let full = root.join(rel);
     let full_c = full.canonicalize().map_err(|e| format!("{}: {e}", full.display()))?;
@@ -273,11 +281,9 @@ pub fn status(root: &Path) -> Result<GitStatus, String> {
 /// The unified diff of one path against HEAD; an untracked file diffs
 /// against nothing, so it shows as all added.
 pub fn diff(root: &Path, rel: &str, untracked: bool) -> Result<String, String> {
-    resolve(root, rel).or_else(|e| {
-        // A deleted file no longer exists to canonicalize; the path is
-        // still fenced by the `..` check.
-        if rel.contains("..") { Err(e) } else { Ok(root.join(rel)) }
-    })?;
+    // A deleted file no longer exists to canonicalize, so only the
+    // component check fences the path here.
+    check_rel(rel)?;
     let out = if untracked {
         git(root, &["diff", "--no-index", "--", "/dev/null", rel])?
     } else {
@@ -358,7 +364,11 @@ mod tests {
         assert_eq!(img.kind, "image");
         assert_eq!(img.data_url.as_deref(), Some("data:image/png;base64,iVBORw=="));
         assert!(read(&root, "../x").is_err());
+        assert!(read(&root, "src/../../x").is_err());
         assert!(read(&root, "C:/x").is_err());
+        // Dots inside a name are not a parent reference.
+        std::fs::write(root.join("a..b.txt"), "dots").unwrap();
+        assert_eq!(read(&root, "a..b.txt").unwrap().text.as_deref(), Some("dots"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -442,7 +442,12 @@ pub async fn download_antigravity_with(
 
     let dir = antigravity_dir(adapters_dir, &release);
     tracing::info!(url = %release.url, dir = %dir.display(), "downloading Antigravity ACP server");
-    let response = reqwest::get(&release.url).await?.error_for_status()?;
+    // A stalled connection must not leave the progress bar pending forever.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(60))
+        .build()?;
+    let response = client.get(&release.url).send().await?.error_for_status()?;
     let total = response.content_length();
     progress(DownloadProgress { phase: DownloadPhase::Downloading, received: 0, total });
 

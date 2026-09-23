@@ -6,9 +6,15 @@
   import LangPicker from "./LangPicker.svelte";
   import { t } from "./i18n.svelte";
 
-  // First launch: detect as soon as the window shows, once.
+  // First launch: detect as soon as the window shows, once. A failed
+  // detection leaves agents null; without the guard the effect would
+  // start another probe every time one ended.
+  let tried = false;
   $effect(() => {
-    if (store.agents === null && !store.detecting) store.detect();
+    if (store.agents === null && !store.detecting && !tried) {
+      tried = true;
+      store.detect();
+    }
   });
 
   const readyCount = $derived(store.readyAgents.length);

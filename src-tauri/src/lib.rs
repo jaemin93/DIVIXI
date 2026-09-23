@@ -181,8 +181,8 @@ async fn update_track(state: State<'_, AppState>, id: String, mut patch: TrackPa
         .ok_or_else(|| format!("no track {id}"))?;
     let moved = patch.cwd.as_deref().is_some_and(|c| c != before.cwd);
     if moved {
-        if state.sessions.is_busy(&id) {
-            return Err("the conductor is still responding; wait before changing the folder".to_string());
+        if state.sessions.is_active(&id).await {
+            return Err("the track is still working; wait before changing the folder".to_string());
         }
         state.sessions.close_track(&id).await;
         state.store.forget_track_sessions(&id).map_err(|e| e.to_string())?;
@@ -193,8 +193,8 @@ async fn update_track(state: State<'_, AppState>, id: String, mut patch: TrackPa
 /// Delete a track: its sessions close, its runs and memory go.
 #[tauri::command]
 async fn delete_track(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    if state.sessions.is_busy(&id) {
-        return Err("the conductor is still responding; wait for it to finish".to_string());
+    if state.sessions.is_active(&id).await {
+        return Err("the track is still working; wait for it to finish".to_string());
     }
     state.sessions.close_track(&id).await;
     state.store.delete_track(&id).map_err(|e| e.to_string())
@@ -262,19 +262,19 @@ async fn conductor_close(app: AppHandle, track: String) -> Result<conductor::Con
 }
 
 /// Every run, oldest first: what the timeline is rebuilt from at startup.
-#[tauri::command]
+#[tauri::command(async)]
 fn list_runs(state: State<'_, AppState>) -> Result<Vec<RunSummary>, String> {
     state.store.runs().map_err(|e| e.to_string())
 }
 
 /// One run's full event log, for the inspector to replay.
-#[tauri::command]
+#[tauri::command(async)]
 fn run_events(state: State<'_, AppState>, run: String) -> Result<Vec<StoredEvent>, String> {
     state.store.events(&run).map_err(|e| e.to_string())
 }
 
 /// Full-text search over finished runs.
-#[tauri::command]
+#[tauri::command(async)]
 fn search_runs(state: State<'_, AppState>, query: String) -> Result<Vec<SearchHit>, String> {
     state.store.search(&query).map_err(|e| e.to_string())
 }
@@ -295,7 +295,7 @@ struct AppInfo {
     runs: usize,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn app_info(state: State<'_, AppState>) -> Result<AppInfo, String> {
     let runs = state.store.runs().map_err(|e| e.to_string())?.len();
     Ok(AppInfo {
@@ -324,31 +324,31 @@ fn track_root(state: &AppState, track: &str) -> Result<PathBuf, String> {
 }
 
 /// Every file and folder under the track's folder, `.gitignore` honoured.
-#[tauri::command]
+#[tauri::command(async)]
 fn workspace_tree(state: State<'_, AppState>, track: String) -> Result<Vec<workspace::Entry>, String> {
     workspace::tree(&track_root(&state, &track)?)
 }
 
 /// One file's contents for preview. `path` is relative to the folder.
-#[tauri::command]
+#[tauri::command(async)]
 fn workspace_read(state: State<'_, AppState>, track: String, path: String) -> Result<workspace::FileContent, String> {
     workspace::read(&track_root(&state, &track)?, &path)
 }
 
 /// What git says has changed in the track's folder.
-#[tauri::command]
+#[tauri::command(async)]
 fn workspace_git_status(state: State<'_, AppState>, track: String) -> Result<workspace::GitStatus, String> {
     workspace::status(&track_root(&state, &track)?)
 }
 
 /// One path's diff against HEAD (all added when untracked).
-#[tauri::command]
+#[tauri::command(async)]
 fn workspace_git_diff(state: State<'_, AppState>, track: String, path: String, untracked: bool) -> Result<String, String> {
     workspace::diff(&track_root(&state, &track)?, &path, untracked)
 }
 
 /// Select a file in the system file manager.
-#[tauri::command]
+#[tauri::command(async)]
 fn workspace_reveal(state: State<'_, AppState>, track: String, path: String) -> Result<(), String> {
     workspace::reveal(&track_root(&state, &track)?, &path)
 }
@@ -449,9 +449,15 @@ pub(crate) async fn pump(
     let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    let emit = |event: LaneEvent, at_ms: u64| {
+    // A run whose row is gone (its track was deleted mid-turn) fails on
+    // every frame; say so once.
+    let mut persist_failed = false;
+    let mut emit = |event: LaneEvent, at_ms: u64| {
         if let Err(err) = app.state::<AppState>().store.append(&run, at_ms, &event) {
-            tracing::error!(run = %run, kind = event.kind(), %err, "failed to persist lane event");
+            if !persist_failed {
+                tracing::error!(run = %run, kind = event.kind(), %err, "failed to persist lane event");
+            }
+            persist_failed = true;
         }
         let _ = app.emit(
             "lane",
@@ -528,12 +534,21 @@ fn open_store(data_dir: &std::path::Path) -> anyhow::Result<(Store, String)> {
 
     let path = data_dir.join("divixi.db");
     // The store was orchestra.db before the app was named Divixi.
-    if !path.exists() {
-        for suffix in ["", "-wal", "-shm"] {
-            let old = data_dir.join(format!("orchestra.db{suffix}"));
-            if old.exists() {
-                let _ = std::fs::rename(&old, data_dir.join(format!("divixi.db{suffix}")));
+    let old_db = data_dir.join("orchestra.db");
+    if !path.exists() && old_db.exists() {
+        match std::fs::rename(&old_db, &path) {
+            Ok(()) => {
+                // The journal files only make sense next to their database.
+                for suffix in ["-wal", "-shm"] {
+                    let old = data_dir.join(format!("orchestra.db{suffix}"));
+                    if old.exists() {
+                        if let Err(err) = std::fs::rename(&old, data_dir.join(format!("divixi.db{suffix}"))) {
+                            tracing::warn!(%err, suffix, "could not move the old database journal");
+                        }
+                    }
+                }
             }
+            Err(err) => tracing::warn!(%err, "could not migrate orchestra.db; starting empty"),
         }
     }
     tracing::info!(path = %path.display(), "opening event store");

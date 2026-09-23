@@ -18,8 +18,8 @@
 
   const activeFile = $derived(store.files[store.activeFile]);
 
-  /** The tree as nested rows: every entry, with its depth and whether a folded ancestor hides it. */
-  type Row = WsEntry & { depth: number; visible: boolean };
+  /** The tree as rows with their depth; `shown` decides folding at render time. */
+  type Row = WsEntry & { depth: number };
   const rows = $derived.by((): Row[] => {
     const q = filter.trim().toLowerCase();
     const out: Row[] = [];
@@ -30,18 +30,10 @@
         // A filter flattens the tree to matching files with their folders shown for context.
         if (e.dir) continue;
         if (!e.path.toLowerCase().includes(q)) continue;
-        out.push({ ...e, depth: 0, visible: true });
+        out.push({ ...e, depth: 0 });
         continue;
       }
-      let hidden = false;
-      for (let i = 1; i < parts.length; i++) {
-        if (folded[parts.slice(0, i).join("/")] !== false && !(parts.slice(0, i).join("/") in folded)) {
-          // Folders start folded unless opened, except the top level.
-          hidden = hidden || i > 1 || false;
-        }
-        if (folded[parts.slice(0, i).join("/")]) hidden = true;
-      }
-      out.push({ ...e, depth, visible: !hidden });
+      out.push({ ...e, depth });
     }
     return out;
   });
@@ -70,7 +62,9 @@
   }
 
   function kb(n: number): string {
-    return n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1048576).toFixed(1)} MB`;
   }
 
   /** Short label for a porcelain code. */
@@ -95,7 +89,7 @@
   }
 
   const diffHtml = $derived(store.diffPath ? highlight(store.diffs[store.diffPath] ?? "", "diff") : "");
-  const codeHtml = $derived(activeFile?.text != null ? highlight(activeFile.text, languageFor(activeFile.ext)) : "");
+  const codeHtml = $derived(activeFile?.text !== undefined && activeFile.text !== null ? highlight(activeFile.text, languageFor(activeFile.ext)) : "");
   const crumbs = $derived(store.activeFile ? store.activeFile.split("/") : []);
   const raw = $derived(!!store.rawMarkdown[store.activeFile]);
 </script>

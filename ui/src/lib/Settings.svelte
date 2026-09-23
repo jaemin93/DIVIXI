@@ -45,6 +45,17 @@
 
   const current = $derived(groups.flatMap((g) => g.entries).find((e) => e.id === store.settingsSection)!);
 
+  /** The status dot beside each agent: ready, wants attention, broken, or idle. */
+  const READINESS_COLORS: Record<string, string> = {
+    ready: "var(--ok)",
+    needs_login: "var(--warn)",
+    needs_download: "var(--warn)",
+    error: "var(--acct)",
+  };
+  function readinessColor(readiness: string): string {
+    return READINESS_COLORS[readiness] ?? "var(--idle)";
+  }
+
   const fonts = $derived<{ id: ChatFont; label: string; px: string }[]>([
     { id: "s", label: t("settings.size.s"), px: "11px" },
     { id: "m", label: t("settings.size.m"), px: "13px" },
@@ -116,7 +127,7 @@
         <div class="rows mono">
           {#each store.agents ?? [] as a (a.kind)}
             <div class="row">
-              <span class="dot" style="background: {a.readiness === 'ready' ? 'var(--ok)' : a.readiness === 'needs_login' || a.readiness === 'needs_download' ? 'var(--warn)' : a.readiness === 'error' ? 'var(--acct)' : 'var(--idle)'}"></span>
+              <span class="dot" style="background: {readinessColor(a.readiness)}"></span>
               <span>{agentLabel(a.kind)}</span>
               <span class="grow"></span>
               <span class="dim">{a.readiness.replace("_", " ")}</span>

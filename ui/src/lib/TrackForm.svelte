@@ -105,9 +105,17 @@
     return t("newtrack.agentDefault", { value: store.choiceName(option, option.current) });
   }
 
+  /** The heading of a new track's sheet: the first one is greeted differently. */
+  const newTitle = $derived(first ? t("newtrack.first") : t("newtrack.title"));
+  const submitLabel = $derived.by(() => {
+    if (editing) return busy ? t("newtrack.saving") : t("newtrack.save");
+    return busy ? t("newtrack.creating") : t("newtrack.create");
+  });
+
   /** Options in a fixed, readable order: mode first, then model, then the rest. */
   function ordered(options: ConfigOption[]): ConfigOption[] {
-    const rank = (o: ConfigOption) => (o.category === "mode" ? 0 : o.category === "model" ? 1 : 2);
+    const ranks: Record<string, number> = { mode: 0, model: 1 };
+    const rank = (o: ConfigOption) => ranks[o.category] ?? 2;
     return [...options].sort((a, b) => rank(a) - rank(b));
   }
 </script>
@@ -116,10 +124,10 @@
 
 <main>
   <div class="sheet">
-    <div class="mlab">{editing ? t("newtrack.editTitle") : first ? t("newtrack.first") : t("newtrack.title")}</div>
+    <div class="mlab">{editing ? t("newtrack.editTitle") : newTitle}</div>
     <div class="titlerow">
       <Mark size={28} />
-      <h1 class="serif">{editing ? track?.name : first ? t("newtrack.first") : t("newtrack.title")}</h1>
+      <h1 class="serif">{editing ? track?.name : newTitle}</h1>
     </div>
     <p class="blurb">{editing ? t("newtrack.editBlurb") : t("newtrack.blurb")}</p>
 
@@ -157,7 +165,7 @@
           <button class="btn" type="button" onclick={cancel}>{t("newtrack.cancel")}</button>
         {/if}
         <button class="btn btn-acc" type="submit" disabled={!canSubmit}>
-          {editing ? (busy ? t("newtrack.saving") : t("newtrack.save")) : busy ? t("newtrack.creating") : t("newtrack.create")}
+          {submitLabel}
         </button>
       </div>
     </form>

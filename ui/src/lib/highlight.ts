@@ -45,9 +45,11 @@ hljs.registerLanguage("toml", yaml);
 export { hljs };
 
 /** File extensions that map to a registered language; the rest stay plain. */
+const ALIASES: Record<string, string> = { mjs: "typescript", cjs: "typescript", jsx: "typescript", tsx: "typescript" };
 export function languageFor(ext: string): string | null {
   const e = ext.toLowerCase();
-  return hljs.getLanguage(e) ? e : e === "mjs" || e === "cjs" || e === "jsx" || e === "tsx" ? "typescript" : null;
+  if (hljs.getLanguage(e)) return e;
+  return ALIASES[e] ?? null;
 }
 
 /** HTML for `code`, coloured when the language is known, escaped otherwise. */

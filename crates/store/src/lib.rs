@@ -273,7 +273,7 @@ impl Store {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> anyhow::Result<Self> {
+    fn init(mut conn: Connection) -> anyhow::Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -290,14 +290,16 @@ impl Store {
             .and_then(|v| v.parse().ok());
         match version {
             None => {
-                conn.execute_batch(SCHEMA)?;
-                conn.execute(
+                let tx = conn.transaction()?;
+                tx.execute_batch(SCHEMA)?;
+                tx.execute(
                     "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)",
                     params![SCHEMA_VERSION.to_string()],
                 )?;
+                tx.commit()?;
             }
             Some(v) if v == SCHEMA_VERSION => {}
-            Some(v) if v < SCHEMA_VERSION => migrate(&conn, v)?,
+            Some(v) if v < SCHEMA_VERSION => migrate(&mut conn, v)?,
             Some(v) => anyhow::bail!("store schema version {v} is newer than this build supports ({SCHEMA_VERSION})"),
         }
 
@@ -601,18 +603,22 @@ impl Store {
     }
 }
 
-/// Upgrade an existing database from `from` to [`SCHEMA_VERSION`].
-fn migrate(conn: &Connection, from: i64) -> anyhow::Result<()> {
+/// Upgrade an existing database from `from` to [`SCHEMA_VERSION`]. Each
+/// step and its version bump commit together, so a crash mid-way never
+/// leaves a half-applied step that fails on the next start.
+fn migrate(conn: &mut Connection, from: i64) -> anyhow::Result<()> {
     for v in from..SCHEMA_VERSION {
         let step = MIGRATIONS
             .get((v - 1) as usize)
             .ok_or_else(|| anyhow::anyhow!("no migration from schema version {v}"))?;
         tracing::info!(from = v, to = v + 1, "migrating event store");
-        conn.execute_batch(step)?;
-        conn.execute(
+        let tx = conn.transaction()?;
+        tx.execute_batch(step)?;
+        tx.execute(
             "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
             params![(v + 1).to_string()],
         )?;
+        tx.commit()?;
     }
     Ok(())
 }

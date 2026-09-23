@@ -18,8 +18,10 @@
     markedHighlight({
       langPrefix: "hljs language-",
       highlight(code, lang) {
-        const language = hljs.getLanguage(lang) ? lang : undefined;
-        return language ? hljs.highlight(code, { language }).value : hljs.highlightAuto(code).value;
+        // Only a tagged fence is coloured: guessing the language runs every
+        // grammar over the block, again on each streamed chunk.
+        // Returning the text unchanged tells marked-highlight to escape it itself.
+        return hljs.getLanguage(lang) ? hljs.highlight(code, { language: lang, ignoreIllegals: true }).value : code;
       },
     }),
   );

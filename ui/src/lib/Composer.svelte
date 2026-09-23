@@ -106,7 +106,9 @@
   function shortPath(p: string | undefined): string {
     if (!p) return "";
     const parts = p.split(/[\\/]/).filter(Boolean);
-    return parts.length > 3 ? `…${p.includes("\\") ? "\\" : "/"}${parts.slice(-2).join(p.includes("\\") ? "\\" : "/")}` : p;
+    if (parts.length <= 3) return p;
+    const sep = p.includes("\\") ? "\\" : "/";
+    return `…${sep}${parts.slice(-2).join(sep)}`;
   }
 
 </script>
@@ -182,7 +184,7 @@
         {#if ctx}
           <div class="row"><span class="dim">{t("composer.used")}</span><span>{t("composer.tokens", { used: k(ctx.used), size: k(ctx.size) })}</span></div>
           <div class="row"><span class="dim">{t("composer.ratio")}</span><span>{pct.toFixed(1)}%</span></div>
-          {#if ctx.cost != null}
+          {#if ctx.cost !== undefined && ctx.cost !== null}
             <div class="row"><span class="dim">{t("composer.cost")}</span><span>{ctx.cost.toFixed(4)} {ctx.currency ?? ""}</span></div>
           {/if}
           <div class="row"><span class="dim">{t("composer.source")}</span><span>{store.activeRun ? t("composer.liveRun") : t("composer.lastRun")}</span></div>

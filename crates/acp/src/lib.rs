@@ -617,44 +617,6 @@ pub fn pick_autonomous_mode(available: &[(String, String)]) -> Option<String> {
     })
 }
 
-#[cfg(test)]
-mod mode_tests {
-    use super::pick_autonomous_mode;
-
-    fn modes(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(i, n)| (i.to_string(), n.to_string())).collect()
-    }
-
-    #[test]
-    fn picks_each_agents_autonomous_mode() {
-        assert_eq!(
-            pick_autonomous_mode(&modes(&[("default", "Default"), ("bypassPermissions", "Bypass")])),
-            Some("bypassPermissions".into())
-        );
-        assert_eq!(
-            pick_autonomous_mode(&modes(&[
-                ("read-only", "Ask for approval"),
-                ("agent", "Approve for me"),
-                ("agent-full-access", "Full access")
-            ])),
-            Some("agent-full-access".into())
-        );
-        let cp = "https://agentclientprotocol.com/protocol/session-modes#autopilot";
-        assert_eq!(
-            pick_autonomous_mode(&modes(&[
-                ("https://agentclientprotocol.com/protocol/session-modes#agent", "Agent"),
-                (cp, "Autopilot")
-            ])),
-            Some(cp.into())
-        );
-        assert_eq!(
-            pick_autonomous_mode(&modes(&[("default", "Default"), ("auto_edit", "Auto Edit"), ("yolo", "YOLO")])),
-            Some("yolo".into())
-        );
-        assert_eq!(pick_autonomous_mode(&modes(&[("plan", "Plan")])), None);
-    }
-}
-
 use agent_client_protocol::schema::v1::{AvailableCommandInput, ContentBlock, SessionUpdate};
 use orchestra_core::SlashCommand;
 
@@ -715,5 +677,43 @@ fn text_of(block: &ContentBlock) -> Option<String> {
     match block {
         ContentBlock::Text(t) => Some(t.text.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::pick_autonomous_mode;
+
+    fn modes(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(i, n)| (i.to_string(), n.to_string())).collect()
+    }
+
+    #[test]
+    fn picks_each_agents_autonomous_mode() {
+        assert_eq!(
+            pick_autonomous_mode(&modes(&[("default", "Default"), ("bypassPermissions", "Bypass")])),
+            Some("bypassPermissions".into())
+        );
+        assert_eq!(
+            pick_autonomous_mode(&modes(&[
+                ("read-only", "Ask for approval"),
+                ("agent", "Approve for me"),
+                ("agent-full-access", "Full access")
+            ])),
+            Some("agent-full-access".into())
+        );
+        let cp = "https://agentclientprotocol.com/protocol/session-modes#autopilot";
+        assert_eq!(
+            pick_autonomous_mode(&modes(&[
+                ("https://agentclientprotocol.com/protocol/session-modes#agent", "Agent"),
+                (cp, "Autopilot")
+            ])),
+            Some(cp.into())
+        );
+        assert_eq!(
+            pick_autonomous_mode(&modes(&[("default", "Default"), ("auto_edit", "Auto Edit"), ("yolo", "YOLO")])),
+            Some("yolo".into())
+        );
+        assert_eq!(pick_autonomous_mode(&modes(&[("plan", "Plan")])), None);
     }
 }

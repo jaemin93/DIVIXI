@@ -785,9 +785,11 @@ class Store {
     return option?.choices.find((c) => c.id === id)?.name ?? id;
   }
 
-  /** Context accounting to show: the live run's, else the latest run that reported one. */
+  /** Context accounting to show: the current track's conductor, live or its latest run that reported one. */
   get context(): Usage | undefined {
-    return this.activeRun?.usage ?? [...this.runs].reverse().find((r) => r.usage)?.usage;
+    const runs = this.trackRuns.filter((r) => r.lane === "conductor");
+    const live = runs.find((r) => r.status === "running" || r.status === "connecting");
+    return live?.usage ?? [...runs].reverse().find((r) => r.usage)?.usage;
   }
 
   /** The agent a role runs on in the current track. */
@@ -863,9 +865,7 @@ class Store {
     this.openLane = name;
     this.view = "lane";
     // Restored runs only carry their folded text; replay them for the full turn.
-    for (const run of this.trackRuns) {
-      if (run.lane === name && !run.loaded) await this.hydrate(run);
-    }
+    await Promise.all(this.trackRuns.filter((r) => r.lane === name && !r.loaded).map((r) => this.hydrate(r)));
   }
 
   /** Open settings on a section. */
@@ -1166,11 +1166,13 @@ class Store {
       transcript: [],
       segments: [],
     };
+    // The array hands back proxies, never the object pushed; match by id.
+    const pendingId = pending.id;
     this.runs.push(pending);
 
     try {
       const id = await invoke<string>("conductor_prompt", { track, prompt: text, agent, lang: i18n.lang });
-      const run = this.runs.find((r) => r === pending || r.id === id);
+      const run = this.runs.find((r) => r.id === pendingId || r.id === id);
       if (run) {
         run.id = id;
         run.track = track;
@@ -1182,7 +1184,7 @@ class Store {
       const tr = this.tracks.find((t) => t.id === track);
       if (tr && tr.agent !== agent) tr.agent = agent;
     } catch (err) {
-      this.runs = this.runs.filter((r) => r !== pending);
+      this.runs = this.runs.filter((r) => r.id !== pendingId);
       this.lastError = String(err);
     }
   }

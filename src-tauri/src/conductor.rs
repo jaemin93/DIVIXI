@@ -52,6 +52,8 @@ const LANE_TURN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// How long a lane report waits for the conductor to become free.
 const REPORT_WAIT: Duration = Duration::from_secs(30 * 60);
+/// What `conductor_turn` returns while an earlier turn is still running.
+pub(crate) const BUSY: &str = "conductor is still responding";
 
 /// One open agent session and what it runs on.
 pub struct Live {
@@ -105,12 +107,33 @@ impl Sessions {
         self.busy.lock().contains(track)
     }
 
-    /// Forget every session of a track (its conductor and lanes). Turns in
-    /// flight finish on their own; nothing new starts.
-    pub async fn close_track(&self, track: &str) {
-        self.conductors.lock().await.remove(track);
+    /// Whether the conductor or any lane of a track has a turn in flight.
+    pub async fn is_active(&self, track: &str) -> bool {
+        if self.is_busy(track) {
+            return true;
+        }
         let prefix = lane_key(track, "");
-        self.lanes.lock().await.retain(|key, _| !key.starts_with(&prefix));
+        self.lanes
+            .lock()
+            .await
+            .iter()
+            .any(|(key, live)| key.starts_with(&prefix) && live.running.is_some())
+    }
+
+    /// Forget every session of a track (its conductor and lanes). Turns in
+    /// flight are cancelled so they end soon; nothing new starts.
+    pub async fn close_track(&self, track: &str) {
+        if let Some(conductor) = self.conductors.lock().await.remove(track) {
+            conductor.live.session.cancel();
+        }
+        let prefix = lane_key(track, "");
+        let mut lanes = self.lanes.lock().await;
+        let gone: Vec<String> = lanes.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+        for key in gone {
+            if let Some(live) = lanes.remove(&key) {
+                live.session.cancel();
+            }
+        }
     }
 }
 
@@ -278,10 +301,15 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                 async move {
                     let name = str_arg(&args, "name")?;
                     let state = app.state::<AppState>();
-                    let removed = state.sessions.lanes.lock().await.remove(&lane_key(&track, &name));
-                    match removed {
-                        Some(live) => {
-                            drop(live);
+                    let mut lanes = state.sessions.lanes.lock().await;
+                    let key = lane_key(&track, &name);
+                    match lanes.get(&key) {
+                        Some(live) if live.running.is_some() => Err(format!(
+                            "lane {name} is still working on run {}. Wait for its {REPORT_PREFIX} before closing it.",
+                            live.running.as_deref().unwrap_or_default()
+                        )),
+                        Some(_) => {
+                            lanes.remove(&key);
                             Ok(Value::String(format!("closed {name}")))
                         }
                         None => Err(format!("no open lane {name}")),
@@ -497,9 +525,9 @@ async fn start_lane_turn(
     let key = lane_key(&track, &name);
 
     // Resolve or open the lane session; refuse a second turn on a busy lane.
-    let (agent_id, turns, session, resumed, note) = {
+    let (agent_id, turns, session, resumed, note, run) = {
         let mut lanes = state.sessions.lanes.lock().await;
-        match (lanes.get_mut(&key), open) {
+        let (agent_id, turns, session, resumed, note) = match (lanes.get_mut(&key), open) {
             (Some(live), true) => {
                 return Err(format!(
                     "lane {name} is already open (agent {}, {} turns). Send follow-ups with ask_lane(name=\"{name}\", message=...), or spawn_lane with a new name.",
@@ -582,16 +610,18 @@ async fn start_lane_turn(
                 };
                 (agent_id, turns, session, resumed, note)
             }
+        };
+        // Claimed under the same lock as the busy check above, so two
+        // parallel asks cannot both pass it.
+        let run = state
+            .store
+            .begin_run(&track, &name, &agent_id, &text, &info.cwd)
+            .map_err(|e| e.to_string())?;
+        if let Some(live) = lanes.get_mut(&key) {
+            live.running = Some(run.clone());
         }
+        (agent_id, turns, session, resumed, note, run)
     };
-
-    let run = state
-        .store
-        .begin_run(&track, &name, &agent_id, &text, &info.cwd)
-        .map_err(|e| e.to_string())?;
-    if let Some(live) = state.sessions.lanes.lock().await.get_mut(&key) {
-        live.running = Some(run.clone());
-    }
 
     // The turn itself, in the background.
     let app_for_turn = app.clone();
@@ -673,22 +703,30 @@ async fn report_to_conductor(app: AppHandle, track: String, lane: String, run: S
         if output.is_empty() { "(no text output)" } else { &output },
     );
 
-    // Wait for the conductor to be free, then run the report as a turn.
+    // Run the report as a turn once the conductor is free. The turn itself
+    // claims the busy mark, so a refusal is retried rather than trusting an
+    // earlier free check that another turn may have overtaken.
     let deadline = std::time::Instant::now() + REPORT_WAIT;
-    while state.sessions.is_busy(&track) {
-        if std::time::Instant::now() > deadline {
-            tracing::warn!(%track, %lane, %run, "conductor stayed busy; report dropped");
+    let lang = state.store.get_meta("setting:language").ok().flatten().unwrap_or_default();
+    loop {
+        if !state.sessions.conductors.lock().await.contains_key(&track) {
+            tracing::warn!(%track, %lane, %run, "no conductor session to report to");
             return;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    if !state.sessions.conductors.lock().await.contains_key(&track) {
-        tracing::warn!(%track, %lane, %run, "no conductor session to report to");
-        return;
-    }
-    let lang = state.store.get_meta("setting:language").ok().flatten().unwrap_or_default();
-    if let Err(err) = conductor_turn(app.clone(), track.clone(), text, None, lang).await {
-        tracing::warn!(%track, %lane, %run, %err, "could not deliver lane report to the conductor");
+        match conductor_turn(app.clone(), track.clone(), text.clone(), None, lang.clone()).await {
+            Ok(_) => return,
+            Err(err) if err == BUSY => {
+                if std::time::Instant::now() > deadline {
+                    tracing::warn!(%track, %lane, %run, "conductor stayed busy; report dropped");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(err) => {
+                tracing::warn!(%track, %lane, %run, %err, "could not deliver lane report to the conductor");
+                return;
+            }
+        }
     }
 }
 
@@ -856,7 +894,7 @@ pub async fn conductor_turn(
     let agent = info.agent.clone();
 
     if !st.sessions.begin_turn(&track) {
-        return Err("conductor is still responding".to_string());
+        return Err(BUSY.to_string());
     }
 
     let outcome: Result<String, String> = async {

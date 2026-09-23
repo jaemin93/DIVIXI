@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::Lines;
-use futures::{AsyncBufReadExt, StreamExt};
+use futures::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
@@ -108,8 +108,18 @@ pub fn spawn(spec: &AgentSpec) -> anyhow::Result<(AgentProcess, AgentLines)> {
         let tail = stderr_tail.clone();
         let program = spec.program.clone();
         tokio::spawn(async move {
-            let mut lines = futures::io::BufReader::new(stderr.compat()).lines();
-            while let Some(Ok(line)) = lines.next().await {
+            // Bytes, decoded lossily: a non-UTF-8 line (a Korean-locale
+            // shell, say) must not end the drain, or the agent blocks on a
+            // full stderr pipe.
+            let mut reader = futures::io::BufReader::new(stderr.compat());
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let line = String::from_utf8_lossy(&buf).trim_end().to_string();
                 tracing::debug!(target: "agent_stderr", program = %program, pid = ?pid, "{line}");
                 if let Ok(mut t) = tail.lock() {
                     if t.len() == STDERR_TAIL {
