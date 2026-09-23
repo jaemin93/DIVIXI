@@ -33,3 +33,4 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
+portable-pty = "0.9.0"

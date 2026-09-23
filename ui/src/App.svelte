@@ -17,6 +17,14 @@
   // Browser-style zoom keys, app-wide.
   function onKey(e: KeyboardEvent) {
     if (!(e.ctrlKey || e.metaKey)) return;
+    if (e.key === "`") {
+      // Ctrl+`: the terminal panel, as in VS Code and Kiro.
+      e.preventDefault();
+      store.setTerminal(!store.termOpen);
+      return;
+    }
+    // Zoom keys stay with the shell while it has focus.
+    if ((e.target as HTMLElement | null)?.closest?.(".xterm")) return;
     if (e.key === "=" || e.key === "+") {
       e.preventDefault();
       store.setZoom(store.zoom + ZOOM_STEP);
@@ -42,6 +50,8 @@
   {/if}
   <div class="body">
     <Rail />
+    <div class="stage">
+    <div class="row">
     {#if store.view === "settings"}
       <Settings />
     {:else if store.view === "lane"}
@@ -74,6 +84,14 @@
         <Workspace />
       {/if}
     {/if}
+    </div>
+    {#if store.termMounted}
+      <!-- Loaded on first use: xterm.js is as big as the rest of the app. -->
+      {#await import("./lib/TerminalPanel.svelte") then panel}
+        <panel.default />
+      {/await}
+    {/if}
+    </div>
   </div>
 </div>
 
@@ -89,6 +107,20 @@
     flex: 1;
     display: flex;
     min-height: 0;
+  }
+
+  /* Right of the rail: the views on top, the terminal panel under them. */
+  .stage {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .row {
+    flex: 1;
+    min-height: 0;
+    display: flex;
   }
 
   main {

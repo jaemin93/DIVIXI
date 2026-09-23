@@ -339,6 +339,12 @@ class Store {
   trackListWidth = $state(264);
   panelWidth = $state(460);
 
+  /** The bottom terminal panel: shown, its height, and whether it was ever
+   *  opened (it stays mounted after that so shells survive folding). */
+  termOpen = $state(false);
+  termHeight = $state(280);
+  termMounted = $state(false);
+
   /** Every decision of every track, oldest first. */
   decisions = $state<Decision[]>([]);
   /** The decision whose answer is on its way. */
@@ -1013,6 +1019,22 @@ class Store {
   }
 
   /** Show or hide the track list column; persisted. */
+  async setTerminal(open: boolean) {
+    this.termOpen = open;
+    if (open) this.termMounted = true;
+    try {
+      await invoke("set_setting", { key: "terminal", value: open ? "open" : "closed" });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  setTermHeight(px: number, persist = false) {
+    const max = Math.max(160, window.innerHeight - 220);
+    this.termHeight = Math.min(max, Math.max(120, Math.round(px)));
+    if (persist) this.persistWidth("terminal_height", this.termHeight);
+  }
+
   async setTrackList(open: boolean) {
     this.trackListOpen = open;
     try {
@@ -1101,6 +1123,17 @@ class Store {
         this.decisions = await invoke<Decision[]>("list_decisions", { track: null });
       } catch (err) {
         this.lastError = String(err);
+      }
+      try {
+        const [term, termHeight] = await Promise.all([
+          invoke<string | null>("get_setting", { key: "terminal" }),
+          invoke<string | null>("get_setting", { key: "terminal_height" }),
+        ]);
+        const h = Number(termHeight);
+        if (Number.isFinite(h) && h > 0) this.setTermHeight(h);
+        if (term === "open") void this.setTerminal(true);
+      } catch {
+        // Defaults are fine.
       }
       this.agents = agents;
       this.pickDefaultAgent();

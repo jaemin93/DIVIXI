@@ -18,6 +18,7 @@ use tauri_plugin_dialog::DialogExt;
 
 mod conductor;
 mod metrics;
+mod terminal;
 mod workspace;
 
 /// How often accumulated message text is flushed to the webview and the store.
@@ -46,6 +47,8 @@ pub struct AppState {
     pub(crate) sessions: conductor::Sessions,
     /// CPU, memory and disk readings for the title bar.
     meter: metrics::Meter,
+    /// Shells in the bottom panel.
+    terminals: terminal::Terminals,
 }
 
 impl AppState {
@@ -304,6 +307,32 @@ async fn system_metrics(state: State<'_, AppState>, track: Option<String>) -> Re
     reading.sessions = sessions;
     reading.working = working;
     Ok(reading)
+}
+
+/// Start a shell in a track's folder (or the workspace root) for the
+/// bottom panel. Output arrives as `term` events.
+#[tauri::command(async)]
+fn term_open(app: AppHandle, state: State<'_, AppState>, track: Option<String>, cols: u16, rows: u16) -> Result<u32, String> {
+    let cwd = track
+        .and_then(|t| state.store.track(&t).ok().flatten())
+        .map(|t| PathBuf::from(t.cwd))
+        .unwrap_or_else(workspace_root);
+    state.terminals.open(app.clone(), Some(&cwd), cols, rows)
+}
+
+#[tauri::command]
+fn term_write(state: State<'_, AppState>, id: u32, data: String) -> Result<(), String> {
+    state.terminals.write(id, &data)
+}
+
+#[tauri::command]
+fn term_resize(state: State<'_, AppState>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+    state.terminals.resize(id, cols, rows)
+}
+
+#[tauri::command(async)]
+fn term_close(state: State<'_, AppState>, id: u32) {
+    state.terminals.close(id);
 }
 
 /// Every run, oldest first: what the timeline is rebuilt from at startup.
@@ -620,6 +649,10 @@ pub fn run() {
             run_events,
             list_decisions,
             system_metrics,
+            term_open,
+            term_write,
+            term_resize,
+            term_close,
             answer_decision,
             dismiss_decision,
             search_runs,
@@ -659,6 +692,7 @@ pub fn run() {
                 agents: Mutex::new(None),
                 sessions: conductor::Sessions::default(),
                 meter: metrics::Meter::default(),
+                terminals: terminal::Terminals::default(),
             });
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Divixi");

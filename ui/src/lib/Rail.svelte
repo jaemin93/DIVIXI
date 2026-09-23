@@ -34,6 +34,7 @@
   ];
 
   const secondary: Item[] = [
+    { id: "terminal", icon: "terminal", label: "rail.terminal", go: () => store.setTerminal(!store.termOpen) },
     { id: "settings", icon: "settings", label: "rail.settings", go: () => store.openSettings("overview") },
   ];
 
@@ -42,6 +43,7 @@
   function active(item: Item): boolean {
     if (item.id === "tracks") return store.view !== "settings";
     if (item.id === "settings") return store.view === "settings";
+    if (item.id === "terminal") return store.termOpen;
     return false;
   }
 
