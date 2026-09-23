@@ -1,5 +1,6 @@
-//! Drafts: a sketch board the human and an agent rough out together before
-//! there is a track.
+//! Designs: a sketch board the human and an agent rough out together, kept
+//! as an artifact beside tracks and attached to a track's conductor as
+//! reference.
 //!
 //! After Microsoft's Huabu: the board is notes, freehand ink and arrows; the
 //! agent reads it as an outline (and sketches as a picture sent with each
@@ -8,31 +9,20 @@
 //! reverts them; a human edit to a suggested item keeps it.
 //!
 //! The board lives here, in the core, so the agent's tool calls and the
-//! human's edits go through the same `apply`; every change is saved and sent
-//! to the window as a `draft` event with the whole board.
+//! human's edits go through the same `apply`; every change is saved (as the
+//! artifact's body) and sent to the window as a `design` event.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
 
-use orchestra_acp::AgentSession;
-use orchestra_core::LaneEvent;
-use orchestra_mcp::{McpServer, Tool};
+use orchestra_mcp::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::Mutex;
 
-use crate::conductor::{fingerprint, session_options, with_attachments, Live};
-use crate::{pump, AppState};
+use crate::AppState;
 
-/// The lane a draft's agent turns are recorded under.
-pub const DRAFT_LANE: &str = "drafter";
-
-/// Runs of a draft are kept under this track key, apart from real tracks.
-pub fn run_key(id: &str) -> String {
-    format!("draft:{id}")
-}
+/// The artifact kind this module serves.
+pub const KIND: &str = "design";
 
 // ----- the board -----
 
@@ -71,7 +61,7 @@ pub struct Node {
     pub h: f64,
     #[serde(default)]
     pub text: String,
-    /// What the note is to the draft: `goal`, `constraint`, `question`,
+    /// What the note is to the design: `goal`, `constraint`, `question`,
     /// `idea`, or empty. Goals, constraints and open questions are what a
     /// track is made from.
     #[serde(default)]
@@ -458,61 +448,42 @@ impl Doc {
     }
 }
 
-// ----- state -----
+// ----- the boards, cached from the store -----
 
-/// A draft's agent session and the MCP server that is its hands.
-pub struct Drafter {
-    pub live: Live,
-    /// Agent and options it was opened with; a change reopens it.
-    fingerprint: String,
-    _mcp: McpServer,
-}
-
-/// Whether a draft's agent session is open.
-pub async fn is_open(state: &AppState, id: &str) -> bool {
-    state.drafts.sessions.lock().await.contains_key(id)
-}
-
-/// Every draft's board (cached from the store) and agent session.
+/// Every open design's board.
 #[derive(Default)]
-pub struct Drafts {
+pub struct Boards {
     docs: parking_lot::Mutex<HashMap<String, Doc>>,
-    sessions: Mutex<HashMap<String, Drafter>>,
-    busy: parking_lot::Mutex<HashSet<String>>,
 }
 
-impl Drafts {
-    pub fn is_busy(&self, id: &str) -> bool {
-        self.busy.lock().contains(id)
-    }
-
-    /// Forget a draft's board and close its session.
-    pub async fn close(&self, id: &str) {
+impl Boards {
+    /// Forget a board (its artifact is gone).
+    pub fn forget(&self, id: &str) {
         self.docs.lock().remove(id);
-        if let Some(d) = self.sessions.lock().await.remove(id) {
-            d.live.session.cancel();
-        }
     }
 }
 
 fn load_doc(state: &AppState, id: &str) -> Result<Doc, String> {
-    let (_, raw) = state.store.draft(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no draft {id}"))?;
+    let (info, raw) = state.store.artifact(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no design {id}"))?;
+    if info.kind != KIND {
+        return Err(format!("{id} is not a design"));
+    }
     Ok(serde_json::from_str(&raw).unwrap_or_default())
 }
 
 /// The board as it is now.
 pub fn doc(state: &AppState, id: &str) -> Result<Doc, String> {
-    if let Some(d) = state.drafts.docs.lock().get(id) {
+    if let Some(d) = state.boards.docs.lock().get(id) {
         return Ok(d.clone());
     }
     let d = load_doc(state, id)?;
-    state.drafts.docs.lock().insert(id.to_string(), d.clone());
+    state.boards.docs.lock().insert(id.to_string(), d.clone());
     Ok(d)
 }
 
 /// What the window hears after every change.
 #[derive(Clone, Serialize)]
-struct DraftEvent<'a> {
+struct DesignEvent<'a> {
     id: &'a str,
     doc: &'a Doc,
 }
@@ -524,13 +495,16 @@ fn edit<R>(app: &AppHandle, id: &str, f: impl FnOnce(&mut Doc) -> R) -> Result<R
     let out = f(&mut current);
     current.version += 1;
     let json = serde_json::to_string(&current).map_err(|e| e.to_string())?;
-    state.store.save_draft(id, Some(&json), None, None).map_err(|e| e.to_string())?;
-    state.drafts.docs.lock().insert(id.to_string(), current.clone());
-    let _ = app.emit("draft", DraftEvent { id, doc: &current });
+    state
+        .store
+        .update_artifact(id, &orchestra_store::ArtifactPatch { body: Some(json), ..Default::default() })
+        .map_err(|e| e.to_string())?;
+    state.boards.docs.lock().insert(id.to_string(), current.clone());
+    let _ = app.emit("design", DesignEvent { id, doc: &current });
     Ok(out)
 }
 
-/// Apply edits to a draft's board.
+/// Apply edits to a design's board.
 pub fn apply(app: &AppHandle, id: &str, ops: Vec<Op>, actor: Actor) -> Result<Vec<Value>, String> {
     edit(app, id, |d| d.apply(ops, &actor))
 }
@@ -540,12 +514,23 @@ pub fn review(app: &AppHandle, id: &str, changes: &[u64], keep: bool) -> Result<
     edit(app, id, |d| d.review(changes, keep))
 }
 
+/// What goes with each message: the board as an outline and the items the
+/// human picked on it.
+pub fn context(state: &AppState, id: &str, selected: &[String]) -> Result<String, String> {
+    let mut out = format!("[board]\n{}", doc(state, id)?.outline());
+    if !selected.is_empty() {
+        out.push_str(&format!("\nselected: {}", selected.join(", ")));
+    }
+    Ok(out)
+}
+
 // ----- the agent -----
 
+/// What the design agent is told once, at the start of its session.
 pub fn preamble(lang: &str, title: &str) -> String {
     if lang == "ko" {
         return format!(
-            r#"당신은 Divixi의 초안 파트너입니다. 사람과 함께 스케치 보드에서 "{title}"의 초안을 잡습니다. 아직 작업을 맡길 트랙은 없습니다. 지금은 생각을 꺼내 놓고, 모양을 잡고, 무엇을 만들지 분명히 하는 단계입니다.
+            r#"당신은 Divixi의 디자인 파트너입니다. 사람과 함께 스케치 보드에서 "{title}"의 설계 초안을 잡습니다. 이 디자인은 나중에 트랙의 지휘자에게 참고 자료로 첨부됩니다. 지금은 생각을 꺼내 놓고, 모양을 잡고, 무엇을 만들지 분명히 하는 단계입니다.
 
 보드:
 - 메모(note), 손그림(sketch), 화살표(edge)가 있습니다. 메모에는 태그를 붙일 수 있습니다: goal(목표), constraint(제약), question(미해결 질문), idea(아이디어).
@@ -557,13 +542,13 @@ pub fn preamble(lang: &str, title: &str) -> String {
 - 메모는 짧게: 한 메모에 한 생각, 두세 줄. 긴 설명은 메모를 나누거나 대화로.
 - 배치: 메모 기본 크기 260×150, 간격 40. 관련 있는 것은 가까이, 흐름은 왼쪽에서 오른쪽, 위에서 아래로. 기존 항목과 겹치지 않게 빈 자리를 찾습니다.
 - 사람의 손그림은 의도를 담고 있습니다. 그림이 무엇을 뜻하는지 읽고, 모호하면 추측하지 말고 question 메모나 대화로 묻습니다.
-- 목표, 제약, 미해결 질문을 드러내는 것이 목적입니다. 초안이 트랙이 될 만큼 분명해지면 그렇다고 말합니다.
+- 목표, 제약, 미해결 질문을 드러내는 것이 목적입니다. 설계가 트랙에 넘겨도 될 만큼 분명해지면 그렇다고 말합니다.
 - 대화 답은 짧게. 보드에 쓴 것을 대화에서 되풀이하지 않습니다. 한국어로 말합니다.
 "#
         );
     }
     format!(
-        r#"You are Divixi's drafting partner. With the human you rough out a first draft of "{title}" on a sketch board. There is no track to delegate to yet: this is the stage of getting thoughts out, giving them shape, and making clear what should be built.
+        r#"You are Divixi's design partner. With the human you rough out a first design of "{title}" on a sketch board. The design will later be attached to a track's conductor as reference. This is the stage of getting thoughts out, giving them shape, and making clear what should be built.
 
 The board:
 - Notes, freehand sketches and arrows (edges). Notes can carry a tag: goal, constraint, question (open question) or idea.
@@ -575,18 +560,18 @@ How to work:
 - Keep notes short: one thought per note, two or three lines. Split long explanations or say them in chat.
 - Layout: notes are 260×150 by default, 40 apart. Related things close together; flow left to right, top to bottom. Find empty space; do not overlap what is there.
 - The human's sketches carry intent. Read what a drawing means; when it is unclear, ask with a question note or in chat rather than guessing.
-- The aim is to surface goals, constraints and open questions. When the draft is clear enough to become a track, say so.
+- The aim is to surface goals, constraints and open questions. When the design is clear enough to hand to a track, say so.
 - Keep chat replies short and do not repeat in chat what you wrote on the board. Speak English.
 "#
     )
 }
 
 /// The agent's two board tools, by name and description; the app and the
-/// `draft_agent` example build them from the same text.
+/// `design_agent` example build them from the same text.
 pub const BOARD_READ: &str = "board_read";
-pub const BOARD_READ_DESC: &str = "Read the draft's board: every note (id, tag, text, position, size, who made it), sketch (position, size, stroke count) and arrow, and which items are suggestions still waiting on the human.";
+pub const BOARD_READ_DESC: &str = "Read the design's board: every note (id, tag, text, position, size, who made it), sketch (position, size, stroke count) and arrow, and which items are suggestions still waiting on the human.";
 pub const BOARD_WRITE: &str = "board_write";
-pub const BOARD_WRITE_DESC: &str = "Change the draft's board with a list of commands, applied in order. Each result says ok with the item id, or the error. create_note {x, y, text, tag?, w?, h?, ref?} (tag: goal | constraint | question | idea); update {id, text?, tag?}; move {id, x, y, w?, h?}; delete {ids}; connect {from, to, label?}. Ids may be \"$ref\" for a note made earlier in the same call. Your changes show as suggestions the human keeps or reverts.";
+pub const BOARD_WRITE_DESC: &str = "Change the design's board with a list of commands, applied in order. Each result says ok with the item id, or the error. create_note {x, y, text, tag?, w?, h?, ref?} (tag: goal | constraint | question | idea); update {id, text?, tag?}; move {id, x, y, w?, h?}; delete {ids}; connect {from, to, label?}. Ids may be \"$ref\" for a note made earlier in the same call. Your changes show as suggestions the human keeps or reverts.";
 
 /// Arguments of `board_write`: a list of commands.
 pub fn board_write_schema() -> Value {
@@ -626,8 +611,8 @@ pub fn parse_commands(args: &Value) -> Result<Vec<Op>, String> {
     serde_json::from_value(raw).map_err(|e| format!("bad commands: {e}"))
 }
 
-/// The draft's tools, scoped to one draft.
-fn tools(app: AppHandle, id: String) -> Vec<Tool> {
+/// The design agent's tools, scoped to one design.
+pub fn tools(app: AppHandle, id: String) -> Vec<Tool> {
     let read = (app.clone(), id.clone());
     let write = (app, id);
     vec![
@@ -643,155 +628,16 @@ fn tools(app: AppHandle, id: String) -> Vec<Tool> {
                 }
             },
         ),
-        Tool::new(
-            BOARD_WRITE,
-            BOARD_WRITE_DESC,
-            board_write_schema(),
-            move |args| {
-                let (app, id) = write.clone();
-                async move {
-                    let ops = parse_commands(&args)?;
-                    let run = {
-                        let state = app.state::<AppState>();
-                        let sessions = state.drafts.sessions.lock().await;
-                        sessions.get(&id).and_then(|d| d.live.running.clone())
-                    };
-                    let results = apply(&app, &id, ops, Actor::Agent { run })?;
-                    Ok(json!({ "results": results }))
-                }
-            },
-        ),
-    ]
-}
-
-/// Where a draft's agent works: a folder of its own under the app's data,
-/// which also keeps the board pictures sent with each message.
-fn workdir(state: &AppState, id: &str) -> Result<PathBuf, String> {
-    let dir = state.drafts_dir.join(id);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir)
-}
-
-/// The draft's agent session, opened (or reopened on another agent) when
-/// needed. The second value says whether this is its first turn.
-async fn open(app: &AppHandle, id: &str, agent: &str, config: &BTreeMap<String, String>) -> Result<(Arc<AgentSession>, bool), String> {
-    let state = app.state::<AppState>();
-    let wanted = fingerprint(agent, config);
-    let mut sessions = state.drafts.sessions.lock().await;
-    if sessions.get(id).is_some_and(|d| d.fingerprint != wanted) {
-        sessions.remove(id);
-    }
-    if !sessions.contains_key(id) {
-        let spec = state.spec_for(agent)?;
-        let mcp = McpServer::start("divixi", tools(app.clone(), id.to_string())).await.map_err(|e| e.to_string())?;
-        let cwd = workdir(&state, id)?;
-        let mut opts = session_options(&state, agent, &cwd.display().to_string(), config, Some(&mcp));
-        let key = format!("draft_session:{id}:{agent}");
-        opts.resume = state.store.get_meta(&key).ok().flatten();
-        tracing::info!(draft = %id, %agent, resume = ?opts.resume, "opening draft session");
-        let session = AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?;
-        let resumed = session.resumed();
-        if let Err(err) = state.store.set_meta(&key, session.session_id()) {
-            tracing::warn!(%err, "could not remember draft session id");
-        }
-        sessions.insert(
-            id.to_string(),
-            Drafter {
-                live: Live { agent: agent.to_string(), session: Arc::new(session), turns: u32::from(resumed), running: None },
-                fingerprint: wanted,
-                _mcp: mcp,
-            },
-        );
-    }
-    let live = &mut sessions.get_mut(id).ok_or("draft session vanished")?.live;
-    live.turns += 1;
-    Ok((live.session.clone(), live.turns == 1))
-}
-
-/// One human message to a draft's agent. `image` is a PNG of the board
-/// (base64) when it has ink; `selected` the items the human picked.
-pub async fn turn(
-    app: AppHandle,
-    id: String,
-    text: String,
-    image: Option<String>,
-    selected: Vec<String>,
-    lang: String,
-    attached: Vec<PathBuf>,
-) -> Result<String, String> {
-    let state = app.state::<AppState>();
-    let (info, _) = state.store.draft(&id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no draft {id}"))?;
-    if !state.drafts.busy.lock().insert(id.clone()) {
-        return Err("the draft's agent is still responding".to_string());
-    }
-    let outcome: Result<String, String> = async {
-        let (session, first) = open(&app, &id, &info.agent, &info.config).await?;
-        let cwd = workdir(&state, &id)?;
-        // The human's files first, then the picture of the board.
-        let mut files = attached.clone();
-        if let Some(data) = image.filter(|d| !d.is_empty()) {
-            use base64::Engine;
-            let bytes = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|e| format!("bad board picture: {e}"))?;
-            let path = cwd.join("board.png");
-            std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
-            files.push(path);
-        }
-        let board = doc(&state, &id)?.outline();
-        let mut context = format!("[board]\n{board}");
-        if !selected.is_empty() {
-            context.push_str(&format!("\nselected: {}", selected.join(", ")));
-        }
-        let body = if text.trim().is_empty() { "(look at the board)".to_string() } else { text.clone() };
-        let sent = if first {
-            format!("{}\n\n---\n\n{body}\n\n{context}", preamble(&lang, &info.title))
-        } else {
-            format!("{body}\n\n{context}")
-        };
-        let run = state
-            .store
-            .begin_run(&run_key(&id), DRAFT_LANE, &info.agent, &with_attachments(&text, &attached), &cwd.display().to_string())
-            .map_err(|e| e.to_string())?;
-        if let Some(d) = state.drafts.sessions.lock().await.get_mut(&id) {
-            d.live.running = Some(run.clone());
-        }
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        tauri::async_runtime::spawn(pump(app.clone(), run_key(&id), DRAFT_LANE.to_string(), run.clone(), rx));
-        let _ = tx.send(LaneEvent::Started { session_id: session.session_id().to_string(), cwd: cwd.display().to_string() });
-
-        let app_t = app.clone();
-        let (id_t, run_t) = (id.clone(), run.clone());
-        tauri::async_runtime::spawn(async move {
-            let result = session.prompt_with(sent, files, tx.clone()).await;
-            let st = app_t.state::<AppState>();
-            {
-                let mut sessions = st.drafts.sessions.lock().await;
-                if let Err(err) = result {
-                    let _ = tx.send(LaneEvent::Failed { error: err.to_string() });
-                    sessions.remove(&id_t);
-                } else if let Some(d) = sessions.get_mut(&id_t) {
-                    if d.live.running.as_deref() == Some(run_t.as_str()) {
-                        d.live.running = None;
-                    }
-                }
+        Tool::new(BOARD_WRITE, BOARD_WRITE_DESC, board_write_schema(), move |args| {
+            let (app, id) = write.clone();
+            async move {
+                let ops = parse_commands(&args)?;
+                let run = crate::artifact::running(&app, &id).await;
+                let results = apply(&app, &id, ops, Actor::Agent { run })?;
+                Ok(json!({ "results": results }))
             }
-            st.drafts.busy.lock().remove(&id_t);
-        });
-        Ok(run)
-    }
-    .await;
-    if outcome.is_err() {
-        state.drafts.busy.lock().remove(&id);
-    }
-    outcome
-}
-
-/// Stop the draft agent's turn in flight.
-pub async fn cancel(app: &AppHandle, id: &str) {
-    let state = app.state::<AppState>();
-    let sessions = state.drafts.sessions.lock().await;
-    if let Some(d) = sessions.get(id) {
-        d.live.session.cancel();
-    }
+        }),
+    ]
 }
 
 #[cfg(test)]

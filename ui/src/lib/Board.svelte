@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { store, type DraftNode, type DraftOp, type DraftTag, type Stroke } from "./store.svelte";
+  import { store, type DesignNode, type DesignOp, type DesignTag, type Stroke } from "./store.svelte";
   import { strokePath, strokesBox, worldStrokes, localStrokes, overlaps, edgeEnds, TAG_COLORS, type Box } from "./ink";
   import { t } from "./i18n.svelte";
 
   /**
-   * The draft's sketch board: notes, freehand ink and arrows on an endless
+   * The design's sketch board: notes, freehand ink and arrows on an endless
    * surface. Drag the empty board to pan, wheel to zoom. The agent's
    * changes show dashed until kept or reverted, right on the item.
    * `selected` is what goes with the next message to the agent.
@@ -19,7 +19,7 @@
 
   let el = $state<HTMLDivElement>();
   let view = $state({ x: 0, y: 0, k: 1 });
-  const doc = $derived(store.draftDoc);
+  const doc = $derived(store.designDoc);
 
   /** Agent suggestions by the item they are about. */
   const pending = $derived(new Map(doc.changes.map((c) => [c.target, c.id])));
@@ -30,7 +30,7 @@
     return { x: (e.clientX - r.left - view.x) / view.k, y: (e.clientY - r.top - view.y) / view.k };
   }
 
-  /** Fit the board's items in view, once per draft opened. */
+  /** Fit the board's items in view, once per design opened. */
   let fittedFor = "";
   function fit() {
     if (!el) return;
@@ -48,8 +48,8 @@
     view = { k, x: r.width / 2 - ((minX + maxX) / 2) * k, y: r.height / 2 - ((minY + maxY) / 2) * k };
   }
   $effect(() => {
-    const id = store.draft;
-    if (id && store.draftLoaded === id && fittedFor !== id && el) {
+    const id = store.artifact;
+    if (id && store.designLoaded === id && fittedFor !== id && el) {
       fittedFor = id;
       queueMicrotask(fit);
     }
@@ -99,7 +99,7 @@
   let drag = $state<{ dx: number; dy: number; moved: boolean } | null>(null);
   let resize = $state<{ id: string; w: number; h: number } | null>(null);
 
-  function box(n: DraftNode): Box {
+  function box(n: DesignNode): Box {
     let { x, y, w, h } = n;
     if (drag && selected.includes(n.id)) {
       x += drag.dx;
@@ -133,7 +133,7 @@
   async function commitInk(stroke: Stroke) {
     const b = strokesBox([stroke]);
     const target = [...doc.nodes].reverse().find((n) => n.kind === "sketch" && overlaps(n, b, 24));
-    let op: DraftOp;
+    let op: DesignOp;
     if (target) {
       const all = [...worldStrokes(target), stroke];
       const nb = strokesBox(all);
@@ -141,7 +141,7 @@
     } else {
       op = { op: "set_sketch", ...b, strokes: localStrokes([stroke], b) };
     }
-    await store.draftApply([op]);
+    await store.designApply([op]);
     ink = null;
   }
 
@@ -158,7 +158,7 @@
   }
 
   async function commitErase() {
-    const ops: DraftOp[] = [];
+    const ops: DesignOp[] = [];
     for (const [id, gone] of Object.entries(erased)) {
       const n = doc.nodes.find((x) => x.id === id);
       if (!n) continue;
@@ -169,14 +169,14 @@
         ops.push({ op: "set_sketch", id, ...nb, strokes: localStrokes(keep, nb) });
       }
     }
-    await store.draftApply(ops);
+    await store.designApply(ops);
     erased = {};
   }
 
   // ----- editing a note -----
   let editing = $state("");
   let editText = $state("");
-  function startEdit(n: DraftNode) {
+  function startEdit(n: DesignNode) {
     if (n.kind !== "note") return;
     editing = n.id;
     editText = n.text;
@@ -186,7 +186,7 @@
     if (!id) return;
     editing = "";
     const n = doc.nodes.find((x) => x.id === id);
-    if (n && n.text !== editText) await store.draftApply([{ op: "update", id, text: editText }]);
+    if (n && n.text !== editText) await store.designApply([{ op: "update", id, text: editText }]);
   }
 
   // ----- arrows -----
@@ -220,7 +220,7 @@
 
     if (tool === "note") {
       tool = "select";
-      void store.draftApply([{ op: "create_note", x: p.x - 130, y: p.y - 75, text: "" }]).then((res) => {
+      void store.designApply([{ op: "create_note", x: p.x - 130, y: p.y - 75, text: "" }]).then((res) => {
         const nid = res[0]?.id;
         if (nid) {
           selected = [nid];
@@ -266,7 +266,7 @@
       else if (arrowFrom !== id) {
         const from = arrowFrom;
         arrowFrom = "";
-        void store.draftApply([{ op: "connect", from, to: id }]);
+        void store.designApply([{ op: "connect", from, to: id }]);
       }
       return;
     }
@@ -289,15 +289,15 @@
         const d = drag;
         drag = null;
         if (!d?.moved) return;
-        const ops: DraftOp[] = doc.nodes
+        const ops: DesignOp[] = doc.nodes
           .filter((n) => selected.includes(n.id))
           .map((n) => ({ op: "move", id: n.id, x: Math.round(n.x + d.dx), y: Math.round(n.y + d.dy) }));
-        void store.draftApply(ops);
+        void store.designApply(ops);
       },
     );
   }
 
-  function startResize(e: PointerEvent, n: DraftNode) {
+  function startResize(e: PointerEvent, n: DesignNode) {
     e.stopPropagation();
     const start = toWorld(e);
     resize = { id: n.id, w: n.w, h: n.h };
@@ -309,7 +309,7 @@
       () => {
         const r = resize;
         resize = null;
-        if (r) void store.draftApply([{ op: "move", id: n.id, x: n.x, y: n.y, w: Math.round(r.w), h: Math.round(r.h) }]);
+        if (r) void store.designApply([{ op: "move", id: n.id, x: n.x, y: n.y, w: Math.round(r.w), h: Math.round(r.h) }]);
       },
     );
   }
@@ -326,11 +326,11 @@
     window.addEventListener("pointerup", onUp);
   }
 
-  function setTag(tag: DraftTag) {
-    const ops: DraftOp[] = selected
+  function setTag(tag: DesignTag) {
+    const ops: DesignOp[] = selected
       .filter((id) => doc.nodes.find((n) => n.id === id)?.kind === "note")
       .map((id) => ({ op: "update", id, tag }));
-    void store.draftApply(ops);
+    void store.designApply(ops);
   }
 
   function removeSelected() {
@@ -338,12 +338,12 @@
     if (!ids.length) return;
     selected = [];
     selectedEdge = "";
-    void store.draftApply([{ op: "delete", ids }]);
+    void store.designApply([{ op: "delete", ids }]);
   }
 
   function onKey(e: KeyboardEvent) {
     const tag = (e.target as HTMLElement | null)?.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA" || editing || store.view !== "draft") return;
+    if (tag === "INPUT" || tag === "TEXTAREA" || editing || store.view !== "design") return;
     if (e.key === " ") spaceHeld = true;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const keys: Record<string, Tool> = { v: "select", n: "note", p: "pen", e: "eraser", a: "arrow" };
@@ -363,7 +363,7 @@
   }
 
   const single = $derived(selected.length === 1 ? doc.nodes.find((n) => n.id === selected[0]) : undefined);
-  const TAG_LIST: DraftTag[] = ["goal", "constraint", "question", "idea"];
+  const TAG_LIST: DesignTag[] = ["goal", "constraint", "question", "idea"];
 
   function focusOnMount(node: HTMLTextAreaElement) {
     node.focus();
@@ -382,14 +382,14 @@
   bind:this={el}
   onpointerdown={onDown}
   role="application"
-  aria-label={t("draft.board")}
+  aria-label={t("design.board")}
   style="background-position: {view.x}px {view.y}px; background-size: {22 * view.k}px {22 * view.k}px"
 >
   <div class="world" style="transform: translate({view.x}px, {view.y}px) scale({view.k})">
     <!-- Arrows under the items. -->
     <svg class="edges" style="left: {edgeFrame.x}px; top: {edgeFrame.y}px" width={edgeFrame.w} height={edgeFrame.h}>
       <defs>
-        <marker id="draft-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <marker id="design-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0,0 L10,5 L0,10 z" fill="context-stroke" />
         </marker>
       </defs>
@@ -413,7 +413,7 @@
                 selected = [];
               }}
             />
-            <line class="line" x1={x1 - edgeFrame.x} y1={y1 - edgeFrame.y} x2={x2 - edgeFrame.x} y2={y2 - edgeFrame.y} marker-end="url(#draft-arrow)" />
+            <line class="line" x1={x1 - edgeFrame.x} y1={y1 - edgeFrame.y} x2={x2 - edgeFrame.x} y2={y2 - edgeFrame.y} marker-end="url(#design-arrow)" />
           </g>
         {/if}
       {/each}
@@ -433,7 +433,7 @@
         role="presentation"
       >
         {#if n.kind === "note"}
-          {#if n.tag}<span class="mono tag">{t(`draft.tag.${n.tag}` as "draft.tag.goal")}</span>{/if}
+          {#if n.tag}<span class="mono tag">{t(`design.tag.${n.tag}` as "design.tag.goal")}</span>{/if}
           {#if editing === n.id}
             <textarea
               class="edit"
@@ -449,7 +449,7 @@
               use:focusOnMount
             ></textarea>
           {:else}
-            <div class="text" class:empty={!n.text}>{n.text || t("draft.emptyNote")}</div>
+            <div class="text" class:empty={!n.text}>{n.text || t("design.emptyNote")}</div>
           {/if}
           {#if selected.length === 1 && selected[0] === n.id && editing !== n.id}
             <span class="grip" role="presentation" onpointerdown={(ev) => startResize(ev, n)}></span>
@@ -464,9 +464,9 @@
         {#if change !== undefined}
           <!-- The agent's suggestion: keep it or put it back, right here. -->
           <span class="review" role="presentation" onpointerdown={(ev) => ev.stopPropagation()}>
-            <span class="mono sug">{t("draft.suggested")}</span>
-            <button type="button" onclick={() => store.draftReview([change], true)} title={t("draft.keep")} aria-label={t("draft.keep")}>✓</button>
-            <button type="button" onclick={() => store.draftReview([change], false)} title={t("draft.revert")} aria-label={t("draft.revert")}>↺</button>
+            <span class="mono sug">{t("design.suggested")}</span>
+            <button type="button" onclick={() => store.designReview([change], true)} title={t("design.keep")} aria-label={t("design.keep")}>✓</button>
+            <button type="button" onclick={() => store.designReview([change], false)} title={t("design.revert")} aria-label={t("design.revert")}>↺</button>
           </span>
         {/if}
       </div>
@@ -480,7 +480,7 @@
   </div>
 
   <!-- Tools, like a sketchbook's: V select · N note · P pen · E eraser · A arrow. -->
-  <div class="tools" role="toolbar" aria-label={t("draft.tools")} tabindex="-1" onpointerdown={(e) => e.stopPropagation()}>
+  <div class="tools" role="toolbar" aria-label={t("design.tools")} tabindex="-1" onpointerdown={(e) => e.stopPropagation()}>
     {#each [["select", "V"], ["note", "N"], ["pen", "P"], ["eraser", "E"], ["arrow", "A"]] as [id, key] (id)}
       <button
         type="button"
@@ -490,8 +490,8 @@
           tool = id as Tool;
           arrowFrom = "";
         }}
-        title="{t(`draft.tool.${id}` as 'draft.tool.select')} ({key})"
-        aria-label={t(`draft.tool.${id}` as "draft.tool.select")}
+        title="{t(`design.tool.${id}` as 'design.tool.select')} ({key})"
+        aria-label={t(`design.tool.${id}` as "design.tool.select")}
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
           {#if id === "select"}<path d="M3 2l9 5-4 1-2 4z" />
@@ -505,37 +505,37 @@
     {#if tool === "pen"}
       <span class="sep"></span>
       {#each PEN_COLORS as c (c)}
-        <button type="button" class="swatch" class:on={penColor === c} style="--c: {c || 'var(--txt)'}" onclick={() => (penColor = c)} aria-label={c || t("draft.ink")}></button>
+        <button type="button" class="swatch" class:on={penColor === c} style="--c: {c || 'var(--txt)'}" onclick={() => (penColor = c)} aria-label={c || t("design.ink")}></button>
       {/each}
     {/if}
   </div>
 
   {#if single?.kind === "note" && !editing}
-    <!-- What the note is to the draft. -->
-    <div class="tagbar" onpointerdown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1" aria-label={t("draft.tagAs")}>
-      <span class="mono lab">{t("draft.tagAs")}</span>
+    <!-- What the note is to the design. -->
+    <div class="tagbar" onpointerdown={(e) => e.stopPropagation()} role="toolbar" tabindex="-1" aria-label={t("design.tagAs")}>
+      <span class="mono lab">{t("design.tagAs")}</span>
       {#each TAG_LIST as tag (tag)}
         <button type="button" class="tagbtn" class:on={single.tag === tag} style="--tag: {TAG_COLORS[tag]}" onclick={() => setTag(single.tag === tag ? "" : tag)}>
-          {t(`draft.tag.${tag}` as "draft.tag.goal")}
+          {t(`design.tag.${tag}` as "design.tag.goal")}
         </button>
       {/each}
     </div>
   {/if}
 
-  <div class="zoom" role="toolbar" tabindex="-1" aria-label={t("draft.zoom")} onpointerdown={(e) => e.stopPropagation()}>
-    <button type="button" onclick={() => zoomBy(1 / 1.2)} aria-label={t("draft.zoomOut")}>−</button>
-    <button type="button" class="mono pct" onclick={fit} title={t("draft.fit")}>{Math.round(view.k * 100)}%</button>
-    <button type="button" onclick={() => zoomBy(1.2)} aria-label={t("draft.zoomIn")}>+</button>
+  <div class="zoom" role="toolbar" tabindex="-1" aria-label={t("design.zoom")} onpointerdown={(e) => e.stopPropagation()}>
+    <button type="button" onclick={() => zoomBy(1 / 1.2)} aria-label={t("design.zoomOut")}>−</button>
+    <button type="button" class="mono pct" onclick={fit} title={t("design.fit")}>{Math.round(view.k * 100)}%</button>
+    <button type="button" onclick={() => zoomBy(1.2)} aria-label={t("design.zoomIn")}>+</button>
   </div>
 
   {#if !doc.nodes.length}
     <div class="hint">
-      <p class="serif">{t("draft.emptyTitle")}</p>
-      <p class="mono">{t("draft.emptyHint")}</p>
+      <p class="serif">{t("design.emptyTitle")}</p>
+      <p class="mono">{t("design.emptyHint")}</p>
     </div>
   {/if}
   {#if tool === "arrow"}
-    <div class="mono mode">{arrowFrom ? t("draft.arrowTo") : t("draft.arrowFrom")}</div>
+    <div class="mono mode">{arrowFrom ? t("design.arrowTo") : t("design.arrowFrom")}</div>
   {/if}
 </div>
 

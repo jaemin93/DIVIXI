@@ -1,7 +1,6 @@
 <script lang="ts">
   import { store, agentLabel, TRACK_COLORS, type TrackSort } from "./store.svelte";
   import Icon from "./Icon.svelte";
-  import ItemMenu from "./ItemMenu.svelte";
   import SplitHandle from "./SplitHandle.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel, whenFull, WINDOWS } from "./time";
@@ -113,9 +112,15 @@
     folded = { ...folded, [id]: isOpen(id) };
   }
 
-  // ----- context menu (shared with drafts: ItemMenu) -----
+  // ----- context menu -----
   type Menu = { id: string; x: number; y: number };
   let menu = $state<Menu | null>(null);
+  let mode = $state<"" | "rename" | "confirm">("");
+  let draft = $state("");
+  /** Why the core refused a delete, shown in the menu. */
+  let deleteError = $state("");
+  let menuEl = $state<HTMLDivElement>();
+  let draftInput = $state<HTMLInputElement>();
 
   const menuTrack = $derived.by(() => {
     const m = menu;
@@ -124,32 +129,87 @@
 
   function openMenu(e: MouseEvent, id: string) {
     e.preventDefault();
+    mode = "";
+    deleteError = "";
+    draft = "";
     menu = { id, x: e.clientX, y: e.clientY };
   }
 
   function closeMenu() {
     menu = null;
+    mode = "";
   }
 
-  /** Whether a click happened inside `el`, as it was when the click was dispatched. */
+  /** Keep the menu inside the window once it has a size. */
+  $effect(() => {
+    if (!menu || !menuEl) return;
+    const r = menuEl.getBoundingClientRect();
+    const x = Math.min(menu.x, window.innerWidth - r.width - 8);
+    const y = Math.min(menu.y, window.innerHeight - r.height - 8);
+    if (x !== menu.x || y !== menu.y) menu = { ...menu, x: Math.max(8, x), y: Math.max(8, y) };
+  });
+
+  $effect(() => {
+    if (mode === "rename") draftInput?.focus();
+  });
+
+  /** Whether a click happened inside `el`. The path is taken when the click
+   *  is dispatched, so a button the click itself replaced (Delete turning
+   *  into the confirm step) still counts as inside. */
   function inside(e: MouseEvent, el: HTMLElement | undefined): boolean {
     return !!el && e.composedPath().includes(el);
   }
 
   function onDocClick(e: MouseEvent) {
+    if (menu && !inside(e, menuEl)) closeMenu();
     if (filterOpen && !inside(e, filterEl)) filterOpen = false;
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") filterOpen = false;
+    if (e.key === "Escape") {
+      if (menu) closeMenu();
+      filterOpen = false;
+    }
+  }
+
+  function startRename() {
+    draft = menuTrack?.name ?? "";
+    mode = "rename";
+  }
+
+  function openTags() {
+    if (!menu) return;
+    store.tagDialog = menu.id;
+    closeMenu();
+  }
+
+  async function commit(e: Event) {
+    e.preventDefault();
+    if (!menu) return;
+    if (mode === "rename" && draft.trim()) await store.updateTrack(menu.id, { name: draft.trim() });
+    closeMenu();
+  }
+
+  async function pickColor(color: string) {
+    if (!menu) return;
+    await store.updateTrack(menu.id, { color });
+    closeMenu();
   }
 
   async function openSettings() {
     if (!menu) return;
-    const id = menu.id;
-    closeMenu();
-    await store.selectTrack(id);
+    await store.selectTrack(menu.id);
     store.view = "edit-track";
+    closeMenu();
+  }
+
+  async function remove() {
+    if (!menu) return;
+    const id = menu.id;
+    deleteError = "";
+    const refused = await store.deleteTrack(id);
+    if (refused) deleteError = refused;
+    else closeMenu();
   }
 </script>
 
@@ -325,32 +385,48 @@
 {/snippet}
 
 {#if menu && menuTrack}
-  {@const tr = menuTrack}
-  <ItemMenu
-    x={menu.x}
-    y={menu.y}
-    name={tr.name}
-    color={tr.color}
-    busy={tr.busy}
-    busyNote={t("track.busyNote")}
-    deleteNote={t("track.deleteNote")}
-    onclose={closeMenu}
-    onrename={(name) => store.updateTrack(tr.id, { name }).then(() => {})}
-    ontags={() => (store.tagDialog = tr.id)}
-    oncolor={(color) => store.updateTrack(tr.id, { color }).then(() => {})}
-    ondelete={() => store.deleteTrack(tr.id)}
-  >
-    {#snippet top()}
-      {#if store.isActive(tr.id)}
-        <button class="item" role="menuitem" disabled={tr.busy} onclick={() => { closeMenu(); store.closeConductor(tr.id); }}>{t("track.deactivate")}</button>
+  <div class="menu" bind:this={menuEl} style="left: {menu.x}px; top: {menu.y}px" role="menu" aria-label={t("track.menu")}>
+    {#if mode === "rename"}
+      <form class="inline" onsubmit={commit}>
+        <span class="mlab-sm">{t("track.rename")}</span>
+        <input type="text" bind:this={draftInput} bind:value={draft} maxlength="80" />
+        <div class="acts">
+          <span class="grow"></span>
+          <button class="btn sm" type="button" onclick={() => (mode = "")}>{t("track.cancel")}</button>
+          <button class="btn sm btn-acc" type="submit" disabled={!draft.trim()}>{t("newtrack.save")}</button>
+        </div>
+      </form>
+    {:else}
+      {#if store.isActive(menuTrack.id)}
+        <button class="item" role="menuitem" disabled={menuTrack.busy} onclick={() => { const id = menuTrack!.id; closeMenu(); store.closeConductor(id); }}>{t("track.deactivate")}</button>
       {:else}
-        <button class="item" role="menuitem" disabled={store.conductorOpening === tr.id} onclick={() => { closeMenu(); store.openConductor(tr.id); }}>{t("track.activate")}</button>
+        <button class="item" role="menuitem" disabled={store.conductorOpening === menuTrack.id} onclick={() => { const id = menuTrack!.id; closeMenu(); store.openConductor(id); }}>{t("track.activate")}</button>
       {/if}
-    {/snippet}
-    {#snippet middle()}
+      <div class="rule"></div>
+      <button class="item" role="menuitem" onclick={startRename}>{t("track.rename")}</button>
+      <button class="item" role="menuitem" onclick={openTags}>{t("track.tags")}</button>
       <button class="item" role="menuitem" onclick={openSettings}>{t("track.settings")}</button>
-    {/snippet}
-  </ItemMenu>
+      <div class="rule"></div>
+      <div class="colors" role="group" aria-label={t("track.color")}>
+        <button class="sw none" class:on={!menuTrack.color} title={t("track.noColor")} onclick={() => pickColor("")}></button>
+        {#each TRACK_COLORS as c (c)}
+          <button class="sw" class:on={menuTrack.color === c} style="background: {c}" title={c} onclick={() => pickColor(c)}></button>
+        {/each}
+      </div>
+      <div class="rule"></div>
+      {#if mode === "confirm"}
+        <div class="mono note">{menuTrack.busy ? t("track.busyNote") : t("track.deleteNote")}</div>
+        {#if deleteError}<div class="mono note err">{deleteError}</div>{/if}
+        <div class="acts pad">
+          <button class="btn sm" type="button" onclick={() => (mode = "")}>{t("track.cancel")}</button>
+          <span class="grow"></span>
+          <button class="btn sm danger" type="button" disabled={menuTrack.busy} onclick={remove}>{t("track.confirmDelete")}</button>
+        </div>
+      {:else}
+        <button class="item danger" role="menuitem" onclick={() => (mode = "confirm")}>{t("track.delete")}</button>
+      {/if}
+    {/if}
+  </div>
 {/if}
 
 <style>
@@ -764,4 +840,124 @@
     color: var(--lab);
   }
 
+  /* The track menu: a fixed sheet at the pointer, hairline and square. */
+  .menu {
+    position: fixed;
+    z-index: 40;
+    min-width: 210px;
+    background: var(--card);
+    border: 1px solid var(--lines);
+    padding: 4px 0;
+  }
+
+  .item {
+    width: 100%;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    font-size: 12px;
+    color: var(--dim);
+  }
+
+  .item:hover {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .item.danger {
+    color: var(--acct);
+  }
+
+  .item:disabled {
+    color: var(--lab);
+    cursor: default;
+  }
+
+  .rule {
+    height: 1px;
+    background: var(--line);
+    margin: 4px 0;
+  }
+
+  .colors {
+    display: flex;
+    gap: 7px;
+    padding: 6px 14px;
+  }
+
+  .sw {
+    width: 16px;
+    height: 16px;
+    border: 1px solid transparent;
+    padding: 0;
+  }
+
+  .sw.none {
+    background: transparent;
+    border-color: var(--lines);
+    background-image: linear-gradient(135deg, transparent 46%, var(--acct) 46%, var(--acct) 54%, transparent 54%);
+  }
+
+  .sw.on {
+    outline: 1px solid var(--hi);
+    outline-offset: 2px;
+  }
+
+  .note {
+    padding: 6px 14px 2px;
+    font-size: 10px;
+    color: var(--dim);
+    max-width: 260px;
+  }
+
+  .note.err {
+    color: var(--acct);
+  }
+
+  .inline {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 12px 10px;
+    width: 260px;
+  }
+
+  .inline input {
+    height: 30px;
+    background: var(--inp);
+    border: 1px solid var(--line);
+    color: var(--txt);
+    font-family: var(--sans);
+    font-size: 12px;
+    padding: 0 9px;
+    outline: none;
+  }
+
+  .inline input:focus {
+    border-color: var(--acc);
+  }
+
+  .acts {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .acts.pad {
+    padding: 4px 12px 8px;
+  }
+
+  .btn.sm {
+    height: 24px;
+    padding: 0 8px;
+  }
+
+  .btn.danger:not(:disabled) {
+    color: var(--acct);
+    border-color: var(--acct);
+  }
 </style>

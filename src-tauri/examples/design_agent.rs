@@ -1,9 +1,9 @@
-//! A draft's agent on a real board, without the window.
+//! A design's agent on a real board, without the window.
 //!
 //! Run with:
-//!   cargo run -p orchestra-app --example draft_agent -- claude_code
+//!   cargo run -p orchestra-app --example design_agent -- claude_code
 //!
-//! The board starts with one note of the human's. The agent gets the draft
+//! The board starts with one note of the human's. The agent gets the design
 //! preamble and the same two MCP tools the app gives it (`board_read`,
 //! `board_write`, same descriptions and schema), and is asked to rough the
 //! idea out. Checks: it wrote through the tool; the board gained a goal,
@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use orchestra_acp::{scrub_inherited_session_env, AgentSession, McpHttp, SessionOptions};
 use orchestra_agents::{detect, AgentKind, DetectOptions};
-use orchestra_app::draft::{self, Actor, Doc};
+use orchestra_app::design::{self, Actor, Doc};
 use orchestra_core::LaneEvent;
 use orchestra_mcp::{McpServer, Tool};
 use parking_lot::Mutex;
@@ -41,14 +41,14 @@ async fn run() -> anyhow::Result<()> {
 
     let (r, w) = (board.clone(), board.clone());
     let tools = vec![
-        Tool::new(draft::BOARD_READ, draft::BOARD_READ_DESC, json!({ "type": "object", "properties": {} }), move |_| {
+        Tool::new(design::BOARD_READ, design::BOARD_READ_DESC, json!({ "type": "object", "properties": {} }), move |_| {
             let b = r.clone();
             async move { Ok(b.lock().outline()) }
         }),
-        Tool::new(draft::BOARD_WRITE, draft::BOARD_WRITE_DESC, draft::board_write_schema(), move |args| {
+        Tool::new(design::BOARD_WRITE, design::BOARD_WRITE_DESC, design::board_write_schema(), move |args| {
             let b = w.clone();
             async move {
-                let ops = draft::parse_commands(&args)?;
+                let ops = design::parse_commands(&args)?;
                 let results = b.lock().apply(ops, &Actor::Agent { run: None });
                 println!("  board_write → {}", serde_json::to_string(&results).unwrap_or_default());
                 Ok(json!({ "results": results }))
@@ -61,7 +61,7 @@ async fn run() -> anyhow::Result<()> {
     let mut opts = DetectOptions::new(&adapters_dir, std::env::current_dir()?);
     opts.skip_probe = true;
     let agent = detect(kind, &opts).await.spec.ok_or_else(|| anyhow::anyhow!("{} has no launchable adapter", kind.name()))?;
-    let cwd = std::env::temp_dir().join("divixi-draft-agent");
+    let cwd = std::env::temp_dir().join("divixi-design-agent");
     std::fs::create_dir_all(&cwd)?;
     let session = AgentSession::open(
         &agent,
@@ -76,7 +76,7 @@ async fn run() -> anyhow::Result<()> {
     let outline = board.lock().outline();
     let prompt = format!(
         "{}\n\n---\n\nRough this idea out with me: put the goal, two constraints and one open question on the board as tagged notes, and connect them to my note.\n\n[board]\n{outline}",
-        draft::preamble("en", "Family todo")
+        design::preamble("en", "Family todo")
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let print = tokio::spawn(async move {
@@ -112,6 +112,6 @@ async fn run() -> anyhow::Result<()> {
         agent_items
     );
     let ok = tags("goal") >= 1 && tags("constraint") >= 2 && tags("question") >= 1 && attached >= 1 && d.changes.len() == agent_items;
-    println!("{}", if ok { "DRAFT AGENT: OK" } else { "DRAFT AGENT: CHECK FAILED" });
+    println!("{}", if ok { "DESIGN AGENT: OK" } else { "DESIGN AGENT: CHECK FAILED" });
     Ok(())
 }

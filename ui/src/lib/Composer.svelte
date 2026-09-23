@@ -7,9 +7,7 @@
   import Popover from "./Popover.svelte";
   import { t } from "./i18n.svelte";
 
-  // A promoted draft's brief waits here for the human to send.
-  let draft = $state(store.composerSeed);
-  if (store.composerSeed) store.composerSeed = "";
+  let draft = $state("");
   let contextOpen = $state(false);
   let box = $state<HTMLTextAreaElement>();
   /** Highlighted row in the slash list. */
@@ -18,7 +16,7 @@
   function submit(e?: Event) {
     e?.preventDefault();
     const text = draft;
-    const something = text.trim() || store.attachments.length || (store.chatDraft && store.draftSelected.length);
+    const something = text.trim() || store.attachments.length || (store.chatArtifact && store.designSelected.length);
     if (!something || store.busy) return;
     draft = "";
     store.send(text);
@@ -50,7 +48,7 @@
   // Typing "/" is intent to talk to the conductor: with no list known yet,
   // open its session now so the commands (and the first reply) are ready.
   $effect(() => {
-    if (store.chatDraft) return;
+    if (store.chatArtifact) return;
     if (slashQuery !== null && store.slashCommands.length === 0 && !store.conductorState.open) void store.openConductor();
   });
   const slashWaiting = $derived(slashQuery !== null && slashMatches.length === 0 && store.conductorOpening === store.track);
@@ -137,8 +135,8 @@
 
   /** The "@word" right before the caret, or null. */
   const atToken = $derived.by(() => {
-    // A draft has no folder to search.
-    if (store.chatDraft) return null;
+    // An artifact has no folder to search.
+    if (store.chatArtifact) return null;
     const before = draft.slice(0, caret);
     const m = before.match(/(?:^|\s)@([^\s@]*)$/);
     return m ? { query: m[1].toLowerCase(), start: before.length - m[1].length - 1 } : null;
@@ -221,6 +219,18 @@
       grow();
     });
   }
+  async function attachDesign(id: string) {
+    menuOpen = false;
+    await store.attachDesign(id, {
+      goal: t("design.tag.goal"),
+      constraint: t("design.tag.constraint"),
+      question: t("design.tag.question"),
+      idea: t("design.tag.idea"),
+      note: t("design.notes"),
+    });
+    box?.focus();
+  }
+
   async function upload() {
     menuOpen = false;
     await store.pickAttachments();
@@ -244,7 +254,7 @@
     let unlisten: (() => void) | undefined;
     getCurrentWebview()
       .onDragDropEvent((e) => {
-        if (store.view !== "track" && store.view !== "draft") return;
+        if (store.view !== "track" && store.view !== "design") return;
         const p = e.payload;
         if (p.type === "enter" || p.type === "over") dropping = true;
         else if (p.type === "leave") dropping = false;
@@ -303,6 +313,19 @@
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4z" /><path d="M9 1.5v3h3M6 9h4M6 11.5h4" /></svg>
           <span>{t("composer.upload")}</span>
         </button>
+        {#if !store.chatArtifact}
+          <!-- A design goes to the conductor as its brief and, with ink, a picture of its board. -->
+          <div class="rule"></div>
+          <div class="mlab-sm mhead">{t("composer.attachDesign")}</div>
+          {#each store.designs.slice(0, 6) as d (d.id)}
+            <button type="button" class="mitem design" role="menuitem" onclick={() => attachDesign(d.id)} style="--bar: {d.color || 'transparent'}">
+              <span class="mono mkey">▦</span>
+              <span class="mbody"><span class="mtitle">{d.title}</span>{#if d.tags.length}<span class="mdesc">{d.tags.join(" · ")}</span>{/if}</span>
+            </button>
+          {:else}
+            <div class="mono mnone">{t("composer.noDesigns")}</div>
+          {/each}
+        {/if}
         <div class="rule"></div>
         <button type="button" class="mitem" role="menuitem" onclick={() => insertAtCaret("/")}>
           <span class="mono mkey">/</span>
@@ -376,7 +399,7 @@
         bind:value={draft}
         rows="1"
         disabled={store.busy}
-        placeholder={store.busy ? t("composer.busy") : store.chatDraft ? t("draft.placeholder") : t("composer.placeholder")}
+        placeholder={store.busy ? t("composer.busy") : store.chatArtifact ? t("design.placeholder") : t("composer.placeholder")}
         aria-label={t("composer.placeholder")}
         onkeydown={onKey}
         oninput={() => {
@@ -400,9 +423,9 @@
   <div class="status">
     <AgentPicker />
 
-    {#if store.chatDraft}
-      {#if store.draftSelected.length}
-        <span class="chip static mono">{t("draft.withSelected", { n: store.draftSelected.length })}</span>
+    {#if store.chatArtifact}
+      {#if store.designSelected.length}
+        <span class="chip static mono">{t("design.withSelected", { n: store.designSelected.length })}</span>
       {/if}
     {:else}
       <span class="chip static" title={store.currentTrack?.cwd}>
@@ -554,6 +577,20 @@
     border: 0;
     text-align: left;
     color: var(--txt);
+  }
+
+  .mhead {
+    padding: 2px 8px 6px;
+  }
+
+  .mitem.design {
+    box-shadow: inset 2px 0 0 var(--bar);
+  }
+
+  .mnone {
+    padding: 4px 8px 8px;
+    font-size: 11px;
+    color: var(--lab);
   }
 
   .mkey {

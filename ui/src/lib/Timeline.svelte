@@ -50,7 +50,7 @@
 
   /** Decisions sit under the conductor turn that asked; the rest (asked
    *  by a run no longer here) go at the end. */
-  /** The human and the conductor, or the human and a draft's agent. */
+  /** The human and the conductor, or the human and an artifact's agent. */
   const conductorRuns = $derived(store.chatRuns);
   const decisionsByRun = $derived.by(() => {
     const byRun: Record<string, Decision[]> = {};
@@ -83,7 +83,7 @@
     <div class="empty">
       <div class="emptymark"><Mark size={56} /></div>
       <div class="mlab">{t("timeline.empty")}</div>
-      <p class="serif">{store.chatDraft ? t("draft.chatEmpty") : t("timeline.emptyHint")}</p>
+      <p class="serif">{store.chatArtifact ? t("design.chatEmpty") : t("timeline.emptyHint")}</p>
     </div>
   {/if}
 
@@ -116,7 +116,7 @@
     {/if}
     <div class="conductor" class:live={run.status === "connecting" || run.status === "running"}>
       <div class="chead">
-        <span class="mlab">{store.chatDraft ? t("draft.agentLabel") : t("timeline.conductor")}</span>
+        <span class="mlab">{store.chatArtifact ? t("design.agentLabel") : t("timeline.conductor")}</span>
         <span class="mono meta">{agentLabel(run.agent)}</span>
         {#if run.status === "connecting" || run.status === "running"}
           <Working />

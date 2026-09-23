@@ -1,13 +1,12 @@
 <script lang="ts">
-  import type { Snippet } from "svelte";
   import { TRACK_COLORS } from "./store.svelte";
   import { t } from "./i18n.svelte";
 
   /**
-   * The right-click menu of a list row (a track, a draft): rename, tags,
-   * colour, delete — after Kiro Crew's session menu. A fixed sheet at the
-   * pointer, kept inside the window. `top` and `middle` hold what only one
-   * kind of row has (a track's session, its settings).
+   * The right-click menu of an artifact in its list (a design; knowledge
+   * later): rename, tags, colour, delete. The artifacts' own menu, apart
+   * from the tracks column's: a fixed sheet at the pointer, kept inside the
+   * window, closed by a click elsewhere or Escape.
    */
   let {
     x,
@@ -22,8 +21,6 @@
     ontags,
     oncolor,
     ondelete,
-    top,
-    middle,
   }: {
     x: number;
     y: number;
@@ -39,8 +36,6 @@
     oncolor: (color: string) => void | Promise<void>;
     /** Resolves to why it was refused, or "" when it is gone. */
     ondelete: () => Promise<string>;
-    top?: Snippet;
-    middle?: Snippet;
   } = $props();
 
   let mode = $state<"" | "rename" | "confirm">("");
@@ -113,13 +108,8 @@
       </div>
     </form>
   {:else}
-    {#if top}
-      {@render top()}
-      <div class="rule"></div>
-    {/if}
     <button class="item" role="menuitem" onclick={startRename}>{t("track.rename")}</button>
     <button class="item" role="menuitem" onclick={() => { ontags(); onclose(); }}>{t("track.tags")}</button>
-    {@render middle?.()}
     <div class="rule"></div>
     <div class="colors" role="group" aria-label={t("track.color")}>
       <button class="sw none" class:on={!color} title={t("track.noColor")} onclick={() => pick("")}></button>
@@ -153,8 +143,7 @@
     padding: 4px 0;
   }
 
-  /* Rows a caller adds through `top` / `middle` wear the same look. */
-  .menu :global(.item) {
+  .item {
     width: 100%;
     height: 30px;
     display: flex;
@@ -167,16 +156,16 @@
     color: var(--dim);
   }
 
-  .menu :global(.item:hover) {
+  .item:hover {
     color: var(--hi);
     background: var(--sel);
   }
 
-  .menu :global(.item.danger) {
+  .item.danger {
     color: var(--acct);
   }
 
-  .menu :global(.item:disabled) {
+  .item:disabled {
     color: var(--lab);
     cursor: default;
   }

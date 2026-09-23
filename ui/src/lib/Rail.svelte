@@ -22,14 +22,15 @@
       label: "rail.tracks",
       go: () => {
         // Second click on the active item folds the list away.
-        if (store.view !== "settings" && store.view !== "draft" && store.trackListOpen) store.setTrackList(false);
+        if (store.view !== "settings" && store.view !== "design" && store.trackListOpen) store.setTrackList(false);
         else {
           store.view = store.currentTrack ? "track" : "new-track";
           store.setTrackList(true);
         }
       },
     },
-    { id: "drafts", icon: "draft", label: "rail.drafts", go: () => void store.showDrafts() },
+    { id: "design", icon: "draft", label: "rail.design", go: () => void store.showDesigns() },
+    { id: "knowledge", icon: "files", label: "rail.knowledge", soon: true },
     { id: "wrapup", icon: "wrapup", label: "rail.wrapup", soon: true },
   ];
 
@@ -41,8 +42,8 @@
   const collapsed = $derived(store.railCollapsed);
 
   function active(item: Item): boolean {
-    if (item.id === "tracks") return store.view !== "settings" && store.view !== "draft";
-    if (item.id === "drafts") return store.view === "draft";
+    if (item.id === "tracks") return store.view !== "settings" && store.view !== "design";
+    if (item.id === "design") return store.view === "design";
     if (item.id === "settings") return store.view === "settings";
     if (item.id === "terminal") return store.termOpen;
     return false;
@@ -50,7 +51,7 @@
 
   function badge(item: Item): string {
     if (item.id === "tracks") return store.tracks.length ? String(store.tracks.length) : "";
-    if (item.id === "drafts") return store.drafts.length ? String(store.drafts.length) : "";
+    if (item.id === "design") return store.designs.length ? String(store.designs.length) : "";
     return "";
   }
 </script>

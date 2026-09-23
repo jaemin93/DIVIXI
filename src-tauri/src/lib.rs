@@ -11,13 +11,14 @@ use std::time::Duration;
 use orchestra_acp::{AgentSpec, ConfigOptionInfo};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
 use orchestra_core::{LaneEnvelope, LaneEvent};
-use orchestra_store::{Decision, DraftInfo, DraftPatch, RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
+use orchestra_store::{ArtifactInfo, ArtifactPatch, Decision, RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 mod conductor;
-pub mod draft;
+pub mod artifact;
+pub mod design;
 mod metrics;
 mod terminal;
 mod workspace;
@@ -44,10 +45,12 @@ pub struct AppState {
     adapters_dir: PathBuf,
     /// Where pasted images are kept so they can be attached by path.
     attachments_dir: PathBuf,
-    /// One working folder per draft, for its agent.
-    pub(crate) drafts_dir: PathBuf,
-    /// Draft boards and their agents.
-    pub(crate) drafts: draft::Drafts,
+    /// One working folder per artifact, for its agent.
+    pub(crate) artifacts_dir: PathBuf,
+    /// Artifacts' agent sessions.
+    pub(crate) artifacts: artifact::Artifacts,
+    /// Designs' boards, cached from the store.
+    pub(crate) boards: design::Boards,
     /// Last detection result, mirrored from the store for quick lookups.
     agents: Mutex<Option<Vec<AgentStatus>>>,
     /// Conductor and lane sessions, across tracks.
@@ -246,28 +249,37 @@ async fn conductor_prompt(
     conductor::conductor_turn(app, track, prompt, agent.filter(|a| !a.is_empty()), lang.unwrap_or_default(), files).await
 }
 
-// ----- drafts -----
+// ----- artifacts: designs (and knowledge, later) -----
 
-/// Every draft, most recently touched first.
+/// Artifacts of one kind, or of every kind, most recently touched first.
 #[tauri::command(async)]
-fn list_drafts(state: State<'_, AppState>) -> Result<Vec<DraftInfo>, String> {
-    state.store.drafts().map_err(|e| e.to_string())
+fn list_artifacts(state: State<'_, AppState>, kind: Option<String>) -> Result<Vec<ArtifactInfo>, String> {
+    state.store.artifacts(kind.as_deref()).map_err(|e| e.to_string())
 }
 
-/// Start an empty draft on an agent.
+/// Start an empty artifact of a kind, on an agent when the kind has one.
 #[tauri::command(async)]
-fn create_draft(state: State<'_, AppState>, title: String, agent: String) -> Result<DraftInfo, String> {
+fn create_artifact(state: State<'_, AppState>, kind: String, title: String, agent: Option<String>) -> Result<ArtifactInfo, String> {
+    if !artifact::KINDS.contains(&kind.as_str()) {
+        return Err(format!("unknown artifact kind {kind}"));
+    }
+    let agent = agent.unwrap_or_default();
+    if !agent.is_empty() {
+        state.spec_for(&agent)?;
+    }
     let title = title.trim();
-    let title = if title.is_empty() { "Draft" } else { title };
-    state.spec_for(&agent)?;
-    let doc = serde_json::to_string(&draft::Doc::default()).map_err(|e| e.to_string())?;
-    state.store.create_draft(title, &agent, &doc).map_err(|e| e.to_string())
+    let title = if title.is_empty() { "Untitled" } else { title };
+    let body = match kind.as_str() {
+        design::KIND => serde_json::to_string(&design::Doc::default()).map_err(|e| e.to_string())?,
+        _ => "{}".to_string(),
+    };
+    state.store.create_artifact(&kind, title, &agent, &body).map_err(|e| e.to_string())
 }
 
-/// Rename a draft, move it to another agent, change its options (from the
-/// next message), its colour or its tags.
+/// Rename an artifact, move it to another agent, change its options (from
+/// the next message), its colour or its tags.
 #[tauri::command(async)]
-fn update_draft(
+fn update_artifact(
     state: State<'_, AppState>,
     id: String,
     title: Option<String>,
@@ -275,72 +287,52 @@ fn update_draft(
     config: Option<std::collections::BTreeMap<String, String>>,
     color: Option<String>,
     tags: Option<Vec<String>>,
-) -> Result<DraftInfo, String> {
+) -> Result<ArtifactInfo, String> {
     if let Some(a) = &agent {
         state.spec_for(a)?;
     }
-    // The same rules (and tidying) as a track's colour and tags.
+    // The same rules (and tidying) as a track's colour and tags: the tags
+    // are one vocabulary.
     let mut look = TrackPatch { color, tags, ..Default::default() };
     check_patch(&mut look)?;
     let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
     state
         .store
-        .update_draft(&id, &DraftPatch { doc: None, title, agent, config, color: look.color, tags: look.tags })
+        .update_artifact(&id, &ArtifactPatch { body: None, title, agent, config, color: look.color, tags: look.tags })
         .map_err(|e| e.to_string())
 }
 
-/// Whether a draft's agent session is open, and busy.
+/// Delete an artifact with its body, conversation and agent session.
+#[tauri::command]
+async fn delete_artifact(app: AppHandle, id: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if state.artifacts.is_busy(&id) {
+        return Err("its agent is still responding; wait for it to finish".to_string());
+    }
+    state.artifacts.close(&id).await;
+    state.boards.forget(&id);
+    state.store.delete_artifact(&id).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(state.artifacts_dir.join(&id));
+    Ok(())
+}
+
+/// Whether an artifact's agent session is open, and busy.
 #[derive(serde::Serialize)]
-struct DraftSession {
+struct ArtifactSession {
     open: bool,
     busy: bool,
 }
 
 #[tauri::command]
-async fn draft_state(app: AppHandle, id: String) -> Result<DraftSession, String> {
+async fn artifact_state(app: AppHandle, id: String) -> Result<ArtifactSession, String> {
     let state = app.state::<AppState>();
-    Ok(DraftSession { open: draft::is_open(&state, &id).await, busy: state.drafts.is_busy(&id) })
+    Ok(ArtifactSession { open: state.artifacts.is_open(&id).await, busy: state.artifacts.is_busy(&id) })
 }
 
-/// Delete a draft, its board, its conversation and its agent session.
+/// One message to an artifact's agent (for a design: a picture of the board
+/// when it has ink, and the items picked on it).
 #[tauri::command]
-async fn delete_draft(app: AppHandle, id: String) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    if state.drafts.is_busy(&id) {
-        return Err("the draft's agent is still responding; wait for it to finish".to_string());
-    }
-    state.drafts.close(&id).await;
-    state.store.delete_draft(&id).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_dir_all(state.drafts_dir.join(&id));
-    Ok(())
-}
-
-/// A draft's board as it is now.
-#[tauri::command(async)]
-fn draft_doc(state: State<'_, AppState>, id: String) -> Result<draft::Doc, String> {
-    draft::doc(&state, &id)
-}
-
-/// The human edits the board.
-#[tauri::command(async)]
-fn draft_apply(app: AppHandle, id: String, ops: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>, String> {
-    let ops: Vec<draft::Op> = ops
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<Result<_, _>>()
-        .map_err(|e| format!("bad edit: {e}"))?;
-    draft::apply(&app, &id, ops, draft::Actor::Human)
-}
-
-/// Keep or revert the agent's suggestions.
-#[tauri::command(async)]
-fn draft_review(app: AppHandle, id: String, changes: Vec<u64>, keep: bool) -> Result<(), String> {
-    draft::review(&app, &id, &changes, keep)
-}
-
-/// One message to the draft's agent, with a picture of the board when it has ink.
-#[tauri::command]
-async fn draft_prompt(
+async fn artifact_prompt(
     app: AppHandle,
     id: String,
     text: String,
@@ -350,13 +342,45 @@ async fn draft_prompt(
     files: Option<Vec<String>>,
 ) -> Result<String, String> {
     let files = check_attachments(files.unwrap_or_default())?;
-    draft::turn(app, id, text, image, selected.unwrap_or_default(), lang.unwrap_or_default(), files).await
+    artifact::turn(app, id, text, image, selected.unwrap_or_default(), lang.unwrap_or_default(), files).await
 }
 
-/// Stop the draft agent's turn.
+/// Stop an artifact agent's turn.
 #[tauri::command]
-async fn draft_cancel(app: AppHandle, id: String) {
-    draft::cancel(&app, &id).await;
+async fn artifact_cancel(app: AppHandle, id: String) {
+    artifact::cancel(&app, &id).await;
+}
+
+/// Write an artifact out as files to attach to a track's message.
+#[tauri::command(async)]
+fn export_artifact(state: State<'_, AppState>, id: String, markdown: String, image: Option<String>) -> Result<Vec<String>, String> {
+    Ok(artifact::export(&state, &id, &markdown, image.as_deref())?
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect())
+}
+
+/// A design's board as it is now.
+#[tauri::command(async)]
+fn design_doc(state: State<'_, AppState>, id: String) -> Result<design::Doc, String> {
+    design::doc(&state, &id)
+}
+
+/// The human edits a design's board.
+#[tauri::command(async)]
+fn design_apply(app: AppHandle, id: String, ops: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>, String> {
+    let ops: Vec<design::Op> = ops
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("bad edit: {e}"))?;
+    design::apply(&app, &id, ops, design::Actor::Human)
+}
+
+/// Keep or revert the design agent's suggestions.
+#[tauri::command(async)]
+fn design_review(app: AppHandle, id: String, changes: Vec<u64>, keep: bool) -> Result<(), String> {
+    design::review(&app, &id, &changes, keep)
 }
 
 /// How many files one message may carry.
@@ -863,16 +887,17 @@ pub fn run() {
             list_runs,
             run_events,
             list_decisions,
-            list_drafts,
-            create_draft,
-            update_draft,
-            delete_draft,
-            draft_doc,
-            draft_apply,
-            draft_review,
-            draft_prompt,
-            draft_cancel,
-            draft_state,
+            list_artifacts,
+            create_artifact,
+            update_artifact,
+            delete_artifact,
+            artifact_state,
+            artifact_prompt,
+            artifact_cancel,
+            export_artifact,
+            design_doc,
+            design_apply,
+            design_review,
             file_stats,
             pick_files,
             save_attachment,
@@ -914,14 +939,30 @@ pub fn run() {
             let (store, db_path) = open_store(&data_dir)?;
             let adapters_dir = data_dir.join("adapters");
             let attachments_dir = data_dir.join("attachments");
-            let drafts_dir = data_dir.join("drafts");
+            let artifacts_dir = data_dir.join("artifacts");
+            // Drafts became artifacts: their agents' folders move along
+            // (dr001 → ar001), as the store moved their records.
+            let old = data_dir.join("drafts");
+            if old.is_dir() && !artifacts_dir.exists() {
+                if let Err(err) = std::fs::rename(&old, &artifacts_dir) {
+                    tracing::warn!(%err, "could not move the drafts folder");
+                } else if let Ok(entries) = std::fs::read_dir(&artifacts_dir) {
+                    for e in entries.flatten() {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        if let Some(n) = name.strip_prefix("dr") {
+                            let _ = std::fs::rename(e.path(), artifacts_dir.join(format!("ar{n}")));
+                        }
+                    }
+                }
+            }
             app.manage(AppState {
                 store,
                 db_path,
                 adapters_dir,
                 attachments_dir,
-                drafts_dir,
-                drafts: draft::Drafts::default(),
+                artifacts_dir,
+                artifacts: artifact::Artifacts::default(),
+                boards: design::Boards::default(),
                 agents: Mutex::new(None),
                 sessions: conductor::Sessions::default(),
                 meter: metrics::Meter::default(),

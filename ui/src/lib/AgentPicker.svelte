@@ -1,8 +1,8 @@
 <script lang="ts">
   import { store, agentLabel, laneAgentOf, laneConfigOf, type Role } from "./store.svelte";
 
-  /** In a draft there is one agent, the draft's. */
-  const draftMode = $derived(store.chatDraft);
+  /** In an artifact there is one agent, the artifact's. */
+  const artifactMode = $derived(store.chatArtifact);
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
   import { t } from "./i18n.svelte";
@@ -42,7 +42,7 @@
 
   /** What the chip says: the conductor, and the workers when they differ. */
   const summary = $derived.by(() => {
-    const d = draftMode ? store.currentDraft : undefined;
+    const d = artifactMode ? store.currentArtifact : undefined;
     if (d) {
       const m = store.optionsOf(d.agent).find((o) => o.category === "model");
       return { conductor: agentLabel(d.agent), model: m ? store.choiceName(m, store.effective(d.agent, d.config, m)) : "", workers: "" };
@@ -83,9 +83,9 @@
       <!-- The conductor session: grey closed, green open, pulsing while it opens or answers. -->
       <span
         class="sess"
-        class:pulse={draftMode ? store.busy : store.conductorOpening === store.track || store.conductorState.busy}
-        style="background: {(draftMode ? store.draftSession.open : store.conductorState.open || store.conductorOpening === store.track) ? 'var(--ok)' : 'var(--idle)'}"
-        title={(draftMode ? store.draftSession.open : store.conductorState.open) ? t("picker.sessionOpen") : t("picker.sessionClosed")}
+        class:pulse={artifactMode ? store.busy : store.conductorOpening === store.track || store.conductorState.busy}
+        style="background: {(artifactMode ? store.artifactSession.open : store.conductorState.open || store.conductorOpening === store.track) ? 'var(--ok)' : 'var(--idle)'}"
+        title={(artifactMode ? store.artifactSession.open : store.conductorState.open) ? t("picker.sessionOpen") : t("picker.sessionClosed")}
       ></span>
       <Icon name="bot" size={14} />
       <!-- One line, cut with an ellipsis when the column is narrow; never wrapped. -->
@@ -96,8 +96,8 @@
   {/snippet}
 
   <div class="head">
-    {#if draftMode}
-      <span class="mono role on">{t("draft.agentLabel")}</span>
+    {#if artifactMode}
+      <span class="mono role on">{t("design.agentLabel")}</span>
     {:else}
     <div class="roles" role="tablist">
       <button class="role mono" class:on={role === "conductor"} role="tab" aria-selected={role === "conductor"} onclick={() => (role = "conductor")}>{t("picker.conductor")}</button>
@@ -156,8 +156,8 @@
   </div>
 
   <div class="foot mono">
-    {#if draftMode}
-      <span class="dim">{store.draftSession.open ? t("picker.sessionOpen") : t("draft.sessionNext")}</span>
+    {#if artifactMode}
+      <span class="dim">{store.artifactSession.open ? t("picker.sessionOpen") : t("design.sessionNext")}</span>
     {:else}
     <span class="dim">{store.conductorState.open ? t("picker.sessionOpen") : t("picker.sessionClosed")}</span>
     {#if store.conductorState.open}

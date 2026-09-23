@@ -4,21 +4,20 @@
   import { cubicOut } from "svelte/easing";
   import SplitHandle from "./SplitHandle.svelte";
   import Icon from "./Icon.svelte";
-  import ItemMenu from "./ItemMenu.svelte";
+  import ArtifactMenu from "./ArtifactMenu.svelte";
   import { whenFull } from "./time";
   import Board from "./Board.svelte";
   import Timeline from "./Timeline.svelte";
   import Composer from "./Composer.svelte";
-  import { briefOf } from "./ink";
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
 
   /**
-   * A draft: the list of drafts, the board, and under it the conversation
-   * with the draft's agent — the same timeline and composer as a track's
+   * A design (an artifact): the list of designs, the board, and beside it
+   * the conversation with its agent — the same timeline and composer as a track's
    * conductor (files, agent and model, context, stop). The header counts
-   * what the draft has become (goals, constraints, open questions) and
-   * carries it into a new track once it has a goal.
+   * what the design has become (goals, constraints, open questions); a
+   * design is attached to a track's conductor from the track's composer.
    */
   let renaming = $state(false);
 
@@ -29,13 +28,13 @@
   let newTitle = $state("");
   /** The right-click menu: the same as a track's, less its session. */
   let menu = $state<{ id: string; x: number; y: number } | null>(null);
-  const menuDraft = $derived.by(() => {
+  const menuArtifact = $derived.by(() => {
     const m = menu;
-    return m ? store.drafts.find((x) => x.id === m.id) : undefined;
+    return m ? store.designs.find((x) => x.id === m.id) : undefined;
   });
 
-  const d = $derived(store.currentDraft);
-  const notes = $derived(store.draftDoc.nodes.filter((n) => n.kind === "note"));
+  const d = $derived(store.currentArtifact);
+  const notes = $derived(store.designDoc.nodes.filter((n) => n.kind === "note"));
   const count = (tag: string) => notes.filter((n) => n.tag === tag && n.text.trim()).length;
   const goals = $derived(count("goal"));
   const constraints = $derived(count("constraint"));
@@ -43,7 +42,7 @@
 
   async function create(e: Event) {
     e.preventDefault();
-    await store.createDraft(newTitle.trim() || t("draft.untitled"));
+    await store.createDesign(newTitle.trim() || t("design.untitled"));
     newTitle = "";
   }
 
@@ -55,46 +54,34 @@
 
   async function commitRename() {
     renaming = false;
-    if (d && titleDraft.trim() && titleDraft.trim() !== d.title) await store.updateDraft(d.id, { title: titleDraft.trim() });
+    if (d && titleDraft.trim() && titleDraft.trim() !== d.title) await store.updateArtifact(d.id, { title: titleDraft.trim() });
   }
 
-  function promote() {
-    if (!d) return;
-    const labels = {
-      goal: t("draft.tag.goal"),
-      constraint: t("draft.tag.constraint"),
-      question: t("draft.tag.question"),
-      idea: t("draft.tag.idea"),
-      note: t("draft.notes"),
-    };
-    const goal = notes.find((n) => n.tag === "goal" && n.text.trim())?.text.trim().split("\n")[0] ?? "";
-    store.promoteDraft(`${t("draft.briefLead")}\n\n${briefOf(d.title, store.draftDoc, labels)}`, goal);
-  }
 </script>
 
-<div class="drafts">
-  <!-- Every draft, most recently touched first; folds like the tracks column. -->
-  {#if store.draftListOpen}
+<div class="designs">
+  <!-- Every design, most recently touched first; folds like the tracks column. -->
+  {#if store.designListOpen}
   <div class="sidebox" transition:slide={side}>
   <aside class="list">
     <!-- As the tracks column: the title, then folding the column away. -->
     <div class="head">
-      <span class="mlab">{t("draft.title")}</span>
+      <span class="mlab">{t("design.title")}</span>
       <span class="grow"></span>
-      <button class="x" onclick={() => store.setDraftList(false)} aria-label={t("tracks.close")} title={t("tracks.close")}>
+      <button class="x" onclick={() => store.setDesignList(false)} aria-label={t("tracks.close")} title={t("tracks.close")}>
         <Icon name="collapse" />
       </button>
     </div>
     <form class="new" onsubmit={create}>
-      <input type="text" bind:value={newTitle} placeholder={t("draft.newPh")} aria-label={t("draft.new")} maxlength="80" />
-      <button class="btn" type="submit" title={t("draft.new")} aria-label={t("draft.new")}>+</button>
+      <input type="text" bind:value={newTitle} placeholder={t("design.newPh")} aria-label={t("design.new")} maxlength="80" />
+      <button class="btn" type="submit" title={t("design.new")} aria-label={t("design.new")}>+</button>
     </form>
     <div class="rows">
-      {#each store.drafts as item (item.id)}
+      {#each store.designs as item (item.id)}
         <!-- Like a track's row: tags and time above, the name below, its colour on the left. -->
         <div
           class="row"
-          class:on={item.id === store.draft}
+          class:on={item.id === store.artifact}
           class:menued={menu?.id === item.id}
           style="border-left-color: {item.color || 'transparent'}"
           oncontextmenu={(e) => {
@@ -103,7 +90,7 @@
           }}
           role="presentation"
         >
-          <button class="pick" onclick={() => store.openDraft(item.id)}>
+          <button class="pick" onclick={() => store.openArtifact(item.id)}>
             <span class="top">
               <span class="taglist" title={item.tags.join(", ")}>
                 {#each item.tags as tag (tag)}
@@ -116,36 +103,36 @@
           </button>
         </div>
       {/each}
-      {#if !store.drafts.length}
-        <p class="none">{t("draft.none")}</p>
+      {#if !store.designs.length}
+        <p class="none">{t("design.none")}</p>
       {/if}
     </div>
   </aside>
   </div>
   {/if}
 
-  {#if menu && menuDraft}
-    {@const md = menuDraft}
-    <ItemMenu
+  {#if menu && menuArtifact}
+    {@const md = menuArtifact}
+    <ArtifactMenu
       x={menu.x}
       y={menu.y}
       name={md.title}
       color={md.color}
-      busy={store.draft === md.id && store.draftBusy}
-      busyNote={t("draft.busyNote")}
-      deleteNote={t("draft.deleteNote")}
+      busy={store.artifact === md.id && store.artifactBusy}
+      busyNote={t("design.busyNote")}
+      deleteNote={t("design.deleteNote")}
       onclose={() => (menu = null)}
-      onrename={(title) => store.updateDraft(md.id, { title })}
+      onrename={(title) => store.updateArtifact(md.id, { title })}
       ontags={() => (store.tagDialog = md.id)}
-      oncolor={(color) => store.updateDraft(md.id, { color })}
-      ondelete={() => store.deleteDraft(md.id)}
+      oncolor={(color) => store.updateArtifact(md.id, { color })}
+      ondelete={() => store.deleteArtifact(md.id)}
     />
   {/if}
 
   {#if d}
     <section class="main">
       <header>
-        <div class="mlab">DRAFT / {d.id}</div>
+        <div class="mlab">DESIGN / {d.id}</div>
         <div class="titlerow">
           {#if renaming}
             <!-- svelte-ignore a11y_autofocus -->
@@ -157,42 +144,39 @@
               autofocus
             />
           {:else}
-            <button class="serif title" ondblclick={rename} title={t("draft.renameHint")}>{d.title}</button>
+            <button class="serif title" ondblclick={rename} title={t("design.renameHint")}>{d.title}</button>
           {/if}
           <span class="grow"></span>
-          <!-- What the draft has become. -->
-          <div class="meter mono" title={t("draft.meterHint")}>
-            <span><b style="color: #46c46a">{goals}</b> {t("draft.tag.goal")}</span>
-            <span><b style="color: var(--acct)">{constraints}</b> {t("draft.tag.constraint")}</span>
-            <span><b style="color: var(--warn)">{questions}</b> {t("draft.tag.question")}</span>
+          <!-- What the design has become. -->
+          <div class="meter mono" title={t("design.meterHint")}>
+            <span><b style="color: #46c46a">{goals}</b> {t("design.tag.goal")}</span>
+            <span><b style="color: var(--acct)">{constraints}</b> {t("design.tag.constraint")}</span>
+            <span><b style="color: var(--warn)">{questions}</b> {t("design.tag.question")}</span>
           </div>
-          <button class="btn btn-acc" disabled={goals === 0} onclick={promote} title={goals === 0 ? t("draft.promoteNeedsGoal") : t("draft.promoteHint")}>
-            {t("draft.promote")}
-          </button>
         </div>
       </header>
       <div class="work">
         <div class="boardwrap">
-          <Board bind:selected={store.draftSelected} />
-          {#if store.draftDoc.changes.length}
+          <Board bind:selected={store.designSelected} />
+          {#if store.designDoc.changes.length}
             <!-- The agent's board changes, all at once; one by one on the items. -->
             <div class="review">
-              <span class="mono">{t("draft.pending", { n: store.draftDoc.changes.length })}</span>
-              <button type="button" class="btn sm" onclick={() => store.draftReview(store.draftDoc.changes.map((c) => c.id), false)}>{t("draft.revertAll")}</button>
-              <button type="button" class="btn sm keep" onclick={() => store.draftReview(store.draftDoc.changes.map((c) => c.id), true)}>{t("draft.keepAll")}</button>
+              <span class="mono">{t("design.pending", { n: store.designDoc.changes.length })}</span>
+              <button type="button" class="btn sm" onclick={() => store.designReview(store.designDoc.changes.map((c) => c.id), false)}>{t("design.revertAll")}</button>
+              <button type="button" class="btn sm keep" onclick={() => store.designReview(store.designDoc.changes.map((c) => c.id), true)}>{t("design.keepAll")}</button>
             </div>
           {/if}
         </div>
         <!-- The conversation beside the board, as on a track. -->
-        <div class="talk" style="width: {store.draftChatWidth}px">
+        <div class="talk" style="width: {store.artifactChatWidth}px">
           <SplitHandle
             edge="left"
-            width={store.draftChatWidth}
+            width={store.artifactChatWidth}
             min={340}
             max={760}
             reset={460}
-            label={t("draft.chatResize")}
-            onchange={(px, persist) => store.setDraftChatWidth(px, persist)}
+            label={t("design.chatResize")}
+            onchange={(px, persist) => store.setArtifactChatWidth(px, persist)}
           />
           <Timeline />
           <Composer />
@@ -201,14 +185,14 @@
     </section>
   {:else}
     <section class="main blank">
-      <p class="serif">{t("draft.startTitle")}</p>
-      <p class="hint">{t("draft.startHint")}</p>
+      <p class="serif">{t("design.startTitle")}</p>
+      <p class="hint">{t("design.startHint")}</p>
     </section>
   {/if}
 </div>
 
 <style>
-  .drafts {
+  .designs {
     flex: 1;
     min-width: 0;
     display: flex;
@@ -285,7 +269,7 @@
   }
 
   /* Two lines, as a track's row: tags and time above, the name below. The
-     left bar is the draft's colour, only when one is chosen; the open one is
+     left bar is the design's colour, only when one is chosen; the open one is
      told by its shade. */
   .row {
     min-height: 52px;

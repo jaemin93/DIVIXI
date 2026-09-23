@@ -1,5 +1,5 @@
 /**
- * Ink and board pictures for drafts.
+ * Ink and board pictures for designs.
  *
  * Strokes are drawn with perfect-freehand (as Huabu does): points with
  * pressure become an outline polygon, filled. The agent never gets vectors;
@@ -7,7 +7,7 @@
  * PNG with each message that has ink on the board.
  */
 import { getStroke } from "perfect-freehand";
-import type { DraftDoc, DraftNode, Stroke } from "./store.svelte";
+import type { DesignDoc, DesignNode, Stroke } from "./store.svelte";
 
 /** The outline of one stroke as an SVG path, in the stroke's own units. */
 export function strokePath(stroke: Stroke): string {
@@ -51,7 +51,7 @@ export function strokesBox(strokes: Stroke[]): Box {
 }
 
 /** A sketch's strokes in board units. */
-export function worldStrokes(node: DraftNode): Stroke[] {
+export function worldStrokes(node: DesignNode): Stroke[] {
   return node.strokes.map((s) => ({ ...s, points: s.points.map(([x, y, p]) => [x + node.x, y + node.y, p] as [number, number, number]) }));
 }
 
@@ -93,7 +93,7 @@ export function edgeEnds(a: Box, b: Box): [number, number, number, number] {
  * ink. Paper background, notes as boxes with their text, strokes filled,
  * arrows as lines. Null when there is no ink: the outline says it all.
  */
-export function boardPng(doc: DraftDoc, maxSide = 1600): string | null {
+export function boardPng(doc: DesignDoc, maxSide = 1600): string | null {
   if (!doc.nodes.some((n) => n.kind === "sketch")) return null;
   const pad = 40;
   let minX = Infinity;
@@ -196,7 +196,7 @@ function wrap(ctx: CanvasRenderingContext2D, text: string, width: number): strin
 }
 
 /** The board as a brief for a new track's first message. */
-export function briefOf(title: string, doc: DraftDoc, labels: Record<string, string>): string {
+export function briefOf(title: string, doc: DesignDoc, labels: Record<string, string>): string {
   const notes = doc.nodes.filter((n) => n.kind === "note" && n.text.trim());
   const section = (tag: string) => notes.filter((n) => n.tag === tag).map((n) => `- ${n.text.trim().replace(/\n+/g, " ")}`);
   const parts = [`# ${title}`];

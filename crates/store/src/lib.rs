@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -117,6 +117,27 @@ const MIGRATIONS: &[&str] = &[
     // 8 -> 9: a colour and tags per draft, as tracks have.
     "ALTER TABLE drafts ADD COLUMN color TEXT NOT NULL DEFAULT '';
     ALTER TABLE drafts ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
+    // 9 -> 10: drafts become artifacts of kind 'design', the first kind of
+    // thing a human keeps beside tracks (knowledge comes next). Ids, the
+    // conversation's key and lane, and remembered sessions move with them.
+    "CREATE TABLE IF NOT EXISTS artifacts (
+        id         TEXT    PRIMARY KEY,
+        kind       TEXT    NOT NULL,
+        title      TEXT    NOT NULL,
+        agent      TEXT    NOT NULL DEFAULT '',
+        config     TEXT    NOT NULL DEFAULT '{}',
+        color      TEXT    NOT NULL DEFAULT '',
+        tags       TEXT    NOT NULL DEFAULT '[]',
+        body       TEXT    NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS artifacts_by_kind ON artifacts(kind, updated_at);
+    INSERT INTO artifacts(id, kind, title, agent, config, color, tags, body, created_at, updated_at)
+        SELECT 'ar' || substr(id, 3), 'design', title, agent, config, color, tags, doc, created_at, updated_at FROM drafts;
+    UPDATE runs SET track = 'artifact:ar' || substr(track, 9), lane = 'artifact' WHERE track LIKE 'draft:dr%';
+    UPDATE meta SET key = 'artifact_session:ar' || substr(key, 17) WHERE key LIKE 'draft_session:dr%';
+    DROP TABLE drafts;",
 ];
 
 const SCHEMA: &str = r#"
@@ -190,17 +211,19 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 CREATE INDEX IF NOT EXISTS decisions_by_track ON decisions(track, id);
 
-CREATE TABLE IF NOT EXISTS drafts (
+CREATE TABLE IF NOT EXISTS artifacts (
     id         TEXT    PRIMARY KEY,
+    kind       TEXT    NOT NULL,
     title      TEXT    NOT NULL,
-    agent      TEXT    NOT NULL,
-    doc        TEXT    NOT NULL DEFAULT '{}',
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
+    agent      TEXT    NOT NULL DEFAULT '',
     config     TEXT    NOT NULL DEFAULT '{}',
     color      TEXT    NOT NULL DEFAULT '',
-    tags       TEXT    NOT NULL DEFAULT '[]'
+    tags       TEXT    NOT NULL DEFAULT '[]',
+    body       TEXT    NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS artifacts_by_kind ON artifacts(kind, updated_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS runs_fts USING fts5(
     run_id UNINDEXED,
@@ -345,26 +368,31 @@ fn row_to_decision(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decision> {
     })
 }
 
-/// A draft: a sketch board and the agent working it out with the human.
-/// The board itself is JSON the app owns (`doc`); the store keeps it whole.
+/// An artifact: something the human keeps beside tracks and can attach to
+/// them — a design (a sketch board worked out with an agent), knowledge
+/// later. What is inside (`body`) is JSON the app owns per kind; the store
+/// keeps it whole.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DraftInfo {
+pub struct ArtifactInfo {
     pub id: String,
+    /// `design`, and more kinds to come.
+    pub kind: String,
     pub title: String,
+    /// The agent that works on it, when its kind has one.
     pub agent: String,
-    /// The agent's session options for this draft (mode, model, effort…).
+    /// That agent's session options (mode, model, effort…).
     pub config: BTreeMap<String, String>,
-    /// `#rrggbb` for the bar beside it in the list, or empty.
+    /// `#rrggbb` for the bar beside it in its list, or empty.
     pub color: String,
     pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-/// What a draft change may touch; `None` keeps a field.
+/// What an artifact change may touch; `None` keeps a field.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct DraftPatch {
-    pub doc: Option<String>,
+pub struct ArtifactPatch {
+    pub body: Option<String>,
     pub title: Option<String>,
     pub agent: Option<String>,
     pub config: Option<BTreeMap<String, String>>,
@@ -372,19 +400,19 @@ pub struct DraftPatch {
     pub tags: Option<Vec<String>>,
 }
 
-const DRAFT_SELECT: &str = "SELECT id, title, agent, config, created_at, updated_at, color, tags FROM drafts";
+const ARTIFACT_SELECT: &str = "SELECT id, kind, title, agent, config, color, tags, created_at, updated_at FROM artifacts";
 
-fn row_to_draft(r: &rusqlite::Row<'_>) -> rusqlite::Result<DraftInfo> {
-    let config: String = r.get(3)?;
-    Ok(DraftInfo {
+fn row_to_artifact(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactInfo> {
+    Ok(ArtifactInfo {
         id: r.get(0)?,
-        title: r.get(1)?,
-        agent: r.get(2)?,
-        config: serde_json::from_str(&config).unwrap_or_default(),
-        created_at: r.get(4)?,
-        updated_at: r.get(5)?,
-        color: r.get(6)?,
-        tags: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
+        kind: r.get(1)?,
+        title: r.get(2)?,
+        agent: r.get(3)?,
+        config: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
+        color: r.get(5)?,
+        tags: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
+        created_at: r.get(7)?,
+        updated_at: r.get(8)?,
     })
 }
 
@@ -622,112 +650,78 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Start a draft; ids are `dr001`, `dr002`, … in creation order.
-    pub fn create_draft(&self, title: &str, agent: &str, doc: &str) -> anyhow::Result<DraftInfo> {
-        let conn = self.conn.lock();
-        let next: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(CAST(substr(id, 3) AS INTEGER)), 0) + 1 FROM drafts",
-            [],
-            |r| r.get(0),
-        )?;
-        let id = format!("dr{next:03}");
-        let now = now_ms();
-        conn.execute(
-            "INSERT INTO drafts(id, title, agent, doc, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![id, title, agent, doc, now],
-        )?;
-        Ok(DraftInfo {
-            id,
-            title: title.to_string(),
-            agent: agent.to_string(),
-            config: BTreeMap::new(),
-            color: String::new(),
-            tags: Vec::new(),
-            created_at: now,
-            updated_at: now,
-        })
+    /// Keep a new artifact; ids are `ar001`, `ar002`, … in creation order
+    /// across kinds.
+    pub fn create_artifact(&self, kind: &str, title: &str, agent: &str, body: &str) -> anyhow::Result<ArtifactInfo> {
+        let id = {
+            let conn = self.conn.lock();
+            let next: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(CAST(substr(id, 3) AS INTEGER)), 0) + 1 FROM artifacts",
+                [],
+                |r| r.get(0),
+            )?;
+            let id = format!("ar{next:03}");
+            let now = now_ms();
+            conn.execute(
+                "INSERT INTO artifacts(id, kind, title, agent, body, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![id, kind, title, agent, body, now],
+            )?;
+            id
+        };
+        self.artifact(&id)?.map(|(a, _)| a).ok_or_else(|| anyhow::anyhow!("artifact {id} vanished"))
     }
 
-    /// Every draft, most recently touched first.
-    pub fn drafts(&self) -> anyhow::Result<Vec<DraftInfo>> {
+    /// Artifacts of one kind, or of every kind, most recently touched first.
+    pub fn artifacts(&self, kind: Option<&str>) -> anyhow::Result<Vec<ArtifactInfo>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(&format!("{DRAFT_SELECT} ORDER BY updated_at DESC, id DESC"))?;
-        let rows = stmt.query_map([], row_to_draft)?;
+        let mut stmt = conn.prepare(&format!("{ARTIFACT_SELECT} WHERE ?1 IS NULL OR kind = ?1 ORDER BY updated_at DESC, id DESC"))?;
+        let rows = stmt.query_map(params![kind], row_to_artifact)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// One draft and its board JSON.
-    pub fn draft(&self, id: &str) -> anyhow::Result<Option<(DraftInfo, String)>> {
+    /// One artifact and its body.
+    pub fn artifact(&self, id: &str) -> anyhow::Result<Option<(ArtifactInfo, String)>> {
         let conn = self.conn.lock();
         Ok(conn
             .query_row(
-                "SELECT id, title, agent, config, created_at, updated_at, color, tags, doc FROM drafts WHERE id = ?1",
+                "SELECT id, kind, title, agent, config, color, tags, created_at, updated_at, body FROM artifacts WHERE id = ?1",
                 params![id],
-                |r| Ok((row_to_draft(r)?, r.get::<_, String>(8)?)),
+                |r| Ok((row_to_artifact(r)?, r.get::<_, String>(9)?)),
             )
             .optional()?)
     }
 
-    /// Keep a draft's board; the title and agent change only when given.
-    pub fn save_draft(&self, id: &str, doc: Option<&str>, title: Option<&str>, agent: Option<&str>) -> anyhow::Result<DraftInfo> {
-        self.update_draft(
-            id,
-            &DraftPatch { doc: doc.map(str::to_owned), title: title.map(str::to_owned), agent: agent.map(str::to_owned), ..Default::default() },
-        )
-    }
-
-    /// As [`Store::save_draft`], and the session options when given.
-    pub fn save_draft_with(
-        &self,
-        id: &str,
-        doc: Option<&str>,
-        title: Option<&str>,
-        agent: Option<&str>,
-        config: Option<&BTreeMap<String, String>>,
-    ) -> anyhow::Result<DraftInfo> {
-        self.update_draft(
-            id,
-            &DraftPatch {
-                doc: doc.map(str::to_owned),
-                title: title.map(str::to_owned),
-                agent: agent.map(str::to_owned),
-                config: config.cloned(),
-                ..Default::default()
-            },
-        )
-    }
-
-    /// Change a draft's fields; `None` in the patch keeps a field.
-    pub fn update_draft(&self, id: &str, patch: &DraftPatch) -> anyhow::Result<DraftInfo> {
+    /// Change an artifact's fields; `None` in the patch keeps a field.
+    pub fn update_artifact(&self, id: &str, patch: &ArtifactPatch) -> anyhow::Result<ArtifactInfo> {
         let config = patch.config.as_ref().map(serde_json::to_string).transpose()?;
         let tags = patch.tags.as_ref().map(serde_json::to_string).transpose()?;
         {
             let conn = self.conn.lock();
             let changed = conn.execute(
-                "UPDATE drafts SET doc = COALESCE(?2, doc), title = COALESCE(?3, title), agent = COALESCE(?4, agent),
+                "UPDATE artifacts SET body = COALESCE(?2, body), title = COALESCE(?3, title), agent = COALESCE(?4, agent),
                  config = COALESCE(?6, config), color = COALESCE(?7, color), tags = COALESCE(?8, tags), updated_at = ?5
                  WHERE id = ?1",
-                params![id, patch.doc, patch.title, patch.agent, now_ms(), config, patch.color, tags],
+                params![id, patch.body, patch.title, patch.agent, now_ms(), config, patch.color, tags],
             )?;
             if changed == 0 {
-                anyhow::bail!("no draft {id}");
+                anyhow::bail!("no artifact {id}");
             }
         }
-        self.draft(id)?.map(|(d, _)| d).ok_or_else(|| anyhow::anyhow!("draft {id} vanished"))
+        self.artifact(id)?.map(|(a, _)| a).ok_or_else(|| anyhow::anyhow!("artifact {id} vanished"))
     }
 
-    /// Delete a draft with its conversation.
-    pub fn delete_draft(&self, id: &str) -> anyhow::Result<()> {
-        let key = format!("draft:{id}");
+    /// Delete an artifact with its conversation and remembered sessions.
+    pub fn delete_artifact(&self, id: &str) -> anyhow::Result<()> {
+        let key = format!("artifact:{id}");
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM runs_fts WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![key])?;
         tx.execute("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![key])?;
         tx.execute("DELETE FROM runs WHERE track = ?1", params![key])?;
-        tx.execute("DELETE FROM meta WHERE key LIKE 'draft_session:' || ?1 || ':%'", params![id])?;
-        let changed = tx.execute("DELETE FROM drafts WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM meta WHERE key LIKE 'artifact_session:' || ?1 || ':%'", params![id])?;
+        let changed = tx.execute("DELETE FROM artifacts WHERE id = ?1", params![id])?;
         if changed == 0 {
-            anyhow::bail!("no draft {id}");
+            anyhow::bail!("no artifact {id}");
         }
         tx.commit()?;
         Ok(())
@@ -1366,8 +1360,8 @@ mod tests {
                 .replace("CREATE INDEX IF NOT EXISTS runs_by_track ON runs(track, n);", "");
             conn.execute_batch(&v1).unwrap();
             conn.execute("DROP TABLE tracks", []).unwrap();
-            // Drafts came at v7; the migrations make them.
-            conn.execute("DROP TABLE drafts", []).unwrap();
+            // Artifacts came at v10 (drafts at v7); the migrations make them.
+            conn.execute("DROP TABLE artifacts", []).unwrap();
             conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')", []).unwrap();
             conn.execute(
                 "INSERT INTO runs(n, id, lane, prompt, cwd, status, started_at) VALUES (1, 't001', 'conductor', 'old', 'C:/old', 'done', 5)",
@@ -1435,30 +1429,72 @@ mod tests {
     }
 
     #[test]
-    fn drafts_are_kept_listed_and_deleted_with_their_runs() {
+    fn artifacts_are_kept_listed_by_kind_and_deleted_with_their_runs() {
         let store = Store::in_memory().unwrap();
-        let a = store.create_draft("wrap-up", "claude_code", "{}").unwrap();
-        let b = store.create_draft("second", "codex", "{}").unwrap();
-        assert_eq!((a.id.as_str(), b.id.as_str()), ("dr001", "dr002"));
+        let a = store.create_artifact("design", "wrap-up", "claude_code", "{}").unwrap();
+        let b = store.create_artifact("knowledge", "notes", "", "{}").unwrap();
+        assert_eq!((a.id.as_str(), b.id.as_str(), a.kind.as_str()), ("ar001", "ar002", "design"));
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let saved = store.save_draft(&a.id, Some("{\"v\":1}"), Some("renamed"), None).unwrap();
-        assert_eq!((saved.title.as_str(), saved.agent.as_str()), ("renamed", "claude_code"));
         let model: BTreeMap<String, String> = [("model".to_string(), "opus".to_string())].into();
-        let tuned = store.save_draft_with(&a.id, None, None, None, Some(&model)).unwrap();
-        assert_eq!(tuned.config, model);
-        assert_eq!(store.draft(&a.id).unwrap().unwrap().0.config, model);
-        let dressed = store
-            .update_draft(&a.id, &DraftPatch { color: Some("#7aa2f7".into()), tags: Some(vec!["ux".into()]), ..Default::default() })
+        let saved = store
+            .update_artifact(
+                &a.id,
+                &ArtifactPatch {
+                    body: Some("{\"v\":1}".into()),
+                    title: Some("renamed".into()),
+                    config: Some(model.clone()),
+                    color: Some("#7aa2f7".into()),
+                    tags: Some(vec!["ux".into()]),
+                    ..Default::default()
+                },
+            )
             .unwrap();
-        assert_eq!((dressed.color.as_str(), dressed.tags.clone()), ("#7aa2f7", vec!["ux".to_string()]));
-        assert_eq!(dressed.config, model, "a patch keeps what it does not name");
-        assert_eq!(store.draft(&a.id).unwrap().unwrap().1, "{\"v\":1}");
-        assert_eq!(store.drafts().unwrap()[0].id, "dr001", "most recently touched first");
-        let run = store.begin_run("draft:dr001", "drafter", "claude_code", "hi", ".").unwrap();
-        store.delete_draft(&a.id).unwrap();
-        assert!(store.draft(&a.id).unwrap().is_none());
+        assert_eq!((saved.title.as_str(), saved.agent.as_str(), saved.color.as_str()), ("renamed", "claude_code", "#7aa2f7"));
+        assert_eq!((saved.config.clone(), saved.tags.clone()), (model.clone(), vec!["ux".to_string()]));
+        let kept = store.update_artifact(&a.id, &ArtifactPatch { title: Some("again".into()), ..Default::default() }).unwrap();
+        assert_eq!((kept.config, kept.tags), (model, vec!["ux".to_string()]), "a patch keeps what it does not name");
+        assert_eq!(store.artifact(&a.id).unwrap().unwrap().1, "{\"v\":1}");
+        assert_eq!(store.artifacts(None).unwrap()[0].id, "ar001", "most recently touched first");
+        assert_eq!(store.artifacts(Some("knowledge")).unwrap().len(), 1);
+        let run = store.begin_run("artifact:ar001", "artifact", "claude_code", "hi", ".").unwrap();
+        store.delete_artifact(&a.id).unwrap();
+        assert!(store.artifact(&a.id).unwrap().is_none());
         assert!(store.run(&run).unwrap().is_none(), "its conversation goes with it");
-        assert!(store.delete_draft(&a.id).is_err());
+        assert!(store.delete_artifact(&a.id).is_err());
+    }
+
+    #[test]
+    fn drafts_move_into_artifacts_with_their_conversation() {
+        let dir = std::env::temp_dir().join(format!("orchestra-store-drafts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v9.db");
+        {
+            // A v9 file: the current schema with drafts where artifacts are.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch(
+                "DROP TABLE artifacts;
+                 CREATE TABLE drafts (id TEXT PRIMARY KEY, title TEXT NOT NULL, agent TEXT NOT NULL,
+                   doc TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                   config TEXT NOT NULL DEFAULT '{}', color TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]');
+                 INSERT INTO drafts VALUES ('dr003', 'board', 'codex', '{\"nodes\":[]}', 1, 2, '{}', '#e0af68', '[\"ux\"]');
+                 INSERT INTO meta(key, value) VALUES ('schema_version', '9');
+                 INSERT INTO meta(key, value) VALUES ('draft_session:dr003:codex', 'sess-d');
+                 INSERT INTO runs(n, id, track, lane, prompt, cwd, status, started_at)
+                   VALUES (1, 't001', 'draft:dr003', 'drafter', 'hi', '.', 'done', 5);",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let (a, body) = store.artifact("ar003").unwrap().unwrap();
+        assert_eq!((a.kind.as_str(), a.title.as_str(), a.color.as_str(), body.as_str()), ("design", "board", "#e0af68", "{\"nodes\":[]}"));
+        assert_eq!(a.tags, vec!["ux".to_string()]);
+        let run = store.run("t001").unwrap().unwrap();
+        assert_eq!((run.track.as_str(), run.lane.as_str()), ("artifact:ar003", "artifact"));
+        assert_eq!(store.get_meta("artifact_session:ar003:codex").unwrap().as_deref(), Some("sess-d"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

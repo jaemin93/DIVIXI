@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { boardPng } from "./ink";
+import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Lang, type LangPref } from "./i18n.svelte";
 
@@ -225,11 +225,14 @@ export type Run = {
   segments: Segment[];
 };
 
-export type View = "track" | "settings" | "lane" | "new-track" | "edit-track" | "draft";
+export type View = "track" | "settings" | "lane" | "new-track" | "edit-track" | "design";
 
-// ----- drafts: a sketch board worked out with an agent before a track -----
-export type DraftInfo = {
+// ----- artifacts: what the human keeps beside tracks and attaches to them —
+// designs (a sketch board worked out with an agent), knowledge later -----
+export type ArtifactKind = "design" | "knowledge";
+export type ArtifactInfo = {
   id: string;
+  kind: ArtifactKind;
   title: string;
   agent: string;
   config: OptionConfig;
@@ -239,8 +242,8 @@ export type DraftInfo = {
   updated_at: number;
 };
 export type Stroke = { points: [number, number, number][]; color: string; size: number };
-export type DraftTag = "" | "goal" | "constraint" | "question" | "idea";
-export type DraftNode = {
+export type DesignTag = "" | "goal" | "constraint" | "question" | "idea";
+export type DesignNode = {
   id: string;
   kind: "note" | "sketch";
   x: number;
@@ -248,26 +251,26 @@ export type DraftNode = {
   w: number;
   h: number;
   text: string;
-  tag: DraftTag;
+  tag: DesignTag;
   strokes: Stroke[];
   by: string;
 };
-export type DraftEdge = { id: string; from: string; to: string; label: string; by: string };
-export type DraftChange = { id: number; target: string; run: string | null; before: unknown; after: unknown };
-export type DraftDoc = { version: number; nodes: DraftNode[]; edges: DraftEdge[]; changes: DraftChange[]; next: number };
+export type DesignEdge = { id: string; from: string; to: string; label: string; by: string };
+export type DesignChange = { id: number; target: string; run: string | null; before: unknown; after: unknown };
+export type DesignDoc = { version: number; nodes: DesignNode[]; edges: DesignEdge[]; changes: DesignChange[]; next: number };
 /** One edit to a board, as the core applies it. */
-export type DraftOp =
-  | { op: "create_note"; x: number; y: number; w?: number; h?: number; text?: string; tag?: DraftTag }
+export type DesignOp =
+  | { op: "create_note"; x: number; y: number; w?: number; h?: number; text?: string; tag?: DesignTag }
   | { op: "set_sketch"; id?: string; x: number; y: number; w: number; h: number; strokes: Stroke[] }
-  | { op: "update"; id: string; text?: string; tag?: DraftTag }
+  | { op: "update"; id: string; text?: string; tag?: DesignTag }
   | { op: "move"; id: string; x: number; y: number; w?: number; h?: number }
   | { op: "delete"; ids: string[] }
   | { op: "connect"; from: string; to: string; label?: string };
-export type DraftResult = { ok: boolean; id?: string; error?: string };
-export const DRAFT_LANE = "drafter";
-/** Draft conversations are kept under this key, apart from tracks. */
-export const draftKey = (id: string) => `draft:${id}`;
-const EMPTY_DOC: DraftDoc = { version: 0, nodes: [], edges: [], changes: [], next: 0 };
+export type DesignResult = { ok: boolean; id?: string; error?: string };
+export const ARTIFACT_LANE = "artifact";
+/** Artifact conversations are kept under this key, apart from tracks. */
+export const artifactKey = (id: string) => `artifact:${id}`;
+const EMPTY_DOC: DesignDoc = { version: 0, nodes: [], edges: [], changes: [], next: 0 };
 
 /** Prefix of conductor prompts Orchestra injects itself (lane reports). Language-neutral. */
 export const REPORT_PREFIX = "[lane-report]";
@@ -419,38 +422,35 @@ class Store {
   termHeight = $state(280);
   termMounted = $state(false);
 
-  /** Drafts, most recently touched first, and the one open. */
-  drafts = $state<DraftInfo[]>([]);
-  draft = $state("");
-  draftDoc = $state<DraftDoc>({ ...EMPTY_DOC });
-  /** The draft whose board `draftDoc` holds. */
-  draftLoaded = $state("");
-  /** Width of the conversation beside a draft's board. Persisted. */
-  draftChatWidth = $state(460);
-  /** The drafts column shown. Persisted. */
-  draftListOpen = $state(true);
+  /** Artifacts of every kind, most recently touched first, and the one open. */
+  artifacts = $state<ArtifactInfo[]>([]);
+  artifact = $state("");
+  designDoc = $state<DesignDoc>({ ...EMPTY_DOC });
+  /** The design whose board `designDoc` holds. */
+  designLoaded = $state("");
+  /** Width of the conversation beside a design's board. Persisted. */
+  artifactChatWidth = $state(460);
+  /** The designs column shown. Persisted. */
+  designListOpen = $state(true);
 
-  setDraftChatWidth(px: number, persist = false) {
-    this.draftChatWidth = Math.min(760, Math.max(340, Math.round(px)));
-    if (persist) this.persistWidth("draft_chat_width", this.draftChatWidth);
+  setArtifactChatWidth(px: number, persist = false) {
+    this.artifactChatWidth = Math.min(760, Math.max(340, Math.round(px)));
+    if (persist) this.persistWidth("artifact_chat_width", this.artifactChatWidth);
   }
 
-  async setDraftList(open: boolean) {
-    this.draftListOpen = open;
+  async setDesignList(open: boolean) {
+    this.designListOpen = open;
     try {
-      await invoke("set_setting", { key: "draftlist", value: open ? "open" : "closed" });
+      await invoke("set_setting", { key: "designlist", value: open ? "open" : "closed" });
     } catch (err) {
       this.lastError = String(err);
     }
   }
 
   /** Items picked on the board; they go with the next message. */
-  draftSelected = $state<string[]>([]);
-  /** The open draft's agent session. */
-  draftSession = $state<{ open: boolean; busy: boolean }>({ open: false, busy: false });
-  /** Carried from a draft into the new-track form and the first message. */
-  trackSeed = $state<{ name: string; intent: string } | null>(null);
-  composerSeed = $state("");
+  designSelected = $state<string[]>([]);
+  /** The open artifact's agent session. */
+  artifactSession = $state<{ open: boolean; busy: boolean }>({ open: false, busy: false });
 
   /** Files in the composer, waiting for the next message. */
   attachments = $state<Attachment[]>([]);
@@ -634,23 +634,23 @@ class Store {
   commandCache = $state<Record<string, SlashCommand[]>>({});
 
   /** Commands to complete in the composer: this track's session's, else the agent's last known. */
-  /** The conversation on screen is a draft's, not a track's conductor. */
-  get chatDraft(): boolean {
-    return this.view === "draft" && !!this.draft;
+  /** The conversation on screen is an artifact's, not a track's conductor. */
+  get chatArtifact(): boolean {
+    return this.view === "design" && !!this.artifact;
   }
 
   /** The turns of the conversation on screen, oldest first. */
   get chatRuns(): Run[] {
-    return this.chatDraft ? this.draftRuns : this.trackRuns.filter((r) => r.lane === "conductor");
+    return this.chatArtifact ? this.artifactRuns : this.trackRuns.filter((r) => r.lane === "conductor");
   }
 
-  /** Decision cards of the conversation on screen; drafts have none. */
+  /** Decision cards of the conversation on screen; artifacts have none. */
   get chatDecisions(): Decision[] {
-    return this.chatDraft ? [] : this.trackDecisions;
+    return this.chatArtifact ? [] : this.trackDecisions;
   }
 
   get slashCommands(): SlashCommand[] {
-    if (this.chatDraft) return this.commandCache[this.currentDraft?.agent ?? ""] ?? [];
+    if (this.chatArtifact) return this.commandCache[this.currentArtifact?.agent ?? ""] ?? [];
     return this.commands[this.track] ?? this.commandCache[this.agent] ?? [];
   }
 
@@ -707,9 +707,9 @@ class Store {
 
   /** Stop the conductor's turn in flight, as Ctrl+C would; the run ends as cancelled. */
   async cancelConductor() {
-    if (this.chatDraft) {
+    if (this.chatArtifact) {
       this.cancelling = true;
-      await this.draftCancel();
+      await this.artifactCancel();
       this.cancelling = false;
       return;
     }
@@ -798,8 +798,8 @@ class Store {
     for (const tr of this.tracks) {
       if (tr.tags.includes(name)) await this.updateTrack(tr.id, { tags: tr.tags.filter((x) => x !== name) });
     }
-    for (const d of this.drafts) {
-      if (d.tags.includes(name)) await this.updateDraft(d.id, { tags: d.tags.filter((x) => x !== name) });
+    for (const d of this.artifacts) {
+      if (d.tags.includes(name)) await this.updateArtifact(d.id, { tags: d.tags.filter((x) => x !== name) });
     }
   }
   lastError = $state("");
@@ -863,8 +863,8 @@ class Store {
 
   /** A path inside the current track's folder, relative with "/", or null outside it. */
   relativeToTrack(path: string): string | null {
-    // A draft has no folder panel to open files in.
-    if (this.chatDraft) return null;
+    // An artifact has no folder panel to open files in.
+    if (this.chatArtifact) return null;
     const root = this.currentTrack?.cwd;
     if (!root) return null;
     const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -882,152 +882,175 @@ class Store {
     return `${root.replace(/[\\/]+$/, "")}${sep}${rel.split("/").join(sep)}`;
   }
 
-  // ----- drafts -----
+  // ----- artifacts -----
 
-  get currentDraft(): DraftInfo | undefined {
-    return this.drafts.find((d) => d.id === this.draft);
+  /** The designs, most recently touched first. */
+  get designs(): ArtifactInfo[] {
+    return this.artifacts.filter((a) => a.kind === "design");
   }
 
-  /** The open draft's conversation, oldest first. */
-  get draftRuns(): Run[] {
-    const key = draftKey(this.draft);
-    return this.runs.filter((r) => r.track === key);
-  }
-
-  get draftBusy(): boolean {
-    return this.draftRuns.some((r) => r.status === "running" || r.status === "connecting");
-  }
-
-  async loadDrafts() {
+  /**
+   * Attach a design to the next message of a track: its board as a brief
+   * (goals, constraints, questions, notes) and, when it has ink, a picture
+   * of it — written out as files and attached like any other.
+   */
+  async attachDesign(id: string, labels: Record<string, string>) {
+    const a = this.artifacts.find((x) => x.id === id);
+    if (!a) return;
     try {
-      this.drafts = await invoke<DraftInfo[]>("list_drafts");
+      const doc = await invoke<DesignDoc>("design_doc", { id });
+      const markdown = briefOf(a.title, doc, labels);
+      const paths = await invoke<string[]>("export_artifact", { id, markdown, image: boardPng(doc) });
+      await this.attach(paths);
     } catch (err) {
       this.lastError = String(err);
     }
   }
 
-  /** Show the drafts: the last one open, else the newest. */
-  async showDrafts() {
-    if (this.view === "draft") {
-      await this.setDraftList(!this.draftListOpen);
-      return;
-    }
-    this.view = "draft";
-    if (!this.draftListOpen) void this.setDraftList(true);
-    if (!this.drafts.length) await this.loadDrafts();
-    const pick = this.drafts.find((d) => d.id === this.draft) ?? this.drafts[0];
-    if (pick) await this.openDraft(pick.id);
+  get currentArtifact(): ArtifactInfo | undefined {
+    return this.artifacts.find((d) => d.id === this.artifact);
   }
 
-  async openDraft(id: string) {
-    if (this.draft !== id) this.draftSelected = [];
-    this.draft = id;
-    this.view = "draft";
-    void this.refreshDraftSession();
-    if (this.draftLoaded !== id) {
-      this.draftLoaded = "";
-      this.draftDoc = { ...EMPTY_DOC };
+  /** The open artifact's conversation, oldest first. */
+  get artifactRuns(): Run[] {
+    const key = artifactKey(this.artifact);
+    return this.runs.filter((r) => r.track === key);
+  }
+
+  get artifactBusy(): boolean {
+    return this.artifactRuns.some((r) => r.status === "running" || r.status === "connecting");
+  }
+
+  async loadArtifacts() {
+    try {
+      this.artifacts = await invoke<ArtifactInfo[]>("list_artifacts", { kind: null });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Show the designs: the last one open, else the newest. */
+  async showDesigns() {
+    if (this.view === "design") {
+      await this.setDesignList(!this.designListOpen);
+      return;
+    }
+    this.view = "design";
+    if (!this.designListOpen) void this.setDesignList(true);
+    if (!this.artifacts.length) await this.loadArtifacts();
+    const pick = this.designs.find((d) => d.id === this.artifact) ?? this.designs[0];
+    if (pick) await this.openArtifact(pick.id);
+  }
+
+  async openArtifact(id: string) {
+    if (this.artifact !== id) this.designSelected = [];
+    this.artifact = id;
+    this.view = "design";
+    void this.refreshArtifactSession();
+    if (this.designLoaded !== id) {
+      this.designLoaded = "";
+      this.designDoc = { ...EMPTY_DOC };
     }
     try {
-      const doc = await invoke<DraftDoc>("draft_doc", { id });
-      if (this.draft === id) {
-        this.draftDoc = doc;
-        this.draftLoaded = id;
+      const doc = await invoke<DesignDoc>("design_doc", { id });
+      if (this.artifact === id) {
+        this.designDoc = doc;
+        this.designLoaded = id;
       }
     } catch (err) {
       this.lastError = String(err);
     }
   }
 
-  async createDraft(title: string) {
+  async createDesign(title: string) {
     const agent = this.readyAgents.some((a) => a.kind === this.agent) ? this.agent : this.readyAgents[0]?.kind;
     if (!agent) {
       this.lastError = "no agent is ready";
       return;
     }
     try {
-      const d = await invoke<DraftInfo>("create_draft", { title, agent });
-      this.drafts = [d, ...this.drafts];
-      await this.openDraft(d.id);
+      const d = await invoke<ArtifactInfo>("create_artifact", { kind: "design", title, agent });
+      this.artifacts = [d, ...this.artifacts];
+      await this.openArtifact(d.id);
     } catch (err) {
       this.lastError = String(err);
     }
   }
 
-  async updateDraft(id: string, patch: { title?: string; agent?: string; config?: OptionConfig; color?: string; tags?: string[] }) {
+  async updateArtifact(id: string, patch: { title?: string; agent?: string; config?: OptionConfig; color?: string; tags?: string[] }) {
     try {
-      const d = await invoke<DraftInfo>("update_draft", { id, ...patch });
-      this.drafts = this.drafts.map((x) => (x.id === id ? d : x));
+      const d = await invoke<ArtifactInfo>("update_artifact", { id, ...patch });
+      this.artifacts = this.artifacts.map((x) => (x.id === id ? d : x));
     } catch (err) {
       this.lastError = String(err);
     }
   }
 
-  /** Delete a draft. Returns why the core refused, or "" when it is gone. */
-  async deleteDraft(id: string): Promise<string> {
+  /** Delete an artifact. Returns why the core refused, or "" when it is gone. */
+  async deleteArtifact(id: string): Promise<string> {
     try {
-      await invoke("delete_draft", { id });
+      await invoke("delete_artifact", { id });
     } catch (err) {
       return String(err);
     }
-    this.drafts = this.drafts.filter((d) => d.id !== id);
-    this.runs = this.runs.filter((r) => r.track !== draftKey(id));
-    if (this.draft === id) {
-      const next = this.drafts[0];
-      if (next) await this.openDraft(next.id);
+    this.artifacts = this.artifacts.filter((d) => d.id !== id);
+    this.runs = this.runs.filter((r) => r.track !== artifactKey(id));
+    if (this.artifact === id) {
+      const next = this.designs[0];
+      if (next) await this.openArtifact(next.id);
       else {
-        this.draft = "";
-        this.draftDoc = { ...EMPTY_DOC };
+        this.artifact = "";
+        this.designDoc = { ...EMPTY_DOC };
       }
     }
     return "";
   }
 
   /** Edit the open board. The core answers with the new board as an event. */
-  async draftApply(ops: DraftOp[]): Promise<DraftResult[]> {
-    const id = this.draft;
+  async designApply(ops: DesignOp[]): Promise<DesignResult[]> {
+    const id = this.artifact;
     if (!id || !ops.length) return [];
     try {
-      return await invoke<DraftResult[]>("draft_apply", { id, ops });
+      return await invoke<DesignResult[]>("design_apply", { id, ops });
     } catch (err) {
       this.lastError = String(err);
       return [];
     }
   }
 
-  async draftReview(changes: number[], keep: boolean) {
-    if (!this.draft || !changes.length) return;
+  async designReview(changes: number[], keep: boolean) {
+    if (!this.artifact || !changes.length) return;
     try {
-      await invoke("draft_review", { id: this.draft, changes, keep });
+      await invoke("design_review", { id: this.artifact, changes, keep });
     } catch (err) {
       this.lastError = String(err);
     }
   }
 
   /** Take a board the core sent, when it is the open one and newer. */
-  takeDraft(id: string, doc: DraftDoc) {
-    if (id === this.draft && this.draftLoaded === id && doc.version >= this.draftDoc.version) this.draftDoc = doc;
-    const d = this.drafts.find((x) => x.id === id);
+  takeDesign(id: string, doc: DesignDoc) {
+    if (id === this.artifact && this.designLoaded === id && doc.version >= this.designDoc.version) this.designDoc = doc;
+    const d = this.artifacts.find((x) => x.id === id);
     if (d) d.updated_at = Date.now();
   }
 
-  /** One message to the draft's agent: the composer's text and files, the
+  /** One message to the artifact's agent: the composer's text and files, the
    *  picture of the board when it has ink, and the items picked on it. */
-  async draftSend(prompt: string) {
-    const id = this.draft;
-    const d = this.currentDraft;
+  async artifactSend(prompt: string) {
+    const id = this.artifact;
+    const d = this.currentArtifact;
     const typed = prompt.trim();
     const files = this.attachments.map((a) => a.path);
-    const selected = [...this.draftSelected];
-    if (!id || !d || this.draftBusy || (!typed && !files.length && !selected.length)) return;
+    const selected = [...this.designSelected];
+    if (!id || !d || this.artifactBusy || (!typed && !files.length && !selected.length)) return;
     this.lastError = "";
     this.attachments = [];
-    const image = boardPng(this.draftDoc);
+    const image = boardPng(this.designDoc);
     const text = withAttachments(typed, files);
     const pending: Run = {
       id: `pending-${Date.now()}`,
-      track: draftKey(id),
-      lane: DRAFT_LANE,
+      track: artifactKey(id),
+      lane: ARTIFACT_LANE,
       agent: d.agent,
       prompt: text,
       status: "connecting",
@@ -1044,10 +1067,10 @@ class Store {
     const pendingId = pending.id;
     this.runs.push(pending);
     try {
-      const run = await invoke<string>("draft_prompt", { id, text: typed, image, selected, lang: i18n.lang, files });
+      const run = await invoke<string>("artifact_prompt", { id, text: typed, image, selected, lang: i18n.lang, files });
       const r = this.runs.find((x) => x.id === pendingId || x.id === run);
       if (r) r.id = run;
-      void this.refreshDraftSession();
+      void this.refreshArtifactSession();
     } catch (err) {
       this.runs = this.runs.filter((x) => x.id !== pendingId);
       if (!this.attachments.length) void this.attach(files);
@@ -1055,29 +1078,19 @@ class Store {
     }
   }
 
-  async refreshDraftSession() {
-    const id = this.draft;
+  async refreshArtifactSession() {
+    const id = this.artifact;
     if (!id) return;
     try {
-      const s = await invoke<{ open: boolean; busy: boolean }>("draft_state", { id });
-      if (this.draft === id) this.draftSession = s;
+      const s = await invoke<{ open: boolean; busy: boolean }>("artifact_state", { id });
+      if (this.artifact === id) this.artifactSession = s;
     } catch {
       // Cosmetic.
     }
   }
 
-  async draftCancel() {
-    if (this.draft) await invoke("draft_cancel", { id: this.draft }).catch(() => {});
-  }
-
-  /** Carry a draft into a new track: its name, its goal as the intent, and
-   *  the whole board as a brief waiting in the first message. */
-  promoteDraft(brief: string, goal: string) {
-    const d = this.currentDraft;
-    if (!d) return;
-    this.trackSeed = { name: d.title, intent: goal };
-    this.composerSeed = brief;
-    this.view = "new-track";
+  async artifactCancel() {
+    if (this.artifact) await invoke("artifact_cancel", { id: this.artifact }).catch(() => {});
   }
 
   /** Take a decision the core sent or returned, new or changed. */
@@ -1126,7 +1139,7 @@ class Store {
   }
 
   get activeRun(): Run | undefined {
-    const runs = this.chatDraft ? this.draftRuns : this.trackRuns;
+    const runs = this.chatArtifact ? this.artifactRuns : this.trackRuns;
     return runs.find((r) => r.status === "running" || r.status === "connecting");
   }
 
@@ -1142,7 +1155,6 @@ class Store {
 
   /** Create a track and open it. */
   async createTrack(patch: TrackPatch): Promise<boolean> {
-    this.trackSeed = null;
     this.lastError = "";
     try {
       const track = await invoke<Track>("create_track", { patch });
@@ -1269,7 +1281,7 @@ class Store {
 
   /** The agent a role runs on in the current track. */
   roleAgent(role: Role): string {
-    if (this.chatDraft) return this.currentDraft?.agent ?? this.agent;
+    if (this.chatArtifact) return this.currentArtifact?.agent ?? this.agent;
     const track = this.currentTrack;
     if (!track) return this.agent;
     return role === "conductor" ? track.agent : laneAgentOf(track);
@@ -1277,7 +1289,7 @@ class Store {
 
   /** A role's chosen options in the current track. */
   roleConfig(role: Role): OptionConfig {
-    if (this.chatDraft) return this.currentDraft?.config ?? {};
+    if (this.chatArtifact) return this.currentArtifact?.config ?? {};
     const track = this.currentTrack;
     if (!track) return {};
     return role === "conductor" ? track.conductor_config : laneConfigOf(track);
@@ -1286,10 +1298,10 @@ class Store {
   /** Put a role on an agent. Takes effect at the next session. A worker
    *  moved onto the agent it already runs on keeps its options. */
   async setRoleAgent(role: Role, agent: string) {
-    const d = this.chatDraft ? this.currentDraft : undefined;
+    const d = this.chatArtifact ? this.currentArtifact : undefined;
     if (d) {
       // Options are in one agent's terms; another agent starts from its own.
-      await this.updateDraft(d.id, agent === d.agent ? { agent } : { agent, config: {} });
+      await this.updateArtifact(d.id, agent === d.agent ? { agent } : { agent, config: {} });
       return;
     }
     const track = this.currentTrack;
@@ -1305,10 +1317,10 @@ class Store {
 
   /** Set one of a role's options on the current track; empty clears it. Takes effect at the next session. */
   async setRoleOption(role: Role, id: string, value: string) {
-    const d = this.chatDraft ? this.currentDraft : undefined;
+    const d = this.chatArtifact ? this.currentArtifact : undefined;
     if (d) {
       const { [id]: _old, ...rest } = d.config;
-      await this.updateDraft(d.id, { config: value ? { ...rest, [id]: value } : rest });
+      await this.updateArtifact(d.id, { config: value ? { ...rest, [id]: value } : rest });
       return;
     }
     const track = this.currentTrack;
@@ -1535,22 +1547,22 @@ class Store {
       // restored can be in flight.
       this.runs = summaries.map(fromSummary);
       this.tracks = tracks;
-      void this.loadDrafts();
+      void this.loadArtifacts();
       try {
         this.decisions = await invoke<Decision[]>("list_decisions", { track: null });
       } catch (err) {
         this.lastError = String(err);
       }
       try {
-        const [term, termHeight, draftChat, draftList] = await Promise.all([
+        const [term, termHeight, artifactChat, designList] = await Promise.all([
           invoke<string | null>("get_setting", { key: "terminal" }),
           invoke<string | null>("get_setting", { key: "terminal_height" }),
-          invoke<string | null>("get_setting", { key: "draft_chat_width" }),
-          invoke<string | null>("get_setting", { key: "draftlist" }),
+          invoke<string | null>("get_setting", { key: "artifact_chat_width" }),
+          invoke<string | null>("get_setting", { key: "designlist" }),
         ]);
-        const dc = Number(draftChat);
-        if (Number.isFinite(dc) && dc > 0) this.setDraftChatWidth(dc);
-        this.draftListOpen = draftList !== "closed";
+        const dc = Number(artifactChat);
+        if (Number.isFinite(dc) && dc > 0) this.setArtifactChatWidth(dc);
+        this.designListOpen = designList !== "closed";
         const h = Number(termHeight);
         if (Number.isFinite(h) && h > 0) this.setTermHeight(h);
         if (term === "open") void this.setTerminal(true);
@@ -1669,7 +1681,7 @@ class Store {
    * `lane` events with their own run ids and are added when first seen.
    */
   async send(prompt: string) {
-    if (this.chatDraft) return this.draftSend(prompt);
+    if (this.chatArtifact) return this.artifactSend(prompt);
     const typed = prompt.trim();
     const track = this.track;
     const files = this.attachments.map((a) => a.path);
@@ -1727,8 +1739,8 @@ class Store {
   /** Fold one live lane event into the run it belongs to, creating lane runs on first sight. */
   apply(env: Envelope) {
     let run = this.runs.find((r) => r.id === env.run);
-    if (!run && (env.lane === "conductor" || env.lane === DRAFT_LANE)) {
-      // The conductor (or draft agent) turn we just sent, still waiting for its id.
+    if (!run && (env.lane === "conductor" || env.lane === ARTIFACT_LANE)) {
+      // The conductor (or artifact agent) turn we just sent, still waiting for its id.
       run = this.runs.find((r) => r.track === env.track && r.lane === env.lane && r.id.startsWith("pending-"));
       if (run) run.id = env.run;
     }
@@ -1757,8 +1769,8 @@ class Store {
       void this.refreshRun(env.run);
     }
     if (env.event.kind === "commands" && env.lane === "conductor") this.rememberCommands(env.track, env.event.commands);
-    if (env.lane === DRAFT_LANE && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
-      void this.refreshDraftSession();
+    if (env.lane === ARTIFACT_LANE && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
+      void this.refreshArtifactSession();
     }
     if (env.lane === "conductor" && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
       void this.refreshConductor();
@@ -1931,6 +1943,6 @@ export async function connectEvents() {
     listen<Envelope>("lane", (e) => store.apply(e.payload)),
     listen<DownloadProgress>("agent_download", (e) => store.progress(e.payload)),
     listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
-    listen<{ id: string; doc: DraftDoc }>("draft", (e) => store.takeDraft(e.payload.id, e.payload.doc)),
+    listen<{ id: string; doc: DesignDoc }>("design", (e) => store.takeDesign(e.payload.id, e.payload.doc)),
   ]);
 }
