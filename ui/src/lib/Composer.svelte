@@ -39,6 +39,13 @@
   );
   const slashOpen = $derived(slashQuery !== null && slashMatches.length > 0);
 
+  // Typing "/" is intent to talk to the conductor: with no list known yet,
+  // open its session now so the commands (and the first reply) are ready.
+  $effect(() => {
+    if (slashQuery !== null && store.slashCommands.length === 0 && !store.conductorState.open) void store.openConductor();
+  });
+  const slashWaiting = $derived(slashQuery !== null && slashMatches.length === 0 && store.conductorOpening === store.track);
+
   $effect(() => {
     void slashMatches.length;
     slashIndex = 0;
@@ -104,7 +111,11 @@
 <div class="composer">
   <form onsubmit={submit}>
     <div class="boxwrap">
-      {#if slashOpen}
+      {#if slashWaiting}
+        <div class="slash" role="status">
+          <div class="mono waiting"><span class="dot pulse"></span>{t("composer.opening")}</div>
+        </div>
+      {:else if slashOpen}
         <!-- The agent's slash commands, narrowed by what follows the "/". -->
         <div class="slash" role="listbox" aria-label={t("composer.commands")}>
           <div class="mlab-sm ph">{t("composer.commands")}</div>
@@ -198,6 +209,7 @@
 
   textarea {
     flex: 1;
+    field-sizing: content;
     min-height: 44px;
     max-height: 200px;
     background: var(--inp);
@@ -232,6 +244,22 @@
 
   .slash .ph {
     padding: 10px 14px 6px;
+  }
+
+  .waiting {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    font-size: 11px;
+    color: var(--lab);
+  }
+
+  .waiting .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ok);
   }
 
   .cmd {

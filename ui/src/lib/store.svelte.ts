@@ -20,6 +20,9 @@ export type LaneEvent =
 /** Mirrors `orchestra_core::SlashCommand`: one `/name` the agent offers. */
 export type SlashCommand = { name: string; description: string; hint: string | null };
 
+/** Mirrors `conductor::ConductorState`. */
+export type ConductorState = { open: boolean; busy: boolean; agent: string | null; commands: SlashCommand[] };
+
 export type Envelope = {
   track: string;
   lane: string;
@@ -473,6 +476,67 @@ class Store {
     return this.commands[this.track] ?? this.commandCache[this.agent] ?? [];
   }
 
+  /** The conductor session per track: open, busy. Read on track select, never opened by it. */
+  conductor = $state<Record<string, ConductorState>>({});
+  /** Track whose conductor is being opened right now. */
+  conductorOpening = $state("");
+
+  get conductorState(): ConductorState {
+    return this.conductor[this.track] ?? { open: false, busy: false, agent: null, commands: [] };
+  }
+
+  private takeConductorState(track: string, state: ConductorState) {
+    this.conductor = { ...this.conductor, [track]: state };
+    if (state.commands.length) this.rememberCommands(track, state.commands);
+  }
+
+  /** Whether a track's conductor session is open (active). */
+  isActive(track: string): boolean {
+    return !!this.conductor[track]?.open;
+  }
+
+  /** Ask how every conductor is, without touching any. Tracks not listed are closed. */
+  async refreshConductor() {
+    try {
+      const list = await invoke<[string, ConductorState][]>("conductor_states");
+      const next: Record<string, ConductorState> = {};
+      for (const [track, state] of list) {
+        next[track] = state;
+        if (state.commands.length) this.rememberCommands(track, state.commands);
+      }
+      this.conductor = next;
+    } catch (err) {
+      tracing(err);
+    }
+  }
+
+  /** Open a track's conductor session on purpose (activate): its commands become known and the first message is quick. */
+  async openConductor(track = this.track) {
+    if (!track || this.conductorOpening) return;
+    this.conductorOpening = track;
+    this.lastError = "";
+    try {
+      const state = await invoke<ConductorState>("conductor_open", { track });
+      this.takeConductorState(track, state);
+    } catch (err) {
+      this.lastError = String(err);
+    } finally {
+      this.conductorOpening = "";
+    }
+  }
+
+  /** Close a track's conductor session (deactivate); it resumes with its memory next time. */
+  async closeConductor(track = this.track) {
+    if (!track) return;
+    this.lastError = "";
+    try {
+      const state = await invoke<ConductorState>("conductor_close", { track });
+      this.takeConductorState(track, state);
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
   private rememberCommands(track: string, list: SlashCommand[]) {
     this.commands = { ...this.commands, [track]: list };
     const agent = this.tracks.find((t) => t.id === track)?.agent;
@@ -581,6 +645,7 @@ class Store {
     if (changed) {
       this.clearWorkspace();
       if (this.panelOpen) void this.refreshWorkspace();
+      void this.refreshConductor();
     }
     if (this.readyAgents.some((a) => a.kind === track.agent)) this.agent = track.agent as AgentId;
     try {
@@ -918,6 +983,7 @@ class Store {
         this.track = current.id;
         if (this.readyAgents.some((a) => a.kind === current.agent)) this.agent = current.agent as AgentId;
         if (this.panelOpen) void this.refreshWorkspace();
+        void this.refreshConductor();
       } else {
         this.view = "new-track";
       }
@@ -1100,6 +1166,9 @@ class Store {
       void this.refreshRun(env.run);
     }
     if (env.event.kind === "commands" && env.lane === "conductor") this.rememberCommands(env.track, env.event.commands);
+    if (env.lane === "conductor" && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
+      void this.refreshConductor();
+    }
     fold(run, env.at_ms, env.event);
     // A finished run may have written files: the open panel catches up.
     if (this.panelOpen && env.track === this.track && (env.event.kind === "finished" || env.event.kind === "failed")) {
@@ -1237,6 +1306,11 @@ function fromSummary(s: RunSummary): Run {
 
 function push(run: Run, ms: number, label: string, text: string, tone: Tone) {
   run.transcript.push({ ms, label, text, tone });
+}
+
+/** A quiet log for failures that have a visible fallback. */
+function tracing(err: unknown) {
+  console.warn(err);
 }
 
 /** Short mono label for an agent id. */

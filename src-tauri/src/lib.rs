@@ -231,6 +231,30 @@ async fn conductor_prompt(
     conductor::conductor_turn(app, track, prompt, agent.filter(|a| !a.is_empty()), lang.unwrap_or_default()).await
 }
 
+/// The conductor's session state for a track: open, busy, its commands.
+#[tauri::command]
+async fn conductor_state(app: AppHandle, track: String) -> Result<conductor::ConductorState, String> {
+    Ok(conductor::conductor_state(&app, &track).await)
+}
+
+/// Every open conductor session, by track.
+#[tauri::command]
+async fn conductor_states(app: AppHandle) -> Result<Vec<(String, conductor::ConductorState)>, String> {
+    Ok(conductor::conductor_states(&app).await)
+}
+
+/// Open a track's conductor session without sending anything.
+#[tauri::command]
+async fn conductor_open(app: AppHandle, track: String) -> Result<conductor::ConductorState, String> {
+    conductor::conductor_open(app, track).await
+}
+
+/// Close a track's conductor session; its memory stays for the next open.
+#[tauri::command]
+async fn conductor_close(app: AppHandle, track: String) -> Result<conductor::ConductorState, String> {
+    conductor::conductor_close(app, track).await
+}
+
 /// Every run, oldest first: what the timeline is rebuilt from at startup.
 #[tauri::command]
 fn list_runs(state: State<'_, AppState>) -> Result<Vec<RunSummary>, String> {
@@ -512,6 +536,10 @@ pub fn run() {
             delete_track,
             pick_folder,
             conductor_prompt,
+            conductor_state,
+            conductor_states,
+            conductor_open,
+            conductor_close,
             list_runs,
             run_events,
             search_runs,

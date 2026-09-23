@@ -43,6 +43,10 @@ const ko = {
   "tracks.lanes": "{n} lanes",
 
   // Track header
+  "track.activate": "활성화 (지휘자 세션 열기)",
+  "track.deactivate": "비활성화 (지휘자 세션 닫기)",
+  "track.active": "활성 · 지휘자 세션 열림",
+  "track.inactive": "비활성 · 첫 메시지나 우클릭 → 활성화로 열립니다",
   "track.rename": "이름 변경",
   "track.tags": "태그…",
   "track.tagTitle": "태그 지정",
@@ -135,6 +139,7 @@ const ko = {
   // Composer
   "composer.placeholder": "지휘자에게 메시지 · / 명령 · Shift+Enter 줄바꿈",
   "composer.commands": "명령",
+  "composer.opening": "지휘자 세션을 여는 중…",
   "composer.busy": "지휘자가 응답 중입니다…",
   "composer.send": "보내기",
   "composer.agentTitle": "지휘자를 실행할 에이전트",
@@ -170,6 +175,10 @@ const ko = {
   "picker.mode": "모드",
   "picker.settings": "Track 설정…",
   "picker.applies": "다음 세션부터 적용",
+  "picker.sessionOpen": "지휘자 세션 열림",
+  "picker.sessionClosed": "지휘자 세션 닫힘 · 첫 메시지나 / 입력 때 열립니다",
+  "picker.openSession": "세션 열기",
+  "picker.closeSession": "세션 닫기",
 
   // Agent list
   "agents.detecting": "감지 중 · 에이전트마다 몇 초 걸립니다",
@@ -314,6 +323,10 @@ const en: Record<Key, string> = {
   "tracks.lanes": "{n} lanes",
 
   // Track header
+  "track.activate": "Activate (open conductor session)",
+  "track.deactivate": "Deactivate (close conductor session)",
+  "track.active": "Active · conductor session open",
+  "track.inactive": "Inactive · opens on the first message or right-click → Activate",
   "track.rename": "Rename",
   "track.tags": "Tags…",
   "track.tagTitle": "Tags",
@@ -403,6 +416,7 @@ const en: Record<Key, string> = {
 
   "composer.placeholder": "Message the conductor · / commands · Shift+Enter for a new line",
   "composer.commands": "Commands",
+  "composer.opening": "Opening the conductor session…",
   "composer.busy": "The conductor is responding…",
   "composer.send": "Send",
   "composer.agentTitle": "Agent that runs the conductor",
@@ -438,6 +452,10 @@ const en: Record<Key, string> = {
   "picker.mode": "Mode",
   "picker.settings": "Track settings…",
   "picker.applies": "Applies from the next session",
+  "picker.sessionOpen": "Conductor session open",
+  "picker.sessionClosed": "Conductor session closed · opens on the first message or a /",
+  "picker.openSession": "Open session",
+  "picker.closeSession": "Close session",
 
   "agents.detecting": "Detecting · a few seconds per agent",
   "agents.notYet": "Not detected yet.",

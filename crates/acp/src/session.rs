@@ -30,7 +30,7 @@ use agent_client_protocol::{
     util::MatchDispatch,
     ActiveSession, Agent, Client, SessionMessage,
 };
-use orchestra_core::LaneEvent;
+use orchestra_core::{LaneEvent, SlashCommand};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{pick_autonomous_mode, process, translate, AgentSpec};
@@ -81,7 +81,18 @@ pub struct AgentSession {
     turns: mpsc::Sender<Turn>,
     session_id: String,
     resumed: bool,
+    /// The latest slash-command list the agent sent.
+    commands: Arc<Mutex<Vec<SlashCommand>>>,
     task: tokio::task::JoinHandle<()>,
+}
+
+/// Keep the newest command list out of a batch of events.
+fn remember_commands(slot: &Arc<Mutex<Vec<SlashCommand>>>, events: &[LaneEvent]) {
+    if let Some(LaneEvent::Commands { commands }) = events.iter().rev().find(|e| matches!(e, LaneEvent::Commands { .. })) {
+        if let Ok(mut c) = slot.lock() {
+            *c = commands.clone();
+        }
+    }
 }
 
 type ReadyTx = oneshot::Sender<anyhow::Result<Ready>>;
@@ -95,6 +106,8 @@ impl AgentSession {
         let (turn_tx, mut turn_rx) = mpsc::channel::<Turn>(1);
         let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<Ready>>();
         let opts_for_task = opts.clone();
+        let commands: Arc<Mutex<Vec<SlashCommand>>> = Arc::new(Mutex::new(Vec::new()));
+        let commands_task = commands.clone();
 
         let task = tokio::spawn(async move {
             let ready: Arc<Mutex<Option<ReadyTx>>> = Arc::new(Mutex::new(Some(ready_tx)));
@@ -189,6 +202,15 @@ impl AgentSession {
                         }
                     }
 
+                    // A fresh session's first notifications (the slash-command
+                    // list, sent right after session/new) arrive before any
+                    // prompt; take them now so a client can ask for them.
+                    if !resumed {
+                        let (_, kept) = drain_replay(&mut session).await;
+                        carried.extend(kept);
+                    }
+                    remember_commands(&commands_task, &carried);
+
                     if let Some(ready) = ready_inner.lock().ok().and_then(|mut r| r.take()) {
                         let _ = ready.send(Ok(Ready {
                             session_id: format!("{session_id}"),
@@ -201,7 +223,7 @@ impl AgentSession {
                         for ev in carried.drain(..) {
                             let _ = turn.tx.send(ev);
                         }
-                        let result = run_turn(&mut session, &turn.text, &turn.tx).await;
+                        let result = run_turn(&mut session, &turn.text, &turn.tx, &commands_task).await;
                         if let Err(err) = &result {
                             let _ = turn.tx.send(LaneEvent::Failed { error: err.to_string() });
                         }
@@ -234,6 +256,7 @@ impl AgentSession {
                 turns: turn_tx,
                 session_id: ready.session_id,
                 resumed: ready.resumed,
+                commands,
                 task,
             }),
             Ok(Err(err)) => {
@@ -255,6 +278,11 @@ impl AgentSession {
     /// Whether this session was brought back from an earlier one.
     pub fn resumed(&self) -> bool {
         self.resumed
+    }
+
+    /// The slash commands the agent last advertised for this session.
+    pub fn commands(&self) -> Vec<SlashCommand> {
+        self.commands.lock().map(|c| c.clone()).unwrap_or_default()
     }
 
     /// Run one turn. Events stream to `tx` and end with `Finished` or
@@ -310,15 +338,19 @@ async fn run_turn(
     session: &mut ActiveSession<'_, Agent>,
     text: &str,
     tx: &mpsc::UnboundedSender<LaneEvent>,
+    commands: &Arc<Mutex<Vec<SlashCommand>>>,
 ) -> anyhow::Result<()> {
     session.send_prompt(text)?;
     loop {
         match session.read_update().await? {
             SessionMessage::SessionMessage(dispatch) => {
                 let tx = tx.clone();
+                let commands = commands.clone();
                 MatchDispatch::new(dispatch)
                     .if_notification(async move |notif: SessionNotification| {
-                        for ev in translate(notif.update) {
+                        let events = translate(notif.update);
+                        remember_commands(&commands, &events);
+                        for ev in events {
                             let _ = tx.send(ev);
                         }
                         Ok(())

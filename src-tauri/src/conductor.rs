@@ -692,6 +692,129 @@ async fn report_to_conductor(app: AppHandle, track: String, lane: String, run: S
     }
 }
 
+/// The track's conductor session, opened (or reopened after its agent or
+/// options changed) when it is not there. With `take_turn`, the turn count
+/// moves and the second value says whether this is the session's first
+/// turn, which is when the preamble goes in.
+async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_turn: bool) -> Result<(Arc<AgentSession>, bool), String> {
+    let st = app.state::<AppState>();
+    let agent = info.agent.clone();
+    let wanted = fingerprint(&agent, &info.conductor_config);
+    let mut guard = st.sessions.conductors.lock().await;
+    let needs_open = match guard.get(track) {
+        Some(c) => c.fingerprint != wanted,
+        None => true,
+    };
+    if needs_open {
+        if let Some(old) = guard.remove(track) {
+            tracing::info!(%track, agent = %old.live.agent, "closing conductor session (agent or options changed)");
+            drop(old);
+        }
+        let spec = st.spec_for(&agent)?;
+        // This track's tools, on their own server: every call is scoped.
+        let mcp = McpServer::start("orchestra", tools(app.clone(), track.to_string()))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut opts = session_options(&st, &agent, &info.cwd, &info.conductor_config, Some(&mcp));
+        // Bring back the conductor this track had last time, with its memory.
+        let key = format!("conductor_session:{track}:{agent}");
+        opts.resume = st.store.get_meta(&key).ok().flatten();
+        tracing::info!(%track, agent = %agent, mcp = %mcp.url(), resume = ?opts.resume, "opening conductor session");
+        let session = AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?;
+        let resumed = session.resumed();
+        if let Err(err) = st.store.set_meta(&key, session.session_id()) {
+            tracing::warn!(%err, "could not remember conductor session id");
+        }
+        guard.insert(
+            track.to_string(),
+            Conductor {
+                live: Live {
+                    agent: agent.clone(),
+                    session: Arc::new(session),
+                    // A resumed session already had its preamble.
+                    turns: if resumed { 1 } else { 0 },
+                    running: None,
+                },
+                fingerprint: wanted,
+                _mcp: mcp,
+            },
+        );
+    }
+    let live = &mut guard.get_mut(track).expect("conductor session just ensured").live;
+    if take_turn {
+        live.turns += 1;
+    }
+    Ok((live.session.clone(), take_turn && live.turns == 1))
+}
+
+/// What the UI shows about a track's conductor session.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConductorState {
+    pub open: bool,
+    pub busy: bool,
+    pub agent: Option<String>,
+    pub commands: Vec<orchestra_core::SlashCommand>,
+}
+
+/// The conductor's state, without opening anything.
+pub async fn conductor_state(app: &AppHandle, track: &str) -> ConductorState {
+    let st = app.state::<AppState>();
+    let guard = st.sessions.conductors.lock().await;
+    let live = guard.get(track).map(|c| &c.live);
+    ConductorState {
+        open: live.is_some(),
+        busy: st.sessions.is_busy(track),
+        agent: live.map(|l| l.agent.clone()),
+        commands: live.map(|l| l.session.commands()).unwrap_or_default(),
+    }
+}
+
+/// Every track with an open conductor session, with its state.
+pub async fn conductor_states(app: &AppHandle) -> Vec<(String, ConductorState)> {
+    let st = app.state::<AppState>();
+    let guard = st.sessions.conductors.lock().await;
+    guard
+        .iter()
+        .map(|(track, c)| {
+            (
+                track.clone(),
+                ConductorState {
+                    open: true,
+                    busy: st.sessions.is_busy(track),
+                    agent: Some(c.live.agent.clone()),
+                    commands: c.live.session.commands(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Open the track's conductor session ahead of a message (so its slash
+/// commands are known and the first turn is quick). A session already
+/// open, or busy with a turn, is left as it is.
+pub async fn conductor_open(app: AppHandle, track: String) -> Result<ConductorState, String> {
+    let st = app.state::<AppState>();
+    if !st.sessions.is_busy(&track) {
+        let info = track_info(&st, &track)?;
+        open_conductor(&app, &track, &info, false).await?;
+    }
+    Ok(conductor_state(&app, &track).await)
+}
+
+/// Close the track's conductor session. Its memory stays in the store, so
+/// the next open resumes it. Refused while a turn is running.
+pub async fn conductor_close(app: AppHandle, track: String) -> Result<ConductorState, String> {
+    let st = app.state::<AppState>();
+    if st.sessions.is_busy(&track) {
+        return Err("the conductor is still responding".to_string());
+    }
+    if let Some(old) = st.sessions.conductors.lock().await.remove(&track) {
+        tracing::info!(%track, agent = %old.live.agent, "closing conductor session (asked)");
+        drop(old);
+    }
+    Ok(conductor_state(&app, &track).await)
+}
+
 /// Send one message to a track's conductor, opening (or resuming) its
 /// session on first use or when the agent changed. `agent` overrides the
 /// track's recorded agent and becomes it. Returns the conductor run id; the
@@ -714,59 +837,14 @@ pub async fn conductor_turn(
         info = st.store.update_track(&track, &patch).map_err(|e| e.to_string())?;
     }
     let agent = info.agent.clone();
-    let wanted = fingerprint(&agent, &info.conductor_config);
 
     if !st.sessions.begin_turn(&track) {
         return Err("conductor is still responding".to_string());
     }
 
     let outcome: Result<String, String> = async {
-        let mut guard = st.sessions.conductors.lock().await;
-        let needs_open = match guard.get(&track) {
-            Some(c) => c.fingerprint != wanted,
-            None => true,
-        };
-        if needs_open {
-            if let Some(old) = guard.remove(&track) {
-                tracing::info!(%track, agent = %old.live.agent, "closing conductor session (agent or options changed)");
-                drop(old);
-            }
-            let spec = st.spec_for(&agent)?;
-            // This track's tools, on their own server: every call is scoped.
-            let mcp = McpServer::start("orchestra", tools(app.clone(), track.clone()))
-                .await
-                .map_err(|e| e.to_string())?;
-            let mut opts = session_options(&st, &agent, &info.cwd, &info.conductor_config, Some(&mcp));
-            // Bring back the conductor this track had last time, with its memory.
-            let key = format!("conductor_session:{track}:{agent}");
-            opts.resume = st.store.get_meta(&key).ok().flatten();
-            tracing::info!(%track, agent = %agent, mcp = %mcp.url(), resume = ?opts.resume, "opening conductor session");
-            let session = AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?;
-            let resumed = session.resumed();
-            if let Err(err) = st.store.set_meta(&key, session.session_id()) {
-                tracing::warn!(%err, "could not remember conductor session id");
-            }
-            guard.insert(
-                track.clone(),
-                Conductor {
-                    live: Live {
-                        agent: agent.clone(),
-                        session: Arc::new(session),
-                        // A resumed session already had its preamble.
-                        turns: if resumed { 1 } else { 0 },
-                        running: None,
-                    },
-                    fingerprint: wanted.clone(),
-                    _mcp: mcp,
-                },
-            );
-        }
-        let live = &mut guard.get_mut(&track).expect("conductor session just ensured").live;
-        live.turns += 1;
-        let first = live.turns == 1;
-        let session_id = live.session.session_id().to_string();
-        let session = live.session.clone();
-        drop(guard);
+        let (session, first) = open_conductor(&app, &track, &info, true).await?;
+        let session_id = session.session_id().to_string();
 
         let run = st
             .store

@@ -181,7 +181,13 @@
             </span>
           {/if}
           <span class="main">
-            <span class="dot" class:pulse={tr.live} style="background: {tr.live ? 'var(--ok)' : 'var(--idle)'}"></span>
+            <!-- The session: grey when closed, green when active, pulsing while it works. -->
+            <span
+              class="dot"
+              class:pulse={tr.live || store.conductorOpening === tr.id}
+              style="background: {tr.live || store.isActive(tr.id) || store.conductorOpening === tr.id ? 'var(--ok)' : 'var(--idle)'}"
+              title={store.isActive(tr.id) ? t("track.active") : t("track.inactive")}
+            ></span>
             <span class="name">{tr.name}</span>
             <span class="mono count">{tr.runs}</span>
           </span>
@@ -225,6 +231,12 @@
         </div>
       </form>
     {:else}
+      {#if store.isActive(menuTrack.id)}
+        <button class="item" role="menuitem" disabled={menuTrack.busy} onclick={() => { const id = menuTrack!.id; closeMenu(); store.closeConductor(id); }}>{t("track.deactivate")}</button>
+      {:else}
+        <button class="item" role="menuitem" disabled={store.conductorOpening === menuTrack.id} onclick={() => { const id = menuTrack!.id; closeMenu(); store.openConductor(id); }}>{t("track.activate")}</button>
+      {/if}
+      <div class="rule"></div>
       <button class="item" role="menuitem" onclick={startRename}>{t("track.rename")}</button>
       <button class="item" role="menuitem" onclick={openTags}>{t("track.tags")}</button>
       <button class="item" role="menuitem" onclick={openSettings}>{t("track.settings")}</button>
@@ -493,6 +505,11 @@
 
   .item.danger {
     color: var(--acct);
+  }
+
+  .item:disabled {
+    color: var(--lab);
+    cursor: default;
   }
 
   .rule {

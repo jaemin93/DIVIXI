@@ -74,6 +74,13 @@
 <Popover bind:open width={520}>
   {#snippet trigger()}
     <button class="chip" onclick={() => (open = !open)} title={t("picker.title")} aria-haspopup="dialog" aria-expanded={open}>
+      <!-- The conductor session: grey closed, green open, pulsing while it opens or answers. -->
+      <span
+        class="sess"
+        class:pulse={store.conductorOpening === store.track || store.conductorState.busy}
+        style="background: {store.conductorState.open || store.conductorOpening === store.track ? 'var(--ok)' : 'var(--idle)'}"
+        title={store.conductorState.open ? t("picker.sessionOpen") : t("picker.sessionClosed")}
+      ></span>
       <Icon name="bot" size={14} />
       <!-- One line, cut with an ellipsis when the column is narrow; never wrapped. -->
       <span class="label mono">
@@ -149,7 +156,12 @@
   </div>
 
   <div class="foot mono">
-    <span class="dim">{t("picker.applies")}</span>
+    <span class="dim">{store.conductorState.open ? t("picker.sessionOpen") : t("picker.sessionClosed")}</span>
+    {#if store.conductorState.open}
+      <button class="link" disabled={store.conductorState.busy} onclick={() => store.closeConductor()}>{t("picker.closeSession")}</button>
+    {:else}
+      <button class="link" disabled={store.conductorOpening === store.track} onclick={() => store.openConductor()}>{store.conductorOpening === store.track ? t("composer.opening") : t("picker.openSession")}</button>
+    {/if}
     <span class="grow"></span>
     <button class="link" onclick={openSettings}>{t("picker.settings")}</button>
   </div>
@@ -193,6 +205,17 @@
 
   .chip .dim,
   .sep {
+    color: var(--lab);
+  }
+
+  .sess {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .link:disabled {
     color: var(--lab);
   }
 
