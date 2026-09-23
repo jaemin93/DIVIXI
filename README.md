@@ -65,7 +65,7 @@ cargo run -p orchestra-acp --example smoke -- "Reply with exactly: ORCHESTRA OK"
 | GitHub Copilot | 설치된 `copilot.exe --acp` | agent · plan · **autopilot** |
 | Antigravity | Google의 `agy_acp_server` zip을 앱 데이터 폴더에 다운로드 | default · auto_edit · **yolo** |
 
-트랙 설정(헤더의 "편집", 또는 컴포저의 워커 칩)에서 지휘자와 워커 각각의 에이전트, 모델, 권한
+트랙 설정(Tracks 열에서 트랙을 우클릭 → "Track 설정…", 또는 컴포저 왼쪽 칩)에서 지휘자와 워커 각각의 에이전트, 모델, 권한
 모드, 그 밖에 에이전트가 알리는 세션 옵션(추론 강도 등)을 고릅니다. 고르지 않은 옵션은
 에이전트 기본값이고, 모드를 고르지 않으면 묻지 않는 쪽을 씁니다.
 

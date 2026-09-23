@@ -3,36 +3,25 @@
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
 
-  /** The track's name and intent; editing opens the track form, deletion asks twice. */
+  /**
+   * The track's name, intent and tags. Editing, tagging and deleting live
+   * in the track list's context menu; the only control here is the panel.
+   */
   let { track }: { track: Track } = $props();
 
-  let confirming = $state(false);
-
   const index = $derived(store.tracks.findIndex((x) => x.id === track.id) + 1);
-
-  function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") confirming = false;
-  }
 </script>
-
-<svelte:window onkeydown={onKey} />
 
 <header>
   <div class="top">
+    {#if track.color}<span class="swatch" style="background: {track.color}"></span>{/if}
     <span class="mlab">#{String(index).padStart(2, "0")} / TRACK</span>
     <span class="mono meta">{agentLabel(track.agent)}</span>
+    {#each track.tags as tag (tag)}<span class="mono tag">{tag}</span>{/each}
     <span class="grow"></span>
-    {#if confirming}
-      <span class="mono note">{store.busy ? t("track.busyNote") : t("track.deleteNote")}</span>
-      <button class="btn" type="button" onclick={() => (confirming = false)}>{t("track.cancel")}</button>
-      <button class="btn danger" type="button" disabled={store.busy} onclick={() => store.deleteTrack(track.id)}>{t("track.confirmDelete")}</button>
-    {:else}
-      <button class="btn" type="button" onclick={() => (store.view = "edit-track")}>{t("track.edit")}</button>
-      <button class="btn" type="button" onclick={() => (confirming = true)}>{t("track.delete")}</button>
-      <button class="tog" class:on={store.panelOpen} type="button" title={t("ws.toggle")} aria-pressed={store.panelOpen} onclick={() => store.setPanel(!store.panelOpen)}>
-        <Icon name="panel" size={14} />
-      </button>
-    {/if}
+    <button class="tog" class:on={store.panelOpen} type="button" title={t("ws.toggle")} aria-pressed={store.panelOpen} onclick={() => store.setPanel(!store.panelOpen)}>
+      <Icon name="panel" size={14} />
+    </button>
   </div>
 
   <h1 class="serif">{track.name}</h1>
@@ -41,7 +30,7 @@
 
 <style>
   header {
-    padding: 22px 34px 16px;
+    padding: 14px 10px 16px 34px;
     border-bottom: 1px solid var(--line);
     flex-shrink: 0;
   }
@@ -53,25 +42,34 @@
     min-height: 28px;
   }
 
+  .swatch {
+    width: 8px;
+    height: 8px;
+    flex-shrink: 0;
+  }
+
   .meta {
     font-size: 10px;
     letter-spacing: 0.12em;
     color: var(--lab);
   }
 
+  .tag {
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    color: var(--dim);
+    border: 1px solid var(--line);
+    padding: 1px 6px;
+  }
+
   .grow {
     flex: 1;
   }
 
-  .note {
-    font-size: 11px;
-    color: var(--dim);
-  }
-
+  /* The panel toggle hugs the edge, where Kiro keeps its panel button. */
   .tog {
     width: 28px;
     height: 28px;
-    margin-left: 6px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -88,11 +86,6 @@
   .tog.on {
     color: var(--hi);
     border-color: var(--acc);
-  }
-
-  .btn.danger:not(:disabled) {
-    color: var(--acct);
-    border-color: var(--acct);
   }
 
   h1 {

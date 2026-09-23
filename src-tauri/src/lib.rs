@@ -137,6 +137,18 @@ fn check_patch(patch: &mut TrackPatch) -> Result<(), String> {
     if let Some(w) = patch.worker_agent.as_deref().filter(|w| !w.is_empty()) {
         AgentKind::parse(w).ok_or_else(|| format!("unknown agent {w}"))?;
     }
+    if let Some(c) = patch.color.as_mut() {
+        *c = c.trim().to_lowercase();
+        let hex = c.strip_prefix('#').unwrap_or("");
+        if !c.is_empty() && !(hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit())) {
+            return Err(format!("a colour is #rrggbb or empty, not {c}"));
+        }
+    }
+    if let Some(tags) = patch.tags.as_ref() {
+        if tags.iter().any(|t| t.trim().chars().count() > 24) {
+            return Err("a tag is at most 24 characters".to_string());
+        }
+    }
     Ok(())
 }
 

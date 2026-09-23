@@ -39,6 +39,9 @@ export type Track = {
   /** Agent lanes run on; empty means the conductor's. */
   worker_agent: string;
   worker_config: OptionConfig;
+  /** `#rrggbb` for the list, or empty. */
+  color: string;
+  tags: string[];
   created_at: number;
   updated_at: number;
   runs: number;
@@ -53,7 +56,12 @@ export type TrackPatch = Partial<{
   conductor_config: OptionConfig;
   worker_agent: string;
   worker_config: OptionConfig;
+  color: string;
+  tags: string[];
 }>;
+
+/** Colours a track can carry in the list; muted enough for both themes. */
+export const TRACK_COLORS = ["#7aa2f7", "#73daca", "#9ece6a", "#e0af68", "#ff9e64", "#f7768e", "#bb9af7", "#c0caf5"];
 
 /** The agent a track's lanes run on. */
 export function laneAgentOf(track: Track): string {

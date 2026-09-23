@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel } from "./store.svelte";
+  import { store, agentLabel, TRACK_COLORS } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import SplitHandle from "./SplitHandle.svelte";
   import { t } from "./i18n.svelte";
@@ -7,7 +7,8 @@
   /**
    * Second column: every track, newest activity first, each unfolding into
    * its lanes (Workspace > Track > Lane). The open track's lanes are shown
-   * unless folded by hand.
+   * unless folded by hand. A right click on a track opens its menu: rename,
+   * tags, colour, settings, delete — after Kiro Crew's session menu.
    */
   let query = $state("");
   let folded = $state<Record<string, boolean>>({});
@@ -23,8 +24,11 @@
           id: tr.id,
           name: tr.name,
           intent: tr.intent,
+          color: tr.color,
+          tags: tr.tags,
           runs: runs.length,
           live: runs.some(live),
+          busy: runs.some((r) => r.lane === "conductor" && live(r)),
           lastAt: Math.max(tr.updated_at, ...runs.map((r) => r.startedAt)),
           lanes: store.laneNamesIn(tr.id).map((name) => {
             const laneRuns = runs.filter((r) => r.lane === name);
@@ -43,7 +47,7 @@
   const shown = $derived(
     tracks.filter((tr) => {
       const q = query.trim().toLowerCase();
-      return !q || tr.name.toLowerCase().includes(q) || tr.intent.toLowerCase().includes(q);
+      return !q || tr.name.toLowerCase().includes(q) || tr.intent.toLowerCase().includes(q) || tr.tags.some((g) => g.toLowerCase().includes(q));
     }),
   );
 
@@ -54,7 +58,96 @@
   function toggle(id: string) {
     folded = { ...folded, [id]: isOpen(id) };
   }
+
+  // ----- context menu -----
+  type Menu = { id: string; x: number; y: number };
+  let menu = $state<Menu | null>(null);
+  let mode = $state<"" | "rename" | "tags" | "confirm">("");
+  let draft = $state("");
+  let menuEl = $state<HTMLDivElement>();
+  let draftInput = $state<HTMLInputElement>();
+
+  const menuTrack = $derived.by(() => {
+    const m = menu;
+    return m ? tracks.find((x) => x.id === m.id) : undefined;
+  });
+
+  function openMenu(e: MouseEvent, id: string) {
+    e.preventDefault();
+    mode = "";
+    draft = "";
+    menu = { id, x: e.clientX, y: e.clientY };
+  }
+
+  function closeMenu() {
+    menu = null;
+    mode = "";
+  }
+
+  /** Keep the menu inside the window once it has a size. */
+  $effect(() => {
+    if (!menu || !menuEl) return;
+    const r = menuEl.getBoundingClientRect();
+    const x = Math.min(menu.x, window.innerWidth - r.width - 8);
+    const y = Math.min(menu.y, window.innerHeight - r.height - 8);
+    if (x !== menu.x || y !== menu.y) menu = { ...menu, x: Math.max(8, x), y: Math.max(8, y) };
+  });
+
+  $effect(() => {
+    if (mode === "rename" || mode === "tags") draftInput?.focus();
+  });
+
+  function onDocClick(e: MouseEvent) {
+    if (menu && menuEl && !menuEl.contains(e.target as Node)) closeMenu();
+  }
+
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Escape" && menu) closeMenu();
+  }
+
+  function startRename() {
+    draft = menuTrack?.name ?? "";
+    mode = "rename";
+  }
+
+  function startTags() {
+    draft = menuTrack?.tags.join(", ") ?? "";
+    mode = "tags";
+  }
+
+  async function commit(e: Event) {
+    e.preventDefault();
+    if (!menu) return;
+    if (mode === "rename") {
+      if (draft.trim()) await store.updateTrack(menu.id, { name: draft.trim() });
+    } else if (mode === "tags") {
+      await store.updateTrack(menu.id, { tags: draft.split(",").map((s) => s.trim()).filter(Boolean) });
+    }
+    closeMenu();
+  }
+
+  async function pickColor(color: string) {
+    if (!menu) return;
+    await store.updateTrack(menu.id, { color });
+    closeMenu();
+  }
+
+  async function openSettings() {
+    if (!menu) return;
+    await store.selectTrack(menu.id);
+    store.view = "edit-track";
+    closeMenu();
+  }
+
+  async function remove() {
+    if (!menu) return;
+    const id = menu.id;
+    closeMenu();
+    await store.deleteTrack(id);
+  }
 </script>
+
+<svelte:document onclick={onDocClick} onkeydown={onKey} />
 
 <aside style="width: {store.trackListWidth}px">
   <SplitHandle edge="right" width={store.trackListWidth} min={200} max={480} reset={264} label={t("tracks.width")} onchange={(px, persist) => store.setTrackListWidth(px, persist)} />
@@ -71,13 +164,16 @@
 
   <div class="list">
     {#each shown as tr (tr.id)}
-      <div class="track" class:on={store.view === "track" && store.track === tr.id}>
+      <div class="track" class:on={store.view === "track" && store.track === tr.id} class:menued={menu?.id === tr.id} oncontextmenu={(e) => openMenu(e, tr.id)} role="presentation">
         <button class="chev mono" onclick={() => toggle(tr.id)} aria-label={isOpen(tr.id) ? t("tracks.foldLanes") : t("tracks.unfoldLanes")}>
           {isOpen(tr.id) ? "▾" : "▸"}
         </button>
         <button class="pick" onclick={() => store.selectTrack(tr.id)} title={tr.intent}>
-          <span class="dot" class:pulse={tr.live} style="background: {tr.live ? 'var(--ok)' : 'var(--idle)'}"></span>
+          <span class="dot" class:pulse={tr.live} style="background: {tr.live ? 'var(--ok)' : tr.color || 'var(--idle)'}"></span>
           <span class="name">{tr.name}</span>
+          {#if tr.tags.length}
+            <span class="mono tags" title={tr.tags.join(", ")}>{tr.tags.slice(0, 2).join(" · ")}{tr.tags.length > 2 ? ` +${tr.tags.length - 2}` : ""}</span>
+          {/if}
           <span class="mono count">{tr.runs}</span>
         </button>
       </div>
@@ -105,6 +201,44 @@
     {/if}
   </div>
 </aside>
+
+{#if menu && menuTrack}
+  <div class="menu" bind:this={menuEl} style="left: {menu.x}px; top: {menu.y}px" role="menu" aria-label={t("track.menu")}>
+    {#if mode === "rename" || mode === "tags"}
+      <form class="inline" onsubmit={commit}>
+        <span class="mlab-sm">{mode === "rename" ? t("track.rename") : t("track.tags")}</span>
+        <input type="text" bind:this={draftInput} bind:value={draft} placeholder={mode === "tags" ? t("track.tagsPh") : ""} maxlength={mode === "rename" ? 80 : 200} />
+        <div class="acts">
+          <span class="grow"></span>
+          <button class="btn sm" type="button" onclick={() => (mode = "")}>{t("track.cancel")}</button>
+          <button class="btn sm btn-acc" type="submit" disabled={mode === "rename" && !draft.trim()}>{t("newtrack.save")}</button>
+        </div>
+      </form>
+    {:else}
+      <button class="item" role="menuitem" onclick={startRename}>{t("track.rename")}</button>
+      <button class="item" role="menuitem" onclick={startTags}>{t("track.tags")}</button>
+      <button class="item" role="menuitem" onclick={openSettings}>{t("track.settings")}</button>
+      <div class="rule"></div>
+      <div class="colors" role="group" aria-label={t("track.color")}>
+        <button class="sw none" class:on={!menuTrack.color} title={t("track.noColor")} onclick={() => pickColor("")}></button>
+        {#each TRACK_COLORS as c (c)}
+          <button class="sw" class:on={menuTrack.color === c} style="background: {c}" title={c} onclick={() => pickColor(c)}></button>
+        {/each}
+      </div>
+      <div class="rule"></div>
+      {#if mode === "confirm"}
+        <div class="mono note">{menuTrack.busy ? t("track.busyNote") : t("track.deleteNote")}</div>
+        <div class="acts pad">
+          <button class="btn sm" type="button" onclick={() => (mode = "")}>{t("track.cancel")}</button>
+          <span class="grow"></span>
+          <button class="btn sm danger" type="button" disabled={menuTrack.busy} onclick={remove}>{t("track.confirmDelete")}</button>
+        </div>
+      {:else}
+        <button class="item danger" role="menuitem" onclick={() => (mode = "confirm")}>{t("track.delete")}</button>
+      {/if}
+    {/if}
+  </div>
+{/if}
 
 <style>
   aside {
@@ -191,7 +325,8 @@
     color: var(--dim);
   }
 
-  .track:hover {
+  .track:hover,
+  .track.menued {
     color: var(--hi);
     background: var(--sel);
   }
@@ -267,6 +402,16 @@
     white-space: nowrap;
   }
 
+  .tags {
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    color: var(--lab);
+  }
+
   .meta {
     font-size: 10px;
     color: var(--lab);
@@ -281,5 +426,117 @@
     padding: 18px 16px;
     font-size: 11px;
     color: var(--lab);
+  }
+
+  /* The track menu: a fixed sheet at the pointer, hairline and square. */
+  .menu {
+    position: fixed;
+    z-index: 40;
+    min-width: 210px;
+    background: var(--card);
+    border: 1px solid var(--lines);
+    padding: 4px 0;
+  }
+
+  .item {
+    width: 100%;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    font-size: 12px;
+    color: var(--dim);
+  }
+
+  .item:hover {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .item.danger {
+    color: var(--acct);
+  }
+
+  .rule {
+    height: 1px;
+    background: var(--line);
+    margin: 4px 0;
+  }
+
+  .colors {
+    display: flex;
+    gap: 7px;
+    padding: 6px 14px;
+  }
+
+  .sw {
+    width: 16px;
+    height: 16px;
+    border: 1px solid transparent;
+    padding: 0;
+  }
+
+  .sw.none {
+    background: transparent;
+    border-color: var(--lines);
+    background-image: linear-gradient(135deg, transparent 46%, var(--acct) 46%, var(--acct) 54%, transparent 54%);
+  }
+
+  .sw.on {
+    outline: 1px solid var(--hi);
+    outline-offset: 2px;
+  }
+
+  .note {
+    padding: 6px 14px 2px;
+    font-size: 10px;
+    color: var(--dim);
+    max-width: 260px;
+  }
+
+  .inline {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 12px 10px;
+    width: 260px;
+  }
+
+  .inline input {
+    height: 30px;
+    background: var(--inp);
+    border: 1px solid var(--line);
+    color: var(--txt);
+    font-family: var(--sans);
+    font-size: 12px;
+    padding: 0 9px;
+    outline: none;
+  }
+
+  .inline input:focus {
+    border-color: var(--acc);
+  }
+
+  .acts {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .acts.pad {
+    padding: 4px 12px 8px;
+  }
+
+  .btn.sm {
+    height: 24px;
+    padding: 0 8px;
+  }
+
+  .btn.danger:not(:disabled) {
+    color: var(--acct);
+    border-color: var(--acct);
   }
 </style>

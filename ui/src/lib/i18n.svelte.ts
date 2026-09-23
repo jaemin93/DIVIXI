@@ -43,13 +43,18 @@ const ko = {
   "tracks.lanes": "{n} lanes",
 
   // Track header
-  "track.edit": "편집",
-  "track.save": "저장",
+  "track.rename": "이름 변경",
+  "track.tags": "태그…",
+  "track.tagsPh": "쉼표로 구분",
+  "track.settings": "Track 설정…",
+  "track.color": "색",
+  "track.noColor": "색 없음",
   "track.cancel": "취소",
   "track.delete": "삭제",
   "track.confirmDelete": "정말 삭제",
   "track.deleteNote": "런, 레인 기록, 지휘자 기억이 모두 지워집니다.",
   "track.busyNote": "지휘자가 응답 중이면 지울 수 없습니다.",
+  "track.menu": "Track 메뉴",
   "track.noIntent": "의도 없음",
 
   // New track
@@ -305,13 +310,18 @@ const en: Record<Key, string> = {
   "tracks.lanes": "{n} lanes",
 
   // Track header
-  "track.edit": "Edit",
-  "track.save": "Save",
+  "track.rename": "Rename",
+  "track.tags": "Tags…",
+  "track.tagsPh": "comma separated",
+  "track.settings": "Track settings…",
+  "track.color": "Colour",
+  "track.noColor": "No colour",
   "track.cancel": "Cancel",
   "track.delete": "Delete",
   "track.confirmDelete": "Delete for real",
   "track.deleteNote": "Runs, lane records and the conductor's memory all go.",
   "track.busyNote": "Cannot delete while the conductor is responding.",
+  "track.menu": "Track menu",
   "track.noIntent": "No intent",
 
   // New track

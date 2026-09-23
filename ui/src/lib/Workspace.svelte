@@ -147,7 +147,7 @@
         <div class="changes" class:short={!!store.diffPath}>
           {#each store.git.changes as c (c.path)}
             <button class="row" class:on={store.diffPath === c.path} onclick={() => store.loadDiff(c.path)} title={c.from ? `${c.from} → ${c.path}` : c.path}>
-              <span class="mono code" style="color: {codeTone(c.code)}">{codeLabel(c.code)}</span>
+              <span class="mono status" style="color: {codeTone(c.code)}">{codeLabel(c.code)}</span>
               <span class="mono cpath">{c.path}</span>
             </button>
           {/each}
@@ -159,7 +159,7 @@
             <button class="btn sm" onclick={() => store.openFile(store.diffPath)}>{t("ws.open")}</button>
             <button class="btn sm" onclick={() => (store.diffPath = "")}>{t("ws.closeDiff")}</button>
           </div>
-          <pre class="code diff hljs">{@html diffHtml}</pre>
+          <pre class="src diff hljs">{@html diffHtml}</pre>
         {/if}
       {/if}
     </div>
@@ -189,7 +189,7 @@
         {:else if activeFile.kind === "markdown" && !raw}
           <div class="mdwrap"><Markdown source={activeFile.text ?? ""} /></div>
         {:else if activeFile.kind === "markdown" || activeFile.kind === "text"}
-          <pre class="code hljs">{@html codeHtml}</pre>
+          <pre class="src hljs">{@html codeHtml}</pre>
         {:else if activeFile.kind === "image"}
           <div class="imgwrap"><img src={activeFile.data_url} alt={activeFile.name} /></div>
         {:else}
@@ -398,7 +398,7 @@
     background: var(--sel);
   }
 
-  .code {
+  .status {
     width: 32px;
     flex-shrink: 0;
     font-size: 9px;
@@ -427,7 +427,7 @@
     padding: 0 8px;
   }
 
-  pre.code {
+  pre.src {
     flex: 1;
     min-height: 0;
     margin: 0;

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -68,6 +68,9 @@ const MIGRATIONS: &[&str] = &[
       WHERE json_valid((SELECT value FROM meta WHERE key = 'setting:models'))
         AND json_extract((SELECT value FROM meta WHERE key = 'setting:models'), '$.' || agent) IS NOT NULL;
     DELETE FROM meta WHERE key = 'setting:models';",
+    // 4 -> 5: a colour and tags per track, for the track list.
+    "ALTER TABLE tracks ADD COLUMN color TEXT NOT NULL DEFAULT '';
+    ALTER TABLE tracks ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
 ];
 
 const SCHEMA: &str = r#"
@@ -86,7 +89,9 @@ CREATE TABLE IF NOT EXISTS tracks (
     updated_at       INTEGER NOT NULL,
     conductor_config TEXT    NOT NULL DEFAULT '{}',
     worker_agent     TEXT    NOT NULL DEFAULT '',
-    worker_config    TEXT    NOT NULL DEFAULT '{}'
+    worker_config    TEXT    NOT NULL DEFAULT '{}',
+    color            TEXT    NOT NULL DEFAULT '',
+    tags             TEXT    NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -182,6 +187,10 @@ pub struct TrackInfo {
     pub worker_agent: String,
     /// Lanes' session options, like `conductor_config`.
     pub worker_config: BTreeMap<String, String>,
+    /// A colour for the list, `#rrggbb`; empty means none.
+    pub color: String,
+    /// Free-form labels for the list and its search.
+    pub tags: Vec<String>,
     /// Unix milliseconds.
     pub created_at: i64,
     /// Unix milliseconds of the last run started in it, or its creation.
@@ -210,6 +219,8 @@ pub struct TrackPatch {
     pub conductor_config: Option<BTreeMap<String, String>>,
     pub worker_agent: Option<String>,
     pub worker_config: Option<BTreeMap<String, String>>,
+    pub color: Option<String>,
+    pub tags: Option<Vec<String>>,
 }
 
 /// A lane as the record knows it: its runs, whoever ran them last.
@@ -349,8 +360,8 @@ impl Store {
             let now = now_ms();
             conn.execute(
                 "INSERT INTO tracks(id, name, intent, cwd, agent, created_at, updated_at,
-                                    conductor_config, worker_agent, worker_config)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9)",
+                                    conductor_config, worker_agent, worker_config, color, tags)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     id,
                     name,
@@ -361,6 +372,8 @@ impl Store {
                     config_json(patch.conductor_config.as_ref())?,
                     patch.worker_agent.as_deref().unwrap_or(""),
                     config_json(patch.worker_config.as_ref())?,
+                    patch.color.as_deref().unwrap_or(""),
+                    tags_json(patch.tags.as_ref())?,
                 ],
             )?;
             id
@@ -393,7 +406,8 @@ impl Store {
                         cwd = COALESCE(?4, cwd), agent = COALESCE(?5, agent),
                         conductor_config = COALESCE(?6, conductor_config),
                         worker_agent = COALESCE(?7, worker_agent),
-                        worker_config = COALESCE(?8, worker_config)
+                        worker_config = COALESCE(?8, worker_config),
+                        color = COALESCE(?9, color), tags = COALESCE(?10, tags)
                  WHERE id = ?1",
                 params![
                     id,
@@ -404,6 +418,8 @@ impl Store {
                     patch.conductor_config.as_ref().map(|c| config_json(Some(c))).transpose()?,
                     patch.worker_agent.as_deref(),
                     patch.worker_config.as_ref().map(|c| config_json(Some(c))).transpose()?,
+                    patch.color.as_deref(),
+                    patch.tags.as_ref().map(|t| tags_json(Some(t))).transpose()?,
                 ],
             )?;
             if changed == 0 {
@@ -664,12 +680,13 @@ const RUN_SELECT: &str = "SELECT id, lane, prompt, cwd, status, started_at, dura
 /// Columns of a track, in the order `row_to_track` reads them.
 const TRACK_SELECT: &str = "SELECT t.id, t.name, t.intent, t.cwd, t.agent, t.created_at, t.updated_at,
                                    (SELECT COUNT(*) FROM runs r WHERE r.track = t.id),
-                                   t.conductor_config, t.worker_agent, t.worker_config
+                                   t.conductor_config, t.worker_agent, t.worker_config, t.color, t.tags
                             FROM tracks t";
 
 fn row_to_track(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackInfo> {
     let conductor: String = r.get(8)?;
     let worker: String = r.get(10)?;
+    let tags: String = r.get(12)?;
     Ok(TrackInfo {
         id: r.get(0)?,
         name: r.get(1)?,
@@ -682,7 +699,22 @@ fn row_to_track(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackInfo> {
         conductor_config: serde_json::from_str(&conductor).unwrap_or_default(),
         worker_agent: r.get(9)?,
         worker_config: serde_json::from_str(&worker).unwrap_or_default(),
+        color: r.get(11)?,
+        tags: serde_json::from_str(&tags).unwrap_or_default(),
     })
+}
+
+/// Tags as the `tracks` row stores them: JSON, trimmed, empties and
+/// duplicates dropped.
+fn tags_json(tags: Option<&Vec<String>>) -> anyhow::Result<String> {
+    let mut clean: Vec<String> = Vec::new();
+    for t in tags.into_iter().flatten() {
+        let t = t.trim();
+        if !t.is_empty() && !clean.iter().any(|c| c == t) {
+            clean.push(t.to_string());
+        }
+    }
+    Ok(serde_json::to_string(&clean)?)
 }
 
 /// A config map as the `tracks` row stores it: JSON, empty values dropped.
@@ -798,6 +830,10 @@ mod tests {
         assert_eq!(a.conductor_config, BTreeMap::from([("model".to_string(), "gpt-5.4".to_string())]), "blank values are dropped");
         assert_eq!((a.worker_agent.as_str(), a.lane_agent()), ("codex", "codex"));
         assert_eq!(a.worker_config.get("mode").map(String::as_str), Some("agent-full-access"));
+        let a = store
+            .update_track("tr001", &TrackPatch { color: Some("#7aa2f7".into()), tags: Some(vec![" rust ".into(), "study".into(), "rust".into(), "".into()]), ..TrackPatch::default() })
+            .unwrap();
+        assert_eq!((a.color.as_str(), a.tags.clone()), ("#7aa2f7", vec!["rust".to_string(), "study".to_string()]));
         // A patch without a field keeps it.
         let a = store.update_track("tr001", &TrackPatch { intent: Some("lex it".into()), ..TrackPatch::default() }).unwrap();
         assert_eq!((a.name.as_str(), a.intent.as_str(), a.worker_agent.as_str()), ("Lexer", "lex it", "codex"));
