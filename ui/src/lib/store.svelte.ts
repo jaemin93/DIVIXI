@@ -416,13 +416,23 @@ class Store {
   draftDoc = $state<DraftDoc>({ ...EMPTY_DOC });
   /** The draft whose board `draftDoc` holds. */
   draftLoaded = $state("");
-  /** Height of the conversation under a draft's board. Persisted. */
-  draftChatHeight = $state(340);
+  /** Width of the conversation beside a draft's board. Persisted. */
+  draftChatWidth = $state(460);
+  /** The drafts column shown. Persisted. */
+  draftListOpen = $state(true);
 
-  setDraftChatHeight(px: number, persist = false) {
-    const max = Math.max(200, window.innerHeight - 260);
-    this.draftChatHeight = Math.min(max, Math.max(180, Math.round(px)));
-    if (persist) this.persistWidth("draft_chat_height", this.draftChatHeight);
+  setDraftChatWidth(px: number, persist = false) {
+    this.draftChatWidth = Math.min(760, Math.max(340, Math.round(px)));
+    if (persist) this.persistWidth("draft_chat_width", this.draftChatWidth);
+  }
+
+  async setDraftList(open: boolean) {
+    this.draftListOpen = open;
+    try {
+      await invoke("set_setting", { key: "draftlist", value: open ? "open" : "closed" });
+    } catch (err) {
+      this.lastError = String(err);
+    }
   }
 
   /** Items picked on the board; they go with the next message. */
@@ -886,7 +896,12 @@ class Store {
 
   /** Show the drafts: the last one open, else the newest. */
   async showDrafts() {
+    if (this.view === "draft") {
+      await this.setDraftList(!this.draftListOpen);
+      return;
+    }
     this.view = "draft";
+    if (!this.draftListOpen) void this.setDraftList(true);
     if (!this.drafts.length) await this.loadDrafts();
     const pick = this.drafts.find((d) => d.id === this.draft) ?? this.drafts[0];
     if (pick) await this.openDraft(pick.id);
@@ -1514,13 +1529,15 @@ class Store {
         this.lastError = String(err);
       }
       try {
-        const [term, termHeight, draftChat] = await Promise.all([
+        const [term, termHeight, draftChat, draftList] = await Promise.all([
           invoke<string | null>("get_setting", { key: "terminal" }),
           invoke<string | null>("get_setting", { key: "terminal_height" }),
-          invoke<string | null>("get_setting", { key: "draft_chat_height" }),
+          invoke<string | null>("get_setting", { key: "draft_chat_width" }),
+          invoke<string | null>("get_setting", { key: "draftlist" }),
         ]);
         const dc = Number(draftChat);
-        if (Number.isFinite(dc) && dc > 0) this.setDraftChatHeight(dc);
+        if (Number.isFinite(dc) && dc > 0) this.setDraftChatWidth(dc);
+        this.draftListOpen = draftList !== "closed";
         const h = Number(termHeight);
         if (Number.isFinite(h) && h > 0) this.setTermHeight(h);
         if (term === "open") void this.setTerminal(true);

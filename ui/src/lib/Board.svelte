@@ -65,11 +65,31 @@
   }
 
   onMount(() => {
-    // Not passive: the wheel zooms the board instead of scrolling the page.
+    // Not passive: the board takes the wheel instead of the page.
+    //  - A touchpad pinch arrives as a wheel with Ctrl held (WebView2's own
+    //    pinch zoom is off), in small steps: zoom, briskly. Ctrl+wheel too.
+    //  - A mouse wheel (whole notches, no sideways part): zoom.
+    //  - Anything else is two fingers on a touchpad: pan, both ways.
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const r = el!.getBoundingClientRect();
-      zoomBy(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
+      const cx = e.clientX - r.left;
+      const cy = e.clientY - r.top;
+      const lines = e.deltaMode === 1;
+      if (e.ctrlKey || e.metaKey) {
+        zoomBy(Math.exp(-e.deltaY * (lines ? 0.05 : 0.01)), cx, cy);
+        return;
+      }
+      const legacy = (e as WheelEvent & { wheelDeltaY?: number }).wheelDeltaY;
+      const notch = legacy !== undefined ? legacy !== 0 && legacy % 120 === 0 : Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY);
+      if (e.deltaX === 0 && !e.shiftKey && (lines || notch)) {
+        zoomBy(Math.exp(-e.deltaY * (lines ? 0.05 : 0.0015)), cx, cy);
+        return;
+      }
+      const dx = e.shiftKey && e.deltaX === 0 ? e.deltaY : e.deltaX;
+      const dy = e.shiftKey && e.deltaX === 0 ? 0 : e.deltaY;
+      const k = lines ? 20 : 1;
+      view = { ...view, x: view.x - dx * k, y: view.y - dy * k };
     };
     el?.addEventListener("wheel", onWheel, { passive: false });
     return () => el?.removeEventListener("wheel", onWheel);

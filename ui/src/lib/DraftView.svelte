@@ -1,5 +1,8 @@
 <script lang="ts">
   import { store } from "./store.svelte";
+  import { slide } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
+  import SplitHandle from "./SplitHandle.svelte";
   import Board from "./Board.svelte";
   import Timeline from "./Timeline.svelte";
   import Composer from "./Composer.svelte";
@@ -15,6 +18,10 @@
    * carries it into a new track once it has a goal.
    */
   let renaming = $state(false);
+
+  /** The list slides like the tracks column; not for those who asked for less motion. */
+  const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const side = { axis: "x" as const, duration: reduced ? 0 : 200, easing: cubicOut };
   let titleDraft = $state("");
   let newTitle = $state("");
   let confirmDelete = $state("");
@@ -43,23 +50,6 @@
     if (d && titleDraft.trim() && titleDraft.trim() !== d.title) await store.updateDraft(d.id, { title: titleDraft.trim() });
   }
 
-  // The conversation's height: drag the edge between board and talk.
-  function startDrag(e: PointerEvent) {
-    e.preventDefault();
-    const startY = e.clientY;
-    const start = store.draftChatHeight;
-    document.documentElement.classList.add("resizing");
-    const move = (ev: PointerEvent) => store.setDraftChatHeight(start + (startY - ev.clientY), false);
-    const stop = () => {
-      document.documentElement.classList.remove("resizing");
-      store.setDraftChatHeight(store.draftChatHeight, true);
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", stop);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", stop);
-  }
-
   function promote() {
     if (!d) return;
     const labels = {
@@ -75,7 +65,9 @@
 </script>
 
 <div class="drafts">
-  <!-- Every draft, most recently touched first. -->
+  <!-- Every draft, most recently touched first; folds like the tracks column. -->
+  {#if store.draftListOpen}
+  <div class="sidebox" transition:slide={side}>
   <aside class="list">
     <div class="head"><span class="mlab">{t("draft.title")}</span></div>
     <form class="new" onsubmit={create}>
@@ -101,6 +93,8 @@
       {/if}
     </div>
   </aside>
+  </div>
+  {/if}
 
   {#if d}
     <section class="main">
@@ -143,10 +137,17 @@
             </div>
           {/if}
         </div>
-        <!-- The conversation under the board, as on a track. -->
-        <div class="talk" style="height: {store.draftChatHeight}px">
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="grip" onpointerdown={startDrag} ondblclick={() => store.setDraftChatHeight(340, true)} title={t("draft.chatResize")}></div>
+        <!-- The conversation beside the board, as on a track. -->
+        <div class="talk" style="width: {store.draftChatWidth}px">
+          <SplitHandle
+            edge="left"
+            width={store.draftChatWidth}
+            min={340}
+            max={760}
+            reset={460}
+            label={t("draft.chatResize")}
+            onchange={(px, persist) => store.setDraftChatWidth(px, persist)}
+          />
           <Timeline />
           <Composer />
         </div>
@@ -375,13 +376,18 @@
     flex: 1;
     min-height: 0;
     display: flex;
-    flex-direction: column;
+  }
+
+  .sidebox {
+    flex-shrink: 0;
+    display: flex;
+    min-height: 0;
   }
 
   .boardwrap {
     position: relative;
     flex: 1;
-    min-height: 120px;
+    min-width: 200px;
     display: flex;
   }
 
@@ -410,25 +416,26 @@
     color: var(--hi);
   }
 
-  /* The conversation: the track's timeline and composer, under the board. */
+  /* The conversation: the track's timeline and composer, beside the board. */
   .talk {
     position: relative;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    min-height: 180px;
-    border-top: 1px solid var(--line);
+    min-height: 0;
+    border-left: 1px solid var(--line);
     background-image: radial-gradient(var(--dot) 1px, transparent 1px);
     background-size: 22px 22px;
   }
 
-  .grip {
-    position: absolute;
-    top: -3px;
-    left: 0;
-    right: 0;
-    height: 6px;
-    cursor: row-resize;
-    z-index: 5;
+  /* The track's composer and timeline are laid out for a wide column. */
+  .talk :global(.composer) {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .talk :global(.scroll) {
+    padding-left: 18px;
+    padding-right: 18px;
   }
 </style>
