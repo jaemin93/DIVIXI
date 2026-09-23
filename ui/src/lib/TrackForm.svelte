@@ -25,15 +25,40 @@
   let cwd = $state(seed?.cwd ?? "");
   let agent = $state<AgentId>((seed?.agent as AgentId) ?? store.agent);
   let conductorConfig = $state<OptionConfig>({ ...(seed?.conductor_config ?? {}) });
-  let workerAgent = $state<string>(seed?.worker_agent ?? "");
+  /**
+   * The worker starts on the conductor's agent and options and keeps
+   * following them until it is set apart: the first change on its tab
+   * copies what the conductor has and goes from there. A track whose
+   * worker was never set apart saves it that way, and lanes then open
+   * with the conductor's options.
+   */
+  const followed = !seed?.worker_agent && Object.keys(seed?.worker_config ?? {}).length === 0;
+  let workerApart = $state(!followed);
+  let workerAgent = $state<string>(seed?.worker_agent || (seed?.agent ?? ""));
   let workerConfig = $state<OptionConfig>({ ...(seed?.worker_config ?? {}) });
+  let tab = $state<"conductor" | "worker">("conductor");
+
+  function setApart() {
+    if (workerApart) return;
+    workerAgent = agent;
+    workerConfig = { ...conductorConfig };
+    workerApart = true;
+  }
   let busy = $state(false);
   let nameInput = $state<HTMLInputElement>();
 
-  /** The agent lanes will run on. */
-  const laneAgent = $derived(workerAgent || agent);
+  /** The agent and options lanes will run on, as the worker tab shows them. */
+  const laneAgent = $derived(workerApart ? workerAgent || agent : agent);
+  const laneConfig = $derived(workerApart ? workerConfig : conductorConfig);
   const conductorOptions = $derived(store.optionsOf(agent));
   const workerOptions = $derived(store.optionsOf(laneAgent));
+
+  /** "Claude Code · Opus" for a role's tab. */
+  function roleSummary(id: string, options: ConfigOption[], config: OptionConfig): string {
+    const model = options.find((o) => o.category === "model");
+    const name = model ? store.choiceName(model, store.effective(id, config, model)) : "";
+    return name ? `${agentLabel(id)} · ${name}` : agentLabel(id);
+  }
   const canSubmit = $derived(!!name.trim() && ready.some((a) => a.kind === agent) && !busy);
 
   // Default folder for a new track: the repository the app was launched from.
@@ -77,8 +102,8 @@
         cwd,
         agent,
         conductor_config: prune(conductorConfig, conductorOptions),
-        worker_agent: workerAgent,
-        worker_config: prune(workerConfig, workerOptions),
+        worker_agent: workerApart ? laneAgent : "",
+        worker_config: workerApart ? prune(workerConfig, workerOptions) : {},
       };
       const ok = track ? await store.updateTrack(track.id, patch) : await store.createTrack(patch);
       if (ok && track) store.view = "track";
@@ -154,8 +179,38 @@
       {#if ready.length === 0}
         <div class="field"><div class="mono none">{t("newtrack.noAgents")}</div></div>
       {:else}
-        {@render role(t("newtrack.conductor"), t("newtrack.agent"), agent, (a) => (agent = a as AgentId), false, conductorOptions, conductorConfig, agent)}
-        {@render role(t("newtrack.workers"), t("newtrack.workerAgent"), workerAgent, (a) => (workerAgent = a), true, workerOptions, workerConfig, laneAgent)}
+        <!-- Who runs what: one role at a time, each tab saying what it is set to. -->
+        <div class="roles" role="tablist">
+          <button type="button" class="roletab" class:on={tab === "conductor"} role="tab" aria-selected={tab === "conductor"} onclick={() => (tab = "conductor")}>
+            <span class="mlab-sm">{t("newtrack.conductor")}</span>
+            <span class="mono sum">{roleSummary(agent, conductorOptions, conductorConfig)}</span>
+          </button>
+          <button type="button" class="roletab" class:on={tab === "worker"} role="tab" aria-selected={tab === "worker"} onclick={() => (tab = "worker")}>
+            <span class="mlab-sm">{t("newtrack.workers")}</span>
+            <span class="mono sum">{roleSummary(laneAgent, workerOptions, laneConfig)}</span>
+          </button>
+        </div>
+        {#if tab === "conductor"}
+          {@render role(t("newtrack.conductorNote"), t("newtrack.agent"), agent, (a) => (agent = a as AgentId), conductorOptions, conductorConfig, (id, v) => (conductorConfig[id] = v), agent)}
+        {:else}
+          {@render role(
+            t("newtrack.workerNote"),
+            t("newtrack.workerAgent"),
+            laneAgent,
+            (a) => {
+              setApart();
+              if (a !== workerAgent) workerConfig = {};
+              workerAgent = a;
+            },
+            workerOptions,
+            laneConfig,
+            (id, v) => {
+              setApart();
+              workerConfig[id] = v;
+            },
+            laneAgent,
+          )}
+        {/if}
       {/if}
 
       <div class="foot">
@@ -174,27 +229,21 @@
 
 <!-- One role: which agent, then that agent's options as selects. -->
 {#snippet role(
-  title: string,
+  note: string,
   agentLabelText: string,
   chosen: string,
   pick: (id: string) => void,
-  allowSame: boolean,
   options: ConfigOption[],
   config: OptionConfig,
+  setOption: (id: string, value: string) => void,
   effectiveAgent: string,
 )}
-  <section class="role">
-    <div class="mlab rolehead">{title}</div>
+  <section class="role" role="tabpanel">
+    <p class="rolenote">{note}</p>
 
     <div class="field">
       <span class="mlab-sm">{agentLabelText}</span>
       <div class="agents" role="radiogroup" aria-label={agentLabelText}>
-        {#if allowSame}
-          <button type="button" class="opt" class:on={chosen === ""} role="radio" aria-checked={chosen === ""} onclick={() => pick("")}>
-            <span class="dot"></span>
-            <span class="mono">{t("newtrack.sameAsConductor")}</span>
-          </button>
-        {/if}
         {#each ready as a (a.kind)}
           <button type="button" class="opt" class:on={chosen === a.kind} role="radio" aria-checked={chosen === a.kind} onclick={() => pick(a.kind)}>
             <span class="dot"></span>
@@ -212,7 +261,7 @@
         <span class="mlab-sm">{option.name} <span class="mono cat">{option.category}</span></span>
         <select
           value={config[option.id] ?? ""}
-          onchange={(e) => (config[option.id] = (e.currentTarget as HTMLSelectElement).value)}
+          onchange={(e) => setOption(option.id, (e.currentTarget as HTMLSelectElement).value)}
         >
           <option value="">{defaultLabel(effectiveAgent, option)}</option>
           {#each option.choices as c (c.id)}
@@ -284,9 +333,59 @@
     border-bottom: 1px solid var(--lineq);
   }
 
-  .rolehead {
-    padding-top: 26px;
+  /* The role switch: two tabs, each with what the role is set to. */
+  .roles {
+    display: flex;
+    margin-top: 26px;
+    border: 1px solid var(--line);
+  }
+
+  .roletab {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
+    padding: 11px 14px;
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    text-align: left;
+    color: var(--dim);
+  }
+
+  .roletab + .roletab {
+    border-left: 1px solid var(--line);
+  }
+
+  .roletab:hover {
+    background: var(--sel);
+  }
+
+  .roletab.on {
+    background: var(--sel);
+    border-bottom-color: var(--acc);
     color: var(--hi);
+  }
+
+  .roletab.on .mlab-sm {
+    color: var(--hi);
+  }
+
+  .sum {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+  }
+
+  .rolenote {
+    margin: 16px 0 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--dim);
   }
 
   .cat {

@@ -2,7 +2,7 @@
 
 여러 네이티브 AI 에이전트 세션을 한 사람이 지휘하는 데스크톱. Rust + Tauri 2 + Svelte 5.
 이름은 악보 지시어 *divisi*(한 파트를 독립된 여러 성부로 나눠 연주)에서 s를 x로 바꾼 것입니다. x는 교차와 곱셈, 제공자를 가로질러 하나가 여럿이 되는 것. 지휘자 한
-세션과 대화하면 지휘자가 일을 독립된 워커 세션들로 나눕니다. 코드 안의 크레이트 이름은 아직
+세션과 대화하면 지휘자가 일을 독립된 작업자 세션들로 나눕니다. 코드 안의 크레이트 이름은 아직
 `orchestra-*`입니다.
 
 ## 설계 원칙
@@ -68,7 +68,7 @@ cargo run -p orchestra-acp --example smoke -- "Reply with exactly: ORCHESTRA OK"
 | GitHub Copilot | 설치된 `copilot.exe --acp` | agent · plan · **autopilot** |
 | Antigravity | Google의 `agy_acp_server` zip을 앱 데이터 폴더에 다운로드 | default · auto_edit · **yolo** |
 
-트랙 설정(Tracks 열에서 트랙을 우클릭 → "Track 설정…", 또는 컴포저 왼쪽 칩)에서 지휘자와 워커 각각의 에이전트, 모델, 권한
+트랙 설정(Tracks 열에서 트랙을 우클릭 → "Track 설정…", 또는 컴포저 왼쪽 칩)에서 지휘자와 작업자 각각의 에이전트, 모델, 권한
 모드, 그 밖에 에이전트가 알리는 세션 옵션(추론 강도 등)을 고릅니다. 고르지 않은 옵션은
 에이전트 기본값이고, 모드를 고르지 않으면 묻지 않는 쪽을 씁니다.
 
@@ -112,7 +112,7 @@ cargo run -p orchestra-store --example persist -- "Reply with exactly: ORCHESTRA
 되는 것: 첫 실행 setup의 에이전트 감지·로그인·다운로드와 테마·언어, 설정의 재감지,
 Track 생성(이름·의도·폴더·지휘자 에이전트)과 편집·삭제, 트랙마다 지휘자 세션(오래 살고,
 재시작 후 `session/load`로 이어짐), 비동기 레인(`[lane-report]`로 지휘자에게 보고, 닫힌 레인
-재개, 전체 레인 목록), 레인 뷰(지휘자↔워커 대화), 작업 폴더 패널(git 변경 사항과 diff, 파일
+재개, 전체 레인 목록), 레인 뷰(지휘자↔작업자 대화), 작업 폴더 패널(git 변경 사항과 diff, 파일
 트리, 마크다운 미리보기·코드·이미지 뷰어), 스트리밍과 마크다운 렌더링, Kiro식 창
 크롬·레일·Tracks 열·설정, 대화창 폰트·확대·서체·언어(ko/en), SQLite 이벤트 스토어(재시작 후
 타임라인 복원, 전문 검색 API).

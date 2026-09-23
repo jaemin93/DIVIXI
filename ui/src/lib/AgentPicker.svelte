@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel, laneAgentOf, type Role } from "./store.svelte";
+  import { store, agentLabel, laneAgentOf, laneConfigOf, type Role } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
   import { t } from "./i18n.svelte";
@@ -20,8 +20,6 @@
   const options = $derived(store.optionsOf(agent));
   const modelOption = $derived(options.find((o) => o.category === "model"));
   const modeOption = $derived(options.find((o) => o.category === "mode"));
-  /** Workers follow the conductor unless the track names an agent for them. */
-  const sameAsConductor = $derived(role === "worker" && !track?.worker_agent);
 
   const modelInEffect = $derived(modelOption ? store.effective(agent, config, modelOption) : "");
   const chosenModel = $derived(modelOption ? (config[modelOption.id] ?? "") : "");
@@ -48,7 +46,7 @@
     const wAgent = laneAgentOf(track);
     const wOpts = store.optionsOf(wAgent);
     const wModel = wOpts.find((o) => o.category === "model");
-    const wModelName = wModel ? store.choiceName(wModel, store.effective(wAgent, track.worker_config, wModel)) : "";
+    const wModelName = wModel ? store.choiceName(wModel, store.effective(wAgent, laneConfigOf(track), wModel)) : "";
     const differs = wAgent !== track.agent || (wModel && wModelName !== model);
     return {
       conductor: agentLabel(track.agent),
@@ -106,18 +104,8 @@
     <!-- agents -->
     <div class="col agents">
       <div class="mlab-sm colhead">{t("picker.agent")}</div>
-      {#if role === "worker"}
-        <button class="opt" class:on={sameAsConductor} onclick={() => pickAgent("")}>
-          <span class="dot" style="background: {sameAsConductor ? 'var(--ok)' : 'var(--idle)'}"></span>
-          <span class="col2">
-            <span class="mono id">{t("picker.same")}</span>
-            <span class="desc">{t("picker.sameNote")}</span>
-          </span>
-          {#if sameAsConductor}<span class="mono check">✓</span>{/if}
-        </button>
-      {/if}
       {#each store.agents ?? [] as a (a.kind)}
-        {@const on = role === "worker" ? !sameAsConductor && agent === a.kind : agent === a.kind}
+        {@const on = agent === a.kind}
         <button class="opt" class:on disabled={a.readiness !== "ready"} onclick={() => pickAgent(a.kind)}>
           <span class="dot" style="background: {a.readiness === 'ready' ? 'var(--ok)' : 'var(--idle)'}"></span>
           <span class="col2">
@@ -135,7 +123,7 @@
       {#if !modelOption}
         <div class="mono none">{t("picker.noModels")}</div>
       {:else}
-        <button class="opt" class:on={!chosenModel} disabled={sameAsConductor} onclick={() => pickModel("")}>
+        <button class="opt" class:on={!chosenModel} onclick={() => pickModel("")}>
           <span class="col2">
             <span class="mono id">{t("picker.default")}</span>
             <span class="desc">{store.choiceName(modelOption, modelOption.current)}</span>
@@ -143,7 +131,7 @@
           {#if !chosenModel}<span class="mono check">✓</span>{/if}
         </button>
         {#each models as c (c.id)}
-          <button class="opt" class:on={chosenModel === c.id} disabled={sameAsConductor} onclick={() => pickModel(c.id)}>
+          <button class="opt" class:on={chosenModel === c.id} onclick={() => pickModel(c.id)}>
             <span class="col2">
               <span class="mono id">{c.name}</span>
               <span class="desc">{c.id}{c.group ? ` · ${c.group}` : ""}{c.description ? ` · ${c.description}` : ""}</span>

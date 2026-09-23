@@ -351,6 +351,16 @@ pub struct TrackInfo {
 }
 
 impl TrackInfo {
+    /// The options lanes open with: the worker's own, or, when the worker
+    /// was never set apart (no agent, no options), the conductor's.
+    pub fn lane_config(&self) -> &BTreeMap<String, String> {
+        if self.worker_agent.is_empty() && self.worker_config.is_empty() {
+            &self.conductor_config
+        } else {
+            &self.worker_config
+        }
+    }
+
     /// The agent lanes run on.
     pub fn lane_agent(&self) -> &str {
         if self.worker_agent.is_empty() {
@@ -1219,6 +1229,27 @@ mod tests {
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lanes_take_the_conductors_options_until_the_worker_is_set_apart() {
+        let store = Store::in_memory().unwrap();
+        let conductor: BTreeMap<String, String> = [("model".to_string(), "opus".to_string())].into();
+        let tr = store
+            .create_track(&TrackPatch {
+                name: Some("t".into()),
+                cwd: Some(".".into()),
+                agent: Some("claude_code".into()),
+                conductor_config: Some(conductor.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!((tr.lane_agent(), tr.lane_config()), ("claude_code", &conductor));
+        let apart = store
+            .update_track(&tr.id, &TrackPatch { worker_agent: Some("codex".into()), ..Default::default() })
+            .unwrap();
+        assert_eq!(apart.lane_agent(), "codex");
+        assert!(apart.lane_config().is_empty(), "a worker set apart keeps its own options");
     }
 
     #[test]

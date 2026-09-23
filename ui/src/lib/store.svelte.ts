@@ -95,6 +95,12 @@ export function laneAgentOf(track: Track): string {
   return track.worker_agent || track.agent;
 }
 
+/** The options lanes open with: the worker's own, else (never set apart) the conductor's. */
+export function laneConfigOf(track: Track): OptionConfig {
+  const own = track.worker_agent !== "" || Object.keys(track.worker_config).length > 0;
+  return own ? track.worker_config : track.conductor_config;
+}
+
 /** Who a session setting is for. */
 export type Role = "conductor" | "worker";
 
@@ -878,10 +884,11 @@ class Store {
   roleConfig(role: Role): OptionConfig {
     const track = this.currentTrack;
     if (!track) return {};
-    return role === "conductor" ? track.conductor_config : track.worker_config;
+    return role === "conductor" ? track.conductor_config : laneConfigOf(track);
   }
 
-  /** Put a role on an agent; for workers, empty means "same as the conductor". Takes effect at the next session. */
+  /** Put a role on an agent. Takes effect at the next session. A worker
+   *  moved onto the agent it already runs on keeps its options. */
   async setRoleAgent(role: Role, agent: string) {
     const track = this.currentTrack;
     if (!track) return;
@@ -889,7 +896,8 @@ class Store {
       this.agent = agent as AgentId;
       await this.updateTrack(track.id, { agent });
     } else {
-      await this.updateTrack(track.id, { worker_agent: agent });
+      const same = agent === laneAgentOf(track);
+      await this.updateTrack(track.id, { worker_agent: agent, worker_config: same ? laneConfigOf(track) : {} });
     }
   }
 

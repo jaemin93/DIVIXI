@@ -724,7 +724,7 @@ async fn start_lane_turn(
                 // The track's worker options are in its worker agent's terms;
                 // a lane on some other agent gets that agent's defaults.
                 let empty = BTreeMap::new();
-                let chosen = if agent_id == info.lane_agent() { &info.worker_config } else { &empty };
+                let chosen = if agent_id == info.lane_agent() { info.lane_config() } else { &empty };
                 let mut opts = session_options(&state, &agent_id, &info.cwd, chosen, None);
                 opts.resume = resume;
                 tracing::info!(%track, lane = %name, agent = %agent_id, resume = ?opts.resume, "opening lane session");
