@@ -183,13 +183,40 @@
     for (const tab of tabs) tab.term.options.theme = th;
   });
 
+  /**
+   * The slide: the outer box's height goes between 0 and the panel height
+   * while the terminal inside keeps its full size, so it rises from the
+   * bottom without the shell being resized every frame. `shown` trails
+   * `store.termOpen` by a frame so the first open animates too; `gone`
+   * hides the folded panel from focus once it has slid away.
+   */
+  let shown = $state(false);
+  let gone = $state(true);
+  let dragging = $state(false);
+  $effect(() => {
+    const open = store.termOpen;
+    if (open) gone = false;
+    const frame = requestAnimationFrame(() => (shown = open));
+    // No transitionend without a transition (reduced motion): hide anyway.
+    const timer = open ? 0 : setTimeout(() => (gone = !store.termOpen), 320);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+    };
+  });
+  function onSlid(e: TransitionEvent) {
+    if (e.target === e.currentTarget && !store.termOpen) gone = true;
+  }
+
   // Height: drag the top edge.
   function startDrag(e: PointerEvent) {
     e.preventDefault();
+    dragging = true;
     const startY = e.clientY;
     const start = store.termHeight;
     const move = (ev: PointerEvent) => store.setTermHeight(start + (startY - ev.clientY), false);
     const stop = () => {
+      dragging = false;
       store.setTermHeight(store.termHeight, true);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);
@@ -199,7 +226,17 @@
   }
 </script>
 
-<section class="terminal" class:hidden={!store.termOpen} style="height: {store.termHeight}px" aria-label={t("term.tab")}>
+<section
+  class="terminal"
+  class:shown
+  class:gone
+  class:dragging
+  style="height: {shown ? store.termHeight : 0}px"
+  ontransitionend={onSlid}
+  aria-label={t("term.tab")}
+  aria-hidden={!store.termOpen}
+>
+  <div class="inner" style="height: {store.termHeight}px">
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="grip" onpointerdown={startDrag} ondblclick={() => store.setTermHeight(280, true)} title={t("term.resize")}></div>
   <div class="bar">
@@ -223,26 +260,50 @@
     </button>
   </div>
   <div class="host" bind:this={host}></div>
+  </div>
 </section>
 
 <style>
+  /* Slides up from the bottom edge and back down; the inside stays put. */
   .terminal {
     position: relative;
     flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    min-height: 120px;
-    border-top: 1px solid var(--line);
+    overflow: hidden;
+    border-top: 1px solid transparent;
     background: var(--bg);
+    transition:
+      height 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      border-color 220ms;
   }
 
-  .terminal.hidden {
-    display: none;
+  .terminal.shown {
+    border-top-color: var(--line);
+  }
+
+  .terminal.gone {
+    visibility: hidden;
+  }
+
+  /* Resizing by hand follows the pointer, not a curve. */
+  .terminal.dragging {
+    transition: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .terminal {
+      transition: none;
+    }
+  }
+
+  .inner {
+    position: relative;
+    display: flex;
+    flex-direction: column;
   }
 
   .grip {
     position: absolute;
-    top: -3px;
+    top: 0;
     left: 0;
     right: 0;
     height: 6px;
