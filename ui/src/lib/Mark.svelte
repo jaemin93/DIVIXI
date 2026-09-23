@@ -25,7 +25,10 @@
 
   // Geometry on a 64-unit box; the icon script draws the same numbers.
   const staves = [22, 30, 38, 46];
-  const TILE = "#0b0b0b";
+  // Fixed colours. Charcoal, not near-black: on the dark theme a near-black
+  // tile vanished into the page; this one reads as a tile on both themes.
+  const TILE = "#262626";
+  const EDGE = "#454545";
   const PALE = "#e9e7e4";
   const ACCENT = "#e03127";
 </script>
@@ -40,6 +43,7 @@
 >
   {#if title}<title>{title}</title>{/if}
   <rect x="0" y="0" width="64" height="64" fill={TILE} />
+  <rect x="0.5" y="0.5" width="63" height="63" fill="none" stroke={EDGE} stroke-width="1" vector-effect="non-scaling-stroke" />
   {#each staves as y (y)}
     <rect x="8" y={y - 0.75} width="48" height="1.5" fill={PALE} shape-rendering="crispEdges" />
   {/each}
