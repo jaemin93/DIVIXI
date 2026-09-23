@@ -132,9 +132,6 @@
     <button class="tab icon" title={t("ws.refresh")} disabled={store.treeLoading || store.gitLoading} onclick={() => store.refreshWorkspace()}>
       <Icon name="refresh" size={14} />
     </button>
-    <button class="tab icon" title={t("ws.close")} onclick={() => store.setPanel(false)}>
-      <Icon name="panel" size={14} />
-    </button>
   </div>
 
   {#if store.panelTab === "changes"}
