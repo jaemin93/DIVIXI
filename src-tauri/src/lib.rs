@@ -41,6 +41,8 @@ pub struct AppState {
     db_path: String,
     /// Where downloaded ACP servers live (`<app data>/adapters`).
     adapters_dir: PathBuf,
+    /// Where pasted images are kept so they can be attached by path.
+    attachments_dir: PathBuf,
     /// Last detection result, mirrored from the store for quick lookups.
     agents: Mutex<Option<Vec<AgentStatus>>>,
     /// Conductor and lane sessions, across tracks.
@@ -233,8 +235,103 @@ async fn conductor_prompt(
     prompt: String,
     agent: Option<String>,
     lang: Option<String>,
+    files: Option<Vec<String>>,
 ) -> Result<String, String> {
-    conductor::conductor_turn(app, track, prompt, agent.filter(|a| !a.is_empty()), lang.unwrap_or_default()).await
+    let files = check_attachments(files.unwrap_or_default())?;
+    conductor::conductor_turn(app, track, prompt, agent.filter(|a| !a.is_empty()), lang.unwrap_or_default(), files).await
+}
+
+/// How many files one message may carry.
+const MAX_ATTACHMENTS: usize = 20;
+
+/// Attached paths, each an existing file, without repeats.
+fn check_attachments(files: Vec<String>) -> Result<Vec<PathBuf>, String> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for f in files {
+        let path = PathBuf::from(&f);
+        if !path.is_absolute() || !path.is_file() {
+            return Err(format!("not a file: {f}"));
+        }
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    if out.len() > MAX_ATTACHMENTS {
+        return Err(format!("at most {MAX_ATTACHMENTS} files per message"));
+    }
+    Ok(out)
+}
+
+/// One attachable file as the composer shows it.
+#[derive(Clone, serde::Serialize)]
+struct FileStat {
+    path: String,
+    name: String,
+    size: u64,
+}
+
+/// Sizes and names for paths about to be attached; folders and missing
+/// paths are left out.
+#[tauri::command(async)]
+fn file_stats(paths: Vec<String>) -> Vec<FileStat> {
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let path = PathBuf::from(&p);
+            let meta = std::fs::metadata(&path).ok().filter(|m| m.is_file())?;
+            Some(FileStat {
+                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.clone()),
+                path: p,
+                size: meta.len(),
+            })
+        })
+        .collect()
+}
+
+/// Let the human pick files to attach, starting in the track's folder.
+#[tauri::command]
+async fn pick_files(app: AppHandle, start: Option<String>) -> Result<Vec<String>, String> {
+    let mut dialog = app.dialog().file();
+    if let Some(dir) = start.filter(|s| !s.is_empty() && std::path::Path::new(s).is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    dialog.pick_files(move |picked| {
+        let _ = tx.send(picked);
+    });
+    let picked = rx.await.map_err(|e| e.to_string())?;
+    Ok(picked
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| p.into_path().ok())
+        .map(|p| p.display().to_string())
+        .collect())
+}
+
+/// Keep a pasted image (or other clipboard file) so it can be attached by
+/// path. Returns where it went.
+#[tauri::command(async)]
+fn save_attachment(state: State<'_, AppState>, name: String, data: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map_err(|e| format!("bad attachment data: {e}"))?;
+    if bytes.len() > 50 * 1024 * 1024 {
+        return Err("attachments over 50 MB are not kept".to_string());
+    }
+    let clean: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .collect();
+    let clean = if clean.trim_matches(['.', '_']).is_empty() { "pasted".to_string() } else { clean };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    std::fs::create_dir_all(&state.attachments_dir).map_err(|e| e.to_string())?;
+    let path = state.attachments_dir.join(format!("{stamp}-{clean}"));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
 }
 
 /// The conductor's session state for a track: open, busy, its commands.
@@ -648,6 +745,9 @@ pub fn run() {
             list_runs,
             run_events,
             list_decisions,
+            file_stats,
+            pick_files,
+            save_attachment,
             system_metrics,
             term_open,
             term_write,
@@ -685,10 +785,12 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let (store, db_path) = open_store(&data_dir)?;
             let adapters_dir = data_dir.join("adapters");
+            let attachments_dir = data_dir.join("attachments");
             app.manage(AppState {
                 store,
                 db_path,
                 adapters_dir,
+                attachments_dir,
                 agents: Mutex::new(None),
                 sessions: conductor::Sessions::default(),
                 meter: metrics::Meter::default(),

@@ -228,6 +228,31 @@ export type View = "track" | "settings" | "lane" | "new-track" | "edit-track";
 
 /** Prefix of conductor prompts Orchestra injects itself (lane reports). Language-neutral. */
 export const REPORT_PREFIX = "[lane-report]";
+/** Heads the list of files under a human message, as the core stores it. */
+export const ATTACH_MARK = "[attachments]";
+
+/** A file waiting in the composer to go with the next message. */
+export type Attachment = { path: string; name: string; size: number };
+
+/** A stored prompt split into what the human wrote and the files they attached. */
+export function splitAttachments(prompt: string): { text: string; files: string[] } {
+  const at = prompt.indexOf(`\n\n${ATTACH_MARK}\n`);
+  const head = prompt.startsWith(`${ATTACH_MARK}\n`) ? 0 : at;
+  if (head < 0) return { text: prompt, files: [] };
+  const list = prompt.slice(head).replace(/^\s*\[attachments\]\n/, "");
+  const files = list
+    .split("\n")
+    .map((l) => l.replace(/^- /, "").trim())
+    .filter(Boolean);
+  return { text: prompt.slice(0, head), files };
+}
+
+/** The message as the core will store it: the text, then its files. */
+function withAttachments(text: string, files: string[]): string {
+  if (!files.length) return text;
+  return `${text}\n\n${ATTACH_MARK}\n${files.map((f) => `- ${f}`).join("\n")}`;
+}
+
 /** First line of the turn that carries the human's answer to a decision card. */
 export const DECISION_PREFIX = "[decision]";
 
@@ -350,6 +375,9 @@ class Store {
   termOpen = $state(false);
   termHeight = $state(280);
   termMounted = $state(false);
+
+  /** Files in the composer, waiting for the next message. */
+  attachments = $state<Attachment[]>([]);
 
   /** Every decision of every track, oldest first. */
   decisions = $state<Decision[]>([]);
@@ -688,6 +716,67 @@ class Store {
 
   get currentTrack(): Track | undefined {
     return this.tracks.find((t) => t.id === this.track);
+  }
+
+  /** Add files to the next message by path; folders and missing paths are skipped. */
+  async attach(paths: string[]) {
+    const fresh = paths.filter((p) => !this.attachments.some((a) => a.path === p));
+    if (!fresh.length) return;
+    try {
+      const stats = await invoke<Attachment[]>("file_stats", { paths: fresh });
+      for (const s of stats) if (!this.attachments.some((a) => a.path === s.path)) this.attachments.push(s);
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** The system file picker, opened in the track's folder. */
+  async pickAttachments() {
+    try {
+      const paths = await invoke<string[]>("pick_files", { start: this.currentTrack?.cwd ?? null });
+      await this.attach(paths);
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** A pasted image (or file) has no path: keep it in the app's folder, then attach it. */
+  async attachBlob(blob: Blob, name: string) {
+    try {
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).replace(/^data:[^,]*,/, ""));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+      const path = await invoke<string>("save_attachment", { name, data });
+      await this.attach([path]);
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  detach(path: string) {
+    this.attachments = this.attachments.filter((a) => a.path !== path);
+  }
+
+  /** A path inside the current track's folder, relative with "/", or null outside it. */
+  relativeToTrack(path: string): string | null {
+    const root = this.currentTrack?.cwd;
+    if (!root) return null;
+    const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+    const r = norm(root);
+    const p = norm(path);
+    const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+    if (p.length <= r.length + 1 || !same(p.slice(0, r.length), r) || p[r.length] !== "/") return null;
+    return p.slice(r.length + 1);
+  }
+
+  /** A track-relative path ("src/a.ts") as an absolute one, in the folder's own separators. */
+  absoluteInTrack(rel: string): string {
+    const root = this.currentTrack?.cwd ?? "";
+    const sep = root.includes("\\") ? "\\" : "/";
+    return `${root.replace(/[\\/]+$/, "")}${sep}${rel.split("/").join(sep)}`;
   }
 
   /** Take a decision the core sent or returned, new or changed. */
@@ -1257,11 +1346,15 @@ class Store {
    * `lane` events with their own run ids and are added when first seen.
    */
   async send(prompt: string) {
-    const text = prompt.trim();
+    const typed = prompt.trim();
     const track = this.track;
-    if (!text || !track || this.busy) return;
+    const files = this.attachments.map((a) => a.path);
+    if ((!typed && !files.length) || !track || this.busy) return;
     this.lastError = "";
     const agent = this.agent;
+    // The files go with this message; the composer starts empty again.
+    this.attachments = [];
+    const text = withAttachments(typed, files);
 
     // Show the message the moment Enter is pressed. The run gets its real id
     // when the core answers; until then it carries a pending id, and events
@@ -1288,7 +1381,7 @@ class Store {
     this.runs.push(pending);
 
     try {
-      const id = await invoke<string>("conductor_prompt", { track, prompt: text, agent, lang: i18n.lang });
+      const id = await invoke<string>("conductor_prompt", { track, prompt: typed, agent, lang: i18n.lang, files });
       const run = this.runs.find((r) => r.id === pendingId || r.id === id);
       if (run) {
         run.id = id;
@@ -1302,6 +1395,7 @@ class Store {
       if (tr && tr.agent !== agent) tr.agent = agent;
     } catch (err) {
       this.runs = this.runs.filter((r) => r.id !== pendingId);
+      if (!this.attachments.length) void this.attach(files);
       this.lastError = String(err);
     }
   }

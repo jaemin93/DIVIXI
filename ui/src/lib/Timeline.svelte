@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel, REPORT_PREFIX, DECISION_PREFIX, type Decision, type Segment, type Tool } from "./store.svelte";
+  import { store, agentLabel, splitAttachments, REPORT_PREFIX, DECISION_PREFIX, type Decision, type Segment, type Tool } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import DecisionCard from "./DecisionCard.svelte";
   import Working from "./Working.svelte";
@@ -94,9 +94,23 @@
     {:else if run.prompt.startsWith(DECISION_PREFIX)}
       <div class="sys mono decided">{t("timeline.decisionSent")} · {decisionLine(run.prompt)}</div>
     {:else}
+      {@const said = splitAttachments(run.prompt)}
       <div class="me">
         <div class="mlab">{t("timeline.me")}</div>
-        <div class="bubble"><p>{run.prompt}</p></div>
+        <div class="bubble">
+          {#if said.text.trim()}<p>{said.text}</p>{/if}
+          {#if said.files.length}
+            <div class="files" class:alone={!said.text.trim()} aria-label={t("timeline.attached")}>
+              {#each said.files as f (f)}
+                {@const rel = store.relativeToTrack(f)}
+                <button class="file" type="button" title={f} disabled={!rel} onclick={() => rel && store.openFile(rel)}>
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4z" /><path d="M9 1.5v3h3" /></svg>
+                  <span>{f.split(/[\\/]/).pop()}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
       </div>
     {/if}
     <div class="conductor" class:live={run.status === "connecting" || run.status === "running"}>
@@ -199,6 +213,46 @@
     border-bottom: 2px solid var(--acc);
     background: var(--accbg);
     padding: 13px 16px;
+  }
+
+  .files {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+  }
+
+  .files.alone {
+    margin-top: 0;
+  }
+
+  .file {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 24px;
+    max-width: 260px;
+    padding: 0 9px;
+    background: var(--card);
+    border: 1px solid var(--accln);
+    color: var(--txt);
+    font-size: 12px;
+  }
+
+  .file span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .file:hover:not(:disabled) {
+    color: var(--hi);
+    border-color: var(--acc);
+  }
+
+  .file:disabled {
+    opacity: 1;
+    cursor: default;
   }
 
   .bubble p {

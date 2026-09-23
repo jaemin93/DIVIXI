@@ -46,6 +46,22 @@ pub const CONDUCTOR_LANE: &str = "conductor";
 /// Language-neutral; the timeline shows these as system lines, not as the
 /// human speaking, and the preamble tells the conductor what it means.
 pub const REPORT_PREFIX: &str = "[lane-report]";
+/// Heads the list of files attached to a human message, in the stored
+/// prompt and in what the conductor reads. The UI splits on it to show the
+/// files as chips under the message.
+pub const ATTACH_MARK: &str = "[attachments]";
+
+/// The message with its attached files listed under it, one path a line:
+/// the record keeps them, and an agent that ignores file blocks still sees
+/// where the files are.
+fn with_attachments(prompt: &str, files: &[PathBuf]) -> String {
+    if files.is_empty() {
+        return prompt.to_string();
+    }
+    let list: Vec<String> = files.iter().map(|f| format!("- {}", f.display())).collect();
+    format!("{prompt}\n\n{ATTACH_MARK}\n{}", list.join("\n"))
+}
+
 /// First line of a turn that carries the human's answer to a decision card.
 pub const DECISION_PREFIX: &str = "[decision]";
 
@@ -504,7 +520,7 @@ async fn deliver(app: AppHandle, track: String, text: String, open: bool, what: 
             tracing::warn!(%track, %what, "no conductor session to deliver to");
             return;
         }
-        match conductor_turn(app.clone(), track.clone(), text.clone(), None, lang.clone()).await {
+        match conductor_turn(app.clone(), track.clone(), text.clone(), None, lang.clone(), Vec::new()).await {
             Ok(_) => return,
             Err(err) if err == BUSY => {
                 if std::time::Instant::now() > deadline {
@@ -1007,7 +1023,9 @@ pub async fn conductor_turn(
     prompt: String,
     agent: Option<String>,
     lang: String,
+    files: Vec<PathBuf>,
 ) -> Result<String, String> {
+    let prompt = with_attachments(&prompt, &files);
     let st = app.state::<AppState>();
     let mut info = track_info(&st, &track)?;
     if let Some(agent) = agent.filter(|a| *a != info.agent) {
@@ -1053,7 +1071,7 @@ pub async fn conductor_turn(
             // No lock held during the turn: the tools it calls lock too.
             let started = std::time::Instant::now();
             tracing::info!(track = %track_for_turn, run = %run_for_turn, "conductor turn starting");
-            let result = session.prompt(text, tx.clone()).await;
+            let result = session.prompt_with(text, files, tx.clone()).await;
             tracing::info!(run = %run_for_turn, elapsed_ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "conductor turn ended");
             {
                 let mut conductors = st.sessions.conductors.lock().await;

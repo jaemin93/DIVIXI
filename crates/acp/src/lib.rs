@@ -23,8 +23,10 @@ use orchestra_core::LaneEvent;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
+mod attach;
 mod process;
 mod session;
+pub use attach::{file_uri, mime_of};
 pub use process::{spawn as spawn_agent, AgentProcess};
 pub use session::{AgentSession, McpHttp, SessionOptions};
 

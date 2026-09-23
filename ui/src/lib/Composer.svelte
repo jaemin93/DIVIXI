@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { store } from "./store.svelte";
+  import { onMount } from "svelte";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
+  import { store, type WsEntry } from "./store.svelte";
   import AgentPicker from "./AgentPicker.svelte";
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
@@ -14,7 +16,7 @@
   function submit(e?: Event) {
     e?.preventDefault();
     const text = draft;
-    if (!text.trim() || store.busy) return;
+    if ((!text.trim() && !store.attachments.length) || store.busy) return;
     draft = "";
     store.send(text);
     queueMicrotask(grow);
@@ -67,6 +69,28 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    if (atOpen && atMatches.length) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        atIndex = (atIndex + 1) % atMatches.length;
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        atIndex = (atIndex - 1 + atMatches.length) % atMatches.length;
+        return;
+      }
+      if (e.key === "Tab" || e.key === "Enter") {
+        e.preventDefault();
+        pickFile(atMatches[atIndex]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        atHidden = true;
+        return;
+      }
+    }
     if (slashOpen) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -96,6 +120,139 @@
     }
   }
 
+  // ----- @ files -----
+  /** Where the caret is, so "@" completion reads the word being typed. */
+  let caret = $state(0);
+  let atIndex = $state(0);
+  /** Escape closes the list until the next keystroke. */
+  let atHidden = $state(false);
+  let treeAsked = "";
+  function trackCaret() {
+    caret = box?.selectionStart ?? draft.length;
+  }
+
+  /** The "@word" right before the caret, or null. */
+  const atToken = $derived.by(() => {
+    const before = draft.slice(0, caret);
+    const m = before.match(/(?:^|\s)@([^\s@]*)$/);
+    return m ? { query: m[1].toLowerCase(), start: before.length - m[1].length - 1 } : null;
+  });
+
+  // The file list comes from the track's folder; fetch it the first time "@" is typed.
+  $effect(() => {
+    if (atToken && store.track && treeAsked !== store.track && !store.treeLoading) {
+      treeAsked = store.track;
+      void store.loadTree();
+    }
+  });
+
+  /** Files whose name or path has the query; names that start with it first. */
+  const atMatches = $derived.by((): WsEntry[] => {
+    if (!atToken) return [];
+    const q = atToken.query;
+    const files = store.tree.filter((e) => !e.dir);
+    if (!q) return files.slice(0, 30);
+    const scored: [number, WsEntry][] = [];
+    for (const e of files) {
+      const name = e.name.toLowerCase();
+      const path = e.path.toLowerCase();
+      let score = -1;
+      if (name.startsWith(q)) score = 0;
+      else if (name.includes(q)) score = 1;
+      else if (path.includes(q)) score = 2;
+      if (score >= 0) scored.push([score, e]);
+    }
+    scored.sort((a, b) => a[0] - b[0] || a[1].path.length - b[1].path.length);
+    return scored.slice(0, 30).map(([, e]) => e);
+  });
+  const atOpen = $derived(atToken !== null && !atHidden && (atMatches.length > 0 || store.treeLoading));
+
+  $effect(() => {
+    void atMatches.length;
+    atIndex = 0;
+  });
+
+  /** Put "@path" in place of what was typed and attach the file. */
+  function pickFile(entry: WsEntry) {
+    if (!atToken) return;
+    const before = draft.slice(0, atToken.start);
+    const after = draft.slice(caret);
+    const inserted = `@${entry.path} `;
+    draft = before + inserted + after.replace(/^\s+/, "");
+    const at = before.length + inserted.length;
+    void store.attach([store.absoluteInTrack(entry.path)]);
+    queueMicrotask(() => {
+      box?.focus();
+      box?.setSelectionRange(at, at);
+      caret = at;
+      grow();
+    });
+  }
+
+  function preview(entry: WsEntry, e: MouseEvent) {
+    e.stopPropagation();
+    void store.openFile(entry.path);
+  }
+
+  function size(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1048576).toFixed(1)} MB`;
+  }
+
+  // ----- the + menu -----
+  let menuOpen = $state(false);
+  function insertAtCaret(ch: string) {
+    menuOpen = false;
+    const at = box?.selectionStart ?? draft.length;
+    const lead = at > 0 && !/\s$/.test(draft.slice(0, at)) ? " " : "";
+    draft = draft.slice(0, at) + lead + ch + draft.slice(at);
+    const next = at + lead.length + ch.length;
+    queueMicrotask(() => {
+      box?.focus();
+      box?.setSelectionRange(next, next);
+      caret = next;
+      grow();
+    });
+  }
+  async function upload() {
+    menuOpen = false;
+    await store.pickAttachments();
+    box?.focus();
+  }
+
+  // ----- paste and drop -----
+  function onPaste(e: ClipboardEvent) {
+    const files = [...(e.clipboardData?.files ?? [])];
+    if (!files.length) return;
+    e.preventDefault();
+    for (const f of files) {
+      const ext = f.type.split("/")[1]?.replace("jpeg", "jpg") ?? "bin";
+      void store.attachBlob(f, f.name || `pasted.${ext}`);
+    }
+  }
+
+  /** The window tells us where files dropped from the system land. */
+  let dropping = $state(false);
+  onMount(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((e) => {
+        if (store.view !== "track") return;
+        const p = e.payload;
+        if (p.type === "enter" || p.type === "over") dropping = true;
+        else if (p.type === "leave") dropping = false;
+        else if (p.type === "drop") {
+          dropping = false;
+          void store.attach(p.paths);
+          box?.focus();
+        }
+      })
+      .then((u) => (unlisten = u))
+      .catch(() => {});
+    return () => unlisten?.();
+  });
+
   const ctx = $derived(store.context);
   const pct = $derived(ctx && ctx.size > 0 ? Math.min(100, (ctx.used / ctx.size) * 100) : 0);
 
@@ -113,10 +270,77 @@
 
 </script>
 
-<div class="composer">
+<div class="composer" class:dropping>
+  {#if store.attachments.length}
+    <!-- What goes with the next message. -->
+    <div class="attached" aria-label={t("composer.attached")}>
+      {#each store.attachments as a (a.path)}
+        <span class="file" title={a.path}>
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4z" /><path d="M9 1.5v3h3" /></svg>
+          <span class="fname">{a.name}</span>
+          <span class="mono fsize">{size(a.size)}</span>
+          <button type="button" class="fx" onclick={() => store.detach(a.path)} aria-label={t("composer.detach")} title={t("composer.detach")}><Icon name="close" size={10} /></button>
+        </span>
+      {/each}
+    </div>
+  {/if}
   <form onsubmit={submit}>
+    <!-- Attach: files, and the two ways to point at things in the box. -->
+    <Popover bind:open={menuOpen} width={300}>
+      {#snippet trigger()}
+        <button type="button" class="btn plus" onclick={() => (menuOpen = !menuOpen)} aria-label={t("composer.add")} title={t("composer.add")} aria-haspopup="menu" aria-expanded={menuOpen}>
+          <svg width="14" height="14" viewBox="0 0 14 14" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M7 1v12M1 7h12" /></svg>
+        </button>
+      {/snippet}
+      <div class="addmenu" role="menu">
+        <button type="button" class="tile" role="menuitem" onclick={upload}>
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4z" /><path d="M9 1.5v3h3M6 9h4M6 11.5h4" /></svg>
+          <span>{t("composer.upload")}</span>
+        </button>
+        <div class="rule"></div>
+        <button type="button" class="mitem" role="menuitem" onclick={() => insertAtCaret("/")}>
+          <span class="mono mkey">/</span>
+          <span class="mbody"><span class="mtitle">{t("composer.menuCommand")}</span><span class="mdesc">{t("composer.menuCommandDesc")}</span></span>
+        </button>
+        <button type="button" class="mitem" role="menuitem" onclick={() => insertAtCaret("@")}>
+          <span class="mono mkey">@</span>
+          <span class="mbody"><span class="mtitle">{t("composer.menuFile")}</span><span class="mdesc">{t("composer.menuFileDesc")}</span></span>
+        </button>
+      </div>
+    </Popover>
     <div class="boxwrap">
-      {#if slashWaiting}
+      {#if atOpen}
+        <!-- Files in the track's folder, narrowed by what follows the "@". -->
+        <div class="slash" role="listbox" aria-label={t("composer.files")}>
+          <div class="mlab-sm ph">{t("composer.files")}</div>
+          {#if atMatches.length === 0}
+            <div class="mono waiting"><span class="dot pulse"></span>{t("composer.filesLoading")}</div>
+          {/if}
+          {#each atMatches as f, i (f.path)}
+            <div
+              class="frow"
+              class:on={i === atIndex}
+              role="option"
+              aria-selected={i === atIndex}
+              tabindex="-1"
+              onmouseenter={() => (atIndex = i)}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => pickFile(f)}
+              onkeydown={() => {}}
+            >
+              <svg class="ficon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4z" /><path d="M9 1.5v3h3" /></svg>
+              <span class="fcol">
+                <span class="mono fn">{f.name}</span>
+                <span class="mono fp">{f.path}</span>
+              </span>
+              <span class="mono fs">{size(f.size)}</span>
+              <button type="button" class="eye" onclick={(e) => preview(f, e)} aria-label={t("composer.preview")} title={t("composer.preview")}>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" /><circle cx="8" cy="8" r="2" /></svg>
+              </button>
+            </div>
+          {/each}
+        </div>
+      {:else if slashWaiting}
         <div class="slash" role="status">
           <div class="mono waiting"><span class="dot pulse"></span>{t("composer.opening")}</div>
         </div>
@@ -149,14 +373,21 @@
         placeholder={store.busy ? t("composer.busy") : t("composer.placeholder")}
         aria-label={t("composer.placeholder")}
         onkeydown={onKey}
-        oninput={grow}
+        oninput={() => {
+          grow();
+          trackCaret();
+          atHidden = false;
+        }}
+        onkeyup={trackCaret}
+        onclick={trackCaret}
+        onpaste={onPaste}
       ></textarea>
     </div>
     {#if store.busy}
       <!-- While the conductor answers, the send button is a stop button: Ctrl+C. -->
       <button class="btn send stop" type="button" disabled={store.cancelling} onclick={() => store.cancelConductor()} title={t("composer.stopTitle")} aria-label={t("composer.stop")}>■</button>
     {:else}
-      <button class="btn send" type="submit" disabled={!draft.trim()} aria-label={t("composer.send")}>→</button>
+      <button class="btn send" type="submit" disabled={!draft.trim() && !store.attachments.length} aria-label={t("composer.send")}>→</button>
     {/if}
   </form>
 
@@ -202,6 +433,206 @@
     border-top: 1px solid var(--line);
     background: var(--rail);
     padding: 16px 34px 10px;
+    outline: 1px dashed transparent;
+    outline-offset: -6px;
+  }
+
+  /* Files dragged over the window land here. */
+  .composer.dropping {
+    outline-color: var(--acc);
+    background: var(--accbg);
+  }
+
+  .attached {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0 0 8px 53px;
+  }
+
+  .file {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 26px;
+    padding: 0 4px 0 9px;
+    border: 1px solid var(--lines);
+    background: var(--inp);
+    color: var(--dim);
+    font-size: 12px;
+    max-width: 280px;
+  }
+
+  .fname {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--txt);
+  }
+
+  .fsize {
+    font-size: 10px;
+    color: var(--lab);
+    flex-shrink: 0;
+  }
+
+  .fx {
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: var(--lab);
+  }
+
+  .fx:hover {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .plus {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .addmenu {
+    display: flex;
+    flex-direction: column;
+    padding: 8px;
+  }
+
+  .tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 10px;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--txt);
+    font-size: 12px;
+  }
+
+  .tile:hover,
+  .mitem:hover {
+    background: var(--sel);
+    color: var(--hi);
+  }
+
+  .rule {
+    height: 1px;
+    background: var(--line);
+    margin: 8px 0;
+  }
+
+  .mitem {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 8px 8px;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    color: var(--txt);
+  }
+
+  .mkey {
+    width: 16px;
+    flex-shrink: 0;
+    font-size: 14px;
+    color: var(--lab);
+    text-align: center;
+  }
+
+  .mbody {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .mtitle {
+    font-size: 13px;
+  }
+
+  .mdesc {
+    font-size: 11px;
+    color: var(--lab);
+  }
+
+  /* One file in the "@" list: name, path, size, and a look at it. */
+  .frow {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 10px 7px 14px;
+    border-left: 2px solid transparent;
+    color: var(--dim);
+    cursor: pointer;
+  }
+
+  .frow.on {
+    color: var(--hi);
+    background: var(--sel);
+    border-left-color: var(--acc);
+  }
+
+  .ficon {
+    flex-shrink: 0;
+    color: var(--lab);
+  }
+
+  .fcol {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .fn {
+    font-size: 12px;
+    font-weight: 600;
+    color: inherit;
+  }
+
+  .fp {
+    font-size: 10px;
+    color: var(--lab);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .fs {
+    font-size: 10px;
+    color: var(--lab);
+    flex-shrink: 0;
+  }
+
+  .eye {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: var(--lab);
+  }
+
+  .eye:hover {
+    color: var(--hi);
+    background: var(--card);
   }
 
   form {

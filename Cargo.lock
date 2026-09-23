@@ -2762,6 +2762,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "base64 0.23.1",
  "futures",
  "orchestra-core",
  "parking_lot",
@@ -2798,6 +2799,7 @@ name = "orchestra-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "ignore",
  "orchestra-acp",
  "orchestra-agents",

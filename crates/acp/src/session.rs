@@ -23,7 +23,7 @@ use agent_client_protocol::{
         v1::{
             HttpHeader, InitializeRequest, LoadSessionRequest, McpServer, McpServerHttp,
             CancelNotification, NewSessionRequest, SessionConfigOptionValue, SessionNotification,
-            SetSessionConfigOptionRequest, SetSessionModeRequest,
+            PromptRequest, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason,
         },
         ProtocolVersion,
     },
@@ -63,9 +63,10 @@ pub struct SessionOptions {
 /// How long to wait for more replayed history after `session/load`.
 const REPLAY_QUIET: Duration = Duration::from_millis(400);
 
-/// One turn's request: the text and where its events go.
+/// One turn's request: the text, the files with it, and where its events go.
 struct Turn {
     text: String,
+    files: Vec<PathBuf>,
     tx: mpsc::UnboundedSender<LaneEvent>,
     done: oneshot::Sender<anyhow::Result<()>>,
 }
@@ -124,6 +125,8 @@ impl AgentSession {
                         .block_task()
                         .await?;
                     let can_load = init.agent_capabilities.load_session;
+                    // Whether pictures can go inline rather than as links.
+                    let images = init.agent_capabilities.prompt_capabilities.image;
 
                     let mcp = |o: &SessionOptions| -> Vec<McpServer> {
                         o.mcp_servers
@@ -243,7 +246,7 @@ impl AgentSession {
                         }
                         // A cancel asked for before this turn is not for this turn.
                         while cancel_rx.try_recv().is_ok() {}
-                        let result = run_turn(&mut session, &turn.text, &turn.tx, &commands_task, &mut cancel_rx).await;
+                        let result = run_turn(&mut session, &turn.text, &turn.files, images, &turn.tx, &commands_task, &mut cancel_rx).await;
                         if let Err(err) = &result {
                             let _ = turn.tx.send(LaneEvent::Failed { error: err.to_string() });
                         }
@@ -310,9 +313,15 @@ impl AgentSession {
     /// Run one turn. Events stream to `tx` and end with `Finished` or
     /// `Failed`; the future resolves when the turn is over.
     pub async fn prompt(&self, text: String, tx: mpsc::UnboundedSender<LaneEvent>) -> anyhow::Result<()> {
+        self.prompt_with(text, Vec::new(), tx).await
+    }
+
+    /// Run one turn with files attached: each goes as a link the agent can
+    /// read, or inline when it is a picture and the agent takes pictures.
+    pub async fn prompt_with(&self, text: String, files: Vec<PathBuf>, tx: mpsc::UnboundedSender<LaneEvent>) -> anyhow::Result<()> {
         let (done_tx, done_rx) = oneshot::channel();
         self.turns
-            .send(Turn { text, tx, done: done_tx })
+            .send(Turn { text, files, tx, done: done_tx })
             .await
             .map_err(|_| anyhow::anyhow!("agent session is closed"))?;
         done_rx
@@ -363,19 +372,54 @@ async fn drain_replay(session: &mut ActiveSession<'_, Agent>) -> (usize, Vec<Lan
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_turn(
     session: &mut ActiveSession<'_, Agent>,
     text: &str,
+    files: &[PathBuf],
+    images: bool,
     tx: &mpsc::UnboundedSender<LaneEvent>,
     commands: &Arc<Mutex<Vec<SlashCommand>>>,
     cancel: &mut mpsc::UnboundedReceiver<()>,
 ) -> anyhow::Result<()> {
-    session.send_prompt(text)?;
+    // The prompt goes out as blocks (text, then the files), which the
+    // crate's text-only `send_prompt` cannot do. Taking the result in a
+    // callback attached at once keeps the ordering it gives: every update
+    // the agent sent before answering is queued before the answer lands.
+    // The callback never fails, so an agent's error on the prompt ends the
+    // turn with its own message instead of closing the connection.
+    let (stop_tx, mut stop_rx) = oneshot::channel::<Result<StopReason, agent_client_protocol::Error>>();
+    let request = PromptRequest::new(session.session_id().clone(), crate::attach::prompt_blocks(text, files, images));
+    session
+        .connection()
+        .send_request_to(Agent, request)
+        .on_receiving_result(async move |result| {
+            let _ = stop_tx.send(result.map(|r| r.stop_reason));
+            Ok(())
+        })?;
     loop {
-        // Read the next update, or forward a cancel and keep reading: the
-        // agent answers a cancel with its stop reason like any other end.
+        // Read the next update, forward a cancel, or finish on the answer:
+        // the agent answers a cancel with its stop reason like any other end.
         let update = tokio::select! {
+            biased;
             update = session.read_update() => update?,
+            stop = &mut stop_rx => {
+                // Whatever is already queued belongs to this turn.
+                while let Some(Ok(update)) = futures::FutureExt::now_or_never(session.read_update()) {
+                    forward(update, tx, commands).await?;
+                }
+                match stop {
+                    Ok(Ok(reason)) => {
+                        let _ = tx.send(LaneEvent::Finished { stop_reason: format!("{reason:?}") });
+                    }
+                    Ok(Err(err)) => {
+                        let detail = err.data.as_ref().map(|d| format!(" ({d})")).unwrap_or_default();
+                        let _ = tx.send(LaneEvent::Failed { error: format!("{}{detail}", err.message) });
+                    }
+                    Err(_) => anyhow::bail!("the agent connection closed during the turn"),
+                }
+                return Ok(());
+            }
             Some(()) = cancel.recv() => {
                 tracing::info!("cancelling the turn");
                 let id = session.session_id().clone();
@@ -385,29 +429,30 @@ async fn run_turn(
                 continue;
             }
         };
-        match update {
-            SessionMessage::SessionMessage(dispatch) => {
-                let tx = tx.clone();
-                let commands = commands.clone();
-                MatchDispatch::new(dispatch)
-                    .if_notification(async move |notif: SessionNotification| {
-                        let events = translate(notif.update);
-                        remember_commands(&commands, &events);
-                        for ev in events {
-                            let _ = tx.send(ev);
-                        }
-                        Ok(())
-                    })
-                    .await
-                    .otherwise_ignore()?;
-            }
-            SessionMessage::StopReason(reason) => {
-                let _ = tx.send(LaneEvent::Finished {
-                    stop_reason: format!("{reason:?}"),
-                });
-                return Ok(());
-            }
-            _ => {}
-        }
+        forward(update, tx, commands).await?;
     }
+}
+
+/// Turn one session message into lane events.
+async fn forward(
+    update: SessionMessage,
+    tx: &mpsc::UnboundedSender<LaneEvent>,
+    commands: &Arc<Mutex<Vec<SlashCommand>>>,
+) -> anyhow::Result<()> {
+    if let SessionMessage::SessionMessage(dispatch) = update {
+        let tx = tx.clone();
+        let commands = commands.clone();
+        MatchDispatch::new(dispatch)
+            .if_notification(async move |notif: SessionNotification| {
+                let events = translate(notif.update);
+                remember_commands(&commands, &events);
+                for ev in events {
+                    let _ = tx.send(ev);
+                }
+                Ok(())
+            })
+            .await
+            .otherwise_ignore()?;
+    }
+    Ok(())
 }
