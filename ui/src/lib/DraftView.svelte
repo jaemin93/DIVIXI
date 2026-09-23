@@ -3,6 +3,7 @@
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import SplitHandle from "./SplitHandle.svelte";
+  import Icon from "./Icon.svelte";
   import Board from "./Board.svelte";
   import Timeline from "./Timeline.svelte";
   import Composer from "./Composer.svelte";
@@ -69,7 +70,14 @@
   {#if store.draftListOpen}
   <div class="sidebox" transition:slide={side}>
   <aside class="list">
-    <div class="head"><span class="mlab">{t("draft.title")}</span></div>
+    <!-- As the tracks column: the title, then folding the column away. -->
+    <div class="head">
+      <span class="mlab">{t("draft.title")}</span>
+      <span class="grow"></span>
+      <button class="x" onclick={() => store.setDraftList(false)} aria-label={t("tracks.close")} title={t("tracks.close")}>
+        <Icon name="collapse" />
+      </button>
+    </div>
     <form class="new" onsubmit={create}>
       <input type="text" bind:value={newTitle} placeholder={t("draft.newPh")} aria-label={t("draft.new")} maxlength="80" />
       <button class="btn" type="submit" title={t("draft.new")} aria-label={t("draft.new")}>+</button>
@@ -180,9 +188,27 @@
 
   .head {
     height: 44px;
+    flex-shrink: 0;
     display: flex;
     align-items: center;
-    padding: 0 16px;
+    gap: 8px;
+    padding: 0 10px 0 16px;
+  }
+
+  .x {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 0;
+    color: var(--lab);
+  }
+
+  .x:hover {
+    color: var(--hi);
+    background: var(--sel);
   }
 
   .new {
