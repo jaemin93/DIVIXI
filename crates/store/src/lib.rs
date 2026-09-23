@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -114,6 +114,9 @@ const MIGRATIONS: &[&str] = &[
     );",
     // 7 -> 8: a draft's own session options (model, effort…), as a track's conductor has.
     "ALTER TABLE drafts ADD COLUMN config TEXT NOT NULL DEFAULT '{}';",
+    // 8 -> 9: a colour and tags per draft, as tracks have.
+    "ALTER TABLE drafts ADD COLUMN color TEXT NOT NULL DEFAULT '';
+    ALTER TABLE drafts ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
 ];
 
 const SCHEMA: &str = r#"
@@ -194,7 +197,9 @@ CREATE TABLE IF NOT EXISTS drafts (
     doc        TEXT    NOT NULL DEFAULT '{}',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    config     TEXT    NOT NULL DEFAULT '{}'
+    config     TEXT    NOT NULL DEFAULT '{}',
+    color      TEXT    NOT NULL DEFAULT '',
+    tags       TEXT    NOT NULL DEFAULT '[]'
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS runs_fts USING fts5(
@@ -349,11 +354,25 @@ pub struct DraftInfo {
     pub agent: String,
     /// The agent's session options for this draft (mode, model, effort…).
     pub config: BTreeMap<String, String>,
+    /// `#rrggbb` for the bar beside it in the list, or empty.
+    pub color: String,
+    pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-const DRAFT_SELECT: &str = "SELECT id, title, agent, config, created_at, updated_at FROM drafts";
+/// What a draft change may touch; `None` keeps a field.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DraftPatch {
+    pub doc: Option<String>,
+    pub title: Option<String>,
+    pub agent: Option<String>,
+    pub config: Option<BTreeMap<String, String>>,
+    pub color: Option<String>,
+    pub tags: Option<Vec<String>>,
+}
+
+const DRAFT_SELECT: &str = "SELECT id, title, agent, config, created_at, updated_at, color, tags FROM drafts";
 
 fn row_to_draft(r: &rusqlite::Row<'_>) -> rusqlite::Result<DraftInfo> {
     let config: String = r.get(3)?;
@@ -364,6 +383,8 @@ fn row_to_draft(r: &rusqlite::Row<'_>) -> rusqlite::Result<DraftInfo> {
         config: serde_json::from_str(&config).unwrap_or_default(),
         created_at: r.get(4)?,
         updated_at: r.get(5)?,
+        color: r.get(6)?,
+        tags: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
     })
 }
 
@@ -615,7 +636,16 @@ impl Store {
             "INSERT INTO drafts(id, title, agent, doc, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
             params![id, title, agent, doc, now],
         )?;
-        Ok(DraftInfo { id, title: title.to_string(), agent: agent.to_string(), config: BTreeMap::new(), created_at: now, updated_at: now })
+        Ok(DraftInfo {
+            id,
+            title: title.to_string(),
+            agent: agent.to_string(),
+            config: BTreeMap::new(),
+            color: String::new(),
+            tags: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        })
     }
 
     /// Every draft, most recently touched first.
@@ -631,16 +661,19 @@ impl Store {
         let conn = self.conn.lock();
         Ok(conn
             .query_row(
-                "SELECT id, title, agent, config, created_at, updated_at, doc FROM drafts WHERE id = ?1",
+                "SELECT id, title, agent, config, created_at, updated_at, color, tags, doc FROM drafts WHERE id = ?1",
                 params![id],
-                |r| Ok((row_to_draft(r)?, r.get::<_, String>(6)?)),
+                |r| Ok((row_to_draft(r)?, r.get::<_, String>(8)?)),
             )
             .optional()?)
     }
 
     /// Keep a draft's board; the title and agent change only when given.
     pub fn save_draft(&self, id: &str, doc: Option<&str>, title: Option<&str>, agent: Option<&str>) -> anyhow::Result<DraftInfo> {
-        self.save_draft_with(id, doc, title, agent, None)
+        self.update_draft(
+            id,
+            &DraftPatch { doc: doc.map(str::to_owned), title: title.map(str::to_owned), agent: agent.map(str::to_owned), ..Default::default() },
+        )
     }
 
     /// As [`Store::save_draft`], and the session options when given.
@@ -652,13 +685,29 @@ impl Store {
         agent: Option<&str>,
         config: Option<&BTreeMap<String, String>>,
     ) -> anyhow::Result<DraftInfo> {
-        let config = config.map(serde_json::to_string).transpose()?;
+        self.update_draft(
+            id,
+            &DraftPatch {
+                doc: doc.map(str::to_owned),
+                title: title.map(str::to_owned),
+                agent: agent.map(str::to_owned),
+                config: config.cloned(),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Change a draft's fields; `None` in the patch keeps a field.
+    pub fn update_draft(&self, id: &str, patch: &DraftPatch) -> anyhow::Result<DraftInfo> {
+        let config = patch.config.as_ref().map(serde_json::to_string).transpose()?;
+        let tags = patch.tags.as_ref().map(serde_json::to_string).transpose()?;
         {
             let conn = self.conn.lock();
             let changed = conn.execute(
                 "UPDATE drafts SET doc = COALESCE(?2, doc), title = COALESCE(?3, title), agent = COALESCE(?4, agent),
-                 config = COALESCE(?6, config), updated_at = ?5 WHERE id = ?1",
-                params![id, doc, title, agent, now_ms(), config],
+                 config = COALESCE(?6, config), color = COALESCE(?7, color), tags = COALESCE(?8, tags), updated_at = ?5
+                 WHERE id = ?1",
+                params![id, patch.doc, patch.title, patch.agent, now_ms(), config, patch.color, tags],
             )?;
             if changed == 0 {
                 anyhow::bail!("no draft {id}");
@@ -1317,7 +1366,7 @@ mod tests {
                 .replace("CREATE INDEX IF NOT EXISTS runs_by_track ON runs(track, n);", "");
             conn.execute_batch(&v1).unwrap();
             conn.execute("DROP TABLE tracks", []).unwrap();
-            // Drafts came at v7; the migration makes them.
+            // Drafts came at v7; the migrations make them.
             conn.execute("DROP TABLE drafts", []).unwrap();
             conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')", []).unwrap();
             conn.execute(
@@ -1398,6 +1447,11 @@ mod tests {
         let tuned = store.save_draft_with(&a.id, None, None, None, Some(&model)).unwrap();
         assert_eq!(tuned.config, model);
         assert_eq!(store.draft(&a.id).unwrap().unwrap().0.config, model);
+        let dressed = store
+            .update_draft(&a.id, &DraftPatch { color: Some("#7aa2f7".into()), tags: Some(vec!["ux".into()]), ..Default::default() })
+            .unwrap();
+        assert_eq!((dressed.color.as_str(), dressed.tags.clone()), ("#7aa2f7", vec!["ux".to_string()]));
+        assert_eq!(dressed.config, model, "a patch keeps what it does not name");
         assert_eq!(store.draft(&a.id).unwrap().unwrap().1, "{\"v\":1}");
         assert_eq!(store.drafts().unwrap()[0].id, "dr001", "most recently touched first");
         let run = store.begin_run("draft:dr001", "drafter", "claude_code", "hi", ".").unwrap();

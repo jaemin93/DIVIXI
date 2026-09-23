@@ -4,6 +4,8 @@
   import { cubicOut } from "svelte/easing";
   import SplitHandle from "./SplitHandle.svelte";
   import Icon from "./Icon.svelte";
+  import ItemMenu from "./ItemMenu.svelte";
+  import { whenFull } from "./time";
   import Board from "./Board.svelte";
   import Timeline from "./Timeline.svelte";
   import Composer from "./Composer.svelte";
@@ -25,7 +27,12 @@
   const side = { axis: "x" as const, duration: reduced ? 0 : 200, easing: cubicOut };
   let titleDraft = $state("");
   let newTitle = $state("");
-  let confirmDelete = $state("");
+  /** The right-click menu: the same as a track's, less its session. */
+  let menu = $state<{ id: string; x: number; y: number } | null>(null);
+  const menuDraft = $derived.by(() => {
+    const m = menu;
+    return m ? store.drafts.find((x) => x.id === m.id) : undefined;
+  });
 
   const d = $derived(store.currentDraft);
   const notes = $derived(store.draftDoc.nodes.filter((n) => n.kind === "note"));
@@ -84,16 +91,29 @@
     </form>
     <div class="rows">
       {#each store.drafts as item (item.id)}
-        <div class="row" class:on={item.id === store.draft}>
+        <!-- Like a track's row: tags and time above, the name below, its colour on the left. -->
+        <div
+          class="row"
+          class:on={item.id === store.draft}
+          class:menued={menu?.id === item.id}
+          style="border-left-color: {item.color || 'transparent'}"
+          oncontextmenu={(e) => {
+            e.preventDefault();
+            menu = { id: item.id, x: e.clientX, y: e.clientY };
+          }}
+          role="presentation"
+        >
           <button class="pick" onclick={() => store.openDraft(item.id)}>
+            <span class="top">
+              <span class="taglist" title={item.tags.join(", ")}>
+                {#each item.tags as tag (tag)}
+                  <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
+                {/each}
+              </span>
+              <span class="mono when" title={whenFull(item.updated_at, store.lang)}>{whenLabel(item.updated_at, store.now, store.lang)}</span>
+            </span>
             <span class="name">{item.title}</span>
-            <span class="mono when">{whenLabel(item.updated_at, store.now, store.lang)}</span>
           </button>
-          {#if confirmDelete === item.id}
-            <button class="del sure mono" onclick={() => { confirmDelete = ""; void store.deleteDraft(item.id); }}>{t("draft.deleteSure")}</button>
-          {:else}
-            <button class="del" onclick={() => (confirmDelete = item.id)} title={t("draft.delete")} aria-label={t("draft.delete")}>×</button>
-          {/if}
         </div>
       {/each}
       {#if !store.drafts.length}
@@ -102,6 +122,24 @@
     </div>
   </aside>
   </div>
+  {/if}
+
+  {#if menu && menuDraft}
+    {@const md = menuDraft}
+    <ItemMenu
+      x={menu.x}
+      y={menu.y}
+      name={md.title}
+      color={md.color}
+      busy={store.draft === md.id && store.draftBusy}
+      busyNote={t("draft.busyNote")}
+      deleteNote={t("draft.deleteNote")}
+      onclose={() => (menu = null)}
+      onrename={(title) => store.updateDraft(md.id, { title })}
+      ontags={() => (store.tagDialog = md.id)}
+      oncolor={(color) => store.updateDraft(md.id, { color })}
+      ondelete={() => store.deleteDraft(md.id)}
+    />
   {/if}
 
   {#if d}
@@ -246,19 +284,19 @@
     overflow-y: auto;
   }
 
+  /* Two lines, as a track's row: tags and time above, the name below. The
+     left bar is the draft's colour, only when one is chosen; the open one is
+     told by its shade. */
   .row {
+    min-height: 52px;
     display: flex;
-    align-items: center;
     border-left: 2px solid transparent;
   }
 
   .row:hover,
-  .row.on {
+  .row.on,
+  .row.menued {
     background: var(--sel);
-  }
-
-  .row.on {
-    border-left-color: var(--acc);
   }
 
   .pick {
@@ -266,13 +304,39 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
+    justify-content: center;
     gap: 3px;
-    padding: 9px 6px 9px 14px;
+    padding: 8px 16px 8px 14px;
     background: transparent;
     border: 0;
     text-align: left;
     color: var(--dim);
+  }
+
+  .top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    line-height: 1.3;
+  }
+
+  .taglist {
+    flex: 1;
+    min-width: 0;
+    font-size: 9px;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .chip {
+    font-size: 9px;
+    letter-spacing: 0.08em;
+  }
+
+  .chip + .chip {
+    margin-left: 8px;
   }
 
   .row.on .pick {
@@ -288,34 +352,10 @@
   }
 
   .when {
+    flex-shrink: 0;
     font-size: 9px;
+    letter-spacing: 0.04em;
     color: var(--lab);
-  }
-
-  .del {
-    margin-right: 8px;
-    height: 24px;
-    min-width: 24px;
-    padding: 0 6px;
-    background: transparent;
-    border: 0;
-    color: var(--lab);
-    opacity: 0;
-  }
-
-  .row:hover .del,
-  .del.sure {
-    opacity: 1;
-  }
-
-  .del:hover {
-    color: var(--acct);
-  }
-
-  .del.sure {
-    font-size: 10px;
-    color: var(--acct);
-    border: 1px solid var(--accln);
   }
 
   .none {

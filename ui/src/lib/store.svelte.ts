@@ -228,7 +228,16 @@ export type Run = {
 export type View = "track" | "settings" | "lane" | "new-track" | "edit-track" | "draft";
 
 // ----- drafts: a sketch board worked out with an agent before a track -----
-export type DraftInfo = { id: string; title: string; agent: string; config: OptionConfig; created_at: number; updated_at: number };
+export type DraftInfo = {
+  id: string;
+  title: string;
+  agent: string;
+  config: OptionConfig;
+  color: string;
+  tags: string[];
+  created_at: number;
+  updated_at: number;
+};
 export type Stroke = { points: [number, number, number][]; color: string; size: number };
 export type DraftTag = "" | "goal" | "constraint" | "question" | "idea";
 export type DraftNode = {
@@ -789,6 +798,9 @@ class Store {
     for (const tr of this.tracks) {
       if (tr.tags.includes(name)) await this.updateTrack(tr.id, { tags: tr.tags.filter((x) => x !== name) });
     }
+    for (const d of this.drafts) {
+      if (d.tags.includes(name)) await this.updateDraft(d.id, { tags: d.tags.filter((x) => x !== name) });
+    }
   }
   lastError = $state("");
   restored = $state(false);
@@ -942,7 +954,7 @@ class Store {
     }
   }
 
-  async updateDraft(id: string, patch: { title?: string; agent?: string; config?: OptionConfig }) {
+  async updateDraft(id: string, patch: { title?: string; agent?: string; config?: OptionConfig; color?: string; tags?: string[] }) {
     try {
       const d = await invoke<DraftInfo>("update_draft", { id, ...patch });
       this.drafts = this.drafts.map((x) => (x.id === id ? d : x));
@@ -951,12 +963,12 @@ class Store {
     }
   }
 
-  async deleteDraft(id: string) {
+  /** Delete a draft. Returns why the core refused, or "" when it is gone. */
+  async deleteDraft(id: string): Promise<string> {
     try {
       await invoke("delete_draft", { id });
     } catch (err) {
-      this.lastError = String(err);
-      return;
+      return String(err);
     }
     this.drafts = this.drafts.filter((d) => d.id !== id);
     this.runs = this.runs.filter((r) => r.track !== draftKey(id));
@@ -968,6 +980,7 @@ class Store {
         this.draftDoc = { ...EMPTY_DOC };
       }
     }
+    return "";
   }
 
   /** Edit the open board. The core answers with the new board as an event. */

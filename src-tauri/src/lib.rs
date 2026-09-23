@@ -11,7 +11,7 @@ use std::time::Duration;
 use orchestra_acp::{AgentSpec, ConfigOptionInfo};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
 use orchestra_core::{LaneEnvelope, LaneEvent};
-use orchestra_store::{Decision, DraftInfo, RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
+use orchestra_store::{Decision, DraftInfo, DraftPatch, RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -264,8 +264,8 @@ fn create_draft(state: State<'_, AppState>, title: String, agent: String) -> Res
     state.store.create_draft(title, &agent, &doc).map_err(|e| e.to_string())
 }
 
-/// Rename a draft, move it to another agent or change its options (from
-/// the next message).
+/// Rename a draft, move it to another agent, change its options (from the
+/// next message), its colour or its tags.
 #[tauri::command(async)]
 fn update_draft(
     state: State<'_, AppState>,
@@ -273,14 +273,19 @@ fn update_draft(
     title: Option<String>,
     agent: Option<String>,
     config: Option<std::collections::BTreeMap<String, String>>,
+    color: Option<String>,
+    tags: Option<Vec<String>>,
 ) -> Result<DraftInfo, String> {
     if let Some(a) = &agent {
         state.spec_for(a)?;
     }
+    // The same rules (and tidying) as a track's colour and tags.
+    let mut look = TrackPatch { color, tags, ..Default::default() };
+    check_patch(&mut look)?;
     let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
     state
         .store
-        .save_draft_with(&id, None, title.as_deref(), agent.as_deref(), config.as_ref())
+        .update_draft(&id, &DraftPatch { doc: None, title, agent, config, color: look.color, tags: look.tags })
         .map_err(|e| e.to_string())
 }
 

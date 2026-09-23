@@ -11,7 +11,18 @@
   let draft = $state("");
   let input = $state<HTMLInputElement>();
 
-  const track = $derived(store.tracks.find((x) => x.id === store.tagDialog));
+  /** A track (`tr…`) or a draft (`dr…`): both carry a name and tags. */
+  const track = $derived.by(() => {
+    const t = store.tracks.find((x) => x.id === store.tagDialog);
+    if (t) return { id: t.id, name: t.name, tags: t.tags };
+    const d = store.drafts.find((x) => x.id === store.tagDialog);
+    return d ? { id: d.id, name: d.title, tags: d.tags } : undefined;
+  });
+
+  async function setTags(id: string, tags: string[]) {
+    if (store.tracks.some((x) => x.id === id)) await store.updateTrack(id, { tags });
+    else await store.updateDraft(id, { tags });
+  }
   const pool = $derived(store.tagPool);
   let confirmDelete = $state("");
 
@@ -26,7 +37,7 @@
   async function toggle(tag: string) {
     if (!track) return;
     const has = track.tags.includes(tag);
-    await store.updateTrack(track.id, { tags: has ? track.tags.filter((x) => x !== tag) : [...track.tags, tag] });
+    await setTags(track.id, has ? track.tags.filter((x) => x !== tag) : [...track.tags, tag]);
   }
 
   async function add(e: Event) {
@@ -35,7 +46,7 @@
     if (!track || !name) return;
     draft = "";
     const tag = await store.createTag(name);
-    if (tag && !track.tags.includes(tag.name)) await store.updateTrack(track.id, { tags: [...track.tags, tag.name] });
+    if (tag && !track.tags.includes(tag.name)) await setTags(track.id, [...track.tags, tag.name]);
   }
 
   async function remove(name: string) {
