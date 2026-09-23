@@ -1,5 +1,8 @@
 <script lang="ts">
   import { store, agentLabel, laneAgentOf, laneConfigOf, type Role } from "./store.svelte";
+
+  /** In a draft there is one agent, the draft's. */
+  const draftMode = $derived(store.chatDraft);
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
   import { t } from "./i18n.svelte";
@@ -39,6 +42,11 @@
 
   /** What the chip says: the conductor, and the workers when they differ. */
   const summary = $derived.by(() => {
+    const d = draftMode ? store.currentDraft : undefined;
+    if (d) {
+      const m = store.optionsOf(d.agent).find((o) => o.category === "model");
+      return { conductor: agentLabel(d.agent), model: m ? store.choiceName(m, store.effective(d.agent, d.config, m)) : "", workers: "" };
+    }
     if (!track) return { conductor: agentLabel(store.agent), model: "", workers: "" };
     const cOpts = store.optionsOf(track.agent);
     const cModel = cOpts.find((o) => o.category === "model");
@@ -75,9 +83,9 @@
       <!-- The conductor session: grey closed, green open, pulsing while it opens or answers. -->
       <span
         class="sess"
-        class:pulse={store.conductorOpening === store.track || store.conductorState.busy}
-        style="background: {store.conductorState.open || store.conductorOpening === store.track ? 'var(--ok)' : 'var(--idle)'}"
-        title={store.conductorState.open ? t("picker.sessionOpen") : t("picker.sessionClosed")}
+        class:pulse={draftMode ? store.busy : store.conductorOpening === store.track || store.conductorState.busy}
+        style="background: {(draftMode ? store.draftSession.open : store.conductorState.open || store.conductorOpening === store.track) ? 'var(--ok)' : 'var(--idle)'}"
+        title={(draftMode ? store.draftSession.open : store.conductorState.open) ? t("picker.sessionOpen") : t("picker.sessionClosed")}
       ></span>
       <Icon name="bot" size={14} />
       <!-- One line, cut with an ellipsis when the column is narrow; never wrapped. -->
@@ -88,10 +96,14 @@
   {/snippet}
 
   <div class="head">
+    {#if draftMode}
+      <span class="mono role on">{t("draft.agentLabel")}</span>
+    {:else}
     <div class="roles" role="tablist">
       <button class="role mono" class:on={role === "conductor"} role="tab" aria-selected={role === "conductor"} onclick={() => (role = "conductor")}>{t("picker.conductor")}</button>
       <button class="role mono" class:on={role === "worker"} role="tab" aria-selected={role === "worker"} onclick={() => (role = "worker")}>{t("picker.worker")}</button>
     </div>
+    {/if}
     <span class="grow"></span>
     {#if modeInEffect}
       <span class="mono modetag" title={t("composer.modeTitle")}>{t("picker.mode")} · {modeKey(modeInEffect)}</span>
@@ -144,6 +156,9 @@
   </div>
 
   <div class="foot mono">
+    {#if draftMode}
+      <span class="dim">{store.draftSession.open ? t("picker.sessionOpen") : t("draft.sessionNext")}</span>
+    {:else}
     <span class="dim">{store.conductorState.open ? t("picker.sessionOpen") : t("picker.sessionClosed")}</span>
     {#if store.conductorState.open}
       <button class="link" disabled={store.conductorState.busy} onclick={() => store.closeConductor()}>{t("picker.closeSession")}</button>
@@ -152,6 +167,7 @@
     {/if}
     <span class="grow"></span>
     <button class="link" onclick={openSettings}>{t("picker.settings")}</button>
+    {/if}
   </div>
 </Popover>
 

@@ -54,7 +54,7 @@ pub const ATTACH_MARK: &str = "[attachments]";
 /// The message with its attached files listed under it, one path a line:
 /// the record keeps them, and an agent that ignores file blocks still sees
 /// where the files are.
-fn with_attachments(prompt: &str, files: &[PathBuf]) -> String {
+pub(crate) fn with_attachments(prompt: &str, files: &[PathBuf]) -> String {
     if files.is_empty() {
         return prompt.to_string();
     }
@@ -95,7 +95,7 @@ pub struct Conductor {
 }
 
 /// What a session was opened with, compared to decide on reopening.
-fn fingerprint(agent: &str, config: &BTreeMap<String, String>) -> String {
+pub(crate) fn fingerprint(agent: &str, config: &BTreeMap<String, String>) -> String {
     format!("{agent}\n{}", serde_json::to_string(config).unwrap_or_default())
 }
 

@@ -18,7 +18,8 @@
   function submit(e?: Event) {
     e?.preventDefault();
     const text = draft;
-    if ((!text.trim() && !store.attachments.length) || store.busy) return;
+    const something = text.trim() || store.attachments.length || (store.chatDraft && store.draftSelected.length);
+    if (!something || store.busy) return;
     draft = "";
     store.send(text);
     queueMicrotask(grow);
@@ -49,6 +50,7 @@
   // Typing "/" is intent to talk to the conductor: with no list known yet,
   // open its session now so the commands (and the first reply) are ready.
   $effect(() => {
+    if (store.chatDraft) return;
     if (slashQuery !== null && store.slashCommands.length === 0 && !store.conductorState.open) void store.openConductor();
   });
   const slashWaiting = $derived(slashQuery !== null && slashMatches.length === 0 && store.conductorOpening === store.track);
@@ -135,6 +137,8 @@
 
   /** The "@word" right before the caret, or null. */
   const atToken = $derived.by(() => {
+    // A draft has no folder to search.
+    if (store.chatDraft) return null;
     const before = draft.slice(0, caret);
     const m = before.match(/(?:^|\s)@([^\s@]*)$/);
     return m ? { query: m[1].toLowerCase(), start: before.length - m[1].length - 1 } : null;
@@ -240,7 +244,7 @@
     let unlisten: (() => void) | undefined;
     getCurrentWebview()
       .onDragDropEvent((e) => {
-        if (store.view !== "track") return;
+        if (store.view !== "track" && store.view !== "draft") return;
         const p = e.payload;
         if (p.type === "enter" || p.type === "over") dropping = true;
         else if (p.type === "leave") dropping = false;
@@ -372,7 +376,7 @@
         bind:value={draft}
         rows="1"
         disabled={store.busy}
-        placeholder={store.busy ? t("composer.busy") : t("composer.placeholder")}
+        placeholder={store.busy ? t("composer.busy") : store.chatDraft ? t("draft.placeholder") : t("composer.placeholder")}
         aria-label={t("composer.placeholder")}
         onkeydown={onKey}
         oninput={() => {
@@ -396,10 +400,16 @@
   <div class="status">
     <AgentPicker />
 
-    <span class="chip static" title={store.currentTrack?.cwd}>
-      <Icon name="folder" size={14} />
-      <span class="mono path">{shortPath(store.currentTrack?.cwd)}</span>
-    </span>
+    {#if store.chatDraft}
+      {#if store.draftSelected.length}
+        <span class="chip static mono">{t("draft.withSelected", { n: store.draftSelected.length })}</span>
+      {/if}
+    {:else}
+      <span class="chip static" title={store.currentTrack?.cwd}>
+        <Icon name="folder" size={14} />
+        <span class="mono path">{shortPath(store.currentTrack?.cwd)}</span>
+      </span>
+    {/if}
 
     <span class="grow"></span>
 

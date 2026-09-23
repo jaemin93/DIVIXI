@@ -10,10 +10,10 @@
 
   // Follow the tail while a run is live.
   $effect(() => {
-    void store.trackRuns.length;
+    void store.chatRuns.length;
     void store.activeRun?.message.length;
     void store.activeRun?.toolCount;
-    void store.trackDecisions.length;
+    void store.chatDecisions.length;
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   });
 
@@ -50,12 +50,13 @@
 
   /** Decisions sit under the conductor turn that asked; the rest (asked
    *  by a run no longer here) go at the end. */
-  const conductorRuns = $derived(store.trackRuns.filter((r) => r.lane === "conductor"));
+  /** The human and the conductor, or the human and a draft's agent. */
+  const conductorRuns = $derived(store.chatRuns);
   const decisionsByRun = $derived.by(() => {
     const byRun: Record<string, Decision[]> = {};
     const orphans: Decision[] = [];
     const ids = new Set(conductorRuns.map((r) => r.id));
-    for (const d of store.trackDecisions) {
+    for (const d of store.chatDecisions) {
       if (d.run && ids.has(d.run)) (byRun[d.run] ??= []).push(d);
       else orphans.push(d);
     }
@@ -78,11 +79,11 @@
 </script>
 
 <div class="scroll" bind:this={scroller}>
-  {#if store.trackRuns.length === 0}
+  {#if conductorRuns.length === 0}
     <div class="empty">
       <div class="emptymark"><Mark size={56} /></div>
       <div class="mlab">{t("timeline.empty")}</div>
-      <p class="serif">{t("timeline.emptyHint")}</p>
+      <p class="serif">{store.chatDraft ? t("draft.chatEmpty") : t("timeline.emptyHint")}</p>
     </div>
   {/if}
 
@@ -115,7 +116,7 @@
     {/if}
     <div class="conductor" class:live={run.status === "connecting" || run.status === "running"}>
       <div class="chead">
-        <span class="mlab">{t("timeline.conductor")}</span>
+        <span class="mlab">{store.chatDraft ? t("draft.agentLabel") : t("timeline.conductor")}</span>
         <span class="mono meta">{agentLabel(run.agent)}</span>
         {#if run.status === "connecting" || run.status === "running"}
           <Working />

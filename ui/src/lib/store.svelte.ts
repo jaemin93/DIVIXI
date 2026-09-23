@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { boardPng } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Lang, type LangPref } from "./i18n.svelte";
 
@@ -227,7 +228,7 @@ export type Run = {
 export type View = "track" | "settings" | "lane" | "new-track" | "edit-track" | "draft";
 
 // ----- drafts: a sketch board worked out with an agent before a track -----
-export type DraftInfo = { id: string; title: string; agent: string; created_at: number; updated_at: number };
+export type DraftInfo = { id: string; title: string; agent: string; config: OptionConfig; created_at: number; updated_at: number };
 export type Stroke = { points: [number, number, number][]; color: string; size: number };
 export type DraftTag = "" | "goal" | "constraint" | "question" | "idea";
 export type DraftNode = {
@@ -415,6 +416,19 @@ class Store {
   draftDoc = $state<DraftDoc>({ ...EMPTY_DOC });
   /** The draft whose board `draftDoc` holds. */
   draftLoaded = $state("");
+  /** Height of the conversation under a draft's board. Persisted. */
+  draftChatHeight = $state(340);
+
+  setDraftChatHeight(px: number, persist = false) {
+    const max = Math.max(200, window.innerHeight - 260);
+    this.draftChatHeight = Math.min(max, Math.max(180, Math.round(px)));
+    if (persist) this.persistWidth("draft_chat_height", this.draftChatHeight);
+  }
+
+  /** Items picked on the board; they go with the next message. */
+  draftSelected = $state<string[]>([]);
+  /** The open draft's agent session. */
+  draftSession = $state<{ open: boolean; busy: boolean }>({ open: false, busy: false });
   /** Carried from a draft into the new-track form and the first message. */
   trackSeed = $state<{ name: string; intent: string } | null>(null);
   composerSeed = $state("");
@@ -601,7 +615,23 @@ class Store {
   commandCache = $state<Record<string, SlashCommand[]>>({});
 
   /** Commands to complete in the composer: this track's session's, else the agent's last known. */
+  /** The conversation on screen is a draft's, not a track's conductor. */
+  get chatDraft(): boolean {
+    return this.view === "draft" && !!this.draft;
+  }
+
+  /** The turns of the conversation on screen, oldest first. */
+  get chatRuns(): Run[] {
+    return this.chatDraft ? this.draftRuns : this.trackRuns.filter((r) => r.lane === "conductor");
+  }
+
+  /** Decision cards of the conversation on screen; drafts have none. */
+  get chatDecisions(): Decision[] {
+    return this.chatDraft ? [] : this.trackDecisions;
+  }
+
   get slashCommands(): SlashCommand[] {
+    if (this.chatDraft) return this.commandCache[this.currentDraft?.agent ?? ""] ?? [];
     return this.commands[this.track] ?? this.commandCache[this.agent] ?? [];
   }
 
@@ -658,6 +688,12 @@ class Store {
 
   /** Stop the conductor's turn in flight, as Ctrl+C would; the run ends as cancelled. */
   async cancelConductor() {
+    if (this.chatDraft) {
+      this.cancelling = true;
+      await this.draftCancel();
+      this.cancelling = false;
+      return;
+    }
     const track = this.track;
     if (!track || !this.busy) return;
     this.cancelling = true;
@@ -805,6 +841,8 @@ class Store {
 
   /** A path inside the current track's folder, relative with "/", or null outside it. */
   relativeToTrack(path: string): string | null {
+    // A draft has no folder panel to open files in.
+    if (this.chatDraft) return null;
     const root = this.currentTrack?.cwd;
     if (!root) return null;
     const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -855,8 +893,10 @@ class Store {
   }
 
   async openDraft(id: string) {
+    if (this.draft !== id) this.draftSelected = [];
     this.draft = id;
     this.view = "draft";
+    void this.refreshDraftSession();
     if (this.draftLoaded !== id) {
       this.draftLoaded = "";
       this.draftDoc = { ...EMPTY_DOC };
@@ -887,7 +927,7 @@ class Store {
     }
   }
 
-  async updateDraft(id: string, patch: { title?: string; agent?: string }) {
+  async updateDraft(id: string, patch: { title?: string; agent?: string; config?: OptionConfig }) {
     try {
       const d = await invoke<DraftInfo>("update_draft", { id, ...patch });
       this.drafts = this.drafts.map((x) => (x.id === id ? d : x));
@@ -943,12 +983,19 @@ class Store {
     if (d) d.updated_at = Date.now();
   }
 
-  /** One message to the draft's agent, with the board picture and the selection. */
-  async draftSend(text: string, image: string | null, selected: string[]) {
+  /** One message to the draft's agent: the composer's text and files, the
+   *  picture of the board when it has ink, and the items picked on it. */
+  async draftSend(prompt: string) {
     const id = this.draft;
     const d = this.currentDraft;
-    if (!id || !d || this.draftBusy) return;
+    const typed = prompt.trim();
+    const files = this.attachments.map((a) => a.path);
+    const selected = [...this.draftSelected];
+    if (!id || !d || this.draftBusy || (!typed && !files.length && !selected.length)) return;
     this.lastError = "";
+    this.attachments = [];
+    const image = boardPng(this.draftDoc);
+    const text = withAttachments(typed, files);
     const pending: Run = {
       id: `pending-${Date.now()}`,
       track: draftKey(id),
@@ -969,12 +1016,25 @@ class Store {
     const pendingId = pending.id;
     this.runs.push(pending);
     try {
-      const run = await invoke<string>("draft_prompt", { id, text, image, selected, lang: i18n.lang });
+      const run = await invoke<string>("draft_prompt", { id, text: typed, image, selected, lang: i18n.lang, files });
       const r = this.runs.find((x) => x.id === pendingId || x.id === run);
       if (r) r.id = run;
+      void this.refreshDraftSession();
     } catch (err) {
       this.runs = this.runs.filter((x) => x.id !== pendingId);
+      if (!this.attachments.length) void this.attach(files);
       this.lastError = String(err);
+    }
+  }
+
+  async refreshDraftSession() {
+    const id = this.draft;
+    if (!id) return;
+    try {
+      const s = await invoke<{ open: boolean; busy: boolean }>("draft_state", { id });
+      if (this.draft === id) this.draftSession = s;
+    } catch {
+      // Cosmetic.
     }
   }
 
@@ -1038,12 +1098,13 @@ class Store {
   }
 
   get activeRun(): Run | undefined {
-    return this.trackRuns.find((r) => r.status === "running" || r.status === "connecting");
+    const runs = this.chatDraft ? this.draftRuns : this.trackRuns;
+    return runs.find((r) => r.status === "running" || r.status === "connecting");
   }
 
-  /** The current track's conductor has a turn in flight; the composer waits. */
+  /** The conversation on screen has a turn in flight; the composer waits. */
   get busy(): boolean {
-    return this.trackRuns.some((r) => r.lane === "conductor" && (r.status === "running" || r.status === "connecting"));
+    return this.chatRuns.some((r) => r.status === "running" || r.status === "connecting");
   }
 
   /** Any track has a run in flight; the brand mark pulses. */
@@ -1173,13 +1234,14 @@ class Store {
 
   /** Context accounting to show: the current track's conductor, live or its latest run that reported one. */
   get context(): Usage | undefined {
-    const runs = this.trackRuns.filter((r) => r.lane === "conductor");
+    const runs = this.chatRuns;
     const live = runs.find((r) => r.status === "running" || r.status === "connecting");
     return live?.usage ?? [...runs].reverse().find((r) => r.usage)?.usage;
   }
 
   /** The agent a role runs on in the current track. */
   roleAgent(role: Role): string {
+    if (this.chatDraft) return this.currentDraft?.agent ?? this.agent;
     const track = this.currentTrack;
     if (!track) return this.agent;
     return role === "conductor" ? track.agent : laneAgentOf(track);
@@ -1187,6 +1249,7 @@ class Store {
 
   /** A role's chosen options in the current track. */
   roleConfig(role: Role): OptionConfig {
+    if (this.chatDraft) return this.currentDraft?.config ?? {};
     const track = this.currentTrack;
     if (!track) return {};
     return role === "conductor" ? track.conductor_config : laneConfigOf(track);
@@ -1195,6 +1258,12 @@ class Store {
   /** Put a role on an agent. Takes effect at the next session. A worker
    *  moved onto the agent it already runs on keeps its options. */
   async setRoleAgent(role: Role, agent: string) {
+    const d = this.chatDraft ? this.currentDraft : undefined;
+    if (d) {
+      // Options are in one agent's terms; another agent starts from its own.
+      await this.updateDraft(d.id, agent === d.agent ? { agent } : { agent, config: {} });
+      return;
+    }
     const track = this.currentTrack;
     if (!track) return;
     if (role === "conductor") {
@@ -1208,6 +1277,12 @@ class Store {
 
   /** Set one of a role's options on the current track; empty clears it. Takes effect at the next session. */
   async setRoleOption(role: Role, id: string, value: string) {
+    const d = this.chatDraft ? this.currentDraft : undefined;
+    if (d) {
+      const { [id]: _old, ...rest } = d.config;
+      await this.updateDraft(d.id, { config: value ? { ...rest, [id]: value } : rest });
+      return;
+    }
     const track = this.currentTrack;
     if (!track) return;
     const { [id]: _old, ...rest } = this.roleConfig(role);
@@ -1439,10 +1514,13 @@ class Store {
         this.lastError = String(err);
       }
       try {
-        const [term, termHeight] = await Promise.all([
+        const [term, termHeight, draftChat] = await Promise.all([
           invoke<string | null>("get_setting", { key: "terminal" }),
           invoke<string | null>("get_setting", { key: "terminal_height" }),
+          invoke<string | null>("get_setting", { key: "draft_chat_height" }),
         ]);
+        const dc = Number(draftChat);
+        if (Number.isFinite(dc) && dc > 0) this.setDraftChatHeight(dc);
         const h = Number(termHeight);
         if (Number.isFinite(h) && h > 0) this.setTermHeight(h);
         if (term === "open") void this.setTerminal(true);
@@ -1561,6 +1639,7 @@ class Store {
    * `lane` events with their own run ids and are added when first seen.
    */
   async send(prompt: string) {
+    if (this.chatDraft) return this.draftSend(prompt);
     const typed = prompt.trim();
     const track = this.track;
     const files = this.attachments.map((a) => a.path);
@@ -1648,6 +1727,9 @@ class Store {
       void this.refreshRun(env.run);
     }
     if (env.event.kind === "commands" && env.lane === "conductor") this.rememberCommands(env.track, env.event.commands);
+    if (env.lane === DRAFT_LANE && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
+      void this.refreshDraftSession();
+    }
     if (env.lane === "conductor" && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
       void this.refreshConductor();
     }

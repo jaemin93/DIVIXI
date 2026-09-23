@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
-use crate::conductor::{session_options, Live};
+use crate::conductor::{fingerprint, session_options, with_attachments, Live};
 use crate::{pump, AppState};
 
 /// The lane a draft's agent turns are recorded under.
@@ -463,7 +463,14 @@ impl Doc {
 /// A draft's agent session and the MCP server that is its hands.
 pub struct Drafter {
     pub live: Live,
+    /// Agent and options it was opened with; a change reopens it.
+    fingerprint: String,
     _mcp: McpServer,
+}
+
+/// Whether a draft's agent session is open.
+pub async fn is_open(state: &AppState, id: &str) -> bool {
+    state.drafts.sessions.lock().await.contains_key(id)
 }
 
 /// Every draft's board (cached from the store) and agent session.
@@ -667,17 +674,18 @@ fn workdir(state: &AppState, id: &str) -> Result<PathBuf, String> {
 
 /// The draft's agent session, opened (or reopened on another agent) when
 /// needed. The second value says whether this is its first turn.
-async fn open(app: &AppHandle, id: &str, agent: &str) -> Result<(Arc<AgentSession>, bool), String> {
+async fn open(app: &AppHandle, id: &str, agent: &str, config: &BTreeMap<String, String>) -> Result<(Arc<AgentSession>, bool), String> {
     let state = app.state::<AppState>();
+    let wanted = fingerprint(agent, config);
     let mut sessions = state.drafts.sessions.lock().await;
-    if sessions.get(id).is_some_and(|d| d.live.agent != agent) {
+    if sessions.get(id).is_some_and(|d| d.fingerprint != wanted) {
         sessions.remove(id);
     }
     if !sessions.contains_key(id) {
         let spec = state.spec_for(agent)?;
         let mcp = McpServer::start("divixi", tools(app.clone(), id.to_string())).await.map_err(|e| e.to_string())?;
         let cwd = workdir(&state, id)?;
-        let mut opts = session_options(&state, agent, &cwd.display().to_string(), &BTreeMap::new(), Some(&mcp));
+        let mut opts = session_options(&state, agent, &cwd.display().to_string(), config, Some(&mcp));
         let key = format!("draft_session:{id}:{agent}");
         opts.resume = state.store.get_meta(&key).ok().flatten();
         tracing::info!(draft = %id, %agent, resume = ?opts.resume, "opening draft session");
@@ -690,6 +698,7 @@ async fn open(app: &AppHandle, id: &str, agent: &str) -> Result<(Arc<AgentSessio
             id.to_string(),
             Drafter {
                 live: Live { agent: agent.to_string(), session: Arc::new(session), turns: u32::from(resumed), running: None },
+                fingerprint: wanted,
                 _mcp: mcp,
             },
         );
@@ -708,6 +717,7 @@ pub async fn turn(
     image: Option<String>,
     selected: Vec<String>,
     lang: String,
+    attached: Vec<PathBuf>,
 ) -> Result<String, String> {
     let state = app.state::<AppState>();
     let (info, _) = state.store.draft(&id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no draft {id}"))?;
@@ -715,9 +725,10 @@ pub async fn turn(
         return Err("the draft's agent is still responding".to_string());
     }
     let outcome: Result<String, String> = async {
-        let (session, first) = open(&app, &id, &info.agent).await?;
+        let (session, first) = open(&app, &id, &info.agent, &info.config).await?;
         let cwd = workdir(&state, &id)?;
-        let mut files = Vec::new();
+        // The human's files first, then the picture of the board.
+        let mut files = attached.clone();
         if let Some(data) = image.filter(|d| !d.is_empty()) {
             use base64::Engine;
             let bytes = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|e| format!("bad board picture: {e}"))?;
@@ -738,7 +749,7 @@ pub async fn turn(
         };
         let run = state
             .store
-            .begin_run(&run_key(&id), DRAFT_LANE, &info.agent, &text, &cwd.display().to_string())
+            .begin_run(&run_key(&id), DRAFT_LANE, &info.agent, &with_attachments(&text, &attached), &cwd.display().to_string())
             .map_err(|e| e.to_string())?;
         if let Some(d) = state.drafts.sessions.lock().await.get_mut(&id) {
             d.live.running = Some(run.clone());

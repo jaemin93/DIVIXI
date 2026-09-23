@@ -264,14 +264,37 @@ fn create_draft(state: State<'_, AppState>, title: String, agent: String) -> Res
     state.store.create_draft(title, &agent, &doc).map_err(|e| e.to_string())
 }
 
-/// Rename a draft or move it to another agent (from the next message).
+/// Rename a draft, move it to another agent or change its options (from
+/// the next message).
 #[tauri::command(async)]
-fn update_draft(state: State<'_, AppState>, id: String, title: Option<String>, agent: Option<String>) -> Result<DraftInfo, String> {
+fn update_draft(
+    state: State<'_, AppState>,
+    id: String,
+    title: Option<String>,
+    agent: Option<String>,
+    config: Option<std::collections::BTreeMap<String, String>>,
+) -> Result<DraftInfo, String> {
     if let Some(a) = &agent {
         state.spec_for(a)?;
     }
     let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-    state.store.save_draft(&id, None, title.as_deref(), agent.as_deref()).map_err(|e| e.to_string())
+    state
+        .store
+        .save_draft_with(&id, None, title.as_deref(), agent.as_deref(), config.as_ref())
+        .map_err(|e| e.to_string())
+}
+
+/// Whether a draft's agent session is open, and busy.
+#[derive(serde::Serialize)]
+struct DraftSession {
+    open: bool,
+    busy: bool,
+}
+
+#[tauri::command]
+async fn draft_state(app: AppHandle, id: String) -> Result<DraftSession, String> {
+    let state = app.state::<AppState>();
+    Ok(DraftSession { open: draft::is_open(&state, &id).await, busy: state.drafts.is_busy(&id) })
 }
 
 /// Delete a draft, its board, its conversation and its agent session.
@@ -319,8 +342,10 @@ async fn draft_prompt(
     image: Option<String>,
     selected: Option<Vec<String>>,
     lang: Option<String>,
+    files: Option<Vec<String>>,
 ) -> Result<String, String> {
-    draft::turn(app, id, text, image, selected.unwrap_or_default(), lang.unwrap_or_default()).await
+    let files = check_attachments(files.unwrap_or_default())?;
+    draft::turn(app, id, text, image, selected.unwrap_or_default(), lang.unwrap_or_default(), files).await
 }
 
 /// Stop the draft agent's turn.
@@ -842,6 +867,7 @@ pub fn run() {
             draft_review,
             draft_prompt,
             draft_cancel,
+            draft_state,
             file_stats,
             pick_files,
             save_attachment,

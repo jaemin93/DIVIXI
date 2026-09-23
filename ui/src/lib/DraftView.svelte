@@ -1,17 +1,19 @@
 <script lang="ts">
-  import { store, agentLabel } from "./store.svelte";
+  import { store } from "./store.svelte";
   import Board from "./Board.svelte";
-  import DraftChat from "./DraftChat.svelte";
+  import Timeline from "./Timeline.svelte";
+  import Composer from "./Composer.svelte";
   import { briefOf } from "./ink";
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
 
   /**
-   * A draft: the list of drafts, the board, and the agent beside it. The
-   * header counts what the draft has become (goals, constraints, open
-   * questions) and carries it into a new track once it has a goal.
+   * A draft: the list of drafts, the board, and under it the conversation
+   * with the draft's agent — the same timeline and composer as a track's
+   * conductor (files, agent and model, context, stop). The header counts
+   * what the draft has become (goals, constraints, open questions) and
+   * carries it into a new track once it has a goal.
    */
-  let selected = $state<string[]>([]);
   let renaming = $state(false);
   let titleDraft = $state("");
   let newTitle = $state("");
@@ -23,12 +25,6 @@
   const goals = $derived(count("goal"));
   const constraints = $derived(count("constraint"));
   const questions = $derived(count("question"));
-
-  // A new draft starts with nothing selected.
-  $effect(() => {
-    void store.draft;
-    selected = [];
-  });
 
   async function create(e: Event) {
     e.preventDefault();
@@ -45,6 +41,23 @@
   async function commitRename() {
     renaming = false;
     if (d && titleDraft.trim() && titleDraft.trim() !== d.title) await store.updateDraft(d.id, { title: titleDraft.trim() });
+  }
+
+  // The conversation's height: drag the edge between board and talk.
+  function startDrag(e: PointerEvent) {
+    e.preventDefault();
+    const startY = e.clientY;
+    const start = store.draftChatHeight;
+    document.documentElement.classList.add("resizing");
+    const move = (ev: PointerEvent) => store.setDraftChatHeight(start + (startY - ev.clientY), false);
+    const stop = () => {
+      document.documentElement.classList.remove("resizing");
+      store.setDraftChatHeight(store.draftChatHeight, true);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
   }
 
   function promote() {
@@ -113,22 +126,30 @@
             <span><b style="color: var(--acct)">{constraints}</b> {t("draft.tag.constraint")}</span>
             <span><b style="color: var(--warn)">{questions}</b> {t("draft.tag.question")}</span>
           </div>
-          <label class="agent mono">
-            <span>{t("draft.agent")}</span>
-            <select value={d.agent} onchange={(e) => store.updateDraft(d.id, { agent: (e.currentTarget as HTMLSelectElement).value })}>
-              {#each store.readyAgents as a (a.kind)}
-                <option value={a.kind}>{agentLabel(a.kind)}</option>
-              {/each}
-            </select>
-          </label>
           <button class="btn btn-acc" disabled={goals === 0} onclick={promote} title={goals === 0 ? t("draft.promoteNeedsGoal") : t("draft.promoteHint")}>
             {t("draft.promote")}
           </button>
         </div>
       </header>
       <div class="work">
-        <Board bind:selected />
-        <DraftChat {selected} />
+        <div class="boardwrap">
+          <Board bind:selected={store.draftSelected} />
+          {#if store.draftDoc.changes.length}
+            <!-- The agent's board changes, all at once; one by one on the items. -->
+            <div class="review">
+              <span class="mono">{t("draft.pending", { n: store.draftDoc.changes.length })}</span>
+              <button type="button" class="btn sm" onclick={() => store.draftReview(store.draftDoc.changes.map((c) => c.id), false)}>{t("draft.revertAll")}</button>
+              <button type="button" class="btn sm keep" onclick={() => store.draftReview(store.draftDoc.changes.map((c) => c.id), true)}>{t("draft.keepAll")}</button>
+            </div>
+          {/if}
+        </div>
+        <!-- The conversation under the board, as on a track. -->
+        <div class="talk" style="height: {store.draftChatHeight}px">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="grip" onpointerdown={startDrag} ondblclick={() => store.setDraftChatHeight(340, true)} title={t("draft.chatResize")}></div>
+          <Timeline />
+          <Composer />
+        </div>
       </div>
     </section>
   {:else}
@@ -350,27 +371,64 @@
     margin-right: 3px;
   }
 
-  .agent {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 10px;
-    letter-spacing: 0.1em;
-    color: var(--lab);
-  }
-
-  .agent select {
-    height: 30px;
-    background: var(--inp);
-    border: 1px solid var(--line);
-    color: var(--txt);
-    font-size: 12px;
-    padding: 0 8px;
-  }
-
   .work {
     flex: 1;
     min-height: 0;
     display: flex;
+    flex-direction: column;
+  }
+
+  .boardwrap {
+    position: relative;
+    flex: 1;
+    min-height: 120px;
+    display: flex;
+  }
+
+  .review {
+    position: absolute;
+    right: 14px;
+    bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px 6px 12px;
+    background: var(--accbg);
+    border: 1px solid var(--accln);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    color: var(--acct);
+  }
+
+  .review .btn.sm {
+    height: 26px;
+    padding: 0 10px;
+  }
+
+  .review .keep {
+    border-color: var(--acc);
+    color: var(--hi);
+  }
+
+  /* The conversation: the track's timeline and composer, under the board. */
+  .talk {
+    position: relative;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 180px;
+    border-top: 1px solid var(--line);
+    background-image: radial-gradient(var(--dot) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+
+  .grip {
+    position: absolute;
+    top: -3px;
+    left: 0;
+    right: 0;
+    height: 6px;
+    cursor: row-resize;
+    z-index: 5;
   }
 </style>
