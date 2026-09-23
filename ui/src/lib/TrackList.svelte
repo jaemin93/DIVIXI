@@ -173,18 +173,18 @@
           {isOpen(tr.id) ? "▾" : "▸"}
         </button>
         <button class="pick" onclick={() => store.selectTrack(tr.id)} title={tr.intent}>
-          <span class="dot" class:pulse={tr.live} style="background: {tr.live ? 'var(--ok)' : 'var(--idle)'}"></span>
-          <span class="lines">
-            {#if tr.tags.length}
-              <span class="tags">
-                {#each tr.tags as tag (tag)}
-                  <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
-                {/each}
-              </span>
-            {/if}
+          {#if tr.tags.length}
+            <span class="tags">
+              {#each tr.tags as tag (tag)}
+                <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
+              {/each}
+            </span>
+          {/if}
+          <span class="main">
+            <span class="dot" class:pulse={tr.live} style="background: {tr.live ? 'var(--ok)' : 'var(--idle)'}"></span>
             <span class="name">{tr.name}</span>
+            <span class="mono count">{tr.runs}</span>
           </span>
-          <span class="mono count">{tr.runs}</span>
         </button>
       </div>
 
@@ -324,11 +324,13 @@
     padding: 4px 0 12px;
   }
 
+  /* The chevron and the name line sit at the bottom; a tag line, when
+     there is one, stacks above and makes the row taller. */
   .track {
     width: 100%;
-    min-height: 46px;
+    min-height: 44px;
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     gap: 4px;
     padding: 0 0 0 8px;
     border-left: 2px solid transparent;
@@ -344,10 +346,9 @@
   .pick {
     flex: 1;
     min-width: 0;
-    height: 100%;
     display: flex;
-    align-items: center;
-    gap: 10px;
+    flex-direction: column;
+    align-items: stretch;
     padding: 0 16px 0 4px;
     background: transparent;
     border: 0;
@@ -363,7 +364,10 @@
 
   .chev {
     width: 18px;
-    height: 18px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     background: transparent;
     border: 0;
     color: var(--lab);
@@ -414,19 +418,24 @@
     flex: 1;
   }
 
-  .lines {
-    flex: 1;
-    min-width: 0;
+  .main {
+    height: 44px;
     display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 2px;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .main .name {
+    flex: 1;
   }
 
   /* Tags sit in a small line above the name, each in its own colour. */
   .tags {
     display: flex;
     gap: 8px;
+    padding: 8px 0 0 16px;
+    margin-bottom: -6px;
     overflow: hidden;
     white-space: nowrap;
     line-height: 1.3;
