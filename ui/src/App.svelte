@@ -13,6 +13,15 @@
   import TrackHeader from "./lib/TrackHeader.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
+  import { slide } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
+
+  /** Side columns slide open and shut; not for those who asked for less motion. */
+  const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const side = { axis: "x" as const, duration: reduced ? 0 : 200, easing: cubicOut };
+
+  /** The track list sits beside every view but settings, once a track exists. */
+  const listShown = $derived(store.view !== "settings" && store.trackListOpen && store.tracks.length > 0);
 
   // Browser-style zoom keys, app-wide.
   function onKey(e: KeyboardEvent) {
@@ -52,36 +61,28 @@
     <Rail />
     <div class="stage">
     <div class="row">
+    <!-- One track list for every view, so switching views does not replay its slide. -->
+    {#if listShown}
+      <div class="sidebox" transition:slide={side}><TrackList /></div>
+    {/if}
     {#if store.view === "settings"}
       <Settings />
     {:else if store.view === "lane"}
-      {#if store.trackListOpen}
-        <TrackList />
-      {/if}
       <LaneView />
     {:else if store.view === "new-track" || !store.currentTrack}
-      {#if store.trackListOpen && store.tracks.length > 0}
-        <TrackList />
-      {/if}
       <TrackForm />
     {:else if store.view === "edit-track"}
-      {#if store.trackListOpen}
-        <TrackList />
-      {/if}
       {#key store.currentTrack.id}
         <TrackForm track={store.currentTrack} />
       {/key}
     {:else}
-      {#if store.trackListOpen}
-        <TrackList />
-      {/if}
       <main>
         <TrackHeader track={store.currentTrack} />
         <Timeline />
         <Composer />
       </main>
       {#if store.panelOpen}
-        <Workspace />
+        <div class="sidebox" transition:slide={side}><Workspace /></div>
       {/if}
     {/if}
     </div>
@@ -121,6 +122,13 @@
     flex: 1;
     min-height: 0;
     display: flex;
+  }
+
+  /* Holds a side column while it slides; the column keeps its own width. */
+  .sidebox {
+    flex-shrink: 0;
+    display: flex;
+    min-height: 0;
   }
 
   main {

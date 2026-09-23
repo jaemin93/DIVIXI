@@ -39,12 +39,15 @@
     const startX = e.clientX;
     const startWidth = width;
     dragging = true;
+    // A column follows the pointer while dragged, not an easing curve.
+    document.documentElement.classList.add("resizing");
     const move = (ev: PointerEvent) => {
       const dx = ev.clientX - startX;
       onchange(clamp(edge === "right" ? startWidth + dx : startWidth - dx), false);
     };
     const stop = () => {
       dragging = false;
+      document.documentElement.classList.remove("resizing");
       onchange(clamp(width), true);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);

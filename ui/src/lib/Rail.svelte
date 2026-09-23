@@ -119,6 +119,19 @@
     flex-direction: column;
     padding: 8px 0 12px;
     overflow: visible;
+    transition: width 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  /* Labels are cut by the rail's width while it slides, not spilled over. */
+  .top,
+  .group {
+    overflow: hidden;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    nav {
+      transition: none;
+    }
   }
 
   nav.collapsed {

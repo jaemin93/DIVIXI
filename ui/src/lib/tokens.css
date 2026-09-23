@@ -422,3 +422,8 @@ input::placeholder {
 .hljs-strong {
   font-weight: 600;
 }
+
+/* While a column edge is dragged, nothing eases: the width follows the pointer. */
+html.resizing * {
+  transition: none !important;
+}
