@@ -57,7 +57,7 @@
 
 <main>
   <header>
-    <div class="mlab">LANE / {store.openLane}</div>
+    <div class="mlab">{t("lane.worker")} / {store.openLane}</div>
     <div class="row">
       <h1 class="serif">{store.openLane}</h1>
       <span class="mono meta">{agentLabel(agent)} · {t("lane.turns", { n: runs.length })}</span>
