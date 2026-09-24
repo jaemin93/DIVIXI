@@ -156,7 +156,6 @@
 
       {#if !kb.sources.length}
         <div class="emptybox">
-          <p>{t("kb.empty")}</p>
           <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
         </div>
       {:else if !shown.length && !kb.loading}
@@ -202,15 +201,10 @@
     {:else if kb.tab === "graph"}
       <KnowledgeGraph />
     {:else if kb.tab === "sources"}
-      <p class="note">{t("kb.sourcesNote")}</p>
       <div class="actions">
-        <span class="mono dim">{t("kb.formats", { list: kb.formats.slice(0, 12).join(" ") })}…</span>
         <span class="grow"></span>
         <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
       </div>
-      {#if !kb.sources.length}
-        <p class="none">{t("kb.empty")}</p>
-      {/if}
       {#each kb.sources as s (s.id)}
         {@const art = kb.artifactOf(s.id)}
         <div
@@ -423,12 +417,6 @@
     text-align: center;
   }
 
-  .emptybox p {
-    margin: 0;
-    max-width: 520px;
-    line-height: 1.55;
-  }
-
   .group {
     border: 1px solid var(--line);
     margin-bottom: 12px;
@@ -598,10 +586,6 @@
     align-items: center;
     gap: 10px;
     margin-bottom: 14px;
-  }
-
-  .actions .dim {
-    font-size: 10.5px;
   }
 
   .source {
