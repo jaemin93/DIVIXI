@@ -1,0 +1,142 @@
+//! Vectors for the knowledge library from a remote embedding API, so the
+//! library can search by meaning without a local model resident in memory
+//! (devterm's local llama-server held about 5 GB while idle). Any endpoint
+//! that speaks OpenAI's `POST {base}/embeddings` works: OpenAI, Voyage,
+//! Gemini's OpenAI-compatible endpoint, Ollama or LM Studio, a llama-server
+//! on another machine.
+//!
+//! Every vector is stamped with the space it belongs to (endpoint, model,
+//! dimensions); changing any of them re-embeds the library in the
+//! background and, until then, searches only the vectors already in the
+//! new space.
+
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use crate::{AppState, SETTING_PREFIX};
+
+pub const SETTING_ENABLED: &str = "knowledge.embed.enabled";
+pub const SETTING_URL: &str = "knowledge.embed.url";
+pub const SETTING_MODEL: &str = "knowledge.embed.model";
+pub const SETTING_KEY: &str = "knowledge.embed.key";
+pub const SETTING_DIMS: &str = "knowledge.embed.dims";
+
+/// Texts per request.
+pub const BATCH: usize = 32;
+/// Requests per minute, at most (Kiro Crew's default embedding rate).
+pub const PER_MINUTE: u64 = 120;
+const TIMEOUT: Duration = Duration::from_secs(60);
+/// A search waits this long for its query's vector before going without.
+pub const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Where vectors come from.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Endpoint {
+    pub url: String,
+    pub model: String,
+    pub key: String,
+    /// Requested dimensions, for models that can shorten their vectors.
+    pub dims: Option<u32>,
+}
+
+impl Endpoint {
+    /// The vector space this endpoint's vectors are in.
+    pub fn signature(&self) -> String {
+        let dims = self.dims.map(|d| d.to_string()).unwrap_or_default();
+        orchestra_knowledge::read::hash(&format!("{}|{}|{}", self.url.trim_end_matches('/'), self.model, dims))[..16].to_string()
+    }
+}
+
+fn setting(state: &AppState, key: &str) -> Option<String> {
+    state.store.get_meta(&format!("{SETTING_PREFIX}{key}")).ok().flatten().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// The endpoint in the settings, when embeddings are switched on and set up.
+pub fn endpoint(state: &AppState) -> Option<Endpoint> {
+    if setting(state, SETTING_ENABLED).as_deref() != Some("on") {
+        return None;
+    }
+    let url = setting(state, SETTING_URL)?;
+    let model = setting(state, SETTING_MODEL)?;
+    Some(Endpoint {
+        url,
+        model,
+        key: setting(state, SETTING_KEY).unwrap_or_default(),
+        dims: setting(state, SETTING_DIMS).and_then(|d| d.parse().ok()).filter(|d| *d > 0),
+    })
+}
+
+/// One request: a vector per text, in order.
+pub async fn embed(ep: &Endpoint, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut body = json!({ "model": ep.model, "input": texts });
+    if let Some(d) = ep.dims {
+        body["dimensions"] = json!(d);
+    }
+    let url = format!("{}/embeddings", ep.url.trim_end_matches('/'));
+    let mut req = reqwest::Client::new()
+        .post(&url)
+        .header("content-type", "application/json")
+        .timeout(TIMEOUT)
+        .body(body.to_string());
+    if !ep.key.is_empty() {
+        req = req.header("authorization", format!("Bearer {}", ep.key));
+    }
+    let res = req.send().await.map_err(|e| format!("{url}: {e}"))?;
+    let status = res.status();
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let detail: String = text.chars().take(300).collect();
+        return Err(format!("{url}: {status} {detail}"));
+    }
+    parse(&text, texts.len())
+}
+
+/// Read `{data: [{index, embedding}]}`, putting vectors back in input order.
+fn parse(text: &str, expected: usize) -> Result<Vec<Vec<f32>>, String> {
+    let v: Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
+    let data = v.get("data").and_then(Value::as_array).ok_or("no data in the reply")?;
+    let mut out: Vec<Option<Vec<f32>>> = vec![None; expected];
+    for (i, d) in data.iter().enumerate() {
+        let at = d.get("index").and_then(Value::as_u64).map(|n| n as usize).unwrap_or(i);
+        let vec: Vec<f32> = d
+            .get("embedding")
+            .and_then(Value::as_array)
+            .ok_or("an item has no embedding (is the encoding float?)")?
+            .iter()
+            .filter_map(|x| x.as_f64().map(|f| f as f32))
+            .collect();
+        if let Some(slot) = out.get_mut(at) {
+            *slot = Some(vec);
+        }
+    }
+    let vecs: Vec<Vec<f32>> = out.into_iter().collect::<Option<_>>().ok_or("fewer vectors than texts")?;
+    if vecs.iter().any(Vec::is_empty) || vecs.windows(2).any(|w| w[0].len() != w[1].len()) {
+        return Err("vectors of different or zero length".to_string());
+    }
+    Ok(vecs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_openai_shaped_replies_in_input_order() {
+        let r = r#"{"object":"list","data":[{"index":1,"embedding":[0.5,0.5]},{"index":0,"embedding":[1,0]}],"model":"m"}"#;
+        assert_eq!(parse(r, 2).unwrap(), vec![vec![1.0, 0.0], vec![0.5, 0.5]]);
+        assert!(parse(r, 3).is_err());
+        assert!(parse(r#"{"error":"nope"}"#, 1).is_err());
+    }
+
+    #[test]
+    fn signature_follows_the_space() {
+        let a = Endpoint { url: "https://x/v1/".into(), model: "m".into(), key: "k1".into(), dims: None };
+        let b = Endpoint { key: "k2".into(), url: "https://x/v1".into(), ..a.clone() };
+        assert_eq!(a.signature(), b.signature(), "the key and a trailing slash do not change the space");
+        assert_ne!(a.signature(), Endpoint { dims: Some(256), ..a.clone() }.signature());
+    }
+}

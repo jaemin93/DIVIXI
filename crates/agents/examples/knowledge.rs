@@ -103,8 +103,8 @@ async fn run() -> anyhow::Result<()> {
     let n = items.len();
     db.replace_items("ar001", &items, parsed > 0, &FileState { hash: file.hash.clone(), mtime_ms: file.mtime_ms, size: file.size as i64 })?;
     println!("stored: {:?}", db.stats()?);
-    let ko = db.search("지휘자 작업자", 3, None)?;
-    let en = db.search("conductor", 3, None)?;
+    let ko = db.search("지휘자 작업자", 3, None, None)?;
+    let en = db.search("conductor", 3, None, None)?;
     for h in ko.iter().chain(&en) {
         println!("  hit {:.4} {} · {}", h.score, h.match_type, h.item.title);
     }

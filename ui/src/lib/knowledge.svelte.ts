@@ -47,11 +47,19 @@ export type KStats = { sources: number; items: number; entities: number; relatio
 
 export type KTab = "list" | "graph" | "sources" | "settings";
 
+/** Mirrors `knowledge::EmbeddingStatus`. */
+export type KEmbedding = { enabled: boolean; model: string; embedded: number; total: number; error: string };
+
 /** Settings keys, as `knowledge.rs` reads them. */
 export const K_AGENT = "knowledge.agent";
 export const K_CONFIG = "knowledge.config";
 export const K_POOL = "knowledge.pool";
 export const K_EXTRACT = "knowledge.extract";
+export const K_EMBED_ENABLED = "knowledge.embed.enabled";
+export const K_EMBED_URL = "knowledge.embed.url";
+export const K_EMBED_MODEL = "knowledge.embed.model";
+export const K_EMBED_KEY = "knowledge.embed.key";
+export const K_EMBED_DIMS = "knowledge.embed.dims";
 
 /**
  * The knowledge library as the UI sees it: its sources (each also an
@@ -65,6 +73,7 @@ class Knowledge {
   items = $state<KItem[]>([]);
   graph = $state<KGraph>({ nodes: [], edges: [] });
   stats = $state<KStats>({ sources: 0, items: 0, entities: 0, relations: 0 });
+  embedding = $state<KEmbedding>({ enabled: false, model: "", embedded: 0, total: 0, error: "" });
   query = $state("");
   /** The query the items shown answer ("" for the plain list). */
   shownQuery = $state("");
@@ -114,6 +123,7 @@ class Knowledge {
       this.stats = stats;
       this.formats = formats;
       this.loaded = true;
+      await this.loadEmbedding();
       await this.refreshTab();
     } catch (err) {
       store.lastError = String(err);
@@ -207,6 +217,14 @@ class Knowledge {
     return why;
   }
 
+  async loadEmbedding() {
+    try {
+      this.embedding = await invoke<KEmbedding>("knowledge_embedding_status");
+    } catch {
+      /* the banner keeps its last word */
+    }
+  }
+
   async loadFormats() {
     try {
       this.formats = await invoke<string[]>("knowledge_formats");
@@ -249,6 +267,7 @@ class Knowledge {
       } catch {
         /* counts can wait */
       }
+      await this.loadEmbedding();
       if (content && store.view === "knowledge") await this.refreshTab();
     }, 500);
   }
@@ -261,5 +280,6 @@ export async function connectKnowledge() {
   await Promise.all([
     listen<KSource>("knowledge", (e) => kb.upsert(e.payload)),
     listen<string>("knowledge-removed", (e) => kb.drop(e.payload)),
+    listen("knowledge-embedding", () => kb.loadEmbedding()),
   ]);
 }

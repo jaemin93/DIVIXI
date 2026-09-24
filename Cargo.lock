@@ -2811,6 +2811,7 @@ dependencies = [
  "orchestra-store",
  "parking_lot",
  "portable-pty",
+ "reqwest",
  "serde",
  "serde_json",
  "sysinfo",

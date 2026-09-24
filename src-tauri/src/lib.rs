@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 mod conductor;
+mod embed;
 pub mod artifact;
 pub mod design;
 mod knowledge;
@@ -950,6 +951,10 @@ pub fn run() {
             knowledge::knowledge_entity_items,
             knowledge::knowledge_stats,
             knowledge::knowledge_formats,
+            knowledge::knowledge_embedding_status,
+            knowledge::knowledge_embed_test,
+            knowledge::knowledge_embed_now,
+            knowledge::knowledge_default_config,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;

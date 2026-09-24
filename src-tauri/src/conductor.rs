@@ -463,7 +463,7 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
         ),
         Tool::new(
             "knowledge_search",
-            "Search the human's knowledge library: documents they chose to add, split into sections, each with a title, a summary and the entities it names. Call it when the human asks what we know about something, refers to their docs or notes or to a stored document by name, or when a task you are about to delegate touches a topic the library covers (knowledge_list_sources shows the topics). Do NOT call it for general coding questions, file operations, debugging, or anything the working folder or the conversation already answers. Matching is by keyword and by entity: use the distinctive words a document would contain, and try other wording once if nothing comes back. Workers cannot search the library; pass them what they need.",
+            "Search the human's knowledge library: documents they chose to add, split into sections, each with a title, a summary and the entities it names. Call it when the human asks what we know about something, refers to their docs or notes or to a stored document by name, or when a task you are about to delegate touches a topic the library covers (knowledge_list_sources shows the topics). Do NOT call it for general coding questions, file operations, debugging, or anything the working folder or the conversation already answers. Matching is by keyword, by entity and, when embeddings are set up, by meaning: use the distinctive words a document would contain, and try other wording once if nothing comes back. Workers cannot search the library; pass them what they need.",
             json!({
                 "type": "object",
                 "properties": {
@@ -479,13 +479,14 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                     let query = str_arg(&args, "query")?;
                     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(3).clamp(1, 5) as usize;
                     let source = args.get("source_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                    let vector = crate::knowledge::query_vector(&app, &query).await;
                     let db = app.state::<AppState>().library.db.clone();
                     if let Some(id) = &source {
                         if db.source(id).map_err(|e| e.to_string())?.is_none() {
                             return Err(format!("No knowledge source with id {id}. Call knowledge_list_sources to see the valid ids."));
                         }
                     }
-                    let hits = tokio::task::spawn_blocking(move || db.search(&query, limit, source.as_deref()))
+                    let hits = tokio::task::spawn_blocking(move || db.search(&query, limit, source.as_deref(), vector.as_ref().map(|(v, s)| (v.as_slice(), s.as_str()))))
                         .await
                         .map_err(|e| e.to_string())?
                         .map_err(|e| e.to_string())?;

@@ -1,7 +1,21 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { store, agentLabel } from "./store.svelte";
-  import { kb, K_AGENT, K_CONFIG, K_EXTRACT, K_POOL, type KItem, type KSource, type KTab } from "./knowledge.svelte";
+  import {
+    kb,
+    K_AGENT,
+    K_CONFIG,
+    K_EMBED_DIMS,
+    K_EMBED_ENABLED,
+    K_EMBED_KEY,
+    K_EMBED_MODEL,
+    K_EMBED_URL,
+    K_EXTRACT,
+    K_POOL,
+    type KItem,
+    type KSource,
+    type KTab,
+  } from "./knowledge.svelte";
   import KnowledgeGraph from "./KnowledgeGraph.svelte";
   import ArtifactMenu from "./ArtifactMenu.svelte";
   import Icon from "./Icon.svelte";
@@ -86,25 +100,50 @@
   let sPool = $state(2);
   let sExtract = $state(true);
   let sLoaded = $state(false);
+  /** The cheapest options on the chosen agent, to mark them. */
+  let cheap = $state<Record<string, string>>({});
+  let eOn = $state(false);
+  let eUrl = $state("");
+  let eModel = $state("");
+  let eKey = $state("");
+  let eDims = $state("");
+  let eTest = $state<{ ok: boolean; text: string } | null>(null);
+  let eTesting = $state(false);
+
+  const get = (key: string) => invoke<string | null>("get_setting", { key }).catch(() => null);
 
   $effect(() => {
     if (kb.tab !== "settings" || sLoaded) return;
     void (async () => {
-      const get = (key: string) => invoke<string | null>("get_setting", { key }).catch(() => null);
-      const [agent, config, pool, extract] = await Promise.all([get(K_AGENT), get(K_CONFIG), get(K_POOL), get(K_EXTRACT)]);
+      const [agent, config, pool, extract, on, url, model, key, dims] = await Promise.all(
+        [K_AGENT, K_CONFIG, K_POOL, K_EXTRACT, K_EMBED_ENABLED, K_EMBED_URL, K_EMBED_MODEL, K_EMBED_KEY, K_EMBED_DIMS].map(get),
+      );
       sAgent = agent || store.readyAgents[0]?.kind || "";
+      cheap = await defaults(sAgent);
       try {
-        sConfig = config ? JSON.parse(config) : {};
+        sConfig = config ? JSON.parse(config) : { ...cheap };
       } catch {
-        sConfig = {};
+        sConfig = { ...cheap };
       }
       sPool = Math.min(5, Math.max(1, Number(pool) || 2));
       sExtract = extract !== "off";
+      eOn = on === "on";
+      eUrl = url ?? "";
+      eModel = model ?? "";
+      eKey = key ?? "";
+      eDims = dims ?? "";
       sLoaded = true;
     })();
   });
 
-  const modelOption = $derived(store.optionsOf(sAgent).find((o) => o.category === "model"));
+  async function defaults(agent: string): Promise<Record<string, string>> {
+    if (!agent) return {};
+    return invoke<Record<string, string>>("knowledge_default_config", { agent }).catch(() => ({}));
+  }
+
+  const agentOptions = $derived(store.optionsOf(sAgent));
+  const modelOption = $derived(agentOptions.find((o) => o.category === "model"));
+  const effortOption = $derived(agentOptions.find((o) => o.category === "thought_level"));
 
   async function save(key: string, value: string) {
     try {
@@ -114,20 +153,60 @@
     }
   }
 
+  /** A new agent starts on its cheapest model and least effort. */
   async function setAgent(agent: string) {
+    if (agent === sAgent) return;
     sAgent = agent;
-    sConfig = {};
+    cheap = await defaults(agent);
+    sConfig = { ...cheap };
     await save(K_AGENT, agent);
-    await save(K_CONFIG, "{}");
+    await save(K_CONFIG, JSON.stringify(sConfig));
   }
 
-  async function setModel(id: string) {
-    if (!modelOption) return;
+  async function setOption(id: string, value: string) {
     const next = { ...sConfig };
-    if (id) next[modelOption.id] = id;
-    else delete next[modelOption.id];
+    if (value) next[id] = value;
+    else delete next[id];
     sConfig = next;
     await save(K_CONFIG, JSON.stringify(next));
+  }
+
+  /** Remote embedding endpoints that speak OpenAI's /embeddings. */
+  const PRESETS = [
+    { id: "openai", label: "OpenAI", url: "https://api.openai.com/v1", model: "text-embedding-3-small", dims: "" },
+    { id: "voyage", label: "Voyage", url: "https://api.voyageai.com/v1", model: "voyage-3.5-lite", dims: "" },
+    { id: "gemini", label: "Gemini", url: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-embedding-001", dims: "768" },
+    { id: "custom", label: t("kb.emb.custom"), url: "", model: "", dims: "" },
+  ];
+
+  function preset(p: (typeof PRESETS)[number]) {
+    eUrl = p.url;
+    eModel = p.model;
+    eDims = p.dims;
+    eTest = null;
+  }
+
+  async function testEndpoint() {
+    eTesting = true;
+    eTest = null;
+    try {
+      const n = await invoke<number>("knowledge_embed_test", { url: eUrl, model: eModel, key: eKey, dims: Number(eDims) || null });
+      eTest = { ok: true, text: t("kb.emb.testOk", { n }) };
+    } catch (err) {
+      eTest = { ok: false, text: String(err) };
+    } finally {
+      eTesting = false;
+    }
+  }
+
+  async function saveEmbedding() {
+    await save(K_EMBED_URL, eUrl.trim());
+    await save(K_EMBED_MODEL, eModel.trim());
+    await save(K_EMBED_KEY, eKey.trim());
+    await save(K_EMBED_DIMS, eDims.trim());
+    await save(K_EMBED_ENABLED, eOn ? "on" : "off");
+    await invoke("knowledge_embed_now").catch(() => {});
+    await kb.loadEmbedding();
   }
 
   const menuSource = $derived(menu ? kb.sources.find((s) => s.id === menu!.id) : undefined);
@@ -148,6 +227,9 @@
       {/each}
     </div>
 
+    {#if kb.embedding.enabled && kb.embedding.error}
+      <div class="banner err">{t("kb.embedError", { error: kb.embedding.error })}</div>
+    {/if}
     <div class="banner" class:busy={!!kb.indexing.length}>
       {#if current}
         <span class="pulse"></span>
@@ -157,7 +239,13 @@
         <span class="pulse"></span><span>{t("kb.queued", { n: kb.indexing.length })}</span>
       {:else}
         <span class="ok">✓</span>
-        <span>{t("kb.searchReady")}</span>
+        {#if kb.embedding.enabled}
+          <span>{t("kb.smartOn")}</span>
+          <span class="dim">· {t("kb.embedded", { done: kb.embedding.embedded, total: kb.embedding.total, pct: kb.embedding.total ? Math.round((kb.embedding.embedded / kb.embedding.total) * 100) : 100 })}</span>
+        {:else}
+          <span>{t("kb.searchReady")}</span>
+          <span class="dim">· {t("kb.keywordOnly")}</span>
+        {/if}
         <span class="dim">· {t("kb.syncedCount", { done: kb.syncedCount, total: kb.sources.length })}</span>
       {/if}
     </div>
@@ -305,28 +393,44 @@
           >
         </div>
 
-        <div class="row">
-          <div class="lhs">
-            <div class="label">{t("kb.set.agent")}</div>
-            <div class="help">{t("kb.set.agentHelp")}</div>
+        <div class="block" class:off={!sExtract}>
+          <div class="label">{t("kb.set.agent")}</div>
+          <div class="help">{t("kb.set.agentHelp")}</div>
+          <div class="agents" role="radiogroup" aria-label={t("kb.set.agent")}>
+            {#each store.readyAgents as a (a.kind)}
+              <button class="agent" class:on={sAgent === a.kind} role="radio" aria-checked={sAgent === a.kind} disabled={!sExtract} onclick={() => setAgent(a.kind)}>
+                {agentLabel(a.kind)}
+              </button>
+            {/each}
+            {#if !store.readyAgents.length}<span class="dim">{t("kb.set.noAgents")}</span>{/if}
           </div>
-          <select value={sAgent} onchange={(e) => setAgent((e.currentTarget as HTMLSelectElement).value)} disabled={!sExtract}>
-            {#each store.readyAgents as a (a.kind)}<option value={a.kind}>{agentLabel(a.kind)}</option>{/each}
-          </select>
-        </div>
 
-        {#if modelOption}
-          <div class="row">
-            <div class="lhs">
-              <div class="label">{t("kb.set.model")}</div>
-              <div class="help">{t("kb.set.modelHelp")}</div>
+          {#if modelOption}
+            <div class="label sub">{t("kb.set.model")}</div>
+            <div class="help">{t("kb.set.modelHelp")}</div>
+            <div class="models" role="radiogroup" aria-label={t("kb.set.model")}>
+              {#each modelOption.choices as c (c.id)}
+                {@const chosen = (sConfig[modelOption.id] ?? "") === c.id}
+                <button class="model" class:on={chosen} role="radio" aria-checked={chosen} disabled={!sExtract} onclick={() => setOption(modelOption.id, c.id)}>
+                  <span class="mname">{c.name}</span>
+                  {#if cheap[modelOption.id] === c.id}<span class="mono cheap">{t("kb.set.cheapest")}</span>{/if}
+                  {#if c.id === modelOption.current}<span class="mono dflt">{t("kb.set.agentDefault")}</span>{/if}
+                </button>
+              {/each}
             </div>
-            <select value={sConfig[modelOption.id] ?? ""} onchange={(e) => setModel((e.currentTarget as HTMLSelectElement).value)} disabled={!sExtract}>
-              <option value="">{t("kb.set.modelDefault", { name: store.choiceName(modelOption, modelOption.current) })}</option>
-              {#each modelOption.choices as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
-            </select>
-          </div>
-        {/if}
+            {#if !cheap[modelOption.id]}<p class="note">{t("kb.set.noCheapest")}</p>{/if}
+          {/if}
+
+          {#if effortOption}
+            <div class="label sub">{effortOption.name}</div>
+            <div class="agents">
+              {#each effortOption.choices as c (c.id)}
+                {@const chosen = (sConfig[effortOption.id] ?? effortOption.current) === c.id}
+                <button class="agent" class:on={chosen} disabled={!sExtract} onclick={() => setOption(effortOption.id, c.id)}>{c.name}</button>
+              {/each}
+            </div>
+          {/if}
+        </div>
 
         <div class="row">
           <div class="lhs">
@@ -347,6 +451,34 @@
           />
         </div>
         <p class="note">{t("kb.set.applies")}</p>
+
+        <h2 class="gap">{t("kb.emb.title")}</h2>
+        <p class="note">{t("kb.emb.blurb")}</p>
+        <div class="row">
+          <div class="lhs">
+            <div class="label">{t("kb.emb.enable")}</div>
+            <div class="help">{t("kb.emb.enableHelp")}</div>
+          </div>
+          <button class="toggle" class:on={eOn} role="switch" aria-checked={eOn} aria-label={t("kb.emb.enable")} onclick={() => (eOn = !eOn)}><span></span></button>
+        </div>
+        <div class="block" class:off={!eOn}>
+          <div class="agents">
+            {#each PRESETS as p (p.id)}
+              <button class="agent" class:on={p.url !== "" && eUrl === p.url && eModel === p.model} disabled={!eOn} onclick={() => preset(p)}>{p.label}</button>
+            {/each}
+          </div>
+          <label class="field"><span>{t("kb.emb.url")}</span><input bind:value={eUrl} disabled={!eOn} placeholder="https://api.openai.com/v1" spellcheck="false" /></label>
+          <label class="field"><span>{t("kb.emb.model")}</span><input bind:value={eModel} disabled={!eOn} placeholder="text-embedding-3-small" spellcheck="false" /></label>
+          <label class="field"><span>{t("kb.emb.key")}</span><input type="password" bind:value={eKey} disabled={!eOn} placeholder="sk-…" autocomplete="off" /></label>
+          <label class="field"><span>{t("kb.emb.dims")}</span><input class="short" bind:value={eDims} disabled={!eOn} placeholder={t("kb.emb.dimsAuto")} inputmode="numeric" /></label>
+          <p class="note">{t("kb.emb.keyNote")}</p>
+          {#if eTest}<p class="test" class:bad={!eTest.ok}>{eTest.text}</p>{/if}
+        </div>
+        <div class="actions">
+          <button class="btn" disabled={!eOn || eTesting || !eUrl.trim() || !eModel.trim()} onclick={testEndpoint}>{eTesting ? t("kb.emb.testing") : t("kb.emb.test")}</button>
+          <span class="grow"></span>
+          <button class="btn btn-acc" onclick={saveEmbedding}>{t("kb.emb.save")}</button>
+        </div>
       </div>
     {/if}
   </div>
@@ -389,7 +521,6 @@
     min-height: 0;
     overflow-y: auto;
     padding: 30px 40px 40px;
-    max-width: 1180px;
     width: 100%;
     box-sizing: border-box;
   }
@@ -442,6 +573,13 @@
     font-size: 13px;
     color: var(--txt);
     margin-bottom: 16px;
+  }
+
+  .banner.err {
+    color: var(--deltx);
+    background: var(--delbg);
+    border-color: var(--deltx);
+    word-break: break-word;
   }
 
   .banner .ok {
@@ -836,6 +974,115 @@
     font-size: 12.5px;
     margin-top: 4px;
     line-height: 1.5;
+  }
+
+  .block {
+    padding: 16px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .block.off {
+    opacity: 0.55;
+  }
+
+  .label.sub {
+    margin-top: 16px;
+  }
+
+  .agents,
+  .models {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+  }
+
+  .agent,
+  .model {
+    background: transparent;
+    border: 1px solid var(--lines);
+    color: var(--dim);
+    font-size: 12.5px;
+    padding: 6px 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .agent:hover:not(:disabled),
+  .model:hover:not(:disabled) {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .agent.on,
+  .model.on {
+    color: var(--hi);
+    border-color: var(--acc);
+    background: var(--accbg);
+  }
+
+  .agent:disabled,
+  .model:disabled {
+    cursor: default;
+  }
+
+  .cheap {
+    font-size: 9.5px;
+    color: var(--oktx);
+    background: var(--okbg);
+    border: 1px solid var(--okln);
+    padding: 0 5px;
+  }
+
+  .dflt {
+    font-size: 9.5px;
+    color: var(--lab);
+  }
+
+  .gap {
+    margin-top: 34px !important;
+  }
+
+  .field {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+    font-size: 12.5px;
+    color: var(--dim);
+  }
+
+  .field span {
+    width: 110px;
+    flex-shrink: 0;
+  }
+
+  .field input {
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+    background: var(--inp);
+    border: 1px solid var(--lines);
+    color: var(--txt);
+    padding: 0 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .field input.short {
+    flex: 0 0 140px;
+  }
+
+  .test {
+    font-size: 12.5px;
+    color: var(--oktx);
+    margin: 10px 0 0;
+    word-break: break-word;
+  }
+
+  .test.bad {
+    color: var(--deltx);
   }
 
   .toggle {

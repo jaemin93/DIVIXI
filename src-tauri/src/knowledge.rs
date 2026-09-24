@@ -27,12 +27,14 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 
-use crate::{AppState, SETTING_PREFIX};
+use crate::{embed, AppState, SETTING_PREFIX};
 
 /// The artifact kind a library document is listed as.
 pub const KIND: &str = "knowledge";
 /// Window event carrying a source whenever it changes.
 const EVENT: &str = "knowledge";
+/// Window event when embeddings moved on (or failed).
+const EMBED_EVENT: &str = "knowledge-embedding";
 /// Window event when a source is gone.
 const REMOVED_EVENT: &str = "knowledge-removed";
 
@@ -63,6 +65,10 @@ pub struct Library {
     queued: parking_lot::Mutex<HashSet<String>>,
     /// The describing agents' working folder: empty, and not a project.
     work_dir: PathBuf,
+    /// Wakes the embedding loop (a sync landed, the settings changed).
+    embed_wake: tokio::sync::Notify,
+    /// Why the last embedding request failed, "" when it did not.
+    embed_error: parking_lot::Mutex<String>,
 }
 
 impl Library {
@@ -72,7 +78,15 @@ impl Library {
         std::fs::create_dir_all(&work_dir)?;
         let db = KnowledgeDb::open(dir.join("knowledge.db"))?;
         let (queue, rx) = mpsc::unbounded_channel();
-        Ok(Self { db: Arc::new(db), queue, rx: parking_lot::Mutex::new(Some(rx)), queued: Default::default(), work_dir })
+        Ok(Self {
+            db: Arc::new(db),
+            queue,
+            rx: parking_lot::Mutex::new(Some(rx)),
+            queued: Default::default(),
+            work_dir,
+            embed_wake: tokio::sync::Notify::new(),
+            embed_error: Default::default(),
+        })
     }
 
     /// Queue a source for syncing, unless it is queued already.
@@ -109,12 +123,67 @@ fn settings(state: &AppState) -> Settings {
             .find(|id| state.spec_for(id).is_ok())
             .unwrap_or_default()
     });
+    // Never chosen: the agent's cheapest model and least effort.
+    let config = setting(state, SETTING_CONFIG)
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_else(|| cheapest_config(&state.config_options_for(&agent)));
     Settings {
         agent,
-        config: setting(state, SETTING_CONFIG).and_then(|c| serde_json::from_str(&c).ok()).unwrap_or_default(),
+        config,
         pool: setting(state, SETTING_POOL).and_then(|p| p.parse().ok()).unwrap_or(DEFAULT_POOL).clamp(1, MAX_POOL),
         extract: setting(state, SETTING_EXTRACT).as_deref() != Some("off"),
     }
+}
+
+/// Model families that cost least, cheapest first, as whole words of a
+/// model's id or name ("gemini" is not "mini").
+const CHEAP_FAMILIES: [&str; 6] = ["nano", "mini", "lite", "haiku", "flash", "small"];
+/// Effort levels, least first.
+const LOW_EFFORT: [&str; 4] = ["none", "minimal", "low", "medium"];
+
+fn words(s: &str) -> Vec<String> {
+    s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect()
+}
+
+/// The first version-like number in an id ("gpt-5.4-mini" → 5.4).
+fn version(id: &str) -> f64 {
+    let start = id.find(|c: char| c.is_ascii_digit());
+    start
+        .map(|i| id[i..].chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect::<String>())
+        .and_then(|v| v.trim_end_matches('.').parse().ok())
+        .unwrap_or(f64::MAX)
+}
+
+/// The agent's cheapest model by its name: the cheapest family, a low
+/// effort variant, then the oldest version. `None` when no name says.
+pub fn cheapest_model(choices: &[orchestra_acp::ConfigChoice]) -> Option<String> {
+    choices
+        .iter()
+        .filter_map(|c| {
+            let w = words(&format!("{} {}", c.id, c.name));
+            let tier = CHEAP_FAMILIES.iter().position(|f| w.iter().any(|x| x == f))?;
+            let low = w.iter().any(|x| x == "low");
+            Some((tier, !low, version(&c.id), c.id.clone()))
+        })
+        .min_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)))
+        .map(|(_, _, _, id)| id)
+}
+
+/// Options for describing documents cheaply: the cheapest model the agent
+/// names, and its least effort.
+pub fn cheapest_config(options: &[ConfigOptionInfo]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if let Some(m) = options.iter().find(|o| o.category == "model") {
+        if let Some(id) = cheapest_model(&m.choices) {
+            out.insert(m.id.clone(), id);
+        }
+    }
+    if let Some(t) = options.iter().find(|o| o.category == "thought_level") {
+        if let Some(c) = LOW_EFFORT.iter().find_map(|l| t.choices.iter().find(|c| c.id.eq_ignore_ascii_case(l))) {
+            out.insert(t.id.clone(), c.id.clone());
+        }
+    }
+    out
 }
 
 /// A mode that reads but does not act, when the agent offers one.
@@ -342,6 +411,7 @@ async fn sync(app: &AppHandle, id: &str, pool: &mut Option<Pool>) {
     if !note.is_empty() {
         let _ = db.set_status(id, status::SYNCED, &note);
     }
+    lib.embed_wake.notify_one();
     if !summaries.is_empty() {
         if let Some(p) = pool.as_mut() {
             let settings = p.settings.clone();
@@ -391,7 +461,65 @@ fn check_files(app: &AppHandle) {
     }
 }
 
-/// Start the sync loop and the watcher.
+/// Embed every item not yet in the configured space, a batch at a time,
+/// within the rate limit. Stops at the first failure and says why.
+async fn embed_pending(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let Some(ep) = embed::endpoint(&state) else { return };
+    let sig = ep.signature();
+    let db = state.library.db.clone();
+    let spacing = Duration::from_millis(60_000 / embed::PER_MINUTE);
+    loop {
+        let batch = match db.to_embed(&sig, embed::BATCH) {
+            Ok(b) if !b.is_empty() => b,
+            _ => break,
+        };
+        let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+        match embed::embed(&ep, &texts).await {
+            Ok(vectors) => {
+                let pairs: Vec<(i64, Vec<f32>)> = batch.iter().map(|(id, _)| *id).zip(vectors).collect();
+                if let Err(err) = db.set_embeddings(&sig, &pairs) {
+                    *state.library.embed_error.lock() = err.to_string();
+                    break;
+                }
+                state.library.embed_error.lock().clear();
+                let _ = app.emit(EMBED_EVENT, ());
+            }
+            Err(err) => {
+                tracing::warn!(%err, "embedding failed");
+                *state.library.embed_error.lock() = err;
+                let _ = app.emit(EMBED_EVENT, ());
+                break;
+            }
+        }
+        // The settings may have changed meanwhile: go again in the new space.
+        if embed::endpoint(&state).map(|e| e.signature()) != Some(sig.clone()) {
+            break;
+        }
+        tokio::time::sleep(spacing).await;
+    }
+}
+
+/// The vector of a search query, when embeddings are on and the library
+/// has vectors in their space; `None` (search goes without) otherwise.
+pub async fn query_vector(app: &AppHandle, query: &str) -> Option<(Vec<f32>, String)> {
+    let state = app.state::<AppState>();
+    let ep = embed::endpoint(&state)?;
+    let sig = ep.signature();
+    if state.library.db.embedded(&sig).ok()?.0 == 0 {
+        return None;
+    }
+    match tokio::time::timeout(embed::QUERY_TIMEOUT, embed::embed(&ep, &[query.to_string()])).await {
+        Ok(Ok(mut v)) => v.pop().map(|v| (v, sig)),
+        Ok(Err(err)) => {
+            tracing::info!(%err, "searching without the query's vector");
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+/// Start the sync loop, the watcher and the embedding loop.
 pub fn start(app: AppHandle) {
     let rx = app.state::<AppState>().library.rx.lock().take();
     let Some(mut rx) = rx else { return };
@@ -408,6 +536,15 @@ pub fn start(app: AppHandle) {
                 // Idle: let the describing agents go.
                 Err(_) => pool = None,
             }
+        }
+    });
+    let embedder = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            embed_pending(&embedder).await;
+            let wake = &embedder.state::<AppState>().library.embed_wake;
+            // Woken by a sync or a settings change; otherwise retry now and then.
+            let _ = tokio::time::timeout(Duration::from_secs(10 * 60), wake.notified()).await;
         }
     });
     tauri::async_runtime::spawn(async move {
@@ -516,12 +653,12 @@ pub struct Listed {
 }
 
 /// Items of one source or of all, or the matches of a search.
-#[tauri::command(async)]
-pub fn knowledge_items(state: State<'_, AppState>, source: Option<String>, query: Option<String>) -> Result<Vec<Listed>, String> {
-    let db = &state.library.db;
+#[tauri::command]
+pub async fn knowledge_items(app: AppHandle, source: Option<String>, query: Option<String>) -> Result<Vec<Listed>, String> {
+    let db = app.state::<AppState>().library.db.clone();
     match query.filter(|q| !q.trim().is_empty()) {
         Some(q) => Ok(db
-            .search(&q, 30, source.as_deref())
+            .search(&q, 30, source.as_deref(), query_vector(&app, &q).await.as_ref().map(|(v, s)| (v.as_slice(), s.as_str())))
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|h| Listed { item: h.item, score: Some(h.score), match_type: Some(h.match_type) })
@@ -550,8 +687,110 @@ pub fn knowledge_stats(state: State<'_, AppState>) -> Result<Stats, String> {
     state.library.db.stats().map_err(|e| e.to_string())
 }
 
+/// Where embeddings stand: whether they are on, the model, how many items
+/// have a vector in its space, and the last failure.
+#[derive(Serialize)]
+pub struct EmbeddingStatus {
+    enabled: bool,
+    model: String,
+    embedded: i64,
+    total: i64,
+    error: String,
+}
+
+#[tauri::command(async)]
+pub fn knowledge_embedding_status(state: State<'_, AppState>) -> Result<EmbeddingStatus, String> {
+    let ep = embed::endpoint(&state);
+    let sig = ep.as_ref().map(|e| e.signature()).unwrap_or_default();
+    let (embedded, total) = state.library.db.embedded(&sig).map_err(|e| e.to_string())?;
+    Ok(EmbeddingStatus {
+        enabled: ep.is_some(),
+        model: ep.map(|e| e.model).unwrap_or_default(),
+        embedded,
+        total,
+        error: state.library.embed_error.lock().clone(),
+    })
+}
+
+/// Try an endpoint before saving it: the length of one vector.
+#[tauri::command]
+pub async fn knowledge_embed_test(url: String, model: String, key: String, dims: Option<u32>) -> Result<usize, String> {
+    let ep = embed::Endpoint { url: url.trim().to_string(), model: model.trim().to_string(), key: key.trim().to_string(), dims: dims.filter(|d| *d > 0) };
+    if ep.url.is_empty() || ep.model.is_empty() {
+        return Err("the endpoint URL and the model are needed".to_string());
+    }
+    let v = embed::embed(&ep, &["Divixi knowledge library 지식 라이브러리".to_string()]).await?;
+    Ok(v.first().map(Vec::len).unwrap_or(0))
+}
+
+/// Start embedding now (the settings just changed).
+#[tauri::command]
+pub fn knowledge_embed_now(state: State<'_, AppState>) {
+    state.library.embed_error.lock().clear();
+    state.library.embed_wake.notify_one();
+}
+
+/// The options documents are described with by default on an agent: its
+/// cheapest model and least effort.
+#[tauri::command(async)]
+pub fn knowledge_default_config(state: State<'_, AppState>, agent: String) -> BTreeMap<String, String> {
+    cheapest_config(&state.config_options_for(&agent))
+}
+
 /// File extensions the library takes.
 #[tauri::command]
 pub fn knowledge_formats() -> Vec<&'static str> {
     read::supported_extensions()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orchestra_acp::ConfigChoice;
+
+    fn choices(ids: &[(&str, &str)]) -> Vec<ConfigChoice> {
+        ids.iter().map(|(id, name)| ConfigChoice { id: id.to_string(), name: name.to_string(), description: None, group: None }).collect()
+    }
+
+    #[test]
+    fn picks_the_cheapest_model_by_name() {
+        let claude = choices(&[("default", "Default (recommended)"), ("sonnet", "Sonnet 5"), ("haiku", "Haiku 4.5"), ("opus", "Opus 5")]);
+        assert_eq!(cheapest_model(&claude).as_deref(), Some("haiku"));
+        let copilot = choices(&[
+            ("auto", "Auto"),
+            ("gpt-5.4", "GPT-5.4"),
+            ("gpt-5.4-mini", "GPT-5.4 mini"),
+            ("gpt-5-mini", "GPT-5 mini"),
+            ("claude-haiku-4.5", "Claude Haiku 4.5"),
+            ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+        ]);
+        assert_eq!(cheapest_model(&copilot).as_deref(), Some("gpt-5-mini"));
+        let antigravity = choices(&[
+            ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+            ("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"),
+            ("gemini-3.6-flash-low", "Gemini 3.6 Flash (Low)"),
+            ("gemini-pro-agent", "Gemini 3.1 Pro (High)"),
+        ]);
+        assert_eq!(cheapest_model(&antigravity).as_deref(), Some("gemini-3.6-flash-low"));
+        let codex = choices(&[("gpt-5.6-terra", "5.6 Terra"), ("gpt-5.6-luna", "5.6 Luna"), ("gpt-5.5", "5.5")]);
+        assert_eq!(cheapest_model(&codex), None, "no name says which is cheaper");
+    }
+
+    #[test]
+    fn cheapest_config_lowers_effort_too() {
+        let opt = |id: &str, category: &str, ids: &[(&str, &str)]| ConfigOptionInfo {
+            id: id.into(),
+            name: id.into(),
+            description: None,
+            category: category.into(),
+            current: String::new(),
+            choices: choices(ids),
+        };
+        let c = cheapest_config(&[
+            opt("model", "model", &[("sonnet", "Sonnet"), ("haiku", "Haiku")]),
+            opt("effort", "thought_level", &[("default", "Default"), ("low", "Low"), ("high", "High")]),
+        ]);
+        assert_eq!(c.get("model").map(String::as_str), Some("haiku"));
+        assert_eq!(c.get("effort").map(String::as_str), Some("low"));
+    }
 }

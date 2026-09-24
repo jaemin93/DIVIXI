@@ -14,7 +14,14 @@ use crate::chunk::Chunk;
 use crate::extract::Extraction;
 use crate::fts;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// Upgrades from each version to the next; `MIGRATIONS[v - 1]` takes v to v + 1.
+const MIGRATIONS: &[&str] = &[
+    // 1 -> 2: vectors from a remote embedding API, and which space they are in.
+    "ALTER TABLE items ADD COLUMN embedding BLOB;
+     ALTER TABLE items ADD COLUMN embedding_sig TEXT NOT NULL DEFAULT '';",
+];
 
 const SCHEMA: &str = r#"
 CREATE TABLE sources (
@@ -46,7 +53,9 @@ CREATE TABLE items (
     section      TEXT,
     line_start   INTEGER NOT NULL,
     line_end     INTEGER NOT NULL,
-    created_at   INTEGER NOT NULL
+    created_at   INTEGER NOT NULL,
+    embedding    BLOB,
+    embedding_sig TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX items_by_source ON items(source_id, chunk_index);
 CREATE VIRTUAL TABLE items_fts USING fts5(title, content, tags);
@@ -271,6 +280,14 @@ impl KnowledgeDb {
                 tx.commit()?;
             }
             Some(v) if v == SCHEMA_VERSION => {}
+            Some(v) if (1..SCHEMA_VERSION).contains(&v) => {
+                for step in v..SCHEMA_VERSION {
+                    let tx = conn.transaction()?;
+                    tx.execute_batch(MIGRATIONS[(step - 1) as usize])?;
+                    tx.execute("UPDATE meta SET value = ?1 WHERE key = 'schema_version'", params![(step + 1).to_string()])?;
+                    tx.commit()?;
+                }
+            }
             Some(v) => anyhow::bail!("knowledge schema version {v} is not supported by this build ({SCHEMA_VERSION})"),
         }
         // A sync cut short by a quit resumes from the start next time.
@@ -507,18 +524,24 @@ impl KnowledgeDb {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Keyword and graph search fused by reciprocal rank. The keyword
-    /// search's best match is always kept, so up to `limit + 1` come back.
-    /// Results under [`MIN_SCORE`] are dropped.
-    pub fn search(&self, query: &str, limit: usize, source: Option<&str>) -> anyhow::Result<Vec<Hit>> {
+    /// Keyword, graph and (given the query's vector and the space it is
+    /// in) vector search, fused by reciprocal rank with the vector leg
+    /// counting double, as Kiro Crew weighs it. The keyword search's best
+    /// match is always kept, so up to `limit + 1` come back. Results under
+    /// [`MIN_SCORE`] are dropped.
+    pub fn search(&self, query: &str, limit: usize, source: Option<&str>, vector: Option<(&[f32], &str)>) -> anyhow::Result<Vec<Hit>> {
         let limit = limit.max(1);
         let keyword = self.keyword_search(query, 20, source)?;
         let graph = self.graph_search(query, 20, source)?;
+        let semantic = match vector {
+            Some((v, sig)) => self.vector_search(v, sig, 20, source)?,
+            None => Vec::new(),
+        };
         let mut scores: BTreeMap<i64, (f64, Vec<&str>)> = BTreeMap::new();
-        for (leg, name) in [(&keyword, "keyword"), (&graph, "graph")] {
+        for (leg, name, weight) in [(&keyword, "keyword", 1.0), (&graph, "graph", 1.0), (&semantic, "vector", VECTOR_WEIGHT)] {
             for (rank, id) in leg.iter().enumerate() {
                 let e = scores.entry(*id).or_insert((0.0, Vec::new()));
-                e.0 += 1.0 / (RRF_K + rank as f64 + 1.0);
+                e.0 += weight / (RRF_K + rank as f64 + 1.0);
                 e.1.push(name);
             }
         }
@@ -542,6 +565,69 @@ impl KnowledgeDb {
             hits.push(Hit { item, score, match_type, source_uri });
         }
         Ok(hits)
+    }
+
+    /// Items closest to `query` by cosine similarity, among those embedded
+    /// in the space `sig` names. A brute-force scan: fine for the tens of
+    /// thousands of items a personal library holds.
+    fn vector_search(&self, query: &[f32], sig: &str, limit: usize, source: Option<&str>) -> anyhow::Result<Vec<i64>> {
+        let qn = norm(query);
+        if qn == 0.0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, embedding FROM items WHERE embedding IS NOT NULL AND embedding_sig = ?1 AND (?2 IS NULL OR source_id = ?2)",
+        )?;
+        let mut scored: Vec<(i64, f32)> = stmt
+            .query_map(params![sig, source], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .filter_map(Result::ok)
+            .filter_map(|(id, blob)| {
+                let v = from_blob(&blob);
+                (v.len() == query.len()).then(|| {
+                    let dot: f32 = v.iter().zip(query).map(|(a, b)| a * b).sum();
+                    let vn = norm(&v);
+                    (id, if vn == 0.0 { 0.0 } else { dot / (vn * qn) })
+                })
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(scored.into_iter().take(limit).map(|(id, _)| id).collect())
+    }
+
+    /// Items not yet embedded in the space `sig` names, with the text to
+    /// embed (title, summary, content), up to `limit`.
+    pub fn to_embed(&self, sig: &str, limit: usize) -> anyhow::Result<Vec<(i64, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, title, summary, content FROM items WHERE embedding IS NULL OR embedding_sig != ?1 ORDER BY id LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![sig, limit as i64], |r| {
+            let text = format!("{}\n{}\n{}", r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?);
+            Ok((r.get(0)?, text.chars().take(EMBED_CHARS).collect()))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Keep vectors for items (skipping any that are gone).
+    pub fn set_embeddings(&self, sig: &str, vectors: &[(i64, Vec<f32>)]) -> anyhow::Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        for (id, v) in vectors {
+            tx.execute("UPDATE items SET embedding = ?2, embedding_sig = ?3 WHERE id = ?1", params![id, to_blob(v), sig])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Items embedded in the space `sig` names, and all items.
+    pub fn embedded(&self, sig: &str) -> anyhow::Result<(i64, i64)> {
+        let conn = self.conn.lock();
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FILTER (WHERE embedding IS NOT NULL AND embedding_sig = ?1), COUNT(*) FROM items",
+            params![sig],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
     }
 
     fn keyword_search(&self, query: &str, limit: usize, source: Option<&str>) -> anyhow::Result<Vec<i64>> {
@@ -596,6 +682,23 @@ impl KnowledgeDb {
         let rows = stmt.query_map(params![source, limit as i64], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+}
+
+/// The vector leg's weight in the fusion (Kiro Crew's `VECTOR_RRF_WEIGHT`).
+const VECTOR_WEIGHT: f64 = 2.0;
+/// Text embedded per item, in characters.
+const EMBED_CHARS: usize = 6000;
+
+fn norm(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+fn to_blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+fn from_blob(b: &[u8]) -> Vec<f32> {
+    b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
 }
 
 fn clear_items(tx: &rusqlite::Transaction<'_>, source: &str) -> anyhow::Result<()> {
@@ -679,23 +782,23 @@ mod tests {
     #[test]
     fn searches_keywords_in_korean_and_english() {
         let db = seeded();
-        let hits = db.search("소유권은", 3, None).unwrap();
+        let hits = db.search("소유권은", 3, None, None).unwrap();
         assert_eq!(hits[0].item.source_id, "ar001");
         assert_eq!(hits[0].source_uri, "/docs/rust.md");
-        let hits = db.search("nightly backups", 3, None).unwrap();
+        let hits = db.search("nightly backups", 3, None, None).unwrap();
         assert_eq!(hits[0].item.title, "Backups");
-        assert!(db.search("", 3, None).unwrap().is_empty());
+        assert!(db.search("", 3, None, None).unwrap().is_empty());
     }
 
     #[test]
     fn graph_finds_what_keywords_miss() {
         let db = seeded();
         // "Rust" appears nowhere in the store doc, but both mention the borrow checker.
-        let hits = db.search("Rust", 5, None).unwrap();
+        let hits = db.search("Rust", 5, None, None).unwrap();
         let sources: Vec<&str> = hits.iter().map(|h| h.item.source_id.as_str()).collect();
         assert!(sources.contains(&"ar001") && sources.contains(&"ar002"), "{sources:?}");
         assert!(hits.iter().any(|h| h.match_type == "graph"));
-        assert_eq!(db.search("Rust", 5, Some("ar002")).unwrap().len(), 1);
+        assert_eq!(db.search("Rust", 5, Some("ar002"), None).unwrap().len(), 1);
     }
 
     #[test]
@@ -703,11 +806,49 @@ mod tests {
         let db = seeded();
         db.replace_items("ar001", &[NewItem { chunk: chunk(0, "gone"), extraction: None, tags: vec![] }], false, &file("h3")).unwrap();
         assert_eq!(db.stats().unwrap().entities, 2, "Rust is no longer mentioned");
-        assert!(db.search("owner", 3, None).unwrap().is_empty(), "old text left the index");
+        assert!(db.search("owner", 3, None, None).unwrap().is_empty(), "old text left the index");
         db.delete_source("ar002").unwrap();
         assert_eq!(db.stats().unwrap(), Stats { sources: 1, items: 1, entities: 0, relations: 0 });
         let g = db.graph(100).unwrap();
         assert!(g.nodes.is_empty());
+    }
+
+    #[test]
+    fn vectors_find_by_meaning_in_their_own_space() {
+        let db = seeded();
+        let todo = db.to_embed("s1", 10).unwrap();
+        assert_eq!(todo.len(), 3);
+        assert!(todo[0].1.starts_with("Ownership in Rust"), "title, summary, content");
+        // Pretend the store doc's backup chunk is about "restore".
+        let vecs: Vec<(i64, Vec<f32>)> = todo
+            .iter()
+            .map(|(id, text)| (*id, if text.contains("nightly") { vec![0.0, 1.0] } else { vec![1.0, 0.0] }))
+            .collect();
+        db.set_embeddings("s1", &vecs).unwrap();
+        assert_eq!(db.embedded("s1").unwrap(), (3, 3));
+        assert!(db.to_embed("s1", 10).unwrap().is_empty());
+        assert_eq!(db.to_embed("s2", 10).unwrap().len(), 3, "another space starts over");
+        let hits = db.search("restore", 3, None, Some((&[0.1, 0.9], "s1"))).unwrap();
+        assert_eq!(hits[0].item.title, "Backups");
+        assert_eq!(hits[0].match_type, "vector");
+        assert!(db.search("restore", 3, None, Some((&[0.1, 0.9], "s2"))).unwrap().is_empty(), "no vectors in that space");
+    }
+
+    #[test]
+    fn migrates_version_one() {
+        let path = std::env::temp_dir().join(format!("kn-migrate-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&SCHEMA.replace(",\n    embedding    BLOB,\n    embedding_sig TEXT NOT NULL DEFAULT ''", "")).unwrap();
+            conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema_version', '1');").unwrap();
+            let cols: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('items') WHERE name = 'embedding'", [], |r| r.get(0)).unwrap();
+            assert_eq!(cols, 0, "the old schema really lacks the column");
+        }
+        let db = KnowledgeDb::open(&path).unwrap();
+        assert_eq!(db.embedded("x").unwrap(), (0, 0));
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
