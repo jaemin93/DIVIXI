@@ -132,6 +132,8 @@
       eModel = model ?? "";
       eKey = key ?? "";
       eDims = dims ?? "";
+      eSaved = { on: eOn, url: eUrl.trim(), model: eModel.trim(), key: eKey.trim(), dims: eDims.trim() };
+      await kb.loadEmbedding();
       sLoaded = true;
     })();
   });
@@ -199,14 +201,27 @@
     }
   }
 
+  /** What is saved, to tell unsaved edits apart. */
+  let eSaved = $state({ on: false, url: "", model: "", key: "", dims: "" });
+  let saving = $state(false);
+  const dirty = $derived(
+    eOn !== eSaved.on || eUrl.trim() !== eSaved.url || eModel.trim() !== eSaved.model || eKey.trim() !== eSaved.key || eDims.trim() !== eSaved.dims,
+  );
+
   async function saveEmbedding() {
-    await save(K_EMBED_URL, eUrl.trim());
-    await save(K_EMBED_MODEL, eModel.trim());
-    await save(K_EMBED_KEY, eKey.trim());
-    await save(K_EMBED_DIMS, eDims.trim());
-    await save(K_EMBED_ENABLED, eOn ? "on" : "off");
-    await invoke("knowledge_embed_now").catch(() => {});
-    await kb.loadEmbedding();
+    saving = true;
+    try {
+      await save(K_EMBED_URL, eUrl.trim());
+      await save(K_EMBED_MODEL, eModel.trim());
+      await save(K_EMBED_KEY, eKey.trim());
+      await save(K_EMBED_DIMS, eDims.trim());
+      await save(K_EMBED_ENABLED, eOn ? "on" : "off");
+      eSaved = { on: eOn, url: eUrl.trim(), model: eModel.trim(), key: eKey.trim(), dims: eDims.trim() };
+      await invoke("knowledge_embed_now").catch(() => {});
+      await kb.loadEmbedding();
+    } finally {
+      saving = false;
+    }
   }
 
   const menuSource = $derived(menu ? kb.sources.find((s) => s.id === menu!.id) : undefined);
@@ -471,13 +486,31 @@
           <label class="field"><span>{t("kb.emb.model")}</span><input bind:value={eModel} disabled={!eOn} placeholder="text-embedding-3-small" spellcheck="false" /></label>
           <label class="field"><span>{t("kb.emb.key")}</span><input type="password" bind:value={eKey} disabled={!eOn} placeholder="sk-…" autocomplete="off" /></label>
           <label class="field"><span>{t("kb.emb.dims")}</span><input class="short" bind:value={eDims} disabled={!eOn} placeholder={t("kb.emb.dimsAuto")} inputmode="numeric" /></label>
-          <p class="note">{t("kb.emb.keyNote")}</p>
-          {#if eTest}<p class="test" class:bad={!eTest.ok}>{eTest.text}</p>{/if}
+          <div class="field">
+            <span></span>
+            <button class="btn sm" disabled={!eOn || eTesting || !eUrl.trim() || !eModel.trim()} onclick={testEndpoint}>{eTesting ? t("kb.emb.testing") : t("kb.emb.test")}</button>
+            {#if eTest}<span class="test" class:bad={!eTest.ok}>{eTest.text}</span>{/if}
+          </div>
+          <p class="note keynote">{t("kb.emb.keyNote")}</p>
         </div>
-        <div class="actions">
-          <button class="btn" disabled={!eOn || eTesting || !eUrl.trim() || !eModel.trim()} onclick={testEndpoint}>{eTesting ? t("kb.emb.testing") : t("kb.emb.test")}</button>
+        <div class="actions savebar">
+          <span class="state" class:bad={!dirty && eSaved.on && !!kb.embedding.error}>
+            {#if saving}
+              {t("kb.emb.saving")}
+            {:else if dirty}
+              {t("kb.emb.unsaved")}
+            {:else if !eSaved.on}
+              {t("kb.emb.savedOff")}
+            {:else if kb.embedding.error}
+              {t("kb.embedError", { error: kb.embedding.error })}
+            {:else if kb.embedding.embedded < kb.embedding.total}
+              <span class="pulse"></span>{t("kb.emb.working", { done: kb.embedding.embedded, total: kb.embedding.total })}
+            {:else}
+              ✓ {t("kb.emb.savedDone", { done: kb.embedding.embedded, total: kb.embedding.total })}
+            {/if}
+          </span>
           <span class="grow"></span>
-          <button class="btn btn-acc" onclick={saveEmbedding}>{t("kb.emb.save")}</button>
+          <button class="btn btn-acc" disabled={!dirty || saving} onclick={saveEmbedding}>{t("kb.emb.save")}</button>
         </div>
       </div>
     {/if}
@@ -1053,7 +1086,7 @@
     color: var(--dim);
   }
 
-  .field span {
+  .field > span:first-child {
     width: 110px;
     flex-shrink: 0;
   }
@@ -1075,13 +1108,36 @@
   }
 
   .test {
+    flex: 1;
+    min-width: 0;
     font-size: 12.5px;
     color: var(--oktx);
-    margin: 10px 0 0;
     word-break: break-word;
   }
 
   .test.bad {
+    color: var(--deltx);
+  }
+
+  .keynote {
+    margin: 10px 0 0 122px;
+  }
+
+  .savebar {
+    margin-top: 16px;
+  }
+
+  .state {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--dim);
+    min-width: 0;
+    word-break: break-word;
+  }
+
+  .state.bad {
     color: var(--deltx);
   }
 
