@@ -19,6 +19,7 @@
   import AgentList from "./AgentList.svelte";
   import ThemePicker from "./ThemePicker.svelte";
   import LangPicker from "./LangPicker.svelte";
+  import KnowledgeSettings from "./KnowledgeSettings.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
   import { t } from "./i18n.svelte";
 
@@ -35,6 +36,7 @@
         { id: "appearance", icon: "look", label: t("settings.appearance"), blurb: t("settings.appearanceBlurb") },
         { id: "chat", icon: "chat", label: t("settings.chat"), blurb: t("settings.chatBlurb") },
         { id: "agents", icon: "agents", label: t("settings.agents"), blurb: t("settings.agentsBlurb") },
+        { id: "knowledge", icon: "book", label: t("settings.knowledge"), blurb: t("settings.knowledgeBlurb") },
       ],
     },
     {
@@ -214,6 +216,8 @@
         {t("settings.agentsNote")}
       </p>
       <AgentList />
+    {:else if store.settingsSection === "knowledge"}
+      <KnowledgeSettings />
     {:else if store.settingsSection === "about"}
       <div class="rows mono kv">
         <div class="row"><span class="dim">version</span><span>{store.info?.version ?? "…"}</span></div>

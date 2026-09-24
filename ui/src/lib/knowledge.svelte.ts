@@ -45,7 +45,7 @@ export type KEdge = { source: number; target: number; kind: string };
 export type KGraph = { nodes: KNode[]; edges: KEdge[] };
 export type KStats = { sources: number; items: number; entities: number; relations: number };
 
-export type KTab = "list" | "graph" | "sources" | "settings";
+export type KTab = "list" | "graph" | "sources";
 
 /** Mirrors `knowledge::EmbeddingStatus`. */
 export type KEmbedding = { enabled: boolean; model: string; embedded: number; total: number; error: string };

@@ -384,7 +384,7 @@ export const ZOOM_MAX = 200;
 export const ZOOM_STEP = 10;
 
 /** Settings sections, in the settings column. */
-export type SettingsSection = "overview" | "appearance" | "chat" | "agents" | "about";
+export type SettingsSection = "overview" | "appearance" | "chat" | "agents" | "knowledge" | "about";
 
 /** Mirrors `workspace::Entry`: one file or folder, path relative to the track folder. */
 export type WsEntry = { path: string; name: string; dir: boolean; size: number };
