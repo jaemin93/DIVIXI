@@ -165,7 +165,7 @@ const ko = {
   "design.arrowFrom": "화살표: 시작할 항목을 누르세요",
   "design.arrowTo": "화살표: 이어질 항목을 누르세요",
   "design.chatEmpty": "보드에 그리고 쓰면서 에이전트와 이야기하세요. 메시지마다 보드 개요와 그림이 함께 갑니다.",
-  "design.placeholder": "에이전트에게 · Enter 보내기 · Shift+Enter 줄바꿈",
+  "design.placeholder": "디자인 에이전트에게 메시지… (/command)",
   "design.withSelected": "선택한 항목 {n}개와 함께 보냅니다",
   "design.pending": "제안 {n}건",
   "design.keepAll": "모두 유지",
@@ -229,7 +229,7 @@ const ko = {
   "ws.large": "너무 커서 표시하지 않습니다",
 
   // Composer
-  "composer.placeholder": "지휘자에게 메시지 · / 명령 · @ 파일 · Shift+Enter 줄바꿈",
+  "composer.placeholder": "지휘자에게 메시지… (/command @file)",
   "composer.add": "첨부",
   "composer.upload": "파일 업로드",
   "composer.attachDesign": "디자인 첨부",
@@ -554,7 +554,7 @@ const en: Record<Key, string> = {
   "design.arrowFrom": "Arrow: click where it starts",
   "design.arrowTo": "Arrow: click where it goes",
   "design.chatEmpty": "Talk with the agent while you draw and write. Every message brings the board's outline and picture.",
-  "design.placeholder": "To the agent · Enter to send · Shift+Enter for a new line",
+  "design.placeholder": "Message the design agent… (/command)",
   "design.withSelected": "Sending with {n} selected item(s)",
   "design.pending": "{n} suggestion(s)",
   "design.keepAll": "Keep all",
@@ -616,7 +616,7 @@ const en: Record<Key, string> = {
   "ws.binary": "Binary file",
   "ws.large": "Too large to show",
 
-  "composer.placeholder": "Message the conductor · / commands · @ files · Shift+Enter for a new line",
+  "composer.placeholder": "Message the conductor… (/command @file)",
   "composer.add": "Attach",
   "composer.upload": "Upload files",
   "composer.attachDesign": "Attach a design",
