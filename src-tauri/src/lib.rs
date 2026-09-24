@@ -310,9 +310,16 @@ async fn delete_artifact(app: AppHandle, id: String) -> Result<(), String> {
         return Err("its agent is still responding; wait for it to finish".to_string());
     }
     state.artifacts.close(&id).await;
-    state.boards.forget(&id);
     state.store.delete_artifact(&id).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_dir_all(state.artifacts_dir.join(&id));
+    // Forgotten only once the record is gone, so a read in between cannot
+    // bring the board back into the cache.
+    state.boards.forget(&id);
+    let dir = state.artifacts_dir.join(&id);
+    if dir.exists() {
+        if let Err(err) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| e.to_string())) {
+            tracing::warn!(%err, artifact = %id, "could not remove the artifact's folder");
+        }
+    }
     Ok(())
 }
 

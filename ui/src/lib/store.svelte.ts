@@ -261,6 +261,7 @@ export type DesignDoc = { version: number; nodes: DesignNode[]; edges: DesignEdg
 /** One edit to a board, as the core applies it. */
 export type DesignOp =
   | { op: "create_note"; x: number; y: number; w?: number; h?: number; text?: string; tag?: DesignTag }
+  | { op: "add_stroke"; stroke: Stroke }
   | { op: "set_sketch"; id?: string; x: number; y: number; w: number; h: number; strokes: Stroke[] }
   | { op: "update"; id: string; text?: string; tag?: DesignTag }
   | { op: "move"; id: string; x: number; y: number; w?: number; h?: number }
@@ -425,7 +426,8 @@ class Store {
   /** Artifacts of every kind, most recently touched first, and the one open. */
   artifacts = $state<ArtifactInfo[]>([]);
   artifact = $state("");
-  designDoc = $state<DesignDoc>({ ...EMPTY_DOC });
+  /** Replaced whole by each board the core sends; never changed in place. */
+  designDoc = $state.raw<DesignDoc>({ ...EMPTY_DOC });
   /** The design whose board `designDoc` holds. */
   designLoaded = $state("");
   /** Width of the conversation beside a design's board. Persisted. */
@@ -453,7 +455,24 @@ class Store {
   artifactSession = $state<{ open: boolean; busy: boolean }>({ open: false, busy: false });
 
   /** Files in the composer, waiting for the next message. */
-  attachments = $state<Attachment[]>([]);
+  /** Files waiting in each conversation's composer (a track's, an artifact's). */
+  attachmentsBy = $state<Record<string, Attachment[]>>({});
+  /** Design briefs being written out to attach; the composer waits for them. */
+  attaching = $state(0);
+
+  /** The conversation on screen, as a key for what waits in its composer. */
+  get chatKey(): string {
+    return this.chatArtifact ? artifactKey(this.artifact) : `track:${this.track}`;
+  }
+
+  /** Files waiting to go with the next message of the conversation on screen. */
+  get attachments(): Attachment[] {
+    return this.attachmentsBy[this.chatKey] ?? [];
+  }
+
+  set attachments(list: Attachment[]) {
+    this.attachmentsBy = { ...this.attachmentsBy, [this.chatKey]: list };
+  }
 
   /** Every decision of every track, oldest first. */
   decisions = $state<Decision[]>([]);
@@ -820,12 +839,15 @@ class Store {
   }
 
   /** Add files to the next message by path; folders and missing paths are skipped. */
-  async attach(paths: string[]) {
-    const fresh = paths.filter((p) => !this.attachments.some((a) => a.path === p));
+  async attach(paths: string[], key = this.chatKey) {
+    const waiting = () => this.attachmentsBy[key] ?? [];
+    const fresh = paths.filter((p) => !waiting().some((a) => a.path === p));
     if (!fresh.length) return;
     try {
       const stats = await invoke<Attachment[]>("file_stats", { paths: fresh });
-      for (const s of stats) if (!this.attachments.some((a) => a.path === s.path)) this.attachments.push(s);
+      // Into the conversation it was meant for, even if another is on screen now.
+      const add = stats.filter((s) => !waiting().some((a) => a.path === s.path));
+      this.attachmentsBy = { ...this.attachmentsBy, [key]: [...waiting(), ...add] };
     } catch (err) {
       this.lastError = String(err);
     }
@@ -897,13 +919,17 @@ class Store {
   async attachDesign(id: string, labels: Record<string, string>) {
     const a = this.artifacts.find((x) => x.id === id);
     if (!a) return;
+    const key = this.chatKey;
+    this.attaching += 1;
     try {
       const doc = await invoke<DesignDoc>("design_doc", { id });
       const markdown = briefOf(a.title, doc, labels);
       const paths = await invoke<string[]>("export_artifact", { id, markdown, image: boardPng(doc) });
-      await this.attach(paths);
+      await this.attach(paths, key);
     } catch (err) {
       this.lastError = String(err);
+    } finally {
+      this.attaching -= 1;
     }
   }
 
@@ -953,7 +979,8 @@ class Store {
     }
     try {
       const doc = await invoke<DesignDoc>("design_doc", { id });
-      if (this.artifact === id) {
+      // An event may have brought a newer board meanwhile; keep that one.
+      if (this.artifact === id && !(this.designLoaded === id && this.designDoc.version > doc.version)) {
         this.designDoc = doc;
         this.designLoaded = id;
       }
@@ -1011,7 +1038,10 @@ class Store {
     const id = this.artifact;
     if (!id || !ops.length) return [];
     try {
-      return await invoke<DesignResult[]>("design_apply", { id, ops });
+      const res = await invoke<DesignResult[]>("design_apply", { id, ops });
+      const bad = res.find((r) => !r.ok);
+      if (bad) this.lastError = bad.error ?? "the board edit did not go through";
+      return res;
     } catch (err) {
       this.lastError = String(err);
       return [];
@@ -1029,7 +1059,10 @@ class Store {
 
   /** Take a board the core sent, when it is the open one and newer. */
   takeDesign(id: string, doc: DesignDoc) {
-    if (id === this.artifact && this.designLoaded === id && doc.version >= this.designDoc.version) this.designDoc = doc;
+    if (id === this.artifact && (this.designLoaded !== id || doc.version >= this.designDoc.version)) {
+      this.designDoc = doc;
+      this.designLoaded = id;
+    }
     const d = this.artifacts.find((x) => x.id === id);
     if (d) d.updated_at = Date.now();
   }
@@ -1040,6 +1073,7 @@ class Store {
     const id = this.artifact;
     const d = this.currentArtifact;
     const typed = prompt.trim();
+    const key = this.chatKey;
     const files = this.attachments.map((a) => a.path);
     const selected = [...this.designSelected];
     if (!id || !d || this.artifactBusy || (!typed && !files.length && !selected.length)) return;
@@ -1073,7 +1107,7 @@ class Store {
       void this.refreshArtifactSession();
     } catch (err) {
       this.runs = this.runs.filter((x) => x.id !== pendingId);
-      if (!this.attachments.length) void this.attach(files);
+      if (!(this.attachmentsBy[key] ?? []).length) void this.attach(files, key);
       this.lastError = String(err);
     }
   }
@@ -1684,6 +1718,7 @@ class Store {
     if (this.chatArtifact) return this.artifactSend(prompt);
     const typed = prompt.trim();
     const track = this.track;
+    const key = this.chatKey;
     const files = this.attachments.map((a) => a.path);
     if ((!typed && !files.length) || !track || this.busy) return;
     this.lastError = "";
@@ -1731,7 +1766,7 @@ class Store {
       if (tr && tr.agent !== agent) tr.agent = agent;
     } catch (err) {
       this.runs = this.runs.filter((r) => r.id !== pendingId);
-      if (!this.attachments.length) void this.attach(files);
+      if (!(this.attachmentsBy[key] ?? []).length) void this.attach(files, key);
       this.lastError = String(err);
     }
   }

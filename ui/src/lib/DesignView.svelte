@@ -157,7 +157,10 @@
       </header>
       <div class="work">
         <div class="boardwrap">
-          <Board bind:selected={store.designSelected} />
+          <!-- One board per design: its selection, edit and arrow-in-progress never carry over. -->
+          {#key store.artifact}
+            <Board bind:selected={store.designSelected} />
+          {/key}
           {#if store.designDoc.changes.length}
             <!-- The agent's board changes, all at once; one by one on the items. -->
             <div class="review">

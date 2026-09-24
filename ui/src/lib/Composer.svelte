@@ -18,7 +18,8 @@
     e?.preventDefault();
     const text = draft;
     const something = text.trim() || store.attachments.length || (store.chatArtifact && store.designSelected.length);
-    if (!something || store.busy) return;
+    // A design picked a moment ago is still being written out: wait for it.
+    if (!something || store.busy || store.attaching > 0) return;
     draft = "";
     store.send(text);
     queueMicrotask(grow);
@@ -495,7 +496,7 @@
       <!-- While the conductor answers, the send button is a stop button: Ctrl+C. -->
       <button class="btn send stop" type="button" disabled={store.cancelling} onclick={() => store.cancelConductor()} title={t("composer.stopTitle")} aria-label={t("composer.stop")}>■</button>
     {:else}
-      <button class="btn send" type="submit" disabled={!draft.trim() && !store.attachments.length} aria-label={t("composer.send")}>→</button>
+      <button class="btn send" type="submit" disabled={(!draft.trim() && !store.attachments.length) || store.attaching > 0} aria-label={t("composer.send")}>→</button>
     {/if}
   </form>
 

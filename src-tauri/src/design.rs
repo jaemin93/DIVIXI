@@ -13,6 +13,7 @@
 //! artifact's body) and sent to the window as a `design` event.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use orchestra_mcp::Tool;
 use serde::{Deserialize, Serialize};
@@ -144,8 +145,12 @@ pub enum Op {
         #[serde(default, rename = "ref")]
         alias: Option<String>,
     },
+    /// One freehand stroke in board units, from the window's pen: merged
+    /// into the newest sketch it touches, else a sketch of its own. The core
+    /// does the merge, so quick strokes never overwrite each other.
+    AddStroke { stroke: Stroke },
     /// Ink: a new sketch, or with `id` the whole of an existing one replaced
-    /// (strokes merged into it, erased from it).
+    /// (strokes erased from it).
     SetSketch {
         #[serde(default)]
         id: Option<String>,
@@ -198,6 +203,66 @@ impl Actor {
 }
 
 const TAGS: [&str; 5] = ["", "goal", "constraint", "question", "idea"];
+
+/// Bounds on what one board holds, so a runaway agent or window cannot grow
+/// it without end (every edit saves and sends the whole board).
+const MAX_OPS: usize = 200;
+const MAX_NODES: usize = 2_000;
+const MAX_TEXT: usize = 4_000;
+const MAX_LABEL: usize = 200;
+const MAX_STROKES: usize = 500;
+const MAX_POINTS: usize = 5_000;
+
+fn check_text(text: &str, max: usize, what: &str) -> Result<(), String> {
+    if text.chars().count() > max {
+        Err(format!("{what} is longer than {max} characters"))
+    } else {
+        Ok(())
+    }
+}
+
+/// The box around strokes given in board units, padded by their width.
+fn strokes_box(strokes: &[Stroke]) -> (f64, f64, f64, f64) {
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for s in strokes {
+        for p in &s.points {
+            x0 = x0.min(p[0] - s.size);
+            y0 = y0.min(p[1] - s.size);
+            x1 = x1.max(p[0] + s.size);
+            y1 = y1.max(p[1] + s.size);
+        }
+    }
+    if x0 > x1 {
+        return (0.0, 0.0, 1.0, 1.0);
+    }
+    (x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0))
+}
+
+/// Strokes moved by `(dx, dy)`: between a sketch's own units and the board's.
+fn shifted(strokes: &[Stroke], dx: f64, dy: f64) -> Vec<Stroke> {
+    strokes
+        .iter()
+        .map(|s| Stroke { points: s.points.iter().map(|p| [p[0] + dx, p[1] + dy, p[2]]).collect(), ..s.clone() })
+        .collect()
+}
+
+fn check_strokes(strokes: &[Stroke]) -> Result<(), String> {
+    if strokes.len() > MAX_STROKES {
+        return Err(format!("a sketch holds at most {MAX_STROKES} strokes"));
+    }
+    for s in strokes {
+        if s.points.len() > MAX_POINTS {
+            return Err(format!("a stroke holds at most {MAX_POINTS} points"));
+        }
+        if !s.size.is_finite() || !(0.5..=64.0).contains(&s.size) || s.color.len() > 32 {
+            return Err("a stroke's size or colour is out of range".to_string());
+        }
+        if s.points.iter().flatten().any(|v| !v.is_finite() || v.abs() > 1.0e7) {
+            return Err("a stroke point is out of range".to_string());
+        }
+    }
+    Ok(())
+}
 const NOTE_W: f64 = 260.0;
 const NOTE_H: f64 = 150.0;
 
@@ -267,6 +332,9 @@ impl Doc {
     /// Apply edits in order. Each result is `{ok, id?}` or `{ok: false, error}`;
     /// a failed edit does not stop the rest.
     pub fn apply(&mut self, ops: Vec<Op>, actor: &Actor) -> Vec<Value> {
+        if ops.len() > MAX_OPS {
+            return vec![json!({ "ok": false, "error": format!("at most {MAX_OPS} commands per call") })];
+        }
         let mut aliases: HashMap<String, String> = HashMap::new();
         let resolve = |aliases: &HashMap<String, String>, id: &str| -> String {
             id.strip_prefix('$').and_then(|a| aliases.get(a).cloned()).unwrap_or_else(|| id.to_string())
@@ -275,6 +343,10 @@ impl Doc {
         for op in ops {
             let result: Result<Value, String> = (|| match op {
                 Op::CreateNote { x, y, w, h, text, tag, alias } => {
+                    check_text(&text, MAX_TEXT, "a note")?;
+                    if self.nodes.len() >= MAX_NODES {
+                        return Err(format!("a board holds at most {MAX_NODES} items"));
+                    }
                     let node = Node {
                         id: self.fresh_id("n"),
                         kind: Kind::Note,
@@ -295,11 +367,73 @@ impl Doc {
                     }
                     Ok(json!({ "ok": true, "id": id }))
                 }
+                Op::AddStroke { stroke } => {
+                    if matches!(actor, Actor::Agent { .. }) {
+                        return Err("agents do not draw ink; use notes and arrows".to_string());
+                    }
+                    check_strokes(std::slice::from_ref(&stroke))?;
+                    if stroke.points.is_empty() {
+                        return Err("an empty stroke".to_string());
+                    }
+                    let (bx, by, bw, bh) = strokes_box(std::slice::from_ref(&stroke));
+                    const GAP: f64 = 24.0;
+                    let target = self
+                        .nodes
+                        .iter()
+                        .rev()
+                        .find(|n| {
+                            n.kind == Kind::Sketch
+                                && n.x - GAP < bx + bw
+                                && bx - GAP < n.x + n.w
+                                && n.y - GAP < by + bh
+                                && by - GAP < n.y + n.h
+                        })
+                        .map(|n| n.id.clone());
+                    match target {
+                        Some(id) => {
+                            let before = self.entity(&id);
+                            let node = self.nodes.iter_mut().find(|n| n.id == id).ok_or_else(|| format!("no sketch {id}"))?;
+                            let mut all = shifted(&node.strokes, node.x, node.y);
+                            all.push(stroke);
+                            check_strokes(&all)?;
+                            let (x, y, w, h) = strokes_box(&all);
+                            (node.x, node.y, node.w, node.h) = (x, y, w, h);
+                            node.strokes = shifted(&all, -x, -y);
+                            self.record(actor, &id, before);
+                            Ok(json!({ "ok": true, "id": id }))
+                        }
+                        None => {
+                            if self.nodes.len() >= MAX_NODES {
+                                return Err(format!("a board holds at most {MAX_NODES} items"));
+                            }
+                            let node = Node {
+                                id: self.fresh_id("s"),
+                                kind: Kind::Sketch,
+                                x: bx,
+                                y: by,
+                                w: bw,
+                                h: bh,
+                                text: String::new(),
+                                tag: String::new(),
+                                strokes: shifted(std::slice::from_ref(&stroke), -bx, -by),
+                                by: actor.name().to_string(),
+                            };
+                            let id = node.id.clone();
+                            self.nodes.push(node);
+                            self.record(actor, &id, None);
+                            Ok(json!({ "ok": true, "id": id }))
+                        }
+                    }
+                }
                 Op::SetSketch { id, x, y, w, h, strokes } => {
                     if matches!(actor, Actor::Agent { .. }) {
                         return Err("agents do not draw ink; use notes and arrows".to_string());
                     }
                     let (x, y, w, h) = (finite(x, "x")?, finite(y, "y")?, finite(w, "w")?.max(1.0), finite(h, "h")?.max(1.0));
+                    check_strokes(&strokes)?;
+                    if id.is_none() && self.nodes.len() >= MAX_NODES {
+                        return Err(format!("a board holds at most {MAX_NODES} items"));
+                    }
                     match id {
                         Some(id) => {
                             let before = self.entity(&id);
@@ -341,6 +475,9 @@ impl Doc {
                     let id = resolve(&aliases, &id);
                     let before = self.entity(&id);
                     let tag = tag.map(|t| check_tag(&t)).transpose()?;
+                    if let Some(t) = &text {
+                        check_text(t, MAX_TEXT, "a note")?;
+                    }
                     let node = self.nodes.iter_mut().find(|n| n.id == id).ok_or_else(|| format!("no item {id}"))?;
                     if let Some(t) = text {
                         node.text = t;
@@ -353,23 +490,33 @@ impl Doc {
                 }
                 Op::Move { id, x, y, w, h } => {
                     let id = resolve(&aliases, &id);
+                    // Every value checked before the item is touched, so a bad
+                    // one leaves it as it was.
+                    let (x, y) = (finite(x, "x")?, finite(y, "y")?);
+                    let w = w.map(|w| finite(w, "w").map(|w| w.clamp(1.0, 4000.0))).transpose()?;
+                    let h = h.map(|h| finite(h, "h").map(|h| h.clamp(1.0, 4000.0))).transpose()?;
                     let before = self.entity(&id);
                     let node = self.nodes.iter_mut().find(|n| n.id == id).ok_or_else(|| format!("no item {id}"))?;
-                    node.x = finite(x, "x")?;
-                    node.y = finite(y, "y")?;
+                    (node.x, node.y) = (x, y);
                     if let Some(w) = w {
-                        node.w = finite(w, "w")?.clamp(1.0, 4000.0);
+                        node.w = w;
                     }
                     if let Some(h) = h {
-                        node.h = finite(h, "h")?.clamp(1.0, 4000.0);
+                        node.h = h;
                     }
                     self.record(actor, &id, before);
                     Ok(json!({ "ok": true, "id": id }))
                 }
                 Op::Delete { ids } => {
-                    let mut gone = Vec::new();
+                    // Arrows go with their note; naming one of those too, or
+                    // naming an item twice, is not an error.
+                    let mut gone: Vec<String> = Vec::new();
+                    let mut missing: Vec<String> = Vec::new();
                     for raw in ids {
                         let id = resolve(&aliases, &raw);
+                        if gone.contains(&id) {
+                            continue;
+                        }
                         if self.nodes.iter().any(|n| n.id == id) {
                             let attached: Vec<String> =
                                 self.edges.iter().filter(|e| e.from == id || e.to == id).map(|e| e.id.clone()).collect();
@@ -377,17 +524,23 @@ impl Doc {
                                 let before = self.entity(&e);
                                 self.edges.retain(|x| x.id != e);
                                 self.record(actor, &e, before);
+                                gone.push(e);
                             }
                         }
-                        let before = self.entity(&id).ok_or_else(|| format!("no item {id}"))?;
-                        self.nodes.retain(|n| n.id != id);
-                        self.edges.retain(|e| e.id != id);
-                        self.record(actor, &id, Some(before));
-                        gone.push(id);
+                        match self.entity(&id) {
+                            Some(before) => {
+                                self.nodes.retain(|n| n.id != id);
+                                self.edges.retain(|e| e.id != id);
+                                self.record(actor, &id, Some(before));
+                                gone.push(id);
+                            }
+                            None => missing.push(id),
+                        }
                     }
-                    Ok(json!({ "ok": true, "deleted": gone }))
+                    Ok(json!({ "ok": missing.is_empty(), "deleted": gone, "missing": missing }))
                 }
                 Op::Connect { from, to, label } => {
+                    check_text(&label, MAX_LABEL, "an arrow's label")?;
                     let (from, to) = (resolve(&aliases, &from), resolve(&aliases, &to));
                     for end in [&from, &to] {
                         if !self.nodes.iter().any(|n| &n.id == end) {
@@ -450,13 +603,22 @@ impl Doc {
 
 // ----- the boards, cached from the store -----
 
+/// One board, loaded on first use. Its lock is held for a whole edit
+/// (read, change, save), so a human's edit and the agent's tool call never
+/// start from the same version and overwrite each other.
+type Slot = Arc<parking_lot::Mutex<Option<Doc>>>;
+
 /// Every open design's board.
 #[derive(Default)]
 pub struct Boards {
-    docs: parking_lot::Mutex<HashMap<String, Doc>>,
+    docs: parking_lot::Mutex<HashMap<String, Slot>>,
 }
 
 impl Boards {
+    fn slot(&self, id: &str) -> Slot {
+        self.docs.lock().entry(id.to_string()).or_default().clone()
+    }
+
     /// Forget a board (its artifact is gone).
     pub fn forget(&self, id: &str) {
         self.docs.lock().remove(id);
@@ -468,17 +630,23 @@ fn load_doc(state: &AppState, id: &str) -> Result<Doc, String> {
     if info.kind != KIND {
         return Err(format!("{id} is not a design"));
     }
-    Ok(serde_json::from_str(&raw).unwrap_or_default())
+    // Only an empty body is a new board. Anything else that does not read
+    // stops here, rather than showing an empty board the next edit would
+    // save over the real one.
+    if raw.trim().is_empty() {
+        return Ok(Doc::default());
+    }
+    serde_json::from_str(&raw).map_err(|e| format!("design {id} could not be read: {e}"))
 }
 
 /// The board as it is now.
 pub fn doc(state: &AppState, id: &str) -> Result<Doc, String> {
-    if let Some(d) = state.boards.docs.lock().get(id) {
-        return Ok(d.clone());
+    let slot = state.boards.slot(id);
+    let mut board = slot.lock();
+    if board.is_none() {
+        *board = Some(load_doc(state, id)?);
     }
-    let d = load_doc(state, id)?;
-    state.boards.docs.lock().insert(id.to_string(), d.clone());
-    Ok(d)
+    board.clone().ok_or_else(|| format!("design {id} vanished"))
 }
 
 /// What the window hears after every change.
@@ -488,18 +656,28 @@ struct DesignEvent<'a> {
     doc: &'a Doc,
 }
 
-/// Run `f` on the board, save it, and tell the window.
+/// Run `f` on the board, save it, and tell the window. The board's lock
+/// is held from reading it to keeping the result; only telling the window
+/// happens after.
 fn edit<R>(app: &AppHandle, id: &str, f: impl FnOnce(&mut Doc) -> R) -> Result<R, String> {
     let state = app.state::<AppState>();
-    let mut current = doc(&state, id)?;
-    let out = f(&mut current);
-    current.version += 1;
-    let json = serde_json::to_string(&current).map_err(|e| e.to_string())?;
-    state
-        .store
-        .update_artifact(id, &orchestra_store::ArtifactPatch { body: Some(json), ..Default::default() })
-        .map_err(|e| e.to_string())?;
-    state.boards.docs.lock().insert(id.to_string(), current.clone());
+    let slot = state.boards.slot(id);
+    let (out, current) = {
+        let mut board = slot.lock();
+        if board.is_none() {
+            *board = Some(load_doc(&state, id)?);
+        }
+        let mut current = board.clone().ok_or_else(|| format!("design {id} vanished"))?;
+        let out = f(&mut current);
+        current.version += 1;
+        let json = serde_json::to_string(&current).map_err(|e| e.to_string())?;
+        state
+            .store
+            .update_artifact(id, &orchestra_store::ArtifactPatch { body: Some(json), ..Default::default() })
+            .map_err(|e| e.to_string())?;
+        *board = Some(current.clone());
+        (out, current)
+    };
     let _ = app.emit("design", DesignEvent { id, doc: &current });
     Ok(out)
 }
@@ -696,6 +874,56 @@ mod tests {
         assert!(d.changes.is_empty(), "touching a suggestion keeps it");
         let ink = d.apply(ops(json!([{ "op": "set_sketch", "x": 0, "y": 0, "w": 1, "h": 1, "strokes": [] }])), &agent);
         assert_eq!(ink[0]["ok"], false, "agents do not draw");
+    }
+
+    #[test]
+    fn a_bad_move_leaves_the_item_and_delete_tolerates_what_went_already() {
+        let mut d = Doc::default();
+        let made = d.apply(ops(json!([{ "op": "create_note", "x": 0, "y": 0, "text": "a" }, { "op": "create_note", "x": 300, "y": 0 }])), &Actor::Human);
+        let (a, b) = (made[0]["id"].as_str().unwrap().to_string(), made[1]["id"].as_str().unwrap().to_string());
+        let out = d.apply(ops(json!([{ "op": "move", "id": a, "x": 100, "y": 2.0e7 }])), &Actor::Agent { run: None });
+        assert_eq!(out[0]["ok"], false);
+        assert_eq!(d.nodes[0].x, 0.0, "nothing moved");
+        assert!(d.changes.is_empty(), "nothing to review");
+
+        let arrow = d.apply(ops(json!([{ "op": "connect", "from": a, "to": b }])), &Actor::Human)[0]["id"].as_str().unwrap().to_string();
+        let out = d.apply(ops(json!([{ "op": "delete", "ids": [a, arrow, "nope"] }])), &Actor::Human);
+        assert_eq!(out[0]["deleted"].as_array().unwrap().len(), 2, "{out:?}");
+        assert_eq!(out[0]["missing"], json!(["nope"]));
+        assert_eq!((d.nodes.len(), d.edges.len()), (1, 0));
+    }
+
+    #[test]
+    fn strokes_merge_in_the_core_without_losing_one() {
+        let mut d = Doc::default();
+        let stroke = |x: f64| json!({ "points": [[x, 0.0, 0.5], [x + 10.0, 10.0, 0.5]], "size": 4.0 });
+        // Two quick strokes close together land in one sketch, both kept.
+        let a = d.apply(ops(json!([{ "op": "add_stroke", "stroke": stroke(0.0) }])), &Actor::Human);
+        let b = d.apply(ops(json!([{ "op": "add_stroke", "stroke": stroke(20.0) }])), &Actor::Human);
+        assert_eq!(a[0]["id"], b[0]["id"]);
+        assert_eq!((d.nodes.len(), d.nodes[0].strokes.len()), (1, 2));
+        let n = &d.nodes[0];
+        assert!(n.x <= -4.0 && n.x + n.w >= 34.0, "the box covers both: {n:?}");
+        assert!(n.strokes.iter().flat_map(|s| &s.points).all(|p| p[0] >= 0.0 && p[1] >= 0.0), "kept in the sketch's own units");
+        // One far away is a sketch of its own.
+        d.apply(ops(json!([{ "op": "add_stroke", "stroke": stroke(500.0) }])), &Actor::Human);
+        assert_eq!(d.nodes.len(), 2);
+        let agent = d.apply(ops(json!([{ "op": "add_stroke", "stroke": stroke(0.0) }])), &Actor::Agent { run: None });
+        assert_eq!(agent[0]["ok"], false, "agents do not draw");
+    }
+
+    #[test]
+    fn limits_keep_a_board_bounded() {
+        let mut d = Doc::default();
+        let long = "x".repeat(MAX_TEXT + 1);
+        let out = d.apply(ops(json!([{ "op": "create_note", "x": 0, "y": 0, "text": long }])), &Actor::Agent { run: None });
+        assert_eq!(out[0]["ok"], false);
+        let many: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.5]; MAX_POINTS + 1];
+        let out = d.apply(ops(json!([{ "op": "set_sketch", "x": 0, "y": 0, "w": 1, "h": 1, "strokes": [{ "points": many }] }])), &Actor::Human);
+        assert_eq!(out[0]["ok"], false);
+        let too_many: Vec<Value> = (0..=MAX_OPS).map(|_| json!({ "op": "delete", "ids": [] })).collect();
+        assert_eq!(d.apply(ops(Value::Array(too_many)), &Actor::Human).len(), 1);
+        assert!(d.nodes.is_empty());
     }
 
     #[test]

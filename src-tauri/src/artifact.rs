@@ -85,18 +85,27 @@ fn info(state: &AppState, id: &str) -> Result<ArtifactInfo, String> {
 }
 
 /// The artifact's agent session, opened (or reopened on another agent or
-/// options) when needed. The second value says whether this is its first turn.
+/// options) when needed. The second value says whether no turn has been
+/// sent on it yet (the preamble goes with the first). The sessions lock is
+/// not held while an agent starts, so other artifacts' tool calls, stops
+/// and states do not wait on it; `busy` already keeps one turn per artifact.
 async fn open(app: &AppHandle, a: &ArtifactInfo) -> Result<(Arc<AgentSession>, bool), String> {
     let state = app.state::<AppState>();
     if a.agent.is_empty() {
         return Err(format!("{} has no agent", a.id));
     }
     let wanted = fingerprint(&a.agent, &a.config);
-    let mut sessions = state.artifacts.sessions.lock().await;
-    if sessions.get(&a.id).is_some_and(|s| s.fingerprint != wanted) {
-        sessions.remove(&a.id);
+    {
+        let mut sessions = state.artifacts.sessions.lock().await;
+        match sessions.get(&a.id) {
+            Some(s) if s.fingerprint == wanted => return Ok((s.live.session.clone(), s.live.turns == 0)),
+            Some(_) => {
+                sessions.remove(&a.id);
+            }
+            None => {}
+        }
     }
-    if !sessions.contains_key(&a.id) {
+    {
         let tools = match a.kind.as_str() {
             design::KIND => design::tools(app.clone(), a.id.clone()),
             other => return Err(format!("{other} artifacts have no agent yet")),
@@ -113,18 +122,19 @@ async fn open(app: &AppHandle, a: &ArtifactInfo) -> Result<(Arc<AgentSession>, b
         if let Err(err) = state.store.set_meta(&key, session.session_id()) {
             tracing::warn!(%err, "could not remember artifact session id");
         }
-        sessions.insert(
+        let session = Arc::new(session);
+        // A resumed session already had its preamble.
+        let turns = u32::from(resumed);
+        state.artifacts.sessions.lock().await.insert(
             a.id.clone(),
             Agent {
-                live: Live { agent: a.agent.clone(), session: Arc::new(session), turns: u32::from(resumed), running: None },
+                live: Live { agent: a.agent.clone(), session: session.clone(), turns, running: None },
                 fingerprint: wanted,
                 _mcp: mcp,
             },
         );
+        Ok((session, turns == 0))
     }
-    let live = &mut sessions.get_mut(&a.id).ok_or("artifact session vanished")?.live;
-    live.turns += 1;
-    Ok((live.session.clone(), live.turns == 1))
 }
 
 /// One human message to an artifact's agent. For a design, `image` is a PNG
@@ -152,12 +162,18 @@ pub async fn turn(
         let (preamble, context) = match a.kind.as_str() {
             design::KIND => {
                 if let Some(data) = image.filter(|d| !d.is_empty()) {
-                    use base64::Engine;
-                    let bytes = base64::engine::general_purpose::STANDARD
-                        .decode(data.as_bytes())
-                        .map_err(|e| format!("bad board picture: {e}"))?;
+                    // Decoding and writing a large picture is blocking work.
                     let path = cwd.join("board.png");
-                    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+                    let target = path.clone();
+                    tokio::task::spawn_blocking(move || -> Result<(), String> {
+                        use base64::Engine;
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(data.as_bytes())
+                            .map_err(|e| format!("bad board picture: {e}"))?;
+                        std::fs::write(&target, bytes).map_err(|e| e.to_string())
+                    })
+                    .await
+                    .map_err(|e| e.to_string())??;
                     files.push(path);
                 }
                 (design::preamble(&lang, &a.title), design::context(&state, &id, &selected)?)
@@ -170,8 +186,11 @@ pub async fn turn(
             .store
             .begin_run(&run_key(&id), LANE, &a.agent, &with_attachments(&text, &attached), &cwd.display().to_string())
             .map_err(|e| e.to_string())?;
+        // Counted only now it goes out: a turn that failed before this
+        // point leaves the next one still the first (with the preamble).
         if let Some(s) = state.artifacts.sessions.lock().await.get_mut(&id) {
             s.live.running = Some(run.clone());
+            s.live.turns += 1;
         }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tauri::async_runtime::spawn(pump(app.clone(), run_key(&id), LANE.to_string(), run.clone(), rx));

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { store, type DesignNode, type DesignOp, type DesignTag, type Stroke } from "./store.svelte";
   import { strokePath, strokesBox, worldStrokes, localStrokes, overlaps, edgeEnds, TAG_COLORS, type Box } from "./ink";
   import { t } from "./i18n.svelte";
@@ -96,18 +96,28 @@
   });
 
   // ----- where items are drawn, with a drag or resize in progress -----
-  let drag = $state<{ dx: number; dy: number; moved: boolean } | null>(null);
-  let resize = $state<{ id: string; w: number; h: number } | null>(null);
+  // After the drop they stay drawn where they were dropped (`settle` is the
+  // board version then) until a newer board comes back with them there, so
+  // nothing snaps back while the core answers.
+  let drag = $state<{ dx: number; dy: number; moved: boolean; settle?: number } | null>(null);
+  let resize = $state<{ id: string; w: number; h: number; settle?: number } | null>(null);
+  const dragNow = $derived(drag && drag.settle !== undefined && doc.version > drag.settle ? null : drag);
+  const resizeNow = $derived(resize && resize.settle !== undefined && doc.version > resize.settle ? null : resize);
+  $effect(() => {
+    const v = doc.version;
+    if (drag?.settle !== undefined && v > drag.settle) drag = null;
+    if (resize?.settle !== undefined && v > resize.settle) resize = null;
+  });
 
   function box(n: DesignNode): Box {
     let { x, y, w, h } = n;
-    if (drag && selected.includes(n.id)) {
-      x += drag.dx;
-      y += drag.dy;
+    if (dragNow && selected.includes(n.id)) {
+      x += dragNow.dx;
+      y += dragNow.dy;
     }
-    if (resize && resize.id === n.id) {
-      w = resize.w;
-      h = resize.h;
+    if (resizeNow && resizeNow.id === n.id) {
+      w = resizeNow.w;
+      h = resizeNow.h;
     }
     return { x, y, w, h };
   }
@@ -126,23 +136,30 @@
   });
 
   // ----- ink -----
-  let ink = $state<Stroke | null>(null);
+  let ink = $state.raw<Stroke | null>(null);
   /** Strokes crossed out by the eraser, by sketch id, until the pointer lifts. */
   let erased = $state<Record<string, number[]>>({});
 
+  /** Hand a finished stroke to the core, which merges it into the sketch it
+   *  touches; strokes drawn in quick succession never overwrite each other. */
   async function commitInk(stroke: Stroke) {
-    const b = strokesBox([stroke]);
-    const target = [...doc.nodes].reverse().find((n) => n.kind === "sketch" && overlaps(n, b, 24));
-    let op: DesignOp;
-    if (target) {
-      const all = [...worldStrokes(target), stroke];
-      const nb = strokesBox(all);
-      op = { op: "set_sketch", id: target.id, ...nb, strokes: localStrokes(all, nb) };
-    } else {
-      op = { op: "set_sketch", ...b, strokes: localStrokes([stroke], b) };
+    await store.designApply([{ op: "add_stroke", stroke }]);
+    // A newer stroke may already be under way; only this one is done.
+    if (ink === stroke) ink = null;
+  }
+
+  /** Stroke outlines are costly; each is kept until its stroke changes. */
+  const outlines = new Map<string, string>();
+  function outline(n: DesignNode, i: number, s: Stroke): string {
+    const p = s.points[0];
+    const key = `${n.id}:${i}:${s.points.length}:${p?.[0]}:${p?.[1]}:${s.size}`;
+    let d = outlines.get(key);
+    if (d === undefined) {
+      if (outlines.size > 20000) outlines.clear();
+      d = strokePath(s);
+      outlines.set(key, d);
     }
-    await store.designApply([op]);
-    ink = null;
+    return d;
   }
 
   function eraseAt(p: { x: number; y: number }) {
@@ -176,6 +193,21 @@
   // ----- editing a note -----
   let editing = $state("");
   let editText = $state("");
+  /** A new note to edit as soon as the core's board has it. */
+  let pendingEdit = $state("");
+  $effect(() => {
+    const ids = new Set(doc.nodes.map((n) => n.id));
+    if (pendingEdit && ids.has(pendingEdit)) {
+      editing = pendingEdit;
+      editText = "";
+      pendingEdit = "";
+    }
+    // Removed under our feet (the agent, a revert): nothing to edit or pick.
+    if (editing && !ids.has(editing)) editing = "";
+    if (selected.some((id) => !ids.has(id))) selected = selected.filter((id) => ids.has(id));
+    if (selectedEdge && !doc.edges.some((e) => e.id === selectedEdge)) selectedEdge = "";
+    if (arrowFrom && !ids.has(arrowFrom)) arrowFrom = "";
+  });
   function startEdit(n: DesignNode) {
     if (n.kind !== "note") return;
     editing = n.id;
@@ -211,6 +243,7 @@
       }
       const start = { cx: e.clientX, cy: e.clientY, x: view.x, y: view.y };
       follow(
+        e,
         (ev) => (view = { ...view, x: start.x + ev.clientX - start.cx, y: start.y + ev.clientY - start.cy }),
         () => {},
       );
@@ -224,8 +257,7 @@
         const nid = res[0]?.id;
         if (nid) {
           selected = [nid];
-          editing = nid;
-          editText = "";
+          pendingEdit = nid;
         }
       });
       return;
@@ -235,6 +267,7 @@
       const pressure = e.pressure > 0 && e.pointerType === "pen" ? e.pressure : 0.5;
       ink = { points: [[p.x, p.y, pressure]], color: penColor, size: 4 };
       follow(
+        e,
         (ev) => {
           const q = toWorld(ev);
           const pr = ev.pressure > 0 && ev.pointerType === "pen" ? ev.pressure : 0.5;
@@ -244,6 +277,7 @@
           if (ink && ink.points.length > 1) void commitInk(ink);
           else ink = null;
         },
+        () => (ink = null),
       );
       return;
     }
@@ -251,8 +285,10 @@
     if (tool === "eraser") {
       eraseAt(p);
       follow(
+        e,
         (ev) => eraseAt(toWorld(ev)),
         () => void commitErase(),
+        () => (erased = {}),
       );
       return;
     }
@@ -279,6 +315,7 @@
     const start = p;
     drag = { dx: 0, dy: 0, moved: false };
     follow(
+      e,
       (ev) => {
         const q = toWorld(ev);
         const dx = q.x - start.x;
@@ -287,13 +324,19 @@
       },
       () => {
         const d = drag;
-        drag = null;
-        if (!d?.moved) return;
+        if (!d?.moved) {
+          drag = null;
+          return;
+        }
         const ops: DesignOp[] = doc.nodes
           .filter((n) => selected.includes(n.id))
           .map((n) => ({ op: "move", id: n.id, x: Math.round(n.x + d.dx), y: Math.round(n.y + d.dy) }));
-        void store.designApply(ops);
+        drag = { ...d, settle: doc.version };
+        void store.designApply(ops).then((res) => {
+          if (!res.length || res.some((r) => !r.ok)) drag = null;
+        });
       },
+      () => (drag = null),
     );
   }
 
@@ -302,28 +345,59 @@
     const start = toWorld(e);
     resize = { id: n.id, w: n.w, h: n.h };
     follow(
+      e,
       (ev) => {
         const q = toWorld(ev);
         resize = { id: n.id, w: Math.max(120, n.w + q.x - start.x), h: Math.max(60, n.h + q.y - start.y) };
       },
       () => {
         const r = resize;
-        resize = null;
-        if (r) void store.designApply([{ op: "move", id: n.id, x: n.x, y: n.y, w: Math.round(r.w), h: Math.round(r.h) }]);
+        if (!r) return;
+        resize = { ...r, settle: doc.version };
+        void store.designApply([{ op: "move", id: n.id, x: n.x, y: n.y, w: Math.round(r.w), h: Math.round(r.h) }]).then((res) => {
+          if (!res.length || res.some((x) => !x.ok)) resize = null;
+        });
       },
+      () => (resize = null),
     );
   }
 
-  /** Track the pointer until it lifts. */
-  function follow(move: (e: PointerEvent) => void, up: () => void) {
-    const onMove = (ev: PointerEvent) => move(ev);
-    const onUp = () => {
+  /** The gesture under way, so leaving the board mid-gesture ends it. */
+  let stopFollowing: (() => void) | null = null;
+  onDestroy(() => stopFollowing?.());
+
+  /** Track the pointer that started a gesture until it lifts. Other pointers
+   *  (a second finger) are ignored; a cancelled pointer (a pen out of range)
+   *  ends the gesture without its effect. */
+  function follow(start: PointerEvent, move: (e: PointerEvent) => void, up: () => void, cancel: () => void = () => {}) {
+    stopFollowing?.();
+    const id = start.pointerId;
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId === id) move(ev);
+    };
+    const stop = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      stopFollowing = null;
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== id) return;
+      stop();
       up();
+    };
+    const onCancel = (ev: PointerEvent) => {
+      if (ev.pointerId !== id) return;
+      stop();
+      cancel();
+    };
+    stopFollowing = () => {
+      stop();
+      cancel();
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
   }
 
   function setTag(tag: DesignTag) {
@@ -342,8 +416,11 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    const tag = (e.target as HTMLElement | null)?.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA" || editing || store.view !== "design") return;
+    // Not while typing, nor behind a dialog or menu (the tag dialog, a
+    // right-click menu), nor on another view.
+    const target = e.target as HTMLElement | null;
+    if (e.defaultPrevented || editing || store.tagDialog || store.view !== "design") return;
+    if (target?.closest?.("input, textarea, select, [contenteditable], [role=menu], [role=dialog]")) return;
     if (e.key === " ") spaceHeld = true;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const keys: Record<string, Tool> = { v: "select", n: "note", p: "pen", e: "eraser", a: "arrow" };
@@ -371,7 +448,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKey} onkeyup={(e) => e.key === " " && (spaceHeld = false)} />
+<svelte:window onkeydown={onKey} onkeyup={(e) => e.key === " " && (spaceHeld = false)} onblur={() => (spaceHeld = false)} />
 
 <div
   class="board"
@@ -457,7 +534,7 @@
         {:else}
           <svg class="ink" width={b.w} height={b.h} viewBox="0 0 {n.w} {n.h}" preserveAspectRatio="none">
             {#each n.strokes as s, i (i)}
-              <path d={strokePath(s)} fill={s.color || "var(--txt)"} class:gone={(erased[n.id] ?? []).includes(i)} />
+              <path d={outline(n, i, s)} fill={s.color || "var(--txt)"} class:gone={(erased[n.id] ?? []).includes(i)} />
             {/each}
           </svg>
         {/if}

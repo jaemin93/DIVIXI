@@ -655,10 +655,18 @@ impl Store {
     pub fn create_artifact(&self, kind: &str, title: &str, agent: &str, body: &str) -> anyhow::Result<ArtifactInfo> {
         let id = {
             let conn = self.conn.lock();
-            let next: i64 = conn.query_row(
-                "SELECT COALESCE(MAX(CAST(substr(id, 3) AS INTEGER)), 0) + 1 FROM artifacts",
-                [],
-                |r| r.get(0),
+            // Past the highest id there is and the highest ever given out,
+            // so a deleted artifact's id (and its folder) is never reused.
+            let highest: i64 = conn.query_row("SELECT COALESCE(MAX(CAST(substr(id, 3) AS INTEGER)), 0) FROM artifacts", [], |r| r.get(0))?;
+            let given: i64 = conn
+                .query_row("SELECT value FROM meta WHERE key = 'artifact_seq'", [], |r| r.get::<_, String>(0))
+                .optional()?
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let next = highest.max(given) + 1;
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES ('artifact_seq', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![next.to_string()],
             )?;
             let id = format!("ar{next:03}");
             let now = now_ms();
@@ -1461,6 +1469,8 @@ mod tests {
         assert!(store.artifact(&a.id).unwrap().is_none());
         assert!(store.run(&run).unwrap().is_none(), "its conversation goes with it");
         assert!(store.delete_artifact(&a.id).is_err());
+        let again = store.create_artifact("design", "fresh", "claude_code", "{}").unwrap();
+        assert_eq!(again.id, "ar003", "a deleted id is not given out again");
     }
 
     #[test]
