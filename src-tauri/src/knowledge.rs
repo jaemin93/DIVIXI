@@ -468,7 +468,6 @@ async fn embed_pending(app: &AppHandle) {
     let Some(ep) = embed::endpoint(&state) else { return };
     let sig = ep.signature();
     let db = state.library.db.clone();
-    let spacing = Duration::from_millis(60_000 / embed::PER_MINUTE);
     loop {
         let batch = match db.to_embed(&sig, embed::BATCH) {
             Ok(b) if !b.is_empty() => b,
@@ -496,7 +495,8 @@ async fn embed_pending(app: &AppHandle) {
         if embed::endpoint(&state).map(|e| e.signature()) != Some(sig.clone()) {
             break;
         }
-        tokio::time::sleep(spacing).await;
+        // Read each time, so a changed limit applies at once.
+        tokio::time::sleep(embed::spacing(embed::per_minute(&state))).await;
     }
 }
 

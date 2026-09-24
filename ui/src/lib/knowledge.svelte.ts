@@ -60,6 +60,7 @@ export const K_EMBED_URL = "knowledge.embed.url";
 export const K_EMBED_MODEL = "knowledge.embed.model";
 export const K_EMBED_KEY = "knowledge.embed.key";
 export const K_EMBED_DIMS = "knowledge.embed.dims";
+export const K_EMBED_RATE = "knowledge.embed.rate";
 
 /**
  * The knowledge library as the UI sees it: its sources (each also an

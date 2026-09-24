@@ -1471,11 +1471,20 @@ class Store {
     await Promise.all(this.trackRuns.filter((r) => r.session === name && !r.loaded).map((r) => this.hydrate(r)));
   }
 
+  /** The view settings were opened from, to go back to. */
+  settingsFrom: View = "track";
+
   /** Open settings on a section. */
   openSettings(section: SettingsSection = "overview") {
+    if (this.view !== "settings") this.settingsFrom = this.view;
     this.settingsSection = section;
     this.view = "settings";
     void this.loadInfo();
+  }
+
+  /** Close settings, back to the view they were opened from. */
+  closeSettings() {
+    this.view = this.settingsFrom === "settings" ? "track" : this.settingsFrom;
   }
 
   async loadInfo() {

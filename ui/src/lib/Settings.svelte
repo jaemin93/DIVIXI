@@ -93,7 +93,7 @@
         <p class="blurb">{current.blurb}</p>
       </div>
       <span class="grow"></span>
-      <button class="btn" onclick={() => (store.view = "track")}>{t("settings.close")}</button>
+      <button class="btn" onclick={() => store.closeSettings()}>{t("settings.close")}</button>
     </div>
 
     {#if store.settingsSection === "overview"}

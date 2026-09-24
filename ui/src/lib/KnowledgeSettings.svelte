@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { store, agentLabel } from "./store.svelte";
-  import { kb, K_AGENT, K_CONFIG, K_EMBED_DIMS, K_EMBED_ENABLED, K_EMBED_KEY, K_EMBED_MODEL, K_EMBED_URL, K_EXTRACT, K_POOL } from "./knowledge.svelte";
+  import { kb, K_AGENT, K_CONFIG, K_EMBED_DIMS, K_EMBED_ENABLED, K_EMBED_KEY, K_EMBED_MODEL, K_EMBED_RATE, K_EMBED_URL, K_EXTRACT, K_POOL } from "./knowledge.svelte";
   import { t } from "./i18n.svelte";
 
   /**
@@ -22,6 +22,7 @@
   let eModel = $state("");
   let eKey = $state("");
   let eDims = $state("");
+  let eRate = $state("120");
   let eTest = $state<{ ok: boolean; text: string } | null>(null);
   let eTesting = $state(false);
 
@@ -30,8 +31,8 @@
   $effect(() => {
     if (sLoaded) return;
     void (async () => {
-      const [agent, config, pool, extract, on, url, model, key, dims] = await Promise.all(
-        [K_AGENT, K_CONFIG, K_POOL, K_EXTRACT, K_EMBED_ENABLED, K_EMBED_URL, K_EMBED_MODEL, K_EMBED_KEY, K_EMBED_DIMS].map(get),
+      const [agent, config, pool, extract, on, url, model, key, dims, rate] = await Promise.all(
+        [K_AGENT, K_CONFIG, K_POOL, K_EXTRACT, K_EMBED_ENABLED, K_EMBED_URL, K_EMBED_MODEL, K_EMBED_KEY, K_EMBED_DIMS, K_EMBED_RATE].map(get),
       );
       sAgent = agent || store.readyAgents[0]?.kind || "";
       cheap = await defaults(sAgent);
@@ -47,7 +48,8 @@
       eModel = model ?? "";
       eKey = key ?? "";
       eDims = dims ?? "";
-      eSaved = { on: eOn, url: eUrl.trim(), model: eModel.trim(), key: eKey.trim(), dims: eDims.trim() };
+      eRate = rate ?? "120";
+      eSaved = { on: eOn, url: eUrl.trim(), model: eModel.trim(), key: eKey.trim(), dims: eDims.trim(), rate: rateValue(eRate) };
       await kb.loadEmbedding();
       sLoaded = true;
     })();
@@ -117,10 +119,16 @@
   }
 
   /** What is saved, to tell unsaved edits apart. */
-  let eSaved = $state({ on: false, url: "", model: "", key: "", dims: "" });
+  let eSaved = $state({ on: false, url: "", model: "", key: "", dims: "", rate: "120" });
+
+  /** The limit as saved: a whole number of requests a minute, 0 for none. */
+  function rateValue(v: string): string {
+    const n = Math.floor(Number(v));
+    return Number.isFinite(n) && n >= 0 ? String(n) : "120";
+  }
   let saving = $state(false);
   const dirty = $derived(
-    eOn !== eSaved.on || eUrl.trim() !== eSaved.url || eModel.trim() !== eSaved.model || eKey.trim() !== eSaved.key || eDims.trim() !== eSaved.dims,
+    eOn !== eSaved.on || eUrl.trim() !== eSaved.url || eModel.trim() !== eSaved.model || eKey.trim() !== eSaved.key || eDims.trim() !== eSaved.dims || rateValue(eRate) !== eSaved.rate,
   );
 
   async function saveEmbedding() {
@@ -130,8 +138,10 @@
       await save(K_EMBED_MODEL, eModel.trim());
       await save(K_EMBED_KEY, eKey.trim());
       await save(K_EMBED_DIMS, eDims.trim());
+      eRate = rateValue(eRate);
+      await save(K_EMBED_RATE, eRate);
       await save(K_EMBED_ENABLED, eOn ? "on" : "off");
-      eSaved = { on: eOn, url: eUrl.trim(), model: eModel.trim(), key: eKey.trim(), dims: eDims.trim() };
+      eSaved = { on: eOn, url: eUrl.trim(), model: eModel.trim(), key: eKey.trim(), dims: eDims.trim(), rate: eRate };
       await invoke("knowledge_embed_now").catch(() => {});
       await kb.loadEmbedding();
     } finally {
@@ -241,6 +251,8 @@
       <label class="field"><span>{t("kb.emb.model")}</span><input bind:value={eModel} disabled={!eOn} placeholder="text-embedding-3-small" spellcheck="false" /></label>
       <label class="field"><span>{t("kb.emb.key")}</span><input type="password" bind:value={eKey} disabled={!eOn} placeholder="sk-…" autocomplete="off" /></label>
       <label class="field"><span>{t("kb.emb.dims")}</span><input class="short" bind:value={eDims} disabled={!eOn} placeholder={t("kb.emb.dimsAuto")} inputmode="numeric" /></label>
+<label class="field"><span>{t("kb.emb.rate")}</span><input class="short" bind:value={eRate} disabled={!eOn} inputmode="numeric" /><em class="unit">{t("kb.emb.rateUnit")}</em></label>
+<p class="note keynote">{t("kb.emb.rateHelp")}</p>
       <div class="field">
         <span></span>
         <button class="btn sm" disabled={!eOn || eTesting || !eUrl.trim() || !eModel.trim()} onclick={testEndpoint}>{eTesting ? t("kb.emb.testing") : t("kb.emb.test")}</button>
@@ -466,6 +478,13 @@
 
   .test.bad {
     color: var(--deltx);
+  }
+
+  .unit {
+    font-style: normal;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--lab);
   }
 
   .keynote {

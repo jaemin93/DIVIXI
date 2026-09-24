@@ -21,11 +21,13 @@ pub const SETTING_URL: &str = "knowledge.embed.url";
 pub const SETTING_MODEL: &str = "knowledge.embed.model";
 pub const SETTING_KEY: &str = "knowledge.embed.key";
 pub const SETTING_DIMS: &str = "knowledge.embed.dims";
+pub const SETTING_RATE: &str = "knowledge.embed.rate";
 
 /// Texts per request.
 pub const BATCH: usize = 32;
-/// Requests per minute, at most (Kiro Crew's default embedding rate).
-pub const PER_MINUTE: u64 = 120;
+/// Requests per minute unless the settings say otherwise (Kiro Crew's
+/// default embedding rate limit); 0 means no limit.
+pub const DEFAULT_PER_MINUTE: u64 = 120;
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// A search waits this long for its query's vector before going without.
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -50,6 +52,16 @@ impl Endpoint {
 
 fn setting(state: &AppState, key: &str) -> Option<String> {
     state.store.get_meta(&format!("{SETTING_PREFIX}{key}")).ok().flatten().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// Embedding requests allowed per minute; 0 means no limit.
+pub fn per_minute(state: &AppState) -> u64 {
+    setting(state, SETTING_RATE).and_then(|r| r.parse().ok()).unwrap_or(DEFAULT_PER_MINUTE)
+}
+
+/// The pause after each request that keeps within the rate limit.
+pub fn spacing(per_minute: u64) -> Duration {
+    60_000u64.checked_div(per_minute).map(Duration::from_millis).unwrap_or(Duration::ZERO)
 }
 
 /// The endpoint in the settings, when embeddings are switched on and set up.
@@ -130,6 +142,13 @@ mod tests {
         assert_eq!(parse(r, 2).unwrap(), vec![vec![1.0, 0.0], vec![0.5, 0.5]]);
         assert!(parse(r, 3).is_err());
         assert!(parse(r#"{"error":"nope"}"#, 1).is_err());
+    }
+
+    #[test]
+    fn rate_limit_spaces_requests() {
+        assert_eq!(spacing(120), Duration::from_millis(500));
+        assert_eq!(spacing(0), Duration::ZERO);
+        assert_eq!(spacing(1), Duration::from_secs(60));
     }
 
     #[test]
