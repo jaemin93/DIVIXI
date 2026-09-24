@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { store, type WsEntry } from "./store.svelte";
+  import { store, type ArtifactInfo, type WsEntry } from "./store.svelte";
   import AgentPicker from "./AgentPicker.svelte";
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
   import { t } from "./i18n.svelte";
+  import { whenLabel } from "./time";
 
   let draft = $state("");
   let contextOpen = $state(false);
@@ -71,20 +72,20 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (atOpen && atMatches.length) {
+    if (atOpen && atItems.length) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        atIndex = (atIndex + 1) % atMatches.length;
+        atIndex = (atIndex + 1) % atItems.length;
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        atIndex = (atIndex - 1 + atMatches.length) % atMatches.length;
+        atIndex = (atIndex - 1 + atItems.length) % atItems.length;
         return;
       }
       if (e.key === "Tab" || e.key === "Enter") {
         e.preventDefault();
-        pickFile(atMatches[atIndex]);
+        pickAt(atItems[atIndex]);
         return;
       }
       if (e.key === "Escape") {
@@ -122,7 +123,7 @@
     }
   }
 
-  // ----- @ files -----
+  // ----- @ designs and files -----
   /** Where the caret is, so "@" completion reads the word being typed. */
   let caret = $state(0);
   let atIndex = $state(0);
@@ -169,12 +170,59 @@
     scored.sort((a, b) => a[0] - b[0] || a[1].path.length - b[1].path.length);
     return scored.slice(0, 30).map(([, e]) => e);
   });
-  const atOpen = $derived(atToken !== null && !atHidden && (atMatches.length > 0 || store.treeLoading));
+  /** Designs to attach: the five most recent with nothing typed, else those
+   *  whose name (first) or a tag has the query, most recent first. */
+  const designMatches = $derived.by((): ArtifactInfo[] => {
+    if (!atToken) return [];
+    const q = atToken.query;
+    if (!q) return store.designs.slice(0, 5);
+    const scored: [number, ArtifactInfo][] = [];
+    for (const d of store.designs) {
+      const title = d.title.toLowerCase();
+      let score = -1;
+      if (title.startsWith(q)) score = 0;
+      else if (title.includes(q)) score = 1;
+      else if (d.tags.some((tag) => tag.toLowerCase().includes(q))) score = 2;
+      if (score >= 0) scored.push([score, d]);
+    }
+    scored.sort((a, b) => a[0] - b[0] || b[1].updated_at - a[1].updated_at);
+    return scored.slice(0, 8).map(([, d]) => d);
+  });
+
+  /** One list for the keyboard: designs first, then files. */
+  type AtItem = { kind: "design"; design: ArtifactInfo } | { kind: "file"; file: WsEntry };
+  const atItems = $derived<AtItem[]>([
+    ...designMatches.map((design) => ({ kind: "design" as const, design })),
+    ...atMatches.map((file) => ({ kind: "file" as const, file })),
+  ]);
+  const atOpen = $derived(atToken !== null && !atHidden && (atItems.length > 0 || store.treeLoading));
 
   $effect(() => {
-    void atMatches.length;
+    void atItems.length;
     atIndex = 0;
   });
+
+  function pickAt(item: AtItem) {
+    if (item.kind === "design") pickDesign(item.design);
+    else pickFile(item.file);
+  }
+
+  /** Put "@name" in place of what was typed and attach the design. */
+  function pickDesign(d: ArtifactInfo) {
+    if (!atToken) return;
+    const before = draft.slice(0, atToken.start);
+    const after = draft.slice(caret);
+    const inserted = `@${d.title} `;
+    draft = before + inserted + after.replace(/^\s+/, "");
+    const at = before.length + inserted.length;
+    void attachDesign(d.id);
+    queueMicrotask(() => {
+      box?.focus();
+      box?.setSelectionRange(at, at);
+      caret = at;
+      grow();
+    });
+  }
 
   /** Put "@path" in place of what was typed and attach the file. */
   function pickFile(entry: WsEntry) {
@@ -317,7 +365,7 @@
           <!-- A design goes to the conductor as its brief and, with ink, a picture of its board. -->
           <div class="rule"></div>
           <div class="mlab-sm mhead">{t("composer.attachDesign")}</div>
-          {#each store.designs.slice(0, 6) as d (d.id)}
+          {#each store.designs.slice(0, 5) as d (d.id)}
             <button type="button" class="mitem design" role="menuitem" onclick={() => attachDesign(d.id)} style="--bar: {d.color || 'transparent'}">
               <span class="mono mkey">▦</span>
               <span class="mbody"><span class="mtitle">{d.title}</span>{#if d.tags.length}<span class="mdesc">{d.tags.join(" · ")}</span>{/if}</span>
@@ -325,6 +373,12 @@
           {:else}
             <div class="mono mnone">{t("composer.noDesigns")}</div>
           {/each}
+          {#if store.designs.length > 5}
+            <button type="button" class="mitem" role="menuitem" onclick={() => insertAtCaret("@")}>
+              <span class="mono mkey">@</span>
+              <span class="mbody"><span class="mtitle">{t("composer.allDesigns", { n: store.designs.length })}</span><span class="mdesc">{t("composer.allDesignsDesc")}</span></span>
+            </button>
+          {/if}
         {/if}
         <div class="rule"></div>
         <button type="button" class="mitem" role="menuitem" onclick={() => insertAtCaret("/")}>
@@ -339,13 +393,38 @@
     </Popover>
     <div class="boxwrap">
       {#if atOpen}
-        <!-- Files in the track's folder, narrowed by what follows the "@". -->
+        <!-- Designs (most recent first), then files in the track's folder, narrowed by what follows the "@". -->
         <div class="slash" role="listbox" aria-label={t("composer.files")}>
+          {#if designMatches.length}
+            <div class="mlab-sm ph">{t("composer.designs")}</div>
+            {#each designMatches as d, i (d.id)}
+              <div
+                class="frow"
+                class:on={i === atIndex}
+                role="option"
+                aria-selected={i === atIndex}
+                tabindex="-1"
+                style="box-shadow: inset 2px 0 0 {d.color || 'transparent'}"
+                onmouseenter={() => (atIndex = i)}
+                onmousedown={(e) => e.preventDefault()}
+                onclick={() => pickDesign(d)}
+                onkeydown={() => {}}
+              >
+                <span class="ficon mono">▦</span>
+                <span class="fcol">
+                  <span class="fn">{d.title}</span>
+                  {#if d.tags.length}<span class="mono fp">{d.tags.join(" · ")}</span>{/if}
+                </span>
+                <span class="mono fs">{whenLabel(d.updated_at, store.now, store.lang)}</span>
+              </div>
+            {/each}
+          {/if}
           <div class="mlab-sm ph">{t("composer.files")}</div>
           {#if atMatches.length === 0}
-            <div class="mono waiting"><span class="dot pulse"></span>{t("composer.filesLoading")}</div>
+            <div class="mono waiting"><span class="dot pulse"></span>{store.treeLoading ? t("composer.filesLoading") : t("composer.noFiles")}</div>
           {/if}
-          {#each atMatches as f, i (f.path)}
+          {#each atMatches as f, j (f.path)}
+            {@const i = designMatches.length + j}
             <div
               class="frow"
               class:on={i === atIndex}

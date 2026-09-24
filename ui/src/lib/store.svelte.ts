@@ -886,7 +886,7 @@ class Store {
 
   /** The designs, most recently touched first. */
   get designs(): ArtifactInfo[] {
-    return this.artifacts.filter((a) => a.kind === "design");
+    return this.artifacts.filter((a) => a.kind === "design").sort((a, b) => b.updated_at - a.updated_at);
   }
 
   /**
