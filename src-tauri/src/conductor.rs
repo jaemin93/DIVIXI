@@ -18,8 +18,8 @@
 //! so a closed lane (closed on purpose, or gone with an app restart) reopens
 //! with its conversation when the conductor calls it by name again.
 //!
-//! Lane work is asynchronous from the conductor's point of view: `spawn_lane`
-//! and `ask_lane` return as soon as the lane has the task, and when the lane
+//! Lane work is asynchronous from the conductor's point of view: `spawn_worker`
+//! and `ask_worker` return as soon as the lane has the task, and when the lane
 //! finishes, Divixi hands its report to the conductor as a new turn. A
 //! blocking tool would trip the agent's own MCP call timeout on any lane
 //! that runs for minutes, which real work does.
@@ -45,7 +45,7 @@ pub const CONDUCTOR_LANE: &str = "conductor";
 /// Prefix of conductor prompts that Divixi itself injects (lane reports).
 /// Language-neutral; the timeline shows these as system lines, not as the
 /// human speaking, and the preamble tells the conductor what it means.
-pub const REPORT_PREFIX: &str = "[lane-report]";
+pub const REPORT_PREFIX: &str = "[worker-report]";
 /// Heads the list of files attached to a human message, in the stored
 /// prompt and in what the conductor reads. The UI splits on it to show the
 /// files as chips under the message.
@@ -180,21 +180,21 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
             format!("\n이 트랙의 목적: {intent}\n")
         };
         return format!(
-            r#"당신은 Divixi의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 레인(lane)이라는 별도의 에이전트 세션에 맡깁니다.
+            r#"당신은 Divixi의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 작업자(worker)라는 별도의 에이전트 세션에 맡깁니다.
 
 트랙 이름: {name}{about}
 규칙:
-- 사람의 메시지가 질문이나 잡담이면 직접 답합니다. 레인을 열지 않습니다.
-- 코드를 읽거나 고치거나 조사하는 일처럼 실제 작업이 필요하면 `spawn_lane`으로 레인을 열어 맡깁니다. 레인 이름은 짧은 영문 소문자(예: fix-parser)로 짓고, task에는 레인이 혼자 끝낼 수 있을 만큼 구체적으로 적습니다.
-- `spawn_lane`과 `ask_lane`은 레인이 일을 받는 즉시 돌아옵니다. 결과를 기다리지 말고, 사람에게 무엇을 맡겼는지 한 문장으로 알린 뒤 턴을 끝냅니다. 레인이 끝나면 `{REPORT_PREFIX}`로 시작하는 메시지가 당신에게 옵니다. 그때 무슨 일이 있었는지 한두 문단으로 사람에게 설명합니다. 보고를 그대로 붙여넣지 말고 요점만 말합니다.
-- 같은 레인에 이어서 시킬 일은 `ask_lane`으로 보냅니다. 레인은 이전 대화를 기억합니다.
-- 레인 목록은 열린 것과 닫힌 것 모두 `lane_status`로 봅니다. 터미널이나 파일을 뒤져 레인을 찾지 않습니다.
-- 닫힌 레인은 같은 이름으로 `spawn_lane`이나 `ask_lane`을 부르면 이전 대화를 기억한 채 다시 열립니다. 기억을 버리고 처음부터 시작하려면 `spawn_lane`에 fresh=true를 줍니다. `close_lane`은 세션만 닫고 기록은 남깁니다.
+- 사람의 메시지가 질문이나 잡담이면 직접 답합니다. 작업자를 부르지 않습니다.
+- 코드를 읽거나 고치거나 조사하는 일처럼 실제 작업이 필요하면 `spawn_worker`로 작업자를 불러 맡깁니다. 작업자 이름은 짧은 영문 소문자(예: fix-parser)로 짓고, task에는 작업자가 혼자 끝낼 수 있을 만큼 구체적으로 적습니다.
+- `spawn_worker`와 `ask_worker`는 작업자가 일을 받는 즉시 돌아옵니다. 결과를 기다리지 말고, 사람에게 무엇을 맡겼는지 한 문장으로 알린 뒤 턴을 끝냅니다. 작업자가 끝나면 `{REPORT_PREFIX}`로 시작하는 메시지가 당신에게 옵니다. 그때 무슨 일이 있었는지 한두 문단으로 사람에게 설명합니다. 보고를 그대로 붙여넣지 말고 요점만 말합니다.
+- 같은 작업자에게 이어서 시킬 일은 `ask_worker`로 보냅니다. 작업자는 이전 대화를 기억합니다.
+- 작업자 목록은 열린 것과 닫힌 것 모두 `worker_status`로 봅니다. 터미널이나 파일을 뒤져 작업자를 찾지 않습니다.
+- 닫힌 작업자는 같은 이름으로 `spawn_worker`나 `ask_worker`를 부르면 이전 대화를 기억한 채 다시 열립니다. 기억을 버리고 처음부터 시작하려면 `spawn_worker`에 fresh=true를 줍니다. `close_worker`는 세션만 닫고 기록은 남깁니다.
 - 도구가 오류를 돌려주면 오류 문구에 적힌 대로 한 번만 다시 시도하고, 그래도 안 되면 사람에게 무엇이 막혔는지 말합니다. 같은 도구를 반복해서 부르지 않습니다.
-- 사람이 골라야 할 일(여러 갈래 중 선택, 되돌리기 어려운 변경, 취향이나 우선순위)은 스스로 정하지 않습니다. 선택지를 본문에 A/B/C로 늘어놓지 말고 `request_decision`을 부르세요. 앱이 선택지를 버튼이 있는 결정 카드로 보여 줍니다. 부른 뒤에는 무엇을 물었는지 한 문장만 말하고 턴을 끝냅니다. 사람의 답은 `{DECISION_PREFIX}`로 시작하는 메시지로 옵니다. 레인 보고에 사람이 정해야 할 질문이 있으면 그것도 `request_decision`으로 올립니다. 사람이 대화 중에 직접 정한 것은 `record_decision`으로 남깁니다.
+- 사람이 골라야 할 일(여러 갈래 중 선택, 되돌리기 어려운 변경, 취향이나 우선순위)은 스스로 정하지 않습니다. 선택지를 본문에 A/B/C로 늘어놓지 말고 `request_decision`을 부르세요. 앱이 선택지를 버튼이 있는 결정 카드로 보여 줍니다. 부른 뒤에는 무엇을 물었는지 한 문장만 말하고 턴을 끝냅니다. 사람의 답은 `{DECISION_PREFIX}`로 시작하는 메시지로 옵니다. 작업자 보고에 사람이 정해야 할 질문이 있으면 그것도 `request_decision`으로 올립니다. 사람이 대화 중에 직접 정한 것은 `record_decision`으로 남깁니다.
 - 한국어로 말합니다. 짧게, 명확하게.
 
-작업 디렉터리는 {cwd} 입니다. 레인도 같은 디렉터리에서 일합니다.
+작업 디렉터리는 {cwd} 입니다. 작업자도 같은 디렉터리에서 일합니다.
 "#,
             name = track.name,
             cwd = track.cwd,
@@ -206,21 +206,21 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
         format!("\nWhat this track is for: {intent}\n")
     };
     format!(
-        r#"You are Divixi's conductor. You are the only one who talks to the human; real work is delegated to lanes, which are separate agent sessions.
+        r#"You are Divixi's conductor. You are the only one who talks to the human; real work is delegated to workers, which are separate agent sessions.
 
 Track: {name}{about}
 Rules:
-- If the human's message is a question or small talk, answer it yourself. Do not open a lane.
-- If real work is needed (reading, changing or investigating code), open a lane with `spawn_lane`. Name it short and lowercase (e.g. fix-parser) and make the task specific enough for the lane to finish alone.
-- `spawn_lane` and `ask_lane` return as soon as the lane has the task. Do not wait for the result: tell the human in one sentence what you delegated and end your turn. When the lane finishes, a message starting with `{REPORT_PREFIX}` reaches you. Then explain to the human in a paragraph or two what happened. Do not paste the report; give the gist.
-- Follow-ups for the same lane go through `ask_lane`; the lane remembers its earlier turns.
-- `lane_status` lists every lane, open and closed. Never hunt for lanes through the terminal or files.
-- A closed lane reopens with its earlier conversation when you call `spawn_lane` or `ask_lane` with its name. To drop that memory and start over, pass fresh=true to `spawn_lane`. `close_lane` only closes the session; the record stays.
+- If the human's message is a question or small talk, answer it yourself. Do not open a worker.
+- If real work is needed (reading, changing or investigating code), open a worker with `spawn_worker`. Name it short and lowercase (e.g. fix-parser) and make the task specific enough for the worker to finish alone.
+- `spawn_worker` and `ask_worker` return as soon as the worker has the task. Do not wait for the result: tell the human in one sentence what you delegated and end your turn. When the worker finishes, a message starting with `{REPORT_PREFIX}` reaches you. Then explain to the human in a paragraph or two what happened. Do not paste the report; give the gist.
+- Follow-ups for the same worker go through `ask_worker`; the worker remembers its earlier turns.
+- `worker_status` lists every worker, open and closed. Never hunt for workers through the terminal or files.
+- A closed worker reopens with its earlier conversation when you call `spawn_worker` or `ask_worker` with its name. To drop that memory and start over, pass fresh=true to `spawn_worker`. `close_worker` only closes the session; the record stays.
 - If a tool returns an error, retry once as the message suggests; if that fails, tell the human what is blocked. Never call the same tool repeatedly.
-- Choices that belong to the human (a choice between directions, hard-to-undo changes, taste or priorities) are not yours to make. Do not list options as A/B/C in prose: call `request_decision`, and the app shows them as a decision card with buttons. After calling it, say in one sentence what you asked and end your turn. The human's answer arrives as a message starting with `{DECISION_PREFIX}`. If a lane report raises a question only the human can answer, put that to them with `request_decision` too. Decisions the human makes in conversation are recorded with `record_decision`.
+- Choices that belong to the human (a choice between directions, hard-to-undo changes, taste or priorities) are not yours to make. Do not list options as A/B/C in prose: call `request_decision`, and the app shows them as a decision card with buttons. After calling it, say in one sentence what you asked and end your turn. The human's answer arrives as a message starting with `{DECISION_PREFIX}`. If a worker report raises a question only the human can answer, put that to them with `request_decision` too. Decisions the human makes in conversation are recorded with `record_decision`.
 - Speak English. Short and clear.
 
-The working directory is {cwd}. Lanes work in the same directory.
+The working directory is {cwd}. Workers work in the same directory.
 "#,
         name = track.name,
         cwd = track.cwd,
@@ -241,15 +241,15 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
 
     vec![
         Tool::new(
-            "spawn_lane",
-            &format!("Open a lane (a separate agent session) and give it a task. Returns at once with the run id; the lane works in the background and its report reaches you later as a message starting with {REPORT_PREFIX}. A closed lane with this name is reopened with its earlier conversation (the result says resumed=true); pass fresh=true to start it over without that memory. Use for real work; answer questions yourself instead."),
+            "spawn_worker",
+            &format!("Open a worker (a separate agent session) and give it a task. Returns at once with the run id; the worker works in the background and its report reaches you later as a message starting with {REPORT_PREFIX}. A closed worker with this name is reopened with its earlier conversation (the result says resumed=true); pass fresh=true to start it over without that memory. Use for real work; answer questions yourself instead."),
             json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Short lane name, lowercase, e.g. fix-parser. New, or the name of a closed lane to reopen." },
-                    "task": { "type": "string", "description": "What the lane should do, specific enough to finish alone." },
-                    "agent": { "type": "string", "description": "Agent id to run the lane on: claude_code, codex, copilot, antigravity. Defaults to the lane's earlier agent, else the conductor's." },
-                    "fresh": { "type": "boolean", "description": "Start over without the closed lane's earlier conversation. Default false." }
+                    "name": { "type": "string", "description": "Short worker name, lowercase, e.g. fix-parser. New, or the name of a closed worker to reopen." },
+                    "task": { "type": "string", "description": "What the worker should do, specific enough to finish alone." },
+                    "agent": { "type": "string", "description": "Agent id to run the worker on: claude_code, codex, copilot, antigravity. Defaults to the worker's earlier agent, else the conductor's." },
+                    "fresh": { "type": "boolean", "description": "Start over without the closed worker's earlier conversation. Default false." }
                 },
                 "required": ["name", "task"]
             }),
@@ -265,12 +265,12 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
             },
         ),
         Tool::new(
-            "ask_lane",
-            &format!("Send a follow-up message to a lane. The lane remembers its earlier turns; a closed lane is reopened with that memory. Returns at once; the lane's answer reaches you later as a {REPORT_PREFIX} message."),
+            "ask_worker",
+            &format!("Send a follow-up message to a worker. The worker remembers its earlier turns; a closed worker is reopened with that memory. Returns at once; the worker's answer reaches you later as a {REPORT_PREFIX} message."),
             json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Lane name given to spawn_lane." },
+                    "name": { "type": "string", "description": "Worker name given to spawn_worker." },
                     "message": { "type": "string" }
                 },
                 "required": ["name", "message"]
@@ -285,8 +285,8 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
             },
         ),
         Tool::new(
-            "lane_status",
-            "List every lane of this track, open or closed: agent, whether its session is open, whether a turn is in flight (with its run id), how many runs it has, and its last run with status. A closed lane marked resumable reopens with its memory when you call spawn_lane or ask_lane with its name.",
+            "worker_status",
+            "List every worker of this track, open or closed: agent, whether its session is open, whether a turn is in flight (with its run id), how many runs it has, and its last run with status. A closed worker marked resumable reopens with its memory when you call spawn_worker or ask_worker with its name.",
             json!({ "type": "object", "properties": {}, "additionalProperties": false }),
             move |_args| {
                 let (app, track) = status.clone();
@@ -317,8 +317,8 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
             },
         ),
         Tool::new(
-            "close_lane",
-            "Close a lane's session. Its runs and its memory stay in the record; spawn_lane or ask_lane with the same name reopens it.",
+            "close_worker",
+            "Close a worker's session. Its runs and its memory stay in the record; spawn_worker or ask_worker with the same name reopens it.",
             json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" } },
@@ -333,14 +333,14 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                     let key = lane_key(&track, &name);
                     match lanes.get(&key) {
                         Some(live) if live.running.is_some() => Err(format!(
-                            "lane {name} is still working on run {}. Wait for its {REPORT_PREFIX} before closing it.",
+                            "worker {name} is still working on run {}. Wait for its {REPORT_PREFIX} before closing it.",
                             live.running.as_deref().unwrap_or_default()
                         )),
                         Some(_) => {
                             lanes.remove(&key);
                             Ok(Value::String(format!("closed {name}")))
                         }
-                        None => Err(format!("no open lane {name}")),
+                        None => Err(format!("no open worker {name}")),
                     }
                 }
             },
@@ -562,10 +562,10 @@ fn remember_lane(state: &AppState, track: &str, name: &str, record: &LaneRecord)
     match serde_json::to_string(record) {
         Ok(json) => {
             if let Err(err) = state.store.set_meta(&lane_record_key(track, name), &json) {
-                tracing::warn!(lane = %name, %err, "could not remember lane session id");
+                tracing::warn!(lane = %name, %err, "could not remember worker session id");
             }
         }
-        Err(err) => tracing::warn!(lane = %name, %err, "could not encode lane record"),
+        Err(err) => tracing::warn!(lane = %name, %err, "could not encode worker record"),
     }
 }
 
@@ -573,7 +573,7 @@ fn remember_lane(state: &AppState, track: &str, name: &str, record: &LaneRecord)
 /// now. The conductor's own lane is not a lane to it.
 async fn lane_list(state: &AppState, track: &str) -> Vec<Value> {
     let history = state.store.lanes(track).unwrap_or_else(|err| {
-        tracing::warn!(%err, "could not list lanes from the store");
+        tracing::warn!(%err, "could not list workers from the store");
         Vec::new()
     });
     let lanes = state.sessions.lanes.lock().await;
@@ -668,8 +668,8 @@ fn track_info(state: &AppState, track: &str) -> Result<TrackInfo, String> {
         .ok_or_else(|| format!("no track {track}"))
 }
 
-/// Give a lane a turn and return at once. `open` is `spawn_lane` (a lane
-/// that is already open is refused); `ask_lane` needs the lane to exist,
+/// Give a lane a turn and return at once. `open` is `spawn_worker` (a lane
+/// that is already open is refused); `ask_worker` needs the lane to exist,
 /// open or in the record. A lane that is not open but has a remembered
 /// session is reopened with it, unless `fresh` says to forget. The turn
 /// runs in the background; when it ends, its report is handed to the
@@ -696,14 +696,14 @@ async fn start_lane_turn(
         let (agent_id, turns, session, resumed, note) = match (lanes.get_mut(&key), open) {
             (Some(live), true) => {
                 return Err(format!(
-                    "lane {name} is already open (agent {}, {} turns). Send follow-ups with ask_lane(name=\"{name}\", message=...), or spawn_lane with a new name.",
+                    "worker {name} is already open (agent {}, {} turns). Send follow-ups with ask_worker(name=\"{name}\", message=...), or spawn_worker with a new name.",
                     live.agent, live.turns
                 ))
             }
             (Some(live), false) => {
                 if let Some(run) = &live.running {
                     return Err(format!(
-                        "lane {name} is still working on run {run}. Wait for its {REPORT_PREFIX} before sending more."
+                        "worker {name} is still working on run {run}. Wait for its {REPORT_PREFIX} before sending more."
                     ));
                 }
                 live.turns += 1;
@@ -722,7 +722,7 @@ async fn start_lane_turn(
                         .map(|l| l.name.as_str())
                         .collect();
                     return Err(format!(
-                        "no lane {name}. Open lanes: {open_names:?}. Closed lanes: {closed:?}. Use spawn_lane to create one."
+                        "no worker {name}. Open workers: {open_names:?}. Closed workers: {closed:?}. Use spawn_worker to create one."
                     ));
                 }
                 // Agent: the caller's choice, else the lane's earlier one, else
@@ -743,7 +743,7 @@ async fn start_lane_turn(
                 let chosen = if agent_id == info.lane_agent() { info.lane_config() } else { &empty };
                 let mut opts = session_options(&state, &agent_id, &info.cwd, chosen, None);
                 opts.resume = resume;
-                tracing::info!(%track, lane = %name, agent = %agent_id, resume = ?opts.resume, "opening lane session");
+                tracing::info!(%track, lane = %name, agent = %agent_id, resume = ?opts.resume, "opening worker session");
                 let session = Arc::new(AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?);
                 let resumed = session.resumed();
                 remember_lane(
@@ -768,9 +768,9 @@ async fn start_lane_turn(
                 let note = if resumed {
                     Some("Reopened with its earlier conversation.")
                 } else if wanted {
-                    Some("Its earlier conversation could not be restored; the lane starts fresh.")
+                    Some("Its earlier conversation could not be restored; the worker starts fresh.")
                 } else if past.is_some() {
-                    Some("Started fresh; earlier runs stay in the record but the lane does not remember them.")
+                    Some("Started fresh; earlier runs stay in the record but the worker does not remember them.")
                 } else {
                     None
                 };
@@ -811,7 +811,7 @@ async fn start_lane_turn(
                 let _ = tx.send(LaneEvent::Failed { error: err.to_string() });
             }
             Err(_) => {
-                let _ = tx.send(LaneEvent::Failed { error: "lane turn timed out".to_string() });
+                let _ = tx.send(LaneEvent::Failed { error: "worker turn timed out".to_string() });
             }
         }
         drop(tx);
@@ -832,12 +832,12 @@ async fn start_lane_turn(
 
     let mut result = json!({
         "run": run,
-        "lane": name,
+        "worker": name,
         "agent": agent_id,
         "turn": turns,
         "resumed": resumed,
         "status": "running",
-        "note": format!("The lane is working. Its report will arrive as a {REPORT_PREFIX} message; tell the human what you delegated and end your turn."),
+        "note": format!("The worker is working. Its report will arrive as a {REPORT_PREFIX} message; tell the human what you delegated and end your turn."),
     });
     if let Some(note) = note {
         result["memory"] = Value::String(note.to_string());
@@ -851,7 +851,7 @@ async fn report_to_conductor(app: AppHandle, track: String, lane: String, run: S
     let summary = match state.store.run(&run) {
         Ok(Some(s)) => s,
         _ => {
-            tracing::warn!(%run, "lane run vanished before reporting");
+            tracing::warn!(%run, "worker run vanished before reporting");
             return;
         }
     };
@@ -861,7 +861,7 @@ async fn report_to_conductor(app: AppHandle, track: String, lane: String, run: S
         output = format!("{}…\n(truncated: read_report(\"{run}\") has it all)", output.chars().take(MAX).collect::<String>());
     }
     let text = format!(
-        "{REPORT_PREFIX} lane={lane} run={run} status={} tools={} duration_ms={}{}\n\n{}",
+        "{REPORT_PREFIX} worker={lane} run={run} status={} tools={} duration_ms={}{}\n\n{}",
         summary.status.as_str(),
         summary.tool_count,
         summary.duration_ms.unwrap_or(0),

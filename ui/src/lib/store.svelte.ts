@@ -305,7 +305,7 @@ export const artifactKey = (id: string) => `artifact:${id}`;
 const EMPTY_DOC: DesignDoc = { version: 0, nodes: [], edges: [], changes: [], next: 0 };
 
 /** Prefix of conductor prompts Orchestra injects itself (lane reports). Language-neutral. */
-export const REPORT_PREFIX = "[lane-report]";
+export const REPORT_PREFIX = "[worker-report]";
 /** Heads the list of files under a human message, as the core stores it. */
 export const ATTACH_MARK = "[attachments]";
 

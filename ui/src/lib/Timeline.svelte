@@ -71,7 +71,7 @@
     return answer ? `${id} · ${answer}` : id;
   }
 
-  /** Tool titles from MCP arrive as `mcp__orchestra__spawn_lane`; show the tool. */
+  /** Tool titles from MCP arrive as `mcp__divixi__spawn_worker`; show the tool. */
   function toolLabel(title: string): string {
     return title.replace(/^mcp__[a-z0-9_-]+__/i, "").replace(/^mcp\.[a-z0-9_-]+\./i, "");
   }

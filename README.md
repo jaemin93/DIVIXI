@@ -13,12 +13,12 @@
 
 **메커니즘과 정책의 분리.** Rust 코어는 레인을 띄우고 이벤트를 나르기만 합니다.
 무엇을 어떻게 분해할지(지휘자 로직)는 에이전트가 정합니다 — 코어에 넣지 않습니다.
-지휘자는 Track마다 하나 있는 오래 사는 ACP 세션이고, 앱 API(`spawn_lane`, `ask_lane`,
+지휘자는 Track마다 하나 있는 오래 사는 ACP 세션이고, 앱 API(`spawn_worker`, `ask_worker`,
 `read_report`, `record_decision` …)를 트랙마다 하나씩 뜨는 프로세스 안 HTTP MCP 서버로
 받습니다(도구가 트랙에 묶여 있어 지휘자가 다른 트랙에 손댈 수 없습니다). 레인도 각각
 오래 사는 세션이라 Claude Code 세션 하나를 열어 두고 계속 시키는 것과 같습니다. 지휘자와
 레인의 세션 id는 스토어에 남아, 앱을 다시 켜거나 레인을 닫았다 열어도 이전 대화를 이어갑니다
-(`session/load`). `lane_status`는 열린 레인과 닫힌 레인을 모두 보여 줍니다.
+(`session/load`). `worker_status`는 열린 레인과 닫힌 레인을 모두 보여 줍니다.
 
 **프로토콜은 한 곳에만.** `crates/acp`만 ACP를 압니다. 그 위는 `LaneEvent`만 봅니다.
 ACP를 지원하지 않는 에이전트는 나중에 같은 채널 뒤에 PTY 백엔드로 붙습니다.
@@ -111,7 +111,7 @@ cargo run -p orchestra-store --example persist -- "Reply with exactly: ORCHESTRA
 
 되는 것: 첫 실행 setup의 에이전트 감지·로그인·다운로드와 테마·언어, 설정의 재감지,
 Track 생성(이름·의도·폴더·지휘자 에이전트)과 편집·삭제, 트랙마다 지휘자 세션(오래 살고,
-재시작 후 `session/load`로 이어짐), 비동기 레인(`[lane-report]`로 지휘자에게 보고, 닫힌 레인
+재시작 후 `session/load`로 이어짐), 비동기 레인(`[worker-report]`로 지휘자에게 보고, 닫힌 레인
 재개, 전체 레인 목록), 레인 뷰(지휘자↔작업자 대화), 작업 폴더 패널(git 변경 사항과 diff, 파일
 트리, 마크다운 미리보기·코드·이미지 뷰어), 스트리밍과 마크다운 렌더링, Kiro식 창
 크롬·레일·Tracks 열·설정, 대화창 폰트·확대·서체·언어(ko/en), SQLite 이벤트 스토어(재시작 후

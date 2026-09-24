@@ -1,11 +1,11 @@
 //! The conductor loop without the desktop shell, in the app's asynchronous
-//! shape: `spawn_lane` returns at once, the lane works in the background,
-//! and its report is handed to the conductor as a new `[레인 보고]` turn.
+//! shape: `spawn_worker` returns at once, the worker works in the background,
+//! and its report is handed to the conductor as a new `[작업자 보고]` turn.
 //!
 //! Run with:
 //!   cargo run -p orchestra-agents --example orchestra -- claude_code
 //!
-//! Checks: a greeting gets no lane; a task gets a lane and a one-line
+//! Checks: a greeting gets no worker; a task gets a worker and a one-line
 //! "delegated" reply; the report turn gets a summary.
 
 use std::sync::Arc;
@@ -17,12 +17,12 @@ use orchestra_mcp::{McpServer, Tool};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-const PREAMBLE: &str = r#"당신은 Orchestra의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 레인(lane)이라는 별도의 에이전트 세션에 맡깁니다.
+const PREAMBLE: &str = r#"당신은 Orchestra의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 작업자(worker)라는 별도의 에이전트 세션에 맡깁니다.
 
 규칙:
-- 사람의 메시지가 질문이나 잡담이면 직접 답합니다. 레인을 열지 않습니다.
-- 코드를 읽거나 고치거나 조사하는 일처럼 실제 작업이 필요하면 `spawn_lane`으로 레인을 열어 맡깁니다. 레인 이름은 짧은 영문 소문자(예: fix-parser)로 짓고, task에는 레인이 혼자 끝낼 수 있을 만큼 구체적으로 적습니다.
-- `spawn_lane`은 레인이 일을 받는 즉시 돌아옵니다. 결과를 기다리지 말고, 사람에게 무엇을 맡겼는지 한 문장으로 알린 뒤 턴을 끝냅니다. 레인이 끝나면 `[레인 보고]`로 시작하는 메시지가 당신에게 옵니다. 그때 무슨 일이 있었는지 한두 문단으로 사람에게 설명합니다.
+- 사람의 메시지가 질문이나 잡담이면 직접 답합니다. 작업자를 부르지 않습니다.
+- 코드를 읽거나 고치거나 조사하는 일처럼 실제 작업이 필요하면 `spawn_worker`로 작업자를 불러 맡깁니다. 작업자 이름은 짧은 영문 소문자(예: fix-parser)로 짓고, task에는 작업자가 혼자 끝낼 수 있을 만큼 구체적으로 적습니다.
+- `spawn_worker`는 작업자가 일을 받는 즉시 돌아옵니다. 결과를 기다리지 말고, 사람에게 무엇을 맡겼는지 한 문장으로 알린 뒤 턴을 끝냅니다. 작업자가 끝나면 `[작업자 보고]`로 시작하는 메시지가 당신에게 옵니다. 그때 무슨 일이 있었는지 한두 문단으로 사람에게 설명합니다.
 - 한국어로 말합니다. 짧게, 명확하게.
 "#;
 
@@ -51,17 +51,17 @@ async fn run() -> anyhow::Result<()> {
     let spawn_spec = spec.clone();
     let spawn_cwd = cwd.clone();
     let spawn = Tool::new(
-        "spawn_lane",
-        "Open a new lane and give it a task. Returns at once; the lane's report arrives later as a [레인 보고] message.",
+        "spawn_worker",
+        "Open a new worker and give it a task. Returns at once; the worker's report arrives later as a [작업자 보고] message.",
         json!({ "type": "object", "properties": { "name": { "type": "string" }, "task": { "type": "string" } }, "required": ["name", "task"] }),
         move |args: Value| {
             let spec = spawn_spec.clone();
             let cwd = spawn_cwd.clone();
             let report_tx = report_tx.clone();
             async move {
-                let name = args["name"].as_str().unwrap_or("lane").to_string();
+                let name = args["name"].as_str().unwrap_or("worker").to_string();
                 let task = args["task"].as_str().unwrap_or("").to_string();
-                println!("    ▸ spawn_lane {name}: {}", task.chars().take(90).collect::<String>());
+                println!("    ▸ spawn_worker {name}: {}", task.chars().take(90).collect::<String>());
                 let started = std::time::Instant::now();
                 let lane = name.clone();
                 tokio::spawn(async move {
@@ -74,13 +74,13 @@ async fn run() -> anyhow::Result<()> {
                     }
                     .await;
                     let report = match outcome {
-                        Ok(out) => format!("[레인 보고] lane={name} status=done duration_ms={}\n\n{out}", started.elapsed().as_millis()),
-                        Err(err) => format!("[레인 보고] lane={name} status=failed error={err}"),
+                        Ok(out) => format!("[작업자 보고] worker={name} status=done duration_ms={}\n\n{out}", started.elapsed().as_millis()),
+                        Err(err) => format!("[작업자 보고] worker={name} status=failed error={err}"),
                     };
-                    println!("    ◂ lane {name} finished in {}ms", started.elapsed().as_millis());
+                    println!("    ◂ worker {name} finished in {}ms", started.elapsed().as_millis());
                     let _ = report_tx.send(report);
                 });
-                Ok(json!({ "lane": name, "status": "running", "note": "Tell the human what you delegated and end your turn." }))
+                Ok(json!({ "worker": name, "status": "running", "note": "Tell the human what you delegated and end your turn." }))
             }
         },
     );
@@ -108,7 +108,7 @@ async fn run() -> anyhow::Result<()> {
     }
 
     // The report comes in on its own time; feed it to the conductor as a turn.
-    println!("\n… waiting for the lane report …");
+    println!("\n… waiting for the worker report …");
     let report = tokio::time::timeout(std::time::Duration::from_secs(600), report_rx.recv())
         .await?
         .ok_or_else(|| anyhow::anyhow!("no report"))?;
