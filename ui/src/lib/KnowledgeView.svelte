@@ -1,0 +1,882 @@
+<script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
+  import { store, agentLabel } from "./store.svelte";
+  import { kb, K_AGENT, K_CONFIG, K_EXTRACT, K_POOL, type KItem, type KSource, type KTab } from "./knowledge.svelte";
+  import KnowledgeGraph from "./KnowledgeGraph.svelte";
+  import ArtifactMenu from "./ArtifactMenu.svelte";
+  import Icon from "./Icon.svelte";
+  import { whenFull, whenLabel } from "./time";
+  import { t } from "./i18n.svelte";
+
+  /**
+   * The knowledge library, after Kiro Crew's: the items agents can search
+   * (listed per document, or found by a search), the entity graph, the
+   * documents themselves with their sync state, and how documents are
+   * described.
+   */
+  const tabs = $derived<{ id: KTab; label: string }[]>([
+    { id: "list", label: t("kb.tab.list") },
+    { id: "graph", label: t("kb.tab.graph") },
+    { id: "sources", label: t("kb.tab.sources") },
+    { id: "settings", label: t("kb.tab.settings") },
+  ]);
+
+  let query = $state(kb.query);
+  let folded = $state<Record<string, boolean>>({});
+  let open = $state<Record<number, boolean>>({});
+  let copied = $state(0);
+  let menu = $state<{ id: string; x: number; y: number } | null>(null);
+  let confirmRemove = $state("");
+
+  const categories = $derived([...new Set(kb.items.map((i) => i.category))].sort());
+  const shown = $derived(kb.category ? kb.items.filter((i) => i.category === kb.category) : kb.items);
+  /** Items grouped by document, in the order they come (a search keeps its ranking). */
+  const groups = $derived.by(() => {
+    const out: { source: KSource | undefined; id: string; items: KItem[] }[] = [];
+    for (const item of shown) {
+      let g = out.find((x) => x.id === item.source_id);
+      if (!g) {
+        g = { id: item.source_id, source: kb.sources.find((s) => s.id === item.source_id), items: [] };
+        out.push(g);
+      }
+      g.items.push(item);
+    }
+    return out;
+  });
+
+  const current = $derived(kb.indexing.find((s) => s.status === "indexing"));
+
+  function name(s: KSource | undefined, id: string): string {
+    return s ? kb.nameOf(s) : id;
+  }
+
+  function preview(item: KItem): string {
+    const text = item.summary || item.content.replace(/\s+/g, " ");
+    return text.length > 260 ? `${text.slice(0, 260)}…` : text;
+  }
+
+  async function copy(item: KItem) {
+    await navigator.clipboard.writeText(item.content);
+    copied = item.id;
+    setTimeout(() => {
+      if (copied === item.id) copied = 0;
+    }, 1200);
+  }
+
+  function statusLabel(s: KSource): string {
+    switch (s.status) {
+      case "indexing":
+        return t("kb.status.indexing", { done: s.done, total: s.total });
+      case "pending":
+        return t("kb.status.pending");
+      case "synced":
+        return t("kb.status.synced");
+      case "missing":
+        return t("kb.status.missing");
+      case "duplicate":
+        return t("kb.status.duplicate");
+      default:
+        return t("kb.status.error");
+    }
+  }
+
+  // Settings: read once when the tab opens, written as they change.
+  let sAgent = $state("");
+  let sConfig = $state<Record<string, string>>({});
+  let sPool = $state(2);
+  let sExtract = $state(true);
+  let sLoaded = $state(false);
+
+  $effect(() => {
+    if (kb.tab !== "settings" || sLoaded) return;
+    void (async () => {
+      const get = (key: string) => invoke<string | null>("get_setting", { key }).catch(() => null);
+      const [agent, config, pool, extract] = await Promise.all([get(K_AGENT), get(K_CONFIG), get(K_POOL), get(K_EXTRACT)]);
+      sAgent = agent || store.readyAgents[0]?.kind || "";
+      try {
+        sConfig = config ? JSON.parse(config) : {};
+      } catch {
+        sConfig = {};
+      }
+      sPool = Math.min(5, Math.max(1, Number(pool) || 2));
+      sExtract = extract !== "off";
+      sLoaded = true;
+    })();
+  });
+
+  const modelOption = $derived(store.optionsOf(sAgent).find((o) => o.category === "model"));
+
+  async function save(key: string, value: string) {
+    try {
+      await invoke("set_setting", { key, value });
+    } catch (err) {
+      store.lastError = String(err);
+    }
+  }
+
+  async function setAgent(agent: string) {
+    sAgent = agent;
+    sConfig = {};
+    await save(K_AGENT, agent);
+    await save(K_CONFIG, "{}");
+  }
+
+  async function setModel(id: string) {
+    if (!modelOption) return;
+    const next = { ...sConfig };
+    if (id) next[modelOption.id] = id;
+    else delete next[modelOption.id];
+    sConfig = next;
+    await save(K_CONFIG, JSON.stringify(next));
+  }
+
+  const menuSource = $derived(menu ? kb.sources.find((s) => s.id === menu!.id) : undefined);
+  const menuArtifact = $derived(menu ? kb.artifactOf(menu.id) : undefined);
+</script>
+
+<section class="page">
+  <div class="inner">
+    <header>
+      <div class="mlab">KNOWLEDGE</div>
+      <h1 class="serif">{t("kb.title")}</h1>
+      <p class="sub">{t("kb.sub")}</p>
+    </header>
+
+    <div class="tabs" role="tablist">
+      {#each tabs as tab (tab.id)}
+        <button role="tab" aria-selected={kb.tab === tab.id} class:on={kb.tab === tab.id} onclick={() => kb.setTab(tab.id)}>{tab.label}</button>
+      {/each}
+    </div>
+
+    <div class="banner" class:busy={!!kb.indexing.length}>
+      {#if current}
+        <span class="pulse"></span>
+        <span>{t("kb.indexingNow", { name: kb.nameOf(current), done: current.done, total: current.total })}</span>
+        {#if kb.indexing.length > 1}<span class="dim">· {t("kb.queued", { n: kb.indexing.length - 1 })}</span>{/if}
+      {:else if kb.indexing.length}
+        <span class="pulse"></span><span>{t("kb.queued", { n: kb.indexing.length })}</span>
+      {:else}
+        <span class="ok">✓</span>
+        <span>{t("kb.searchReady")}</span>
+        <span class="dim">· {t("kb.syncedCount", { done: kb.syncedCount, total: kb.sources.length })}</span>
+      {/if}
+    </div>
+
+    {#if kb.tab === "list"}
+      <div class="filters">
+        <input
+          class="search"
+          placeholder={t("kb.searchPlaceholder")}
+          bind:value={query}
+          onkeydown={(e) => {
+            if (e.key === "Enter") {
+              kb.query = query;
+              void kb.search(query);
+            } else if (e.key === "Escape" && query) {
+              query = "";
+              kb.query = "";
+              void kb.search("");
+            }
+          }}
+        />
+        <select bind:value={kb.category} aria-label={t("kb.allTypes")}>
+          <option value="">{t("kb.allTypes")}</option>
+          {#each categories as c (c)}<option value={c}>{c.replace(/_/g, " ")}</option>{/each}
+        </select>
+        <select bind:value={kb.sourceFilter} onchange={() => kb.search(kb.shownQuery)} aria-label={t("kb.allSources")}>
+          <option value="">{t("kb.allSources")}</option>
+          {#each kb.sources as s (s.id)}<option value={s.id}>{kb.nameOf(s)}</option>{/each}
+        </select>
+      </div>
+
+      {#if kb.shownQuery}
+        <p class="note">{t("kb.results", { n: shown.length, q: kb.shownQuery })}</p>
+      {/if}
+
+      {#if !kb.sources.length}
+        <div class="emptybox">
+          <p>{t("kb.empty")}</p>
+          <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
+        </div>
+      {:else if !shown.length && !kb.loading}
+        <p class="none">{kb.shownQuery ? t("kb.noResults") : t("kb.noItems")}</p>
+      {/if}
+
+      {#each groups as g (g.id)}
+        <div class="group">
+          <button class="ghead" onclick={() => (folded[g.id] = !folded[g.id])} aria-expanded={!folded[g.id]}>
+            <span class="chev" class:shut={folded[g.id]}>▾</span>
+            <Icon name="book" size={14} />
+            <span class="gname">{name(g.source, g.id)}</span>
+            <span class="mono badge">{g.items.length}</span>
+            {#if g.source?.topic}<span class="gtopic">{g.source.topic}</span>{/if}
+            <span class="mono gpath" title={g.source?.uri}>{g.source?.uri}</span>
+          </button>
+          {#if !folded[g.id]}
+            {#each g.items as item (item.id)}
+              <article class="card">
+                <div class="ctop">
+                  <button class="ctitle" onclick={() => (open[item.id] = !open[item.id])}>{item.title || t("kb.untitled")}</button>
+                  <span class="mono cat">{item.category.replace(/_/g, " ")}</span>
+                </div>
+                {#if open[item.id]}
+                  <pre class="content">{item.content}</pre>
+                {:else}
+                  <p class="summary">{preview(item)}</p>
+                {/if}
+                <div class="cfoot">
+                  <span class="mono meta" title={whenFull(item.created_at, store.lang)}>{whenLabel(item.created_at, store.now, store.lang)}</span>
+                  {#if item.section}<span class="mono meta">§ {item.section}</span>{/if}
+                  <span class="mono meta">L{item.line_start}-{item.line_end}</span>
+                  {#each item.tags as tag (tag)}<span class="mono meta">#{tag}</span>{/each}
+                  {#if item.match_type}<span class="mono meta match">{item.match_type} · {item.score?.toFixed(3)}</span>{/if}
+                  <span class="grow"></span>
+                  <button class="btn sm" onclick={() => copy(item)}>{copied === item.id ? t("kb.copied") : t("kb.copy")}</button>
+                </div>
+              </article>
+            {/each}
+          {/if}
+        </div>
+      {/each}
+    {:else if kb.tab === "graph"}
+      <KnowledgeGraph />
+    {:else if kb.tab === "sources"}
+      <p class="note">{t("kb.sourcesNote")}</p>
+      <div class="actions">
+        <span class="mono dim">{t("kb.formats", { list: kb.formats.slice(0, 12).join(" ") })}…</span>
+        <span class="grow"></span>
+        <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
+      </div>
+      {#if !kb.sources.length}
+        <p class="none">{t("kb.empty")}</p>
+      {/if}
+      {#each kb.sources as s (s.id)}
+        {@const art = kb.artifactOf(s.id)}
+        <div
+          class="source"
+          style="border-left-color: {art?.color || 'transparent'}"
+          oncontextmenu={(e) => {
+            e.preventDefault();
+            menu = { id: s.id, x: e.clientX, y: e.clientY };
+          }}
+          role="presentation"
+        >
+          <div class="sbody">
+            <div class="sname">{kb.nameOf(s)}</div>
+            <div class="mono spath">{s.source_type} · {s.uri}</div>
+            {#if s.topic}<div class="stopic">{s.topic}</div>{/if}
+            {#if s.error}<div class="serr" class:warn={s.status === "synced"}>{s.error}</div>{/if}
+            <div class="chips">
+              {#each s.themes as theme (theme)}<span class="theme">{theme}</span>{/each}
+              {#each art?.tags ?? [] as tag (tag)}<span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>{/each}
+            </div>
+          </div>
+          <span class="pill {s.status}">{statusLabel(s)}</span>
+          <span class="mono meta">{t("kb.itemCount", { n: s.items })}</span>
+          <span class="mono meta" title={s.last_synced ? whenFull(s.last_synced, store.lang) : ""}>{s.last_synced ? whenLabel(s.last_synced, store.now, store.lang) : "—"}</span>
+          <button class="btn sm" disabled={s.status === "indexing" || s.status === "pending"} onclick={() => kb.sync(s.id)}>{t("kb.sync")}</button>
+          {#if confirmRemove === s.id}
+            <button class="btn sm danger" onclick={async () => { confirmRemove = ""; const why = await kb.remove(s.id); if (why) store.lastError = why; }}>{t("kb.removeConfirm")}</button>
+          {:else}
+            <button class="btn sm x" title={t("kb.remove")} aria-label={t("kb.remove")} onclick={() => (confirmRemove = s.id)}>×</button>
+          {/if}
+        </div>
+      {/each}
+    {:else if kb.tab === "settings"}
+      <div class="settings">
+        <h2>{t("kb.set.title")}</h2>
+        <p class="note">{t("kb.set.blurb")}</p>
+
+        <div class="row">
+          <div class="lhs">
+            <div class="label">{t("kb.set.extract")}</div>
+            <div class="help">{t("kb.set.extractHelp")}</div>
+          </div>
+          <button
+            class="toggle"
+            class:on={sExtract}
+            role="switch"
+            aria-checked={sExtract}
+            aria-label={t("kb.set.extract")}
+            onclick={() => {
+              sExtract = !sExtract;
+              void save(K_EXTRACT, sExtract ? "on" : "off");
+            }}><span></span></button
+          >
+        </div>
+
+        <div class="row">
+          <div class="lhs">
+            <div class="label">{t("kb.set.agent")}</div>
+            <div class="help">{t("kb.set.agentHelp")}</div>
+          </div>
+          <select value={sAgent} onchange={(e) => setAgent((e.currentTarget as HTMLSelectElement).value)} disabled={!sExtract}>
+            {#each store.readyAgents as a (a.kind)}<option value={a.kind}>{agentLabel(a.kind)}</option>{/each}
+          </select>
+        </div>
+
+        {#if modelOption}
+          <div class="row">
+            <div class="lhs">
+              <div class="label">{t("kb.set.model")}</div>
+              <div class="help">{t("kb.set.modelHelp")}</div>
+            </div>
+            <select value={sConfig[modelOption.id] ?? ""} onchange={(e) => setModel((e.currentTarget as HTMLSelectElement).value)} disabled={!sExtract}>
+              <option value="">{t("kb.set.modelDefault", { name: store.choiceName(modelOption, modelOption.current) })}</option>
+              {#each modelOption.choices as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
+            </select>
+          </div>
+        {/if}
+
+        <div class="row">
+          <div class="lhs">
+            <div class="label">{t("kb.set.pool")}</div>
+            <div class="help">{t("kb.set.poolHelp")}</div>
+          </div>
+          <input
+            class="num"
+            type="number"
+            min="1"
+            max="5"
+            value={sPool}
+            disabled={!sExtract}
+            onchange={(e) => {
+              sPool = Math.min(5, Math.max(1, Number((e.currentTarget as HTMLInputElement).value) || 2));
+              void save(K_POOL, String(sPool));
+            }}
+          />
+        </div>
+        <p class="note">{t("kb.set.applies")}</p>
+      </div>
+    {/if}
+  </div>
+
+  <footer class="mono">
+    <span>{t("kb.stat.items", { n: kb.stats.items })}</span>
+    <span>{t("kb.stat.entities", { n: kb.stats.entities })}</span>
+    <span>{t("kb.stat.relations", { n: kb.stats.relations })}</span>
+    <span>{t("kb.stat.sources", { n: kb.stats.sources })}</span>
+  </footer>
+</section>
+
+{#if menu && menuSource}
+  <ArtifactMenu
+    x={menu.x}
+    y={menu.y}
+    name={menuArtifact?.title ?? kb.nameOf(menuSource)}
+    color={menuArtifact?.color ?? ""}
+    deleteNote={t("kb.deleteNote")}
+    onclose={() => (menu = null)}
+    onrename={(title) => store.updateArtifact(menuSource.id, { title })}
+    ontags={() => (store.tagDialog = menuSource.id)}
+    oncolor={(color) => store.updateArtifact(menuSource.id, { color })}
+    ondelete={() => kb.remove(menuSource.id)}
+  />
+{/if}
+
+<style>
+  .page {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+  }
+
+  .inner {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 30px 40px 40px;
+    max-width: 1180px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  header h1 {
+    margin: 6px 0 4px;
+    font-size: 30px;
+    font-weight: 400;
+    color: var(--hi);
+  }
+
+  .sub {
+    margin: 0 0 18px;
+    color: var(--dim);
+    font-size: 13.5px;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 16px;
+  }
+
+  .tabs button {
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 9px 14px;
+    font-size: 13.5px;
+    color: var(--dim);
+    margin-bottom: -1px;
+  }
+
+  .tabs button:hover {
+    color: var(--hi);
+  }
+
+  .tabs button.on {
+    color: var(--hi);
+    border-bottom-color: var(--acc);
+  }
+
+  .banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--line);
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--txt);
+    margin-bottom: 16px;
+  }
+
+  .banner .ok {
+    color: var(--ok);
+  }
+
+  .dim {
+    color: var(--lab);
+  }
+
+  .pulse {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--acc);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    50% {
+      opacity: 0.3;
+    }
+  }
+
+  .filters {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+
+  .search {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .search,
+  select,
+  .num {
+    height: 34px;
+    background: var(--inp);
+    border: 1px solid var(--lines);
+    color: var(--txt);
+    padding: 0 10px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+
+  select {
+    max-width: 240px;
+  }
+
+  .num {
+    width: 80px;
+    text-align: center;
+  }
+
+  .note {
+    color: var(--dim);
+    font-size: 12.5px;
+    margin: 0 0 12px;
+    line-height: 1.55;
+  }
+
+  .none {
+    color: var(--lab);
+    font-size: 13px;
+  }
+
+  .emptybox {
+    border: 1px dashed var(--lines);
+    padding: 28px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    color: var(--dim);
+    font-size: 13px;
+    text-align: center;
+  }
+
+  .emptybox p {
+    margin: 0;
+    max-width: 520px;
+    line-height: 1.55;
+  }
+
+  .group {
+    border: 1px solid var(--line);
+    margin-bottom: 12px;
+  }
+
+  .ghead {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 10px 12px;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    color: var(--txt);
+    min-width: 0;
+  }
+
+  .ghead:hover {
+    background: var(--sel);
+  }
+
+  .chev {
+    color: var(--lab);
+    transition: transform 0.15s;
+    width: 10px;
+  }
+
+  .chev.shut {
+    transform: rotate(-90deg);
+  }
+
+  .gname {
+    color: var(--hi);
+    font-size: 13.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 30%;
+  }
+
+  .badge {
+    font-size: 10.5px;
+    color: var(--oktx);
+    background: var(--okbg);
+    border: 1px solid var(--okln);
+    padding: 0 7px;
+    border-radius: 9px;
+  }
+
+  .gtopic {
+    flex: 1;
+    min-width: 0;
+    font-size: 12.5px;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .gpath {
+    max-width: 26%;
+    font-size: 10.5px;
+    color: var(--lab);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: rtl;
+    text-align: left;
+  }
+
+  .card {
+    margin: 0 12px 10px 34px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    padding: 12px 14px 10px;
+  }
+
+  .ctop {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .ctitle {
+    flex: 1;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    text-align: left;
+    color: var(--hi);
+    font-size: 14.5px;
+  }
+
+  .ctitle:hover {
+    text-decoration: underline;
+  }
+
+  .cat {
+    font-size: 11px;
+    color: var(--acct);
+    background: var(--accbg);
+    border: 1px solid var(--accln);
+    padding: 1px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+  }
+
+  .summary {
+    margin: 7px 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--txt);
+  }
+
+  .content {
+    margin: 8px 0;
+    padding: 10px;
+    max-height: 420px;
+    overflow: auto;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    color: var(--txt);
+  }
+
+  .cfoot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .meta {
+    font-size: 10.5px;
+    color: var(--lab);
+  }
+
+  .match {
+    color: var(--acct);
+  }
+
+  .grow {
+    flex: 1;
+  }
+
+  .btn.sm {
+    height: 26px;
+    padding: 0 10px;
+  }
+
+  .btn.danger {
+    color: var(--deltx);
+    border-color: var(--deltx);
+  }
+
+  .btn.x {
+    font-size: 14px;
+    color: var(--deltx);
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+
+  .actions .dim {
+    font-size: 10.5px;
+  }
+
+  .source {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    border: 1px solid var(--line);
+    border-left: 3px solid transparent;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+
+  .sbody {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .sname {
+    color: var(--hi);
+    font-size: 14px;
+  }
+
+  .spath {
+    font-size: 10.5px;
+    color: var(--lab);
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .stopic {
+    font-size: 12.5px;
+    color: var(--txt);
+    margin-top: 6px;
+  }
+
+  .serr {
+    font-size: 12px;
+    color: var(--deltx);
+    margin-top: 5px;
+  }
+
+  .serr.warn {
+    color: var(--warn);
+  }
+
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 7px;
+  }
+
+  .theme {
+    font-size: 11px;
+    color: var(--dim);
+    border: 1px solid var(--lines);
+    padding: 1px 7px;
+  }
+
+  .chip {
+    font-size: 10.5px;
+  }
+
+  .pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 10px;
+    border-radius: 11px;
+    border: 1px solid var(--lines);
+    color: var(--dim);
+    white-space: nowrap;
+  }
+
+  .pill.synced {
+    color: var(--oktx);
+    background: var(--okbg);
+    border-color: var(--okln);
+  }
+
+  .pill.indexing,
+  .pill.pending {
+    color: var(--acct);
+    background: var(--accbg);
+    border-color: var(--accln);
+  }
+
+  .pill.error,
+  .pill.missing {
+    color: var(--deltx);
+    background: var(--delbg);
+    border-color: var(--deltx);
+  }
+
+  .pill.duplicate {
+    color: var(--warn);
+    background: var(--warnbg);
+    border-color: var(--warnln);
+  }
+
+  .settings {
+    max-width: 760px;
+  }
+
+  .settings h2 {
+    font-size: 17px;
+    font-weight: 500;
+    color: var(--hi);
+    margin: 4px 0 8px;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .lhs {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .label {
+    color: var(--hi);
+    font-size: 14px;
+  }
+
+  .help {
+    color: var(--dim);
+    font-size: 12.5px;
+    margin-top: 4px;
+    line-height: 1.5;
+  }
+
+  .toggle {
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    border: 1px solid var(--lines);
+    background: var(--inp);
+    position: relative;
+    padding: 0;
+    flex-shrink: 0;
+  }
+
+  .toggle span {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--dim);
+    transition: left 0.15s;
+  }
+
+  .toggle.on {
+    background: var(--acc);
+    border-color: var(--acc);
+  }
+
+  .toggle.on span {
+    left: 20px;
+    background: var(--accon);
+  }
+
+  footer {
+    display: flex;
+    gap: 22px;
+    padding: 9px 40px;
+    border-top: 1px solid var(--line);
+    font-size: 11px;
+    color: var(--dim);
+    flex-shrink: 0;
+  }
+</style>

@@ -196,6 +196,7 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
 - 도구가 오류를 돌려주면 오류 문구에 적힌 대로 한 번만 다시 시도하고, 그래도 안 되면 사람에게 무엇이 막혔는지 말합니다. 같은 도구를 반복해서 부르지 않습니다.
 - 사람이 골라야 할 일(여러 갈래 중 선택, 되돌리기 어려운 변경, 취향이나 우선순위)은 스스로 정하지 않습니다. 선택지를 본문에 A/B/C로 늘어놓지 말고 `request_decision`을 부르세요. 앱이 선택지를 버튼이 있는 결정 카드로 보여 줍니다. 부른 뒤에는 무엇을 물었는지 한 문장만 말하고 턴을 끝냅니다. 사람의 답은 `{DECISION_PREFIX}`로 시작하는 메시지로 옵니다. 작업자 보고에 사람이 정해야 할 질문이 있으면 그것도 `request_decision`으로 올립니다. 사람이 대화 중에 직접 정한 것은 `record_decision`으로 남깁니다.
 - 사람은 작업자와 직접 이야기하지 않습니다. 작업자가 무언가를 해도 되는지 물으면 `{PERMISSION_PREFIX}`로 시작하는 메시지로 당신에게 옵니다. 사람의 지시와 맡긴 일의 범위 안이면 당신이 직접 골라 `answer_worker`로 답합니다(허용할 때는 보통 이번만 허용). 되돌리기 어렵거나 맡긴 범위를 벗어나거나 사람이 정해야 할 일이면 `request_decision`으로 사람에게 묻고, 답이 오면 그대로 `answer_worker`로 전합니다. 작업자는 답을 받을 때까지 기다리므로 미루지 않습니다.
+- 사람이 고른 문서가 모인 지식 라이브러리가 있습니다. 사람이 "우리가 아는 것", 자기 문서·노트, 이름으로 특정 문서를 언급하거나, 맡기려는 일이 라이브러리가 다루는 주제에 닿으면 `knowledge_search`로 찾습니다(무엇이 있는지는 `knowledge_list_sources`). 일반적인 코딩 질문이나 작업 폴더만 봐도 되는 일에는 부르지 않습니다. 작업자는 라이브러리를 볼 수 없으므로, 작업자에게 필요한 내용은 핵심 사실과 읽을 파일 경로를 task에 직접 담아 넘깁니다. 라이브러리에서 가져온 내용은 출처(파일)를 밝힙니다.
 - 한국어로 말합니다. 짧게, 명확하게.
 
 작업 디렉터리는 {cwd} 입니다. 작업자도 같은 디렉터리에서 일합니다.
@@ -223,6 +224,7 @@ Rules:
 - If a tool returns an error, retry once as the message suggests; if that fails, tell the human what is blocked. Never call the same tool repeatedly.
 - Choices that belong to the human (a choice between directions, hard-to-undo changes, taste or priorities) are not yours to make. Do not list options as A/B/C in prose: call `request_decision`, and the app shows them as a decision card with buttons. After calling it, say in one sentence what you asked and end your turn. The human's answer arrives as a message starting with `{DECISION_PREFIX}`. If a worker report raises a question only the human can answer, put that to them with `request_decision` too. Decisions the human makes in conversation are recorded with `record_decision`.
 - The human does not talk to workers. When a worker asks whether it may do something, the question reaches you as a message starting with `{PERMISSION_PREFIX}`. If it is within the human's instructions and the task you gave, choose yourself and answer with `answer_worker` (usually allow once). If it is hard to undo, outside the task, or the human's call, ask them with `request_decision` and pass their answer on with `answer_worker`. The worker waits until answered, so do not leave it.
+- There is a knowledge library of documents the human chose. When the human asks what we know about something, refers to their docs or notes or to a document by name, or when work you are about to delegate touches a topic the library covers, search it with `knowledge_search` (`knowledge_list_sources` shows what is there). Do not call it for general coding questions or what the working folder answers. Workers cannot see the library: put what they need from it (the key facts and the file paths to read) into their task. Name the file when you use something from the library.
 - Speak English. Short and clear.
 
 The working directory is {cwd}. Workers work in the same directory.
@@ -243,6 +245,8 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
     let close = (app.clone(), track.clone());
     let ask_human = (app.clone(), track.clone());
     let answer = (app.clone(), track.clone());
+    let search = app.clone();
+    let list = app.clone();
     let decide = (app, track);
 
     vec![
@@ -454,6 +458,54 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                     let choice = if option == "cancel" { None } else { Some(option.as_str()) };
                     session.answer_permission(&request, choice).map_err(|e| e.to_string())?;
                     Ok(json!({ "answered": request, "worker": worker, "option": option }))
+                }
+            },
+        ),
+        Tool::new(
+            "knowledge_search",
+            "Search the human's knowledge library: documents they chose to add, split into sections, each with a title, a summary and the entities it names. Call it when the human asks what we know about something, refers to their docs or notes or to a stored document by name, or when a task you are about to delegate touches a topic the library covers (knowledge_list_sources shows the topics). Do NOT call it for general coding questions, file operations, debugging, or anything the working folder or the conversation already answers. Matching is by keyword and by entity: use the distinctive words a document would contain, and try other wording once if nothing comes back. Workers cannot search the library; pass them what they need.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Words to find in the documents." },
+                    "limit": { "type": "integer", "description": "Max results (default 3, max 5). One extra may be added when the best keyword match would otherwise be dropped.", "default": 3 },
+                    "source_id": { "type": "string", "description": "Optional source id (from knowledge_list_sources) to search one document." }
+                },
+                "required": ["query"]
+            }),
+            move |args| {
+                let app = search.clone();
+                async move {
+                    let query = str_arg(&args, "query")?;
+                    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(3).clamp(1, 5) as usize;
+                    let source = args.get("source_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                    let db = app.state::<AppState>().library.db.clone();
+                    if let Some(id) = &source {
+                        if db.source(id).map_err(|e| e.to_string())?.is_none() {
+                            return Err(format!("No knowledge source with id {id}. Call knowledge_list_sources to see the valid ids."));
+                        }
+                    }
+                    let hits = tokio::task::spawn_blocking(move || db.search(&query, limit, source.as_deref()))
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .map_err(|e| e.to_string())?;
+                    Ok(Value::String(orchestra_knowledge::format_hits(&hits)))
+                }
+            },
+        ),
+        Tool::new(
+            "knowledge_list_sources",
+            "What is in the human's knowledge library: counts, then one line per document with its id, item count, sync status and topic. Read-only. Use it to see which topics the library covers and to find a source_id for knowledge_search.",
+            json!({ "type": "object", "properties": {} }),
+            move |_args| {
+                let app = list.clone();
+                async move {
+                    let db = app.state::<AppState>().library.db.clone();
+                    let (sources, stats) = tokio::task::spawn_blocking(move || Ok::<_, anyhow::Error>((db.sources()?, db.stats()?)))
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .map_err(|e| e.to_string())?;
+                    Ok(Value::String(orchestra_knowledge::format_sources(&sources, &stats)))
                 }
             },
         ),

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store } from "./store.svelte";
+  import { kb } from "./knowledge.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
   import Mark from "./Mark.svelte";
   import SplitHandle from "./SplitHandle.svelte";
@@ -22,7 +23,7 @@
       label: "rail.tracks",
       go: () => {
         // Second click on the active item folds the list away.
-        if (store.view !== "settings" && store.view !== "design" && store.trackListOpen) store.setTrackList(false);
+        if (store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.trackListOpen) store.setTrackList(false);
         else {
           store.view = store.currentTrack ? "track" : "new-track";
           store.setTrackList(true);
@@ -30,7 +31,7 @@
       },
     },
     { id: "design", icon: "draft", label: "rail.design", go: () => void store.showDesigns() },
-    { id: "knowledge", icon: "files", label: "rail.knowledge", soon: true },
+    { id: "knowledge", icon: "book", label: "rail.knowledge", go: () => void kb.show() },
     { id: "wrapup", icon: "wrapup", label: "rail.wrapup", soon: true },
   ];
 
@@ -42,8 +43,9 @@
   const collapsed = $derived(store.railCollapsed);
 
   function active(item: Item): boolean {
-    if (item.id === "tracks") return store.view !== "settings" && store.view !== "design";
+    if (item.id === "tracks") return store.view !== "settings" && store.view !== "design" && store.view !== "knowledge";
     if (item.id === "design") return store.view === "design";
+    if (item.id === "knowledge") return store.view === "knowledge";
     if (item.id === "settings") return store.view === "settings";
     if (item.id === "terminal") return store.termOpen;
     return false;
@@ -52,6 +54,10 @@
   function badge(item: Item): string {
     if (item.id === "tracks") return store.tracks.length ? String(store.tracks.length) : "";
     if (item.id === "design") return store.designs.length ? String(store.designs.length) : "";
+    if (item.id === "knowledge") {
+      const n = store.artifacts.filter((a) => a.kind === "knowledge").length;
+      return n ? String(n) : "";
+    }
     return "";
   }
 </script>

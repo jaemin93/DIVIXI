@@ -27,7 +27,7 @@ use crate::{design, pump, AppState};
 pub const SESSION: &str = "artifact";
 
 /// The kinds there are.
-pub const KINDS: [&str; 2] = [design::KIND, "knowledge"];
+pub const KINDS: [&str; 2] = [design::KIND, crate::knowledge::KIND];
 
 /// Runs of an artifact are kept under this track key, apart from tracks.
 pub fn run_key(id: &str) -> String {

@@ -2783,6 +2783,7 @@ dependencies = [
  "futures",
  "orchestra-acp",
  "orchestra-core",
+ "orchestra-knowledge",
  "orchestra-mcp",
  "reqwest",
  "serde",
@@ -2800,10 +2801,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "futures",
  "ignore",
  "orchestra-acp",
  "orchestra-agents",
  "orchestra-core",
+ "orchestra-knowledge",
  "orchestra-mcp",
  "orchestra-store",
  "parking_lot",
@@ -2817,6 +2820,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -2825,6 +2829,20 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "orchestra-knowledge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
  "uuid",
 ]
 

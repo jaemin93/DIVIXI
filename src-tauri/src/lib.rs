@@ -19,6 +19,7 @@ use tauri_plugin_dialog::DialogExt;
 mod conductor;
 pub mod artifact;
 pub mod design;
+mod knowledge;
 mod metrics;
 mod terminal;
 mod workspace;
@@ -59,6 +60,8 @@ pub struct AppState {
     meter: metrics::Meter,
     /// Shells in the bottom panel.
     terminals: terminal::Terminals,
+    /// The knowledge library and its sync queue.
+    pub(crate) library: knowledge::Library,
 }
 
 impl AppState {
@@ -314,6 +317,9 @@ async fn delete_artifact(app: AppHandle, id: String) -> Result<(), String> {
     // Forgotten only once the record is gone, so a read in between cannot
     // bring the board back into the cache.
     state.boards.forget(&id);
+    if state.library.db.source(&id).ok().flatten().is_some() {
+        knowledge::remove(&app, &id);
+    }
     let dir = state.artifacts_dir.join(&id);
     if dir.exists() {
         if let Err(err) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| e.to_string())) {
@@ -677,7 +683,7 @@ fn workspace_reveal(state: State<'_, AppState>, track: String, path: String) -> 
 }
 
 /// Namespace for user preferences in the store's `meta` table.
-const SETTING_PREFIX: &str = "setting:";
+pub(crate) const SETTING_PREFIX: &str = "setting:";
 
 /// Read a user preference (`theme`, …).
 #[tauri::command]
@@ -935,6 +941,15 @@ pub fn run() {
             workspace_git_status,
             workspace_git_diff,
             workspace_reveal,
+            knowledge::knowledge_add,
+            knowledge::knowledge_sources,
+            knowledge::knowledge_source_for,
+            knowledge::knowledge_sync,
+            knowledge::knowledge_items,
+            knowledge::knowledge_graph,
+            knowledge::knowledge_entity_items,
+            knowledge::knowledge_stats,
+            knowledge::knowledge_formats,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -969,6 +984,7 @@ pub fn run() {
                     }
                 }
             }
+            let library = knowledge::Library::open(&data_dir.join("knowledge"))?;
             app.manage(AppState {
                 store,
                 db_path,
@@ -981,9 +997,12 @@ pub fn run() {
                 sessions: conductor::Sessions::default(),
                 meter: metrics::Meter::default(),
                 terminals: terminal::Terminals::default(),
+                library,
             });
             // Artifact agents nobody has talked to for an hour are closed.
             artifact::sweep_idle(app.handle().clone());
+            // Library sync, and a watch on its files.
+            knowledge::start(app.handle().clone());
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Divixi");
             }

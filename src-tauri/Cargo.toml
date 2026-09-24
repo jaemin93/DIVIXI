@@ -18,9 +18,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow.workspace = true
+futures.workspace = true
 orchestra-acp = { path = "../crates/acp" }
 orchestra-agents = { path = "../crates/agents" }
 orchestra-core = { path = "../crates/orchestra" }
+orchestra-knowledge = { path = "../crates/knowledge" }
 orchestra-mcp = { path = "../crates/mcp" }
 orchestra-store = { path = "../crates/store" }
 parking_lot.workspace = true
@@ -32,6 +34,7 @@ ignore = "0.4"
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
 portable-pty = "0.9.0"
 base64 = "0.23.1"

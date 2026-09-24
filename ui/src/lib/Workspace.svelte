@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store, type WsEntry } from "./store.svelte";
+  import { kb as knowledge } from "./knowledge.svelte";
   import Icon from "./Icon.svelte";
   import Markdown from "./Markdown.svelte";
   import SplitHandle from "./SplitHandle.svelte";
@@ -17,6 +18,29 @@
   let folded = $state<Record<string, boolean>>({});
 
   const activeFile = $derived(store.files[store.activeFile]);
+
+  // Whether the open file is in the knowledge library; the book button adds it.
+  let kbAdding = $state(false);
+  $effect(() => {
+    const track = store.track;
+    const path = store.activeFile;
+    if (track && path && store.panelTab === "file") void knowledge.checkViewer(track, path);
+  });
+  const inLibrary = $derived(!!knowledge.viewerSource && knowledge.viewerSource.uri.replace(/\\/g, "/").endsWith(store.activeFile));
+  const canAdd = $derived(!!activeFile && (activeFile.kind === "markdown" || activeFile.kind === "text") && knowledge.formats.includes(activeFile.ext.toLowerCase()));
+  async function addToLibrary() {
+    const track = store.track;
+    const path = store.activeFile;
+    if (!track || !path) return;
+    kbAdding = true;
+    const why = await knowledge.add(path, track);
+    kbAdding = false;
+    if (why) store.lastError = why;
+    await knowledge.checkViewer(track, path);
+  }
+  $effect(() => {
+    if (!knowledge.formats.length) void knowledge.loadFormats();
+  });
 
   /** The tree as rows with their depth; `shown` decides folding at render time. */
   type Row = WsEntry & { depth: number };
@@ -175,6 +199,15 @@
       <span class="grow"></span>
       {#if activeFile?.kind === "markdown"}
         <button class="btn sm" onclick={() => (store.rawMarkdown = { ...store.rawMarkdown, [store.activeFile]: !raw })}>{raw ? t("ws.preview") : t("ws.raw")}</button>
+      {/if}
+      {#if inLibrary}
+        <button class="tab icon kbin" title={t("ws.kbIn", { status: knowledge.viewerSource?.status ?? "" })} onclick={() => knowledge.show("sources")}>
+          <Icon name="book" size={14} />
+        </button>
+      {:else if canAdd}
+        <button class="tab icon" title={t("ws.kbAdd")} disabled={kbAdding} onclick={addToLibrary}>
+          <Icon name="book" size={14} />
+        </button>
       {/if}
       <button class="btn sm" onclick={() => store.revealFile(store.activeFile)}>{t("ws.reveal")}</button>
       <button class="tab icon" class:on={store.panelTree} title={t("ws.toggleTree")} onclick={() => (store.panelTree = !store.panelTree)}>
@@ -608,5 +641,9 @@
     margin-left: auto;
     font-size: 9px;
     color: var(--lab);
+  }
+
+  .kbin {
+    color: var(--acct);
   }
 </style>

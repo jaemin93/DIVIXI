@@ -233,7 +233,7 @@ export type Run = {
   segments: Segment[];
 };
 
-export type View = "track" | "settings" | "worker" | "new-track" | "edit-track" | "design";
+export type View = "track" | "settings" | "worker" | "new-track" | "edit-track" | "design" | "knowledge";
 
 // ----- artifacts: what the human keeps beside tracks and attaches to them —
 // designs (a sketch board worked out with an agent), knowledge later -----
