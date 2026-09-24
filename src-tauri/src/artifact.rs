@@ -5,7 +5,7 @@
 //!
 //! The conversation runs like a track conductor's: one long-lived agent
 //! session per artifact with an MCP server of the kind's tools; its turns
-//! are kept under the track key `artifact:<id>`, lane `artifact`, so they
+//! are kept under the track key `artifact:<id>`, session `artifact`, so they
 //! never mix with a track's.
 
 use std::collections::{HashMap, HashSet};
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use orchestra_acp::AgentSession;
-use orchestra_core::LaneEvent;
+use orchestra_core::AgentEvent;
 use orchestra_mcp::McpServer;
 use orchestra_store::ArtifactInfo;
 use tauri::{AppHandle, Manager};
@@ -23,8 +23,8 @@ use tokio::sync::Mutex;
 use crate::conductor::{fingerprint, session_options, with_attachments, Live};
 use crate::{design, pump, AppState};
 
-/// The lane an artifact's agent turns are recorded under.
-pub const LANE: &str = "artifact";
+/// The session an artifact's agent turns are recorded under.
+pub const SESSION: &str = "artifact";
 
 /// The kinds there are.
 pub const KINDS: [&str; 2] = [design::KIND, "knowledge"];
@@ -223,7 +223,7 @@ pub async fn turn(
         let sent = if first { format!("{preamble}\n\n---\n\n{body}\n\n{context}") } else { format!("{body}\n\n{context}") };
         let run = state
             .store
-            .begin_run(&run_key(&id), LANE, &a.agent, &with_attachments(&text, &attached), &cwd.display().to_string())
+            .begin_run(&run_key(&id), SESSION, &a.agent, &with_attachments(&text, &attached), &cwd.display().to_string())
             .map_err(|e| e.to_string())?;
         // Counted only now it goes out: a turn that failed before this
         // point leaves the next one still the first (with the preamble).
@@ -233,8 +233,8 @@ pub async fn turn(
             s.used = Instant::now();
         }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        tauri::async_runtime::spawn(pump(app.clone(), run_key(&id), LANE.to_string(), run.clone(), rx));
-        let _ = tx.send(LaneEvent::Started { session_id: session.session_id().to_string(), cwd: cwd.display().to_string() });
+        tauri::async_runtime::spawn(pump(app.clone(), run_key(&id), SESSION.to_string(), run.clone(), rx));
+        let _ = tx.send(AgentEvent::Started { session_id: session.session_id().to_string(), cwd: cwd.display().to_string() });
 
         let app_t = app.clone();
         let (id_t, run_t) = (id.clone(), run.clone());
@@ -244,7 +244,7 @@ pub async fn turn(
             {
                 let mut sessions = st.artifacts.sessions.lock().await;
                 if let Err(err) = result {
-                    let _ = tx.send(LaneEvent::Failed { error: err.to_string() });
+                    let _ = tx.send(AgentEvent::Failed { error: err.to_string() });
                     sessions.remove(&id_t);
                 } else if let Some(s) = sessions.get_mut(&id_t) {
                     if s.live.running.as_deref() == Some(run_t.as_str()) {

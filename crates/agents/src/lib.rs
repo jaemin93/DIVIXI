@@ -210,7 +210,7 @@ pub struct AgentStatus {
     pub readiness: Readiness,
     pub cli: Option<CliInfo>,
     pub adapter: Adapter,
-    /// The launch spec to use for lanes, when there is one.
+    /// The launch spec to use for sessions, when there is one.
     pub spec: Option<AgentSpec>,
     pub probe: Option<ProbeReport>,
     /// Why `readiness` is `Error`, or a probe failure message.

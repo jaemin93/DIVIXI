@@ -1,4 +1,4 @@
-//! Persistence smoke test: run one real lane, record every event, reopen the
+//! Persistence smoke test: run one real session, record every event, reopen the
 //! store and read the run back the way the app does at startup.
 //!
 //! Run with:
@@ -7,7 +7,7 @@
 //! `DIVISI_DB` picks the database file; the default is a temp file that is
 //! deleted afterwards.
 
-use orchestra_acp::{run_lane, scrub_inherited_session_env, AgentSpec, LaneSpec};
+use orchestra_acp::{run_prompt, scrub_inherited_session_env, AgentSpec, PromptSpec};
 use orchestra_store::Store;
 
 fn main() -> anyhow::Result<()> {
@@ -55,8 +55,8 @@ async fn run() -> anyhow::Result<()> {
         println!("run: {run_id}");
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let task = tokio::spawn(run_lane(
-            LaneSpec {
+        let task = tokio::spawn(run_prompt(
+            PromptSpec {
                 agent: AgentSpec::claude_code(),
                 cwd,
                 prompt,
@@ -94,7 +94,7 @@ async fn run() -> anyhow::Result<()> {
     }
 
     let events = store.events(&run_id)?;
-    println!("\n--- lane log for {run_id} ({} events, below the membrane) ---", events.len());
+    println!("\n--- session log for {run_id} ({} events, below the membrane) ---", events.len());
     for e in &events {
         println!("[{:>6}ms] {}", e.at_ms, e.event.kind());
     }

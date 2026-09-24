@@ -2,7 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // Must happen before any thread exists: a lane's agent cannot inherit this
+    // Must happen before any thread exists: a session's agent cannot inherit this
     // process's Claude Code session markers or it refuses to start.
     orchestra_acp::scrub_inherited_session_env();
 

@@ -1,14 +1,14 @@
-//! Run one prompt in a lane on a chosen agent.
+//! Run one prompt in a session on a chosen agent.
 //!
 //! Run with:
-//!   cargo run -p orchestra-agents --example lane -- codex "Reply with exactly: ORCHESTRA OK"
+//!   cargo run -p orchestra-agents --example prompt -- codex "Reply with exactly: ORCHESTRA OK"
 //!
 //! Agent ids: claude_code, codex, copilot, antigravity. The Antigravity
 //! server must already be downloaded (see the `detect` example).
 
-use orchestra_acp::{run_lane, scrub_inherited_session_env, LaneSpec};
+use orchestra_acp::{run_prompt, scrub_inherited_session_env, PromptSpec};
 use orchestra_agents::{detect, AgentKind, DetectOptions};
-use orchestra_core::LaneEvent;
+use orchestra_core::AgentEvent;
 
 fn main() -> anyhow::Result<()> {
     scrub_inherited_session_env();
@@ -39,8 +39,8 @@ async fn run() -> anyhow::Result<()> {
     println!("agent: {} via {} {:?}", kind.name(), agent.program, agent.args);
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(run_lane(
-        LaneSpec {
+    let task = tokio::spawn(run_prompt(
+        PromptSpec {
             agent,
             cwd: std::env::current_dir()?,
             prompt,
@@ -55,7 +55,7 @@ async fn run() -> anyhow::Result<()> {
         let ms = started.elapsed().as_millis();
         let side = if event.above_membrane() { "^" } else { " " };
         match &event {
-            LaneEvent::Message { text } | LaneEvent::Thought { text } => {
+            AgentEvent::Message { text } | AgentEvent::Thought { text } => {
                 use std::io::Write;
                 print!("{text}");
                 std::io::stdout().flush().ok();
@@ -64,6 +64,6 @@ async fn run() -> anyhow::Result<()> {
         }
     }
     task.await??;
-    println!("\n--- lane closed ---");
+    println!("\n--- session closed ---");
     Ok(())
 }

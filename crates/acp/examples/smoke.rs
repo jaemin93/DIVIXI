@@ -3,8 +3,8 @@
 //! Run with:
 //!   cargo run -p orchestra-acp --example smoke -- "say hello in five words"
 
-use orchestra_acp::{run_lane, scrub_inherited_session_env, AgentSpec, LaneSpec};
-use orchestra_core::LaneEvent;
+use orchestra_acp::{run_prompt, scrub_inherited_session_env, AgentSpec, PromptSpec};
+use orchestra_core::AgentEvent;
 
 fn main() -> anyhow::Result<()> {
     // Before the runtime exists, so the mutation is single-threaded.
@@ -30,8 +30,8 @@ async fn run() -> anyhow::Result<()> {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let task = tokio::spawn(run_lane(
-        LaneSpec {
+    let task = tokio::spawn(run_prompt(
+        PromptSpec {
             agent: AgentSpec::claude_code(),
             cwd: std::env::current_dir()?,
             prompt,
@@ -46,7 +46,7 @@ async fn run() -> anyhow::Result<()> {
         let ms = started.elapsed().as_millis();
         let side = if event.above_membrane() { "^" } else { " " };
         match &event {
-            LaneEvent::Message { text } | LaneEvent::Thought { text } => {
+            AgentEvent::Message { text } | AgentEvent::Thought { text } => {
                 use std::io::Write;
                 print!("{text}");
                 std::io::stdout().flush().ok();
@@ -56,6 +56,6 @@ async fn run() -> anyhow::Result<()> {
     }
 
     task.await??;
-    println!("\n--- lane closed ---");
+    println!("\n--- session closed ---");
     Ok(())
 }

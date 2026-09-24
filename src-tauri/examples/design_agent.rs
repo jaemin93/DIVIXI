@@ -15,7 +15,7 @@ use std::sync::Arc;
 use orchestra_acp::{scrub_inherited_session_env, AgentSession, McpHttp, SessionOptions};
 use orchestra_agents::{detect, AgentKind, DetectOptions};
 use orchestra_app::design::{self, Actor, Doc};
-use orchestra_core::LaneEvent;
+use orchestra_core::AgentEvent;
 use orchestra_mcp::{McpServer, Tool};
 use parking_lot::Mutex;
 use serde_json::json;
@@ -83,10 +83,10 @@ async fn run() -> anyhow::Result<()> {
         let mut reply = String::new();
         while let Some(ev) = rx.recv().await {
             match ev {
-                LaneEvent::Message { text } => reply.push_str(&text),
-                LaneEvent::ToolCall { title, .. } => println!("  tool: {title}"),
-                LaneEvent::Finished { stop_reason } => println!("  finished: {stop_reason}"),
-                LaneEvent::Failed { error } => println!("  failed: {error}"),
+                AgentEvent::Message { text } => reply.push_str(&text),
+                AgentEvent::ToolCall { title, .. } => println!("  tool: {title}"),
+                AgentEvent::Finished { stop_reason } => println!("  finished: {stop_reason}"),
+                AgentEvent::Failed { error } => println!("  failed: {error}"),
                 _ => {}
             }
         }

@@ -2,7 +2,7 @@
   /** 16px stroke icons for the rail. Hairline weight, square joins, no fill. */
   export type IconName =
     | "tracks"
-    | "lanes"
+    | "workers"
     | "draft"
     | "wrapup"
     | "agents"
@@ -41,7 +41,7 @@
 >
   {#if name === "tracks"}
     <path d="M2 4h12M2 8h12M2 12h8" />
-  {:else if name === "lanes"}
+  {:else if name === "workers"}
     <path d="M4 2v12M8 2v12M12 2v8" />
   {:else if name === "draft"}
     <path d="M3 13l1-4 7-7 3 3-7 7-4 1z" /><path d="M9.5 4.5l2 2" />

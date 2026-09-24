@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel, laneAgentOf, laneConfigOf, type Role } from "./store.svelte";
+  import { store, agentLabel, workerAgentOf, workerConfigOf, type Role } from "./store.svelte";
 
   /** In an artifact there is one agent, the artifact's. */
   const artifactMode = $derived(store.chatArtifact);
@@ -51,10 +51,10 @@
     const cOpts = store.optionsOf(track.agent);
     const cModel = cOpts.find((o) => o.category === "model");
     const model = cModel ? store.choiceName(cModel, store.effective(track.agent, track.conductor_config, cModel)) : "";
-    const wAgent = laneAgentOf(track);
+    const wAgent = workerAgentOf(track);
     const wOpts = store.optionsOf(wAgent);
     const wModel = wOpts.find((o) => o.category === "model");
-    const wModelName = wModel ? store.choiceName(wModel, store.effective(wAgent, laneConfigOf(track), wModel)) : "";
+    const wModelName = wModel ? store.choiceName(wModel, store.effective(wAgent, workerConfigOf(track), wModel)) : "";
     const differs = wAgent !== track.agent || (wModel && wModelName !== model);
     return {
       conductor: agentLabel(track.agent),

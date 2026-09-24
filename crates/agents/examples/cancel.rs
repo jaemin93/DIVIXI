@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use orchestra_acp::{scrub_inherited_session_env, AgentSession, SessionOptions};
 use orchestra_agents::{detect, AgentKind, DetectOptions};
-use orchestra_core::LaneEvent;
+use orchestra_core::AgentEvent;
 
 fn main() -> anyhow::Result<()> {
     scrub_inherited_session_env();
@@ -73,7 +73,7 @@ async fn run() -> anyhow::Result<()> {
     let mut chars = 0usize;
     while let Some(event) = rx.recv().await {
         match event {
-            LaneEvent::Message { text } | LaneEvent::Thought { text } => chars += text.chars().count(),
+            AgentEvent::Message { text } | AgentEvent::Thought { text } => chars += text.chars().count(),
             other => println!("[{:>6}ms] {:<8} {other:?}", started.elapsed().as_millis(), other.label()),
         }
     }
@@ -86,7 +86,7 @@ async fn run() -> anyhow::Result<()> {
     let turn = tokio::spawn(async move { s.prompt("Reply with exactly: STILL HERE".into(), tx).await });
     let mut reply = String::new();
     while let Some(event) = rx.recv().await {
-        if let LaneEvent::Message { text } = event {
+        if let AgentEvent::Message { text } = event {
             reply.push_str(&text);
         }
     }

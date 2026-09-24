@@ -4,7 +4,7 @@
 //! MCP tools, listens on a random localhost port with a random bearer
 //! token, and hands the URL to the conductor's ACP session in
 //! `session/new` → `mcpServers`. Tool calls land directly in this process,
-//! so `spawn_worker` can open a lane and wait for its report without any
+//! so `spawn_worker` can open a worker and wait for its report without any
 //! extra process or IPC.
 //!
 //! Only the Streamable HTTP transport's request/response half is

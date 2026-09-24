@@ -9,7 +9,7 @@
 
 **막(membrane).** Track 타임라인에는 Report / Decision / Running / 대화 네 가지만 올라옵니다.
 트랜스크립트, diff, 툴 호출은 레인에 남고 레인 뷰로만 내려갑니다.
-`LaneEvent::above_membrane()`이 그 경계를 코드로 강제합니다.
+`AgentEvent::above_membrane()`이 그 경계를 코드로 강제합니다.
 
 **메커니즘과 정책의 분리.** Rust 코어는 레인을 띄우고 이벤트를 나르기만 합니다.
 무엇을 어떻게 분해할지(지휘자 로직)는 에이전트가 정합니다 — 코어에 넣지 않습니다.
@@ -20,13 +20,13 @@
 레인의 세션 id는 스토어에 남아, 앱을 다시 켜거나 레인을 닫았다 열어도 이전 대화를 이어갑니다
 (`session/load`). `worker_status`는 열린 레인과 닫힌 레인을 모두 보여 줍니다.
 
-**프로토콜은 한 곳에만.** `crates/acp`만 ACP를 압니다. 그 위는 `LaneEvent`만 봅니다.
+**프로토콜은 한 곳에만.** `crates/acp`만 ACP를 압니다. 그 위는 `AgentEvent`만 봅니다.
 ACP를 지원하지 않는 에이전트는 나중에 같은 채널 뒤에 PTY 백엔드로 붙습니다.
 
 ## 구조
 
 ```
-crates/orchestra/   도메인 — LaneEvent, 막의 정의
+crates/orchestra/   도메인 — AgentEvent, 막의 정의
 crates/acp/         ACP 클라이언트 — 에이전트 기동, 세션, 스트리밍
 crates/agents/      에이전트 카탈로그 — CLI 탐색, ACP 프로브·로그인, Antigravity 서버 다운로드
 crates/mcp/         앱 내장 HTTP MCP 서버 — 지휘자에게 주는 도구
@@ -89,7 +89,7 @@ Object로 묶어 자손까지 함께 종료됩니다. Antigravity 서버는 stdi
 ```bash
 cargo run -p orchestra-agents --example detect                  # 감지 결과 출력
 cargo run -p orchestra-agents --example detect -- --download    # Antigravity 서버까지
-cargo run -p orchestra-agents --example lane -- codex "prompt"  # 특정 에이전트로 레인 1회
+cargo run -p orchestra-agents --example prompt -- codex "prompt"  # 특정 에이전트로 레인 1회
 ```
 
 **코얼레싱.** 에이전트 텍스트 청크는 40ms 단위로 묶어서 webview에 보냅니다.

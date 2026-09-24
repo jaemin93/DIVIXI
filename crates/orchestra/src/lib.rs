@@ -1,29 +1,16 @@
 //! Orchestra domain types.
 //!
-//! The membrane lives here: [`LaneEvent`] is everything a lane emits, and
-//! [`LaneEvent::above_membrane`] decides what is allowed to reach a Track's
-//! timeline. Everything else stays in the lane and is fetched on demand.
+//! The membrane lives here: [`AgentEvent`] is everything a session emits, and
+//! [`AgentEvent::above_membrane`] decides what is allowed to reach a Track's
+//! timeline. Everything else stays in the session and is fetched on demand.
 
 use serde::{Deserialize, Serialize};
 
-/// Stable identifier for a lane (durable across runs).
-pub type LaneId = String;
-/// Stable identifier for a single run inside a lane.
+/// Which session a run belongs to within its track: `conductor`, a
+/// worker's name, or `artifact`. Durable across runs.
+pub type SessionName = String;
+/// Stable identifier for a single run inside a session.
 pub type RunId = String;
-
-/// A lane's execution status, as shown on the lane strip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LaneStatus {
-    /// No run in flight.
-    Idle,
-    /// A run is in flight.
-    Running,
-    /// A run is blocked on a human decision.
-    AwaitingDecision,
-    /// The last run failed.
-    Failed,
-}
 
 /// Lifecycle of a single run, as projected from its events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,12 +54,12 @@ impl RunStatus {
     }
 }
 
-/// One thing that happened inside a lane.
+/// One thing that happened inside a session.
 ///
 /// Serialized to the UI as `{"kind": "...", ...}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LaneEvent {
+pub enum AgentEvent {
     /// The agent subprocess answered `initialize`.
     Connected {
         /// Protocol version the agent negotiated.
@@ -145,16 +132,16 @@ pub enum LaneEvent {
     },
 }
 
-impl LaneEvent {
+impl AgentEvent {
     /// Whether this event is allowed to cross into the Track timeline.
     ///
     /// Only lifecycle boundaries cross. Message chunks, thoughts, tool calls
-    /// and plans stay in the lane and are read through the inspector, which is
+    /// and plans stay in the session and are read through the inspector, which is
     /// the whole point of the membrane: the Track stays readable by a human.
     pub fn above_membrane(&self) -> bool {
         matches!(
             self,
-            LaneEvent::Started { .. } | LaneEvent::Finished { .. } | LaneEvent::Failed { .. }
+            AgentEvent::Started { .. } | AgentEvent::Finished { .. } | AgentEvent::Failed { .. }
         )
     }
 
@@ -164,39 +151,39 @@ impl LaneEvent {
     /// drift from the `#[serde(tag = "kind")]` names.
     pub fn kind(&self) -> &'static str {
         match self {
-            LaneEvent::Connected { .. } => "connected",
-            LaneEvent::Started { .. } => "started",
-            LaneEvent::Message { .. } => "message",
-            LaneEvent::Thought { .. } => "thought",
-            LaneEvent::ToolCall { .. } => "tool_call",
-            LaneEvent::ToolUpdate { .. } => "tool_update",
-            LaneEvent::Plan { .. } => "plan",
-            LaneEvent::Usage { .. } => "usage",
-            LaneEvent::Commands { .. } => "commands",
-            LaneEvent::Finished { .. } => "finished",
-            LaneEvent::Failed { .. } => "failed",
+            AgentEvent::Connected { .. } => "connected",
+            AgentEvent::Started { .. } => "started",
+            AgentEvent::Message { .. } => "message",
+            AgentEvent::Thought { .. } => "thought",
+            AgentEvent::ToolCall { .. } => "tool_call",
+            AgentEvent::ToolUpdate { .. } => "tool_update",
+            AgentEvent::Plan { .. } => "plan",
+            AgentEvent::Usage { .. } => "usage",
+            AgentEvent::Commands { .. } => "commands",
+            AgentEvent::Finished { .. } => "finished",
+            AgentEvent::Failed { .. } => "failed",
         }
     }
 
     /// Whether this event ends the run.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, LaneEvent::Finished { .. } | LaneEvent::Failed { .. })
+        matches!(self, AgentEvent::Finished { .. } | AgentEvent::Failed { .. })
     }
 
     /// Short mono label used by the inspector's transcript view.
     pub fn label(&self) -> &'static str {
         match self {
-            LaneEvent::Connected { .. } => "connect",
-            LaneEvent::Started { .. } => "session",
-            LaneEvent::Message { .. } => "message",
-            LaneEvent::Thought { .. } => "thought",
-            LaneEvent::ToolCall { .. } => "tool",
-            LaneEvent::ToolUpdate { .. } => "tool",
-            LaneEvent::Plan { .. } => "plan",
-            LaneEvent::Usage { .. } => "usage",
-            LaneEvent::Commands { .. } => "commands",
-            LaneEvent::Finished { .. } => "done",
-            LaneEvent::Failed { .. } => "error",
+            AgentEvent::Connected { .. } => "connect",
+            AgentEvent::Started { .. } => "session",
+            AgentEvent::Message { .. } => "message",
+            AgentEvent::Thought { .. } => "thought",
+            AgentEvent::ToolCall { .. } => "tool",
+            AgentEvent::ToolUpdate { .. } => "tool",
+            AgentEvent::Plan { .. } => "plan",
+            AgentEvent::Usage { .. } => "usage",
+            AgentEvent::Commands { .. } => "commands",
+            AgentEvent::Finished { .. } => "done",
+            AgentEvent::Failed { .. } => "error",
         }
     }
 }
@@ -211,19 +198,19 @@ pub struct SlashCommand {
     pub hint: Option<String>,
 }
 
-/// An event tagged with the lane and run it came from.
+/// An event tagged with the session and run it came from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LaneEnvelope {
-    /// Which track the lane belongs to.
+pub struct AgentEnvelope {
+    /// Which track the session belongs to.
     pub track: String,
-    /// Which lane produced it.
-    pub lane: LaneId,
+    /// Which session produced it.
+    pub session: SessionName,
     /// Which run produced it.
     pub run: RunId,
     /// Milliseconds since the run started.
     pub at_ms: u64,
     /// The event itself.
-    pub event: LaneEvent,
+    pub event: AgentEvent,
 }
 
 #[cfg(test)]
@@ -232,17 +219,17 @@ mod tests {
 
     #[test]
     fn only_lifecycle_crosses_the_membrane() {
-        assert!(LaneEvent::Started {
+        assert!(AgentEvent::Started {
             session_id: "s".into(),
             cwd: ".".into()
         }
         .above_membrane());
-        assert!(LaneEvent::Finished {
+        assert!(AgentEvent::Finished {
             stop_reason: "end_turn".into()
         }
         .above_membrane());
-        assert!(!LaneEvent::Message { text: "hi".into() }.above_membrane());
-        assert!(!LaneEvent::ToolCall {
+        assert!(!AgentEvent::Message { text: "hi".into() }.above_membrane());
+        assert!(!AgentEvent::ToolCall {
             id: "1".into(),
             title: "cargo test".into(),
             tool_kind: "execute".into(),
@@ -254,22 +241,22 @@ mod tests {
     #[test]
     fn kind_matches_serde_tag() {
         let samples = [
-            LaneEvent::Connected { protocol: "v1".into(), load_session: false },
-            LaneEvent::Started { session_id: "s".into(), cwd: ".".into() },
-            LaneEvent::Message { text: "m".into() },
-            LaneEvent::Thought { text: "t".into() },
-            LaneEvent::ToolCall {
+            AgentEvent::Connected { protocol: "v1".into(), load_session: false },
+            AgentEvent::Started { session_id: "s".into(), cwd: ".".into() },
+            AgentEvent::Message { text: "m".into() },
+            AgentEvent::Thought { text: "t".into() },
+            AgentEvent::ToolCall {
                 id: "1".into(),
                 title: "ls".into(),
                 tool_kind: "execute".into(),
                 status: "pending".into(),
             },
-            LaneEvent::ToolUpdate { id: "1".into(), status: "completed".into() },
-            LaneEvent::Plan { entries: vec![] },
-            LaneEvent::Usage { raw: serde_json::Value::Null },
-            LaneEvent::Commands { commands: vec![] },
-            LaneEvent::Finished { stop_reason: "end_turn".into() },
-            LaneEvent::Failed { error: "boom".into() },
+            AgentEvent::ToolUpdate { id: "1".into(), status: "completed".into() },
+            AgentEvent::Plan { entries: vec![] },
+            AgentEvent::Usage { raw: serde_json::Value::Null },
+            AgentEvent::Commands { commands: vec![] },
+            AgentEvent::Finished { stop_reason: "end_turn".into() },
+            AgentEvent::Failed { error: "boom".into() },
         ];
         for ev in samples {
             let json = serde_json::to_value(&ev).unwrap();
@@ -288,7 +275,7 @@ mod tests {
 
     #[test]
     fn events_serialize_tagged() {
-        let json = serde_json::to_string(&LaneEvent::Message { text: "x".into() }).unwrap();
+        let json = serde_json::to_string(&AgentEvent::Message { text: "x".into() }).unwrap();
         assert_eq!(json, r#"{"kind":"message","text":"x"}"#);
     }
 }

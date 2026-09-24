@@ -1,11 +1,11 @@
 //! A long-lived agent session: one process, one ACP session, many prompts.
 //!
-//! [`run_lane`](crate::run_lane) is the one-shot form: open, prompt, close.
+//! [`run_prompt`](crate::run_prompt) is the one-shot form: open, prompt, close.
 //! The conductor needs the other form, because its whole point is context
-//! that survives across turns, and so do lanes once the conductor can ask
+//! that survives across turns, and so do sessions once the conductor can ask
 //! them follow-up questions. [`AgentSession`] owns the process and the
 //! protocol task; each [`AgentSession::prompt`] runs one turn and streams
-//! that turn's [`LaneEvent`]s to the channel given for it, ending with
+//! that turn's [`AgentEvent`]s to the channel given for it, ending with
 //! `Finished` or `Failed`.
 //!
 //! A session can also be **resumed** across app restarts: given the id of a
@@ -30,7 +30,7 @@ use agent_client_protocol::{
     util::MatchDispatch,
     ActiveSession, Agent, Client, SessionMessage,
 };
-use orchestra_core::{LaneEvent, SlashCommand};
+use orchestra_core::{AgentEvent, SlashCommand};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{pick_autonomous_mode, process, translate, AgentSpec};
@@ -67,7 +67,7 @@ const REPLAY_QUIET: Duration = Duration::from_millis(400);
 struct Turn {
     text: String,
     files: Vec<PathBuf>,
-    tx: mpsc::UnboundedSender<LaneEvent>,
+    tx: mpsc::UnboundedSender<AgentEvent>,
     done: oneshot::Sender<anyhow::Result<()>>,
 }
 
@@ -90,8 +90,8 @@ pub struct AgentSession {
 }
 
 /// Keep the newest command list out of a batch of events.
-fn remember_commands(slot: &Arc<Mutex<Vec<SlashCommand>>>, events: &[LaneEvent]) {
-    if let Some(LaneEvent::Commands { commands }) = events.iter().rev().find(|e| matches!(e, LaneEvent::Commands { .. })) {
+fn remember_commands(slot: &Arc<Mutex<Vec<SlashCommand>>>, events: &[AgentEvent]) {
+    if let Some(AgentEvent::Commands { commands }) = events.iter().rev().find(|e| matches!(e, AgentEvent::Commands { .. })) {
         if let Ok(mut c) = slot.lock() {
             *c = commands.clone();
         }
@@ -146,7 +146,7 @@ impl AgentSession {
                     // Bring an earlier session back, or open a fresh one.
                     let mut resumed = false;
                     // Command lists seen during a replay, handed to the first turn.
-                    let mut carried: Vec<LaneEvent> = Vec::new();
+                    let mut carried: Vec<AgentEvent> = Vec::new();
                     let mut session: Option<ActiveSession<'static, Agent>> = None;
                     if let Some(id) = opts_for_task.resume.clone().filter(|_| can_load) {
                         let request = LoadSessionRequest::new(id.clone(), opts_for_task.cwd.clone())
@@ -248,7 +248,7 @@ impl AgentSession {
                         while cancel_rx.try_recv().is_ok() {}
                         let result = run_turn(&mut session, &turn.text, &turn.files, images, &turn.tx, &commands_task, &mut cancel_rx).await;
                         if let Err(err) = &result {
-                            let _ = turn.tx.send(LaneEvent::Failed { error: err.to_string() });
+                            let _ = turn.tx.send(AgentEvent::Failed { error: err.to_string() });
                         }
                         let fatal = result.as_ref().err().map(|e| e.to_string());
                         let _ = turn.done.send(result);
@@ -312,13 +312,13 @@ impl AgentSession {
 
     /// Run one turn. Events stream to `tx` and end with `Finished` or
     /// `Failed`; the future resolves when the turn is over.
-    pub async fn prompt(&self, text: String, tx: mpsc::UnboundedSender<LaneEvent>) -> anyhow::Result<()> {
+    pub async fn prompt(&self, text: String, tx: mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<()> {
         self.prompt_with(text, Vec::new(), tx).await
     }
 
     /// Run one turn with files attached: each goes as a link the agent can
     /// read, or inline when it is a picture and the agent takes pictures.
-    pub async fn prompt_with(&self, text: String, files: Vec<PathBuf>, tx: mpsc::UnboundedSender<LaneEvent>) -> anyhow::Result<()> {
+    pub async fn prompt_with(&self, text: String, files: Vec<PathBuf>, tx: mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<()> {
         let (done_tx, done_rx) = oneshot::channel();
         self.turns
             .send(Turn { text, files, tx, done: done_tx })
@@ -347,7 +347,7 @@ impl AgentSession {
 /// many messages were dropped and the command lists among them, which are
 /// not history and belong to the session ahead. The replay has no end
 /// marker; a quiet gap is taken as the end.
-async fn drain_replay(session: &mut ActiveSession<'_, Agent>) -> (usize, Vec<LaneEvent>) {
+async fn drain_replay(session: &mut ActiveSession<'_, Agent>) -> (usize, Vec<AgentEvent>) {
     let mut n = 0;
     let mut kept = Vec::new();
     loop {
@@ -357,7 +357,7 @@ async fn drain_replay(session: &mut ActiveSession<'_, Agent>) -> (usize, Vec<Lan
                 let _ = MatchDispatch::new(dispatch)
                     .if_notification(async |notif: SessionNotification| {
                         for ev in translate(notif.update) {
-                            if matches!(ev, LaneEvent::Commands { .. }) {
+                            if matches!(ev, AgentEvent::Commands { .. }) {
                                 kept.push(ev);
                             }
                         }
@@ -378,7 +378,7 @@ async fn run_turn(
     text: &str,
     files: &[PathBuf],
     images: bool,
-    tx: &mpsc::UnboundedSender<LaneEvent>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
     commands: &Arc<Mutex<Vec<SlashCommand>>>,
     cancel: &mut mpsc::UnboundedReceiver<()>,
 ) -> anyhow::Result<()> {
@@ -410,11 +410,11 @@ async fn run_turn(
                 }
                 match stop {
                     Ok(Ok(reason)) => {
-                        let _ = tx.send(LaneEvent::Finished { stop_reason: format!("{reason:?}") });
+                        let _ = tx.send(AgentEvent::Finished { stop_reason: format!("{reason:?}") });
                     }
                     Ok(Err(err)) => {
                         let detail = err.data.as_ref().map(|d| format!(" ({d})")).unwrap_or_default();
-                        let _ = tx.send(LaneEvent::Failed { error: format!("{}{detail}", err.message) });
+                        let _ = tx.send(AgentEvent::Failed { error: format!("{}{detail}", err.message) });
                     }
                     Err(_) => anyhow::bail!("the agent connection closed during the turn"),
                 }
@@ -433,10 +433,10 @@ async fn run_turn(
     }
 }
 
-/// Turn one session message into lane events.
+/// Turn one session message into session events.
 async fn forward(
     update: SessionMessage,
-    tx: &mpsc::UnboundedSender<LaneEvent>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
     commands: &Arc<Mutex<Vec<SlashCommand>>>,
 ) -> anyhow::Result<()> {
     if let SessionMessage::SessionMessage(dispatch) = update {

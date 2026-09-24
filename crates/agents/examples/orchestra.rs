@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use orchestra_acp::{scrub_inherited_session_env, AgentSession, AgentSpec, McpHttp, SessionOptions};
 use orchestra_agents::{detect, AgentKind, DetectOptions};
-use orchestra_core::LaneEvent;
+use orchestra_core::AgentEvent;
 use orchestra_mcp::{McpServer, Tool};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -45,7 +45,7 @@ async fn run() -> anyhow::Result<()> {
     let spec: AgentSpec = detect(kind, &opts).await.spec.ok_or_else(|| anyhow::anyhow!("no adapter"))?;
     let cwd = std::env::current_dir()?;
 
-    // Finished lane reports land here; the main loop feeds them to the conductor.
+    // Finished worker reports land here; the main loop feeds them to the conductor.
     let (report_tx, mut report_rx) = mpsc::unbounded_channel::<String>();
 
     let spawn_spec = spec.clone();
@@ -63,12 +63,12 @@ async fn run() -> anyhow::Result<()> {
                 let task = args["task"].as_str().unwrap_or("").to_string();
                 println!("    ▸ spawn_worker {name}: {}", task.chars().take(90).collect::<String>());
                 let started = std::time::Instant::now();
-                let lane = name.clone();
+                let worker = name.clone();
                 tokio::spawn(async move {
-                    let name = lane;
+                    let name = worker;
                     let outcome = async {
                         let session = AgentSession::open(&spec, SessionOptions { cwd, ..Default::default() }).await?;
-                        let out = lane_turn(&session, &task).await?;
+                        let out = worker_turn(&session, &task).await?;
                         session.close().await;
                         Ok::<_, anyhow::Error>(out)
                     }
@@ -127,9 +127,9 @@ async fn turn(session: &AgentSession, text: &str) -> anyhow::Result<(String, Vec
         let mut tools = Vec::new();
         while let Some(ev) = rx.recv().await {
             match ev {
-                LaneEvent::Message { text } => out.push_str(&text),
-                LaneEvent::ToolCall { title, .. } => tools.push(title),
-                LaneEvent::Finished { .. } | LaneEvent::Failed { .. } => break,
+                AgentEvent::Message { text } => out.push_str(&text),
+                AgentEvent::ToolCall { title, .. } => tools.push(title),
+                AgentEvent::Finished { .. } | AgentEvent::Failed { .. } => break,
                 _ => {}
             }
         }
@@ -140,15 +140,15 @@ async fn turn(session: &AgentSession, text: &str) -> anyhow::Result<(String, Vec
     Ok(out)
 }
 
-async fn lane_turn(session: &AgentSession, text: &str) -> anyhow::Result<String> {
+async fn worker_turn(session: &AgentSession, text: &str) -> anyhow::Result<String> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let prompt = session.prompt(text.to_string(), tx);
     let collect = async {
         let mut out = String::new();
         while let Some(ev) = rx.recv().await {
             match ev {
-                LaneEvent::Message { text } => out.push_str(&text),
-                LaneEvent::Finished { .. } | LaneEvent::Failed { .. } => break,
+                AgentEvent::Message { text } => out.push_str(&text),
+                AgentEvent::Finished { .. } | AgentEvent::Failed { .. } => break,
                 _ => {}
             }
         }

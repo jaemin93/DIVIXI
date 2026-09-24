@@ -7,7 +7,7 @@
 
   /**
    * Second column: every track, newest activity first, each unfolding into
-   * its lanes (Workspace > Track > Lane). The open track's lanes are shown
+   * its workers (Workspace > Track > Worker). The open track's workers are shown
    * unless folded by hand. A right click on a track opens its menu: rename,
    * tags, colour, settings, delete — after Kiro Crew's session menu.
    */
@@ -16,7 +16,7 @@
 
   const live = (r: { status: string }) => r.status === "running" || r.status === "connecting";
 
-  // Lanes are whatever the conductor has opened in a track, from the runs.
+  // Workers are whatever the conductor has opened in a track, from the runs.
   const tracks = $derived(
     store.tracks
       .map((tr) => {
@@ -31,15 +31,15 @@
           createdAt: tr.created_at,
           runs: runs.length,
           live: runs.some(live),
-          busy: runs.some((r) => r.lane === "conductor" && live(r)),
+          busy: runs.some((r) => r.session === "conductor" && live(r)),
           lastAt: Math.max(tr.updated_at, ...runs.map((r) => r.startedAt)),
-          lanes: store.laneNamesIn(tr.id).map((name) => {
-            const laneRuns = runs.filter((r) => r.lane === name);
+          workers: store.workerNamesIn(tr.id).map((name) => {
+            const workerRuns = runs.filter((r) => r.session === name);
             return {
               name,
-              agent: laneRuns.at(-1)?.agent ?? tr.agent,
-              live: laneRuns.some(live),
-              runs: laneRuns.length,
+              agent: workerRuns.at(-1)?.agent ?? tr.agent,
+              live: workerRuns.some(live),
+              runs: workerRuns.length,
             };
           }),
         };
@@ -324,7 +324,7 @@
   </div>
 </aside>
 
-<!-- One track and, when unfolded, its lanes. -->
+<!-- One track and, when unfolded, its workers. -->
 {#snippet row(tr: (typeof tracks)[number])}
       <div
         class="track"
@@ -343,7 +343,7 @@
             style="background: {dotColor(tr)}"
             title={dotTitle(tr)}
           ></span>
-          <button class="chev" onclick={() => toggle(tr.id)} aria-label={isOpen(tr.id) ? t("tracks.foldLanes") : t("tracks.unfoldLanes")}>
+          <button class="chev" onclick={() => toggle(tr.id)} aria-label={isOpen(tr.id) ? t("tracks.foldWorkers") : t("tracks.unfoldWorkers")}>
             {isOpen(tr.id) ? "▾" : "▸"}
           </button>
         </div>
@@ -366,19 +366,19 @@
       </div>
 
       {#if isOpen(tr.id)}
-        {#each tr.lanes as lane (lane.name)}
+        {#each tr.workers as worker (worker.name)}
           <button
-            class="lane"
-            class:on={store.view === "lane" && store.track === tr.id && store.openLane === lane.name}
+            class="worker"
+            class:on={store.view === "worker" && store.track === tr.id && store.openWorker === worker.name}
             onclick={async () => {
               if (store.track !== tr.id) await store.selectTrack(tr.id);
-              store.openLaneView(lane.name);
+              store.openWorkerView(worker.name);
             }}
           >
-            <span class="dot" class:pulse={lane.live} style="background: {lane.live ? 'var(--ok)' : 'var(--idle)'}"></span>
-            <span class="mono name">{lane.name}</span>
-            <span class="mono meta">{agentLabel(lane.agent)}</span>
-            <span class="mono count">{lane.runs}</span>
+            <span class="dot" class:pulse={worker.live} style="background: {worker.live ? 'var(--ok)' : 'var(--idle)'}"></span>
+            <span class="mono name">{worker.name}</span>
+            <span class="mono meta">{agentLabel(worker.agent)}</span>
+            <span class="mono count">{worker.runs}</span>
           </button>
         {/each}
       {/if}
@@ -729,7 +729,7 @@
     color: var(--hi);
   }
 
-  .lane {
+  .worker {
     width: 100%;
     height: 30px;
     display: flex;
@@ -744,12 +744,12 @@
     color: var(--dim);
   }
 
-  .lane:hover {
+  .worker:hover {
     color: var(--hi);
     background: var(--sel);
   }
 
-  .lane.on {
+  .worker.on {
     color: var(--hi);
     background: var(--sel);
   }
@@ -768,7 +768,7 @@
     white-space: nowrap;
   }
 
-  .lane .name {
+  .worker .name {
     flex: 1;
   }
 

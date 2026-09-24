@@ -1,7 +1,7 @@
 //! How the machine is holding up, for the meter in the title bar: CPU,
 //! memory, and the disk the open track's folder lives on. Agents are
 //! heavy (each session is a node or native process), so this is what the
-//! human glances at before opening another lane.
+//! human glances at before opening another worker.
 
 use std::path::Path;
 
@@ -20,7 +20,7 @@ pub struct Metrics {
     pub disk_total: u64,
     /// Mount point of the disk measured, e.g. `C:\`.
     pub disk_mount: String,
-    /// Agent sessions open right now (conductors and lanes).
+    /// Agent sessions open right now (conductors and workers).
     pub sessions: usize,
     /// Of those, how many have a turn in flight.
     pub working: usize,

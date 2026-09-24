@@ -1,8 +1,8 @@
-//! The conductor and its lanes.
+//! The conductor and its workers.
 //!
 //! A track has one conductor: an agent session at Track level. What it can
 //! do to the app arrives as MCP tools (served in-process, see
-//! `orchestra_mcp`): open a lane, ask a lane a follow-up, check on it, read
+//! `orchestra_mcp`): open a worker, ask a worker a follow-up, check on it, read
 //! a report, record a decision. Whether a human message is a question to
 //! answer or work to delegate is the conductor's call, made in its prompt,
 //! not in Rust — the core is the mechanism, the agent is the policy.
@@ -11,17 +11,17 @@
 //! already scoped to the track that made it; the conductor never names its
 //! track and cannot reach another.
 //!
-//! Lanes are agent sessions too, one per lane name within a track, alive
-//! across runs, so a lane is a Claude Code (or Codex, …) session the
-//! conductor keeps talking to. Every turn, on the conductor or a lane, is one
-//! run in the store. A lane's session id is remembered in the store as well,
-//! so a closed lane (closed on purpose, or gone with an app restart) reopens
+//! Workers are agent sessions too, one per worker name within a track, alive
+//! across runs, so a worker is a Claude Code (or Codex, …) session the
+//! conductor keeps talking to. Every turn, on the conductor or a worker, is one
+//! run in the store. A worker's session id is remembered in the store as well,
+//! so a closed worker (closed on purpose, or gone with an app restart) reopens
 //! with its conversation when the conductor calls it by name again.
 //!
-//! Lane work is asynchronous from the conductor's point of view: `spawn_worker`
-//! and `ask_worker` return as soon as the lane has the task, and when the lane
+//! Worker work is asynchronous from the conductor's point of view: `spawn_worker`
+//! and `ask_worker` return as soon as the worker has the task, and when the worker
 //! finishes, Divixi hands its report to the conductor as a new turn. A
-//! blocking tool would trip the agent's own MCP call timeout on any lane
+//! blocking tool would trip the agent's own MCP call timeout on any worker
 //! that runs for minutes, which real work does.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orchestra_acp::{AgentSession, AgentSpec, McpHttp, SessionOptions};
-use orchestra_core::LaneEvent;
+use orchestra_core::AgentEvent;
 use orchestra_mcp::{McpServer, Tool};
 use orchestra_store::{Decision, DecisionOption, NewDecision, TrackInfo};
 use serde_json::{json, Value};
@@ -39,10 +39,10 @@ use tokio::sync::Mutex;
 
 use crate::{pump, AppState};
 
-/// The lane name conductor turns are recorded under.
-pub const CONDUCTOR_LANE: &str = "conductor";
+/// The worker name conductor turns are recorded under.
+pub const CONDUCTOR_SESSION: &str = "conductor";
 
-/// Prefix of conductor prompts that Divixi itself injects (lane reports).
+/// Prefix of conductor prompts that Divixi itself injects (worker reports).
 /// Language-neutral; the timeline shows these as system lines, not as the
 /// human speaking, and the preamble tells the conductor what it means.
 pub const REPORT_PREFIX: &str = "[worker-report]";
@@ -65,10 +65,10 @@ pub(crate) fn with_attachments(prompt: &str, files: &[PathBuf]) -> String {
 /// First line of a turn that carries the human's answer to a decision card.
 pub const DECISION_PREFIX: &str = "[decision]";
 
-/// A lane run waits at most this long for the agent to finish a turn.
-const LANE_TURN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// A worker run waits at most this long for the agent to finish a turn.
+const WORKER_TURN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
-/// How long a lane report waits for the conductor to become free.
+/// How long a worker report waits for the conductor to become free.
 const REPORT_WAIT: Duration = Duration::from_secs(30 * 60);
 /// What `conductor_turn` returns while an earlier turn is still running.
 pub(crate) const BUSY: &str = "conductor is still responding";
@@ -99,14 +99,14 @@ pub(crate) fn fingerprint(agent: &str, config: &BTreeMap<String, String>) -> Str
     format!("{agent}\n{}", serde_json::to_string(config).unwrap_or_default())
 }
 
-/// Conductor and lane sessions, across tracks. Held behind async mutexes
+/// Conductor and worker sessions, across tracks. Held behind async mutexes
 /// because opening a session and running a turn both await.
 #[derive(Default)]
 pub struct Sessions {
     /// By track id.
     pub conductors: Mutex<HashMap<String, Conductor>>,
-    /// By `track/lane` (see [`lane_key`]).
-    pub lanes: Mutex<HashMap<String, Live>>,
+    /// By `track/worker` (see [`worker_key`]).
+    pub workers: Mutex<HashMap<String, Live>>,
     /// Tracks whose conductor has a turn in flight.
     busy: parking_lot::Mutex<HashSet<String>>,
 }
@@ -128,45 +128,45 @@ impl Sessions {
     /// Open agent sessions across tracks, and how many are mid-turn.
     pub async fn counts(&self) -> (usize, usize) {
         let conductors = self.conductors.lock().await;
-        let lanes = self.lanes.lock().await;
-        let open = conductors.len() + lanes.len();
-        let working = self.busy.lock().len() + lanes.values().filter(|l| l.running.is_some()).count();
+        let workers = self.workers.lock().await;
+        let open = conductors.len() + workers.len();
+        let working = self.busy.lock().len() + workers.values().filter(|l| l.running.is_some()).count();
         (open, working)
     }
 
-    /// Whether the conductor or any lane of a track has a turn in flight.
+    /// Whether the conductor or any worker of a track has a turn in flight.
     pub async fn is_active(&self, track: &str) -> bool {
         if self.is_busy(track) {
             return true;
         }
-        let prefix = lane_key(track, "");
-        self.lanes
+        let prefix = worker_key(track, "");
+        self.workers
             .lock()
             .await
             .iter()
             .any(|(key, live)| key.starts_with(&prefix) && live.running.is_some())
     }
 
-    /// Forget every session of a track (its conductor and lanes). Turns in
+    /// Forget every session of a track (its conductor and workers). Turns in
     /// flight are cancelled so they end soon; nothing new starts.
     pub async fn close_track(&self, track: &str) {
         if let Some(conductor) = self.conductors.lock().await.remove(track) {
             conductor.live.session.cancel();
         }
-        let prefix = lane_key(track, "");
-        let mut lanes = self.lanes.lock().await;
-        let gone: Vec<String> = lanes.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+        let prefix = worker_key(track, "");
+        let mut workers = self.workers.lock().await;
+        let gone: Vec<String> = workers.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
         for key in gone {
-            if let Some(live) = lanes.remove(&key) {
+            if let Some(live) = workers.remove(&key) {
                 live.session.cancel();
             }
         }
     }
 }
 
-/// Key of a lane in [`Sessions::lanes`] and in the store's memory.
-fn lane_key(track: &str, lane: &str) -> String {
-    format!("{track}/{lane}")
+/// Key of a worker in [`Sessions::workers`] and in the store's memory.
+fn worker_key(track: &str, worker: &str) -> String {
+    format!("{track}/{worker}")
 }
 
 /// What the conductor is told once, at the start of its session, in the
@@ -260,7 +260,7 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                     let task = str_arg(&args, "task")?;
                     let agent = args.get("agent").and_then(Value::as_str).map(str::to_owned);
                     let fresh = args.get("fresh").and_then(Value::as_bool).unwrap_or(false);
-                    start_lane_turn(app, track, name, task, agent, true, fresh).await
+                    start_worker_turn(app, track, name, task, agent, true, fresh).await
                 }
             },
         ),
@@ -280,7 +280,7 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                 async move {
                     let name = str_arg(&args, "name")?;
                     let message = str_arg(&args, "message")?;
-                    start_lane_turn(app, track, name, message, None, false, false).await
+                    start_worker_turn(app, track, name, message, None, false, false).await
                 }
             },
         ),
@@ -292,7 +292,7 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                 let (app, track) = status.clone();
                 async move {
                     let state = app.state::<AppState>();
-                    Ok(Value::Array(lane_list(&state, &track).await))
+                    Ok(Value::Array(worker_list(&state, &track).await))
                 }
             },
         ),
@@ -329,15 +329,15 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                 async move {
                     let name = str_arg(&args, "name")?;
                     let state = app.state::<AppState>();
-                    let mut lanes = state.sessions.lanes.lock().await;
-                    let key = lane_key(&track, &name);
-                    match lanes.get(&key) {
+                    let mut workers = state.sessions.workers.lock().await;
+                    let key = worker_key(&track, &name);
+                    match workers.get(&key) {
                         Some(live) if live.running.is_some() => Err(format!(
                             "worker {name} is still working on run {}. Wait for its {REPORT_PREFIX} before closing it.",
                             live.running.as_deref().unwrap_or_default()
                         )),
                         Some(_) => {
-                            lanes.remove(&key);
+                            workers.remove(&key);
                             Ok(Value::String(format!("closed {name}")))
                         }
                         None => Err(format!("no open worker {name}")),
@@ -510,7 +510,7 @@ pub async fn answer_decision(
 /// Run `text` as a conductor turn once the conductor is free. The turn
 /// itself claims the busy mark, so a refusal is retried rather than
 /// trusting an earlier free check that another turn may have overtaken.
-/// `open` lets it start a closed conductor; a lane report does not.
+/// `open` lets it start a closed conductor; a worker report does not.
 async fn deliver(app: AppHandle, track: String, text: String, open: bool, what: String) {
     let state = app.state::<AppState>();
     let deadline = std::time::Instant::now() + REPORT_WAIT;
@@ -537,51 +537,51 @@ async fn deliver(app: AppHandle, track: String, text: String, open: bool, what: 
     }
 }
 
-/// What the store remembers about a lane's last agent session, so the lane
+/// What the store remembers about a worker's last agent session, so the worker
 /// can be reopened with its conversation.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct LaneRecord {
+struct WorkerRecord {
     session_id: String,
     agent: String,
 }
 
-fn lane_record_key(track: &str, name: &str) -> String {
-    format!("lane_session:{}", lane_key(track, name))
+fn worker_record_key(track: &str, name: &str) -> String {
+    format!("worker_session:{}", worker_key(track, name))
 }
 
-fn lane_record(state: &AppState, track: &str, name: &str) -> Option<LaneRecord> {
+fn worker_record(state: &AppState, track: &str, name: &str) -> Option<WorkerRecord> {
     state
         .store
-        .get_meta(&lane_record_key(track, name))
+        .get_meta(&worker_record_key(track, name))
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
 }
 
-fn remember_lane(state: &AppState, track: &str, name: &str, record: &LaneRecord) {
+fn remember_worker(state: &AppState, track: &str, name: &str, record: &WorkerRecord) {
     match serde_json::to_string(record) {
         Ok(json) => {
-            if let Err(err) = state.store.set_meta(&lane_record_key(track, name), &json) {
-                tracing::warn!(lane = %name, %err, "could not remember worker session id");
+            if let Err(err) = state.store.set_meta(&worker_record_key(track, name), &json) {
+                tracing::warn!(worker = %name, %err, "could not remember worker session id");
             }
         }
-        Err(err) => tracing::warn!(lane = %name, %err, "could not encode worker record"),
+        Err(err) => tracing::warn!(worker = %name, %err, "could not encode worker record"),
     }
 }
 
-/// Every lane the store knows in a track, merged with what is open right
-/// now. The conductor's own lane is not a lane to it.
-async fn lane_list(state: &AppState, track: &str) -> Vec<Value> {
-    let history = state.store.lanes(track).unwrap_or_else(|err| {
+/// Every worker the store knows in a track, merged with what is open right
+/// now. The conductor's own worker is not a worker to it.
+async fn worker_list(state: &AppState, track: &str) -> Vec<Value> {
+    let history = state.store.sessions(track).unwrap_or_else(|err| {
         tracing::warn!(%err, "could not list workers from the store");
         Vec::new()
     });
-    let lanes = state.sessions.lanes.lock().await;
+    let workers = state.sessions.workers.lock().await;
     let mut list: Vec<Value> = history
         .iter()
-        .filter(|info| info.name != CONDUCTOR_LANE)
+        .filter(|info| info.name != CONDUCTOR_SESSION)
         .map(|info| {
-            let live = lanes.get(&lane_key(track, &info.name));
+            let live = workers.get(&worker_key(track, &info.name));
             json!({
                 "name": info.name,
                 "agent": live.map(|l| l.agent.clone()).unwrap_or_else(|| info.agent.clone()),
@@ -592,13 +592,13 @@ async fn lane_list(state: &AppState, track: &str) -> Vec<Value> {
                 "last_run": info.last_run,
                 "last_status": info.last_status.as_str(),
                 "last_at": info.last_at,
-                "resumable": live.is_none() && lane_record(state, track, &info.name).is_some(),
+                "resumable": live.is_none() && worker_record(state, track, &info.name).is_some(),
             })
         })
         .collect();
-    // A lane opened so recently that its first run is not in the store yet.
-    let prefix = lane_key(track, "");
-    for (key, live) in lanes.iter() {
+    // A worker opened so recently that its first run is not in the store yet.
+    let prefix = worker_key(track, "");
+    for (key, live) in workers.iter() {
         let Some(name) = key.strip_prefix(&prefix) else { continue };
         if !history.iter().any(|h| h.name == name) {
             list.push(json!({
@@ -668,13 +668,13 @@ fn track_info(state: &AppState, track: &str) -> Result<TrackInfo, String> {
         .ok_or_else(|| format!("no track {track}"))
 }
 
-/// Give a lane a turn and return at once. `open` is `spawn_worker` (a lane
-/// that is already open is refused); `ask_worker` needs the lane to exist,
-/// open or in the record. A lane that is not open but has a remembered
+/// Give a worker a turn and return at once. `open` is `spawn_worker` (a worker
+/// that is already open is refused); `ask_worker` needs the worker to exist,
+/// open or in the record. A worker that is not open but has a remembered
 /// session is reopened with it, unless `fresh` says to forget. The turn
 /// runs in the background; when it ends, its report is handed to the
 /// conductor as a new turn.
-async fn start_lane_turn(
+async fn start_worker_turn(
     app: AppHandle,
     track: String,
     name: String,
@@ -683,17 +683,17 @@ async fn start_lane_turn(
     open: bool,
     fresh: bool,
 ) -> Result<Value, String> {
-    if name == CONDUCTOR_LANE {
+    if name == CONDUCTOR_SESSION {
         return Err("that name is reserved".to_string());
     }
     let state = app.state::<AppState>();
     let info = track_info(&state, &track)?;
-    let key = lane_key(&track, &name);
+    let key = worker_key(&track, &name);
 
-    // Resolve or open the lane session; refuse a second turn on a busy lane.
+    // Resolve or open the worker session; refuse a second turn on a busy worker.
     let (agent_id, turns, session, resumed, note, run) = {
-        let mut lanes = state.sessions.lanes.lock().await;
-        let (agent_id, turns, session, resumed, note) = match (lanes.get_mut(&key), open) {
+        let mut workers = state.sessions.workers.lock().await;
+        let (agent_id, turns, session, resumed, note) = match (workers.get_mut(&key), open) {
             (Some(live), true) => {
                 return Err(format!(
                     "worker {name} is already open (agent {}, {} turns). Send follow-ups with ask_worker(name=\"{name}\", message=...), or spawn_worker with a new name.",
@@ -710,53 +710,53 @@ async fn start_lane_turn(
                 (live.agent.clone(), live.turns, live.session.clone(), false, None)
             }
             (None, _) => {
-                let record = if fresh { None } else { lane_record(&state, &track, &name) };
-                let history = state.store.lanes(&track).unwrap_or_default();
+                let record = if fresh { None } else { worker_record(&state, &track, &name) };
+                let history = state.store.sessions(&track).unwrap_or_default();
                 let past = history.iter().find(|l| l.name == name);
                 if !open && record.is_none() && past.is_none() {
-                    let prefix = lane_key(&track, "");
-                    let open_names: Vec<&str> = lanes.keys().filter_map(|k| k.strip_prefix(&prefix)).collect();
+                    let prefix = worker_key(&track, "");
+                    let open_names: Vec<&str> = workers.keys().filter_map(|k| k.strip_prefix(&prefix)).collect();
                     let closed: Vec<&str> = history
                         .iter()
-                        .filter(|l| l.name != CONDUCTOR_LANE && !lanes.contains_key(&lane_key(&track, &l.name)))
+                        .filter(|l| l.name != CONDUCTOR_SESSION && !workers.contains_key(&worker_key(&track, &l.name)))
                         .map(|l| l.name.as_str())
                         .collect();
                     return Err(format!(
                         "no worker {name}. Open workers: {open_names:?}. Closed workers: {closed:?}. Use spawn_worker to create one."
                     ));
                 }
-                // Agent: the caller's choice, else the lane's earlier one, else
+                // Agent: the caller's choice, else the worker's earlier one, else
                 // the track's worker agent.
                 let agent_id = match (agent, &record, past) {
                     (Some(a), _, _) => a,
                     (None, Some(r), _) => r.agent.clone(),
                     (None, None, Some(p)) if !fresh => p.agent.clone(),
-                    _ => info.lane_agent().to_string(),
+                    _ => info.effective_worker_agent().to_string(),
                 };
                 // Memory only carries over on the agent that made it.
                 let resume = record.filter(|r| r.agent == agent_id).map(|r| r.session_id);
                 let wanted = resume.is_some();
                 let spec: AgentSpec = state.spec_for(&agent_id)?;
                 // The track's worker options are in its worker agent's terms;
-                // a lane on some other agent gets that agent's defaults.
+                // a worker on some other agent gets that agent's defaults.
                 let empty = BTreeMap::new();
-                let chosen = if agent_id == info.lane_agent() { info.lane_config() } else { &empty };
+                let chosen = if agent_id == info.effective_worker_agent() { info.effective_worker_config() } else { &empty };
                 let mut opts = session_options(&state, &agent_id, &info.cwd, chosen, None);
                 opts.resume = resume;
-                tracing::info!(%track, lane = %name, agent = %agent_id, resume = ?opts.resume, "opening worker session");
+                tracing::info!(%track, worker = %name, agent = %agent_id, resume = ?opts.resume, "opening worker session");
                 let session = Arc::new(AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?);
                 let resumed = session.resumed();
-                remember_lane(
+                remember_worker(
                     &state,
                     &track,
                     &name,
-                    &LaneRecord {
+                    &WorkerRecord {
                         session_id: session.session_id().to_string(),
                         agent: agent_id.clone(),
                     },
                 );
                 let turns = if resumed { past.map(|p| p.runs).unwrap_or(0) + 1 } else { 1 };
-                lanes.insert(
+                workers.insert(
                     key.clone(),
                     Live {
                         agent: agent_id.clone(),
@@ -783,7 +783,7 @@ async fn start_lane_turn(
             .store
             .begin_run(&track, &name, &agent_id, &text, &info.cwd)
             .map_err(|e| e.to_string())?;
-        if let Some(live) = lanes.get_mut(&key) {
+        if let Some(live) = workers.get_mut(&key) {
             live.running = Some(run.clone());
         }
         (agent_id, turns, session, resumed, note, run)
@@ -801,17 +801,17 @@ async fn start_lane_turn(
             run_t.clone(),
             rx,
         ));
-        let _ = tx.send(LaneEvent::Started {
+        let _ = tx.send(AgentEvent::Started {
             session_id: session.session_id().to_string(),
             cwd: cwd_t,
         });
-        match tokio::time::timeout(LANE_TURN_TIMEOUT, session.prompt(text_t, tx.clone())).await {
+        match tokio::time::timeout(WORKER_TURN_TIMEOUT, session.prompt(text_t, tx.clone())).await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
-                let _ = tx.send(LaneEvent::Failed { error: err.to_string() });
+                let _ = tx.send(AgentEvent::Failed { error: err.to_string() });
             }
             Err(_) => {
-                let _ = tx.send(LaneEvent::Failed { error: "worker turn timed out".to_string() });
+                let _ = tx.send(AgentEvent::Failed { error: "worker turn timed out".to_string() });
             }
         }
         drop(tx);
@@ -819,13 +819,13 @@ async fn start_lane_turn(
 
         {
             let state = app_for_turn.state::<AppState>();
-            let mut lanes = state.sessions.lanes.lock().await;
-            if let Some(live) = lanes.get_mut(&lane_key(&track_t, &name_t)) {
+            let mut workers = state.sessions.workers.lock().await;
+            if let Some(live) = workers.get_mut(&worker_key(&track_t, &name_t)) {
                 if live.running.as_deref() == Some(run_t.as_str()) {
                     live.running = None;
                 }
             }
-            drop(lanes);
+            drop(workers);
         }
         report_to_conductor(app_for_turn, track_t, name_t, run_t).await;
     });
@@ -845,8 +845,8 @@ async fn start_lane_turn(
     Ok(result)
 }
 
-/// Hand a finished lane run to its track's conductor as a new turn.
-async fn report_to_conductor(app: AppHandle, track: String, lane: String, run: String) {
+/// Hand a finished worker run to its track's conductor as a new turn.
+async fn report_to_conductor(app: AppHandle, track: String, worker: String, run: String) {
     let state = app.state::<AppState>();
     let summary = match state.store.run(&run) {
         Ok(Some(s)) => s,
@@ -861,7 +861,7 @@ async fn report_to_conductor(app: AppHandle, track: String, lane: String, run: S
         output = format!("{}…\n(truncated: read_report(\"{run}\") has it all)", output.chars().take(MAX).collect::<String>());
     }
     let text = format!(
-        "{REPORT_PREFIX} worker={lane} run={run} status={} tools={} duration_ms={}{}\n\n{}",
+        "{REPORT_PREFIX} worker={worker} run={run} status={} tools={} duration_ms={}{}\n\n{}",
         summary.status.as_str(),
         summary.tool_count,
         summary.duration_ms.unwrap_or(0),
@@ -869,7 +869,7 @@ async fn report_to_conductor(app: AppHandle, track: String, lane: String, run: S
         if output.is_empty() { "(no text output)" } else { &output },
     );
 
-    deliver(app.clone(), track, text, false, format!("report of {lane} run {run}")).await;
+    deliver(app.clone(), track, text, false, format!("report of {worker} run {run}")).await;
 }
 
 /// The track's conductor session, opened (or reopened after its agent or
@@ -1047,7 +1047,7 @@ pub async fn conductor_turn(
 
         let run = st
             .store
-            .begin_run(&track, CONDUCTOR_LANE, &agent, &prompt, &info.cwd)
+            .begin_run(&track, CONDUCTOR_SESSION, &agent, &prompt, &info.cwd)
             .map_err(|e| e.to_string())?;
         // Tools called during the turn (decisions) hang off this run.
         if let Some(c) = st.sessions.conductors.lock().await.get_mut(&track) {
@@ -1056,8 +1056,8 @@ pub async fn conductor_turn(
 
         let text = if first { format!("{}\n\n---\n\n{prompt}", preamble(&lang, &info)) } else { prompt };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        tauri::async_runtime::spawn(pump(app.clone(), track.clone(), CONDUCTOR_LANE.to_string(), run.clone(), rx));
-        let _ = tx.send(LaneEvent::Started {
+        tauri::async_runtime::spawn(pump(app.clone(), track.clone(), CONDUCTOR_SESSION.to_string(), run.clone(), rx));
+        let _ = tx.send(AgentEvent::Started {
             session_id,
             cwd: info.cwd.clone(),
         });
@@ -1076,7 +1076,7 @@ pub async fn conductor_turn(
             {
                 let mut conductors = st.sessions.conductors.lock().await;
                 if let Err(err) = result {
-                    let _ = tx.send(LaneEvent::Failed { error: err.to_string() });
+                    let _ = tx.send(AgentEvent::Failed { error: err.to_string() });
                     // A failed turn kills the session; drop it so the next prompt reopens.
                     conductors.remove(&track_for_turn);
                 } else if let Some(c) = conductors.get_mut(&track_for_turn) {

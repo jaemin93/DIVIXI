@@ -5,11 +5,11 @@
   import { t } from "./i18n.svelte";
 
   /**
-   * A worker lane's session, read like a conversation: what the conductor
+   * A worker worker's session, read like a conversation: what the conductor
    * sent it, then how the worker answered, turn by turn. The worker's turn
    * unfolds live with the same prose and tool lines as the conductor's.
    */
-  const runs = $derived(store.trackRuns.filter((r) => r.lane === store.openLane));
+  const runs = $derived(store.trackRuns.filter((r) => r.session === store.openWorker));
   const agent = $derived(runs.at(-1)?.agent ?? "");
   const live = $derived(runs.some((r) => r.status === "running" || r.status === "connecting"));
 
@@ -57,24 +57,24 @@
 
 <main>
   <header>
-    <div class="mlab">{t("lane.worker")} / {store.openLane}</div>
+    <div class="mlab">{t("worker.worker")} / {store.openWorker}</div>
     <div class="row">
-      <h1 class="serif">{store.openLane}</h1>
-      <span class="mono meta">{agentLabel(agent)} · {t("lane.turns", { n: runs.length })}</span>
+      <h1 class="serif">{store.openWorker}</h1>
+      <span class="mono meta">{agentLabel(agent)} · {t("worker.turns", { n: runs.length })}</span>
       {#if live}<Working />{/if}
       <span class="grow"></span>
-      <button class="btn" onclick={() => (store.view = "track")}>{t("lane.back")}</button>
+      <button class="btn" onclick={() => (store.view = "track")}>{t("worker.back")}</button>
     </div>
   </header>
 
   <div class="scroll" bind:this={scroller}>
     {#if runs.length === 0}
-      <div class="mono empty">{t("lane.empty")}</div>
+      <div class="mono empty">{t("worker.empty")}</div>
     {/if}
     {#each runs as run (run.id)}
-      <!-- What the conductor sent this lane: on the right, as the human's words are on the track. -->
+      <!-- What the conductor sent this worker: on the right, as the human's words are on the track. -->
       <div class="from">
-        <div class="mlab">{t("lane.conductor")}</div>
+        <div class="mlab">{t("worker.conductor")}</div>
         <div class="turn bubble">
           <div class="ctext"><Markdown source={run.prompt} /></div>
         </div>
@@ -83,8 +83,8 @@
       <!-- How the worker answered, as it happened. -->
       <div class="turn to" class:live={run.status === "running" || run.status === "connecting"} class:failed={run.status === "failed"}>
         <div class="head">
-          <span class="mlab">{t("lane.worker")}</span>
-          <span class="mono meta">{run.id} · {t("lane.tools", { n: run.toolCount })}{run.durationMs !== undefined && run.durationMs !== null ? ` · ${secs(run.durationMs)}` : ""}</span>
+          <span class="mlab">{t("worker.worker")}</span>
+          <span class="mono meta">{run.id} · {t("worker.tools", { n: run.toolCount })}{run.durationMs !== undefined && run.durationMs !== null ? ` · ${secs(run.durationMs)}` : ""}</span>
           {#if run.status === "running" || run.status === "connecting"}<Working />{/if}
         </div>
         {#each collapse(run.segments) as seg, i (i)}
@@ -111,7 +111,7 @@
         {#if run.status === "failed" && run.error}
           <p class="ctext bad">{run.error}</p>
         {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
-          <p class="ctext dim">{t("lane.starting")}</p>
+          <p class="ctext dim">{t("worker.starting")}</p>
         {/if}
       </div>
     {/each}

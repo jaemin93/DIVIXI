@@ -87,8 +87,8 @@
     </div>
   {/if}
 
-  <!-- The track is the human and the conductor. Lane work is the conductor's
-       to relay; lanes themselves are read in their own view. -->
+  <!-- The track is the human and the conductor. Worker work is the conductor's
+       to relay; workers themselves are read in their own view. -->
   {#each conductorRuns as run (run.id)}
     {#if run.prompt.startsWith(REPORT_PREFIX)}
       <div class="sys mono">{t("timeline.reportArrived")} · {run.prompt.split("\n")[0].replace(REPORT_PREFIX, "").trim()}</div>
@@ -185,7 +185,7 @@
     margin-bottom: 18px;
   }
 
-  /* A lane report arriving for the conductor: a quiet system line. */
+  /* A worker report arriving for the conductor: a quiet system line. */
   .sys {
     margin: 0 0 12px;
     font-size: 10px;

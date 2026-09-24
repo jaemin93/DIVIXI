@@ -1,6 +1,6 @@
 //! Event store: the durable side of the membrane.
 //!
-//! Every [`LaneEvent`] a run emits is appended, in order, to an append-only
+//! Every [`AgentEvent`] a run emits is appended, in order, to an append-only
 //! `events` log. The `runs` table is a projection folded from that log at the
 //! run's lifecycle boundaries (`started`, `finished`, `failed`), and
 //! `runs_fts` is a full-text index over each finished run's prompt, output and
@@ -18,14 +18,14 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use orchestra_core::{LaneEvent, LaneId, RunId, RunStatus};
+use orchestra_core::{AgentEvent, SessionName, RunId, RunStatus};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -138,6 +138,11 @@ const MIGRATIONS: &[&str] = &[
     UPDATE runs SET track = 'artifact:ar' || substr(track, 9), lane = 'artifact' WHERE track LIKE 'draft:dr%';
     UPDATE meta SET key = 'artifact_session:ar' || substr(key, 17) WHERE key LIKE 'draft_session:dr%';
     DROP TABLE drafts;",
+    // 10 -> 11: on screen and in code a lane is a worker now. A run's column
+    // says which session it belongs to (`conductor`, a worker's name,
+    // `artifact`), and a worker's remembered session moves to its new key.
+    "ALTER TABLE runs RENAME COLUMN lane TO session;
+    UPDATE meta SET key = 'worker_session:' || substr(key, 14) WHERE key LIKE 'lane_session:%';",
 ];
 
 const SCHEMA: &str = r#"
@@ -165,7 +170,7 @@ CREATE TABLE IF NOT EXISTS runs (
     n           INTEGER PRIMARY KEY AUTOINCREMENT,
     id          TEXT    NOT NULL UNIQUE,
     track       TEXT    NOT NULL DEFAULT '',
-    lane        TEXT    NOT NULL,
+    session     TEXT    NOT NULL,
     prompt      TEXT    NOT NULL,
     cwd         TEXT    NOT NULL,
     status      TEXT    NOT NULL,
@@ -246,7 +251,7 @@ pub struct RunSummary {
     pub id: RunId,
     /// The track this run belongs to.
     pub track: String,
-    pub lane: LaneId,
+    pub session: SessionName,
     /// Which agent ran it (`claude_code`, `codex`, …).
     pub agent: String,
     pub prompt: String,
@@ -416,14 +421,14 @@ fn row_to_artifact(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactInfo> {
     })
 }
 
-/// A track: one conductor, its lanes, one working directory.
+/// A track: one conductor, its workers, one working directory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackInfo {
     pub id: String,
     pub name: String,
     /// One line on what the track is for; shown under the name.
     pub intent: String,
-    /// Directory the conductor and its lanes work in.
+    /// Directory the conductor and its workers work in.
     pub cwd: String,
     /// Agent the conductor runs on.
     pub agent: String,
@@ -432,9 +437,9 @@ pub struct TrackInfo {
     /// options keep the agent's default; an absent `mode` means the most
     /// autonomous one.
     pub conductor_config: BTreeMap<String, String>,
-    /// Agent lanes run on; empty means the conductor's.
+    /// Agent workers run on; empty means the conductor's.
     pub worker_agent: String,
-    /// Lanes' session options, like `conductor_config`.
+    /// Workers' session options, like `conductor_config`.
     pub worker_config: BTreeMap<String, String>,
     /// A colour for the list, `#rrggbb`; empty means none.
     pub color: String,
@@ -448,9 +453,9 @@ pub struct TrackInfo {
 }
 
 impl TrackInfo {
-    /// The options lanes open with: the worker's own, or, when the worker
+    /// The options workers open with: the worker's own, or, when the worker
     /// was never set apart (no agent, no options), the conductor's.
-    pub fn lane_config(&self) -> &BTreeMap<String, String> {
+    pub fn effective_worker_config(&self) -> &BTreeMap<String, String> {
         if self.worker_agent.is_empty() && self.worker_config.is_empty() {
             &self.conductor_config
         } else {
@@ -458,8 +463,8 @@ impl TrackInfo {
         }
     }
 
-    /// The agent lanes run on.
-    pub fn lane_agent(&self) -> &str {
+    /// The agent workers run on.
+    pub fn effective_worker_agent(&self) -> &str {
         if self.worker_agent.is_empty() {
             &self.agent
         } else {
@@ -482,9 +487,9 @@ pub struct TrackPatch {
     pub tags: Option<Vec<String>>,
 }
 
-/// A lane as the record knows it: its runs, whoever ran them last.
+/// A session as the record knows it: its runs, whoever ran them last.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LaneInfo {
+pub struct SessionInfo {
     pub name: String,
     /// Agent of the latest run.
     pub agent: String,
@@ -500,7 +505,7 @@ pub struct LaneInfo {
 pub struct StoredEvent {
     pub seq: i64,
     pub at_ms: u64,
-    pub event: LaneEvent,
+    pub event: AgentEvent,
 }
 
 /// A full-text match.
@@ -598,7 +603,7 @@ impl Store {
         };
         for (run, at_ms) in live {
             tracing::warn!(%run, "closing run left live by a previous process");
-            self.append(&run, at_ms, &LaneEvent::Failed { error: INTERRUPTED.to_string() })?;
+            self.append(&run, at_ms, &AgentEvent::Failed { error: INTERRUPTED.to_string() })?;
         }
         Ok(())
     }
@@ -775,12 +780,12 @@ impl Store {
         self.track(id)?.ok_or_else(|| anyhow::anyhow!("no track {id}"))
     }
 
-    /// Forget a track's remembered conductor and lane sessions, so they
+    /// Forget a track's remembered conductor and worker sessions, so they
     /// open fresh next time (needed when the working directory changes).
     pub fn forget_track_sessions(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock();
         conn.execute(
-            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'lane_session:' || ?1 || '/%'",
+            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%'",
             params![id],
         )?;
         Ok(())
@@ -795,7 +800,7 @@ impl Store {
         tx.execute("DELETE FROM runs WHERE track = ?1", params![id])?;
         tx.execute("DELETE FROM decisions WHERE track = ?1", params![id])?;
         tx.execute(
-            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'lane_session:' || ?1 || '/%'",
+            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%'",
             params![id],
         )?;
         let changed = tx.execute("DELETE FROM tracks WHERE id = ?1", params![id])?;
@@ -809,15 +814,15 @@ impl Store {
     /// Register a new run in a track and return its id.
     ///
     /// Ids are `t001`, `t002`, … in creation order, durable across restarts.
-    pub fn begin_run(&self, track: &str, lane: &str, agent: &str, prompt: &str, cwd: &str) -> anyhow::Result<RunId> {
+    pub fn begin_run(&self, track: &str, session: &str, agent: &str, prompt: &str, cwd: &str) -> anyhow::Result<RunId> {
         let conn = self.conn.lock();
         let next: i64 = conn.query_row("SELECT COALESCE(MAX(n), 0) + 1 FROM runs", [], |r| r.get(0))?;
         let id = format!("t{next:03}");
         let now = now_ms();
         conn.execute(
-            "INSERT INTO runs(n, id, track, lane, agent, prompt, cwd, status, started_at)
+            "INSERT INTO runs(n, id, track, session, agent, prompt, cwd, status, started_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![next, id, track, lane, agent, prompt, cwd, RunStatus::Connecting.as_str(), now],
+            params![next, id, track, session, agent, prompt, cwd, RunStatus::Connecting.as_str(), now],
         )?;
         conn.execute("UPDATE tracks SET updated_at = ?2 WHERE id = ?1", params![track, now])?;
         Ok(id)
@@ -827,7 +832,7 @@ impl Store {
     ///
     /// Returns the event's sequence number. Appending to a run that already
     /// ended is allowed (the log stays truthful) but does not reopen it.
-    pub fn append(&self, run: &str, at_ms: u64, event: &LaneEvent) -> anyhow::Result<i64> {
+    pub fn append(&self, run: &str, at_ms: u64, event: &AgentEvent) -> anyhow::Result<i64> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
 
@@ -839,13 +844,13 @@ impl Store {
         let seq = tx.last_insert_rowid();
 
         match event {
-            LaneEvent::Started { session_id, .. } => {
+            AgentEvent::Started { session_id, .. } => {
                 tx.execute(
                     "UPDATE runs SET status = ?2, session_id = ?3 WHERE id = ?1 AND status = 'connecting'",
                     params![run, RunStatus::Running.as_str(), session_id],
                 )?;
             }
-            LaneEvent::Finished { stop_reason } => {
+            AgentEvent::Finished { stop_reason } => {
                 let changed = tx.execute(
                     "UPDATE runs SET status = ?2, stop_reason = ?3, ended_at = ?4, duration_ms = ?5
                      WHERE id = ?1 AND status IN ('connecting', 'running')",
@@ -855,7 +860,7 @@ impl Store {
                     fold(&tx, run)?;
                 }
             }
-            LaneEvent::Failed { error } => {
+            AgentEvent::Failed { error } => {
                 let changed = tx.execute(
                     "UPDATE runs SET status = ?2, error = ?3, ended_at = ?4, duration_ms = ?5
                      WHERE id = ?1 AND status IN ('connecting', 'running')",
@@ -880,22 +885,23 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Every lane that ever had a run in a track, newest activity first,
-    /// with the agent and status of its latest run. Lanes outlive their
-    /// sessions: this is how a closed lane is still known.
-    pub fn lanes(&self, track: &str) -> anyhow::Result<Vec<LaneInfo>> {
+    /// Every session that ever had a run in a track (the conductor, each
+    /// worker, by name), newest activity first,
+    /// with the agent and status of its latest run. Workers outlive their
+    /// sessions: this is how a closed worker is still known.
+    pub fn sessions(&self, track: &str) -> anyhow::Result<Vec<SessionInfo>> {
         let conn = self.conn.lock();
-        // The latest run per lane, joined back for its id, status and time.
+        // The latest run per session, joined back for its id, status and time.
         let mut stmt = conn.prepare(
-            "SELECT r.lane, r.agent, c.runs, r.id, r.status, r.started_at
+            "SELECT r.session, r.agent, c.runs, r.id, r.status, r.started_at
              FROM runs r
-             JOIN (SELECT lane, COUNT(*) AS runs, MAX(n) AS last_n FROM runs WHERE track = ?1 GROUP BY lane) c
-               ON c.lane = r.lane AND c.last_n = r.n
+             JOIN (SELECT session, COUNT(*) AS runs, MAX(n) AS last_n FROM runs WHERE track = ?1 GROUP BY session) c
+               ON c.session = r.session AND c.last_n = r.n
              ORDER BY r.n DESC",
         )?;
         let rows = stmt.query_map(params![track], |r| {
             let status: String = r.get(4)?;
-            Ok(LaneInfo {
+            Ok(SessionInfo {
                 name: r.get(0)?,
                 agent: r.get(1)?,
                 runs: r.get::<_, i64>(2)? as u32,
@@ -1047,7 +1053,7 @@ impl Store {
             conn.prepare("SELECT seq, at_ms, payload FROM events WHERE run_id = ?1 ORDER BY seq")?;
         let rows = stmt.query_map(params![run], |r| {
             let payload: String = r.get(2)?;
-            let event: LaneEvent = serde_json::from_str(&payload).map_err(|e| {
+            let event: AgentEvent = serde_json::from_str(&payload).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
             })?;
             Ok(StoredEvent { seq: r.get(0)?, at_ms: r.get::<_, i64>(1)? as u64, event })
@@ -1149,7 +1155,7 @@ fn fts_query(query: &str) -> Option<String> {
 }
 
 /// Columns of a run summary, in the order `row_to_summary` reads them.
-const RUN_SELECT: &str = "SELECT id, lane, prompt, cwd, status, started_at, duration_ms, session_id,
+const RUN_SELECT: &str = "SELECT id, session, prompt, cwd, status, started_at, duration_ms, session_id,
                                  stop_reason, error, output, plan, tool_count, agent, track
                           FROM runs";
 
@@ -1207,7 +1213,7 @@ fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
     Ok(RunSummary {
         id: r.get(0)?,
         track: r.get(14)?,
-        lane: r.get(1)?,
+        session: r.get(1)?,
         agent: r.get(13)?,
         prompt: r.get(2)?,
         cwd: r.get(3)?,
@@ -1234,8 +1240,8 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
-    fn tool(id: &str, title: &str) -> LaneEvent {
-        LaneEvent::ToolCall {
+    fn tool(id: &str, title: &str) -> AgentEvent {
+        AgentEvent::ToolCall {
             id: id.into(),
             title: title.into(),
             tool_kind: "execute".into(),
@@ -1246,18 +1252,18 @@ mod tests {
     /// Track every test run goes into unless it says otherwise.
     const TR: &str = "tr001";
 
-    fn drive_run(store: &Store, lane: &str, prompt: &str, output: &[&str], tools: &[&str]) -> RunId {
-        let run = store.begin_run(TR, lane, "claude_code", prompt, ".").unwrap();
-        store.append(&run, 10, &LaneEvent::Connected { protocol: "v1".into(), load_session: true }).unwrap();
-        store.append(&run, 20, &LaneEvent::Started { session_id: "sess".into(), cwd: ".".into() }).unwrap();
+    fn drive_run(store: &Store, session: &str, prompt: &str, output: &[&str], tools: &[&str]) -> RunId {
+        let run = store.begin_run(TR, session, "claude_code", prompt, ".").unwrap();
+        store.append(&run, 10, &AgentEvent::Connected { protocol: "v1".into(), load_session: true }).unwrap();
+        store.append(&run, 20, &AgentEvent::Started { session_id: "sess".into(), cwd: ".".into() }).unwrap();
         for (i, t) in tools.iter().enumerate() {
             store.append(&run, 30 + i as u64, &tool(&i.to_string(), t)).unwrap();
         }
         for chunk in output {
-            store.append(&run, 50, &LaneEvent::Message { text: (*chunk).into() }).unwrap();
+            store.append(&run, 50, &AgentEvent::Message { text: (*chunk).into() }).unwrap();
         }
-        store.append(&run, 60, &LaneEvent::Plan { entries: vec!["a".into(), "b".into()] }).unwrap();
-        store.append(&run, 90, &LaneEvent::Finished { stop_reason: "end_turn".into() }).unwrap();
+        store.append(&run, 60, &AgentEvent::Plan { entries: vec!["a".into(), "b".into()] }).unwrap();
+        store.append(&run, 90, &AgentEvent::Finished { stop_reason: "end_turn".into() }).unwrap();
         run
     }
 
@@ -1279,7 +1285,7 @@ mod tests {
         assert_eq!(b.id, "tr002");
         assert_eq!(store.tracks().unwrap().len(), 2);
         assert!(a.conductor_config.is_empty() && a.worker_agent.is_empty(), "defaults are empty");
-        assert_eq!(a.lane_agent(), "claude_code", "lanes follow the conductor by default");
+        assert_eq!(a.effective_worker_agent(), "claude_code", "workers follow the conductor by default");
         assert!(store.create_track(&TrackPatch { name: Some("  ".into()), ..new_track("x", "", ".", "codex") }).is_err());
 
         // Runs count per track and bump its activity time.
@@ -1290,8 +1296,8 @@ mod tests {
         let a = store.track("tr001").unwrap().unwrap();
         assert_eq!(a.runs, 2);
         assert!(a.updated_at >= before);
-        assert_eq!(store.lanes("tr001").unwrap().len(), 2);
-        assert_eq!(store.lanes("tr002").unwrap().len(), 1);
+        assert_eq!(store.sessions("tr001").unwrap().len(), 2);
+        assert_eq!(store.sessions("tr002").unwrap().len(), 1);
 
         let patch = TrackPatch {
             name: Some("Lexer".into()),
@@ -1304,7 +1310,7 @@ mod tests {
         let a = store.update_track("tr001", &patch).unwrap();
         assert_eq!((a.name.as_str(), a.intent.as_str(), a.agent.as_str()), ("Lexer", "fix the tokenizer", "copilot"));
         assert_eq!(a.conductor_config, BTreeMap::from([("model".to_string(), "gpt-5.4".to_string())]), "blank values are dropped");
-        assert_eq!((a.worker_agent.as_str(), a.lane_agent()), ("codex", "codex"));
+        assert_eq!((a.worker_agent.as_str(), a.effective_worker_agent()), ("codex", "codex"));
         assert_eq!(a.worker_config.get("mode").map(String::as_str), Some("agent-full-access"));
         let a = store
             .update_track("tr001", &TrackPatch { color: Some("#7aa2f7".into()), tags: Some(vec![" rust ".into(), "study".into(), "rust".into(), "".into()]), ..TrackPatch::default() })
@@ -1317,15 +1323,15 @@ mod tests {
 
         // Deleting takes the runs, their events and remembered sessions with it.
         store.set_meta("conductor_session:tr001:copilot", "s1").unwrap();
-        store.set_meta("lane_session:tr001/ui", "{}").unwrap();
-        store.set_meta("lane_session:tr002/ui", "{}").unwrap();
+        store.set_meta("worker_session:tr001/ui", "{}").unwrap();
+        store.set_meta("worker_session:tr002/ui", "{}").unwrap();
         store.delete_track("tr001").unwrap();
         assert_eq!(store.tracks().unwrap().len(), 1);
         assert!(store.run("t001").unwrap().is_none());
         assert_eq!(store.runs().unwrap().len(), 1);
         assert_eq!(store.get_meta("conductor_session:tr001:copilot").unwrap(), None);
-        assert_eq!(store.get_meta("lane_session:tr001/ui").unwrap(), None);
-        assert_eq!(store.get_meta("lane_session:tr002/ui").unwrap().as_deref(), Some("{}"));
+        assert_eq!(store.get_meta("worker_session:tr001/ui").unwrap(), None);
+        assert_eq!(store.get_meta("worker_session:tr002/ui").unwrap().as_deref(), Some("{}"));
         assert!(store.delete_track("tr001").is_err());
         // Ids never reuse a deleted number.
         assert_eq!(store.create_track(&new_track("Again", "", ".", "codex")).unwrap().id, "tr003");
@@ -1368,6 +1374,8 @@ mod tests {
                 .replace("CREATE INDEX IF NOT EXISTS runs_by_track ON runs(track, n);", "");
             conn.execute_batch(&v1).unwrap();
             conn.execute("DROP TABLE tracks", []).unwrap();
+            // Before v11 a run's session column was called lane.
+            conn.execute("ALTER TABLE runs RENAME COLUMN session TO lane", []).unwrap();
             // Artifacts came at v10 (drafts at v7); the migrations make them.
             conn.execute("DROP TABLE artifacts", []).unwrap();
             conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')", []).unwrap();
@@ -1407,7 +1415,7 @@ mod tests {
         assert_eq!((tracks[0].cwd.as_str(), tracks[0].runs, tracks[0].created_at), ("C:/old", 1, 5));
         // Remembered sessions move under the track so nothing forgets.
         assert_eq!(store.get_meta("conductor_session:tr001:claude_code").unwrap().as_deref(), Some("sess-c"));
-        assert_eq!(store.get_meta("lane_session:tr001/ui").unwrap().as_deref(), Some("{\"a\":1}"));
+        assert_eq!(store.get_meta("worker_session:tr001/ui").unwrap().as_deref(), Some("{\"a\":1}"), "a worker's memory survives every rename");
         let new = store.begin_run("tr001", "solo", "copilot", "new", ".").unwrap();
         assert_eq!(store.run(&new).unwrap().unwrap().agent, "copilot");
 
@@ -1416,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn lanes_take_the_conductors_options_until_the_worker_is_set_apart() {
+    fn workers_take_the_conductors_options_until_set_apart() {
         let store = Store::in_memory().unwrap();
         let conductor: BTreeMap<String, String> = [("model".to_string(), "opus".to_string())].into();
         let tr = store
@@ -1428,12 +1436,12 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert_eq!((tr.lane_agent(), tr.lane_config()), ("claude_code", &conductor));
+        assert_eq!((tr.effective_worker_agent(), tr.effective_worker_config()), ("claude_code", &conductor));
         let apart = store
             .update_track(&tr.id, &TrackPatch { worker_agent: Some("codex".into()), ..Default::default() })
             .unwrap();
-        assert_eq!(apart.lane_agent(), "codex");
-        assert!(apart.lane_config().is_empty(), "a worker set apart keeps its own options");
+        assert_eq!(apart.effective_worker_agent(), "codex");
+        assert!(apart.effective_worker_config().is_empty(), "a worker set apart keeps its own options");
     }
 
     #[test]
@@ -1484,7 +1492,8 @@ mod tests {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(SCHEMA).unwrap();
             conn.execute_batch(
-                "DROP TABLE artifacts;
+                "ALTER TABLE runs RENAME COLUMN session TO lane;
+                 DROP TABLE artifacts;
                  CREATE TABLE drafts (id TEXT PRIMARY KEY, title TEXT NOT NULL, agent TEXT NOT NULL,
                    doc TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
                    config TEXT NOT NULL DEFAULT '{}', color TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]');
@@ -1501,7 +1510,7 @@ mod tests {
         assert_eq!((a.kind.as_str(), a.title.as_str(), a.color.as_str(), body.as_str()), ("design", "board", "#e0af68", "{\"nodes\":[]}"));
         assert_eq!(a.tags, vec!["ux".to_string()]);
         let run = store.run("t001").unwrap().unwrap();
-        assert_eq!((run.track.as_str(), run.lane.as_str()), ("artifact:ar003", "artifact"));
+        assert_eq!((run.track.as_str(), run.session.as_str()), ("artifact:ar003", "artifact"));
         assert_eq!(store.get_meta("artifact_session:ar003:codex").unwrap().as_deref(), Some("sess-d"));
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1573,7 +1582,7 @@ mod tests {
         let store = Store::in_memory().unwrap();
         drive_run(&store, "solo", "first", &["x"], &[]);
         let live = store.begin_run(TR, "solo", "claude_code", "second", ".").unwrap();
-        store.append(&live, 5, &LaneEvent::Started { session_id: "s2".into(), cwd: ".".into() }).unwrap();
+        store.append(&live, 5, &AgentEvent::Started { session_id: "s2".into(), cwd: ".".into() }).unwrap();
 
         let runs = store.runs().unwrap();
         assert_eq!(runs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["t001", "t002"]);
@@ -1583,17 +1592,17 @@ mod tests {
     }
 
     #[test]
-    fn lanes_are_grouped_from_runs_newest_first() {
+    fn sessions_are_grouped_from_runs_newest_first() {
         let store = Store::in_memory().unwrap();
         drive_run(&store, "conductor", "hi", &["x"], &[]);
         drive_run(&store, "ui", "fix", &["y"], &["ls"]);
         drive_run(&store, "ui", "more", &["z"], &[]);
         drive_run(&store, "docs", "write", &["w"], &[]);
 
-        let lanes = store.lanes(TR).unwrap();
-        let names: Vec<&str> = lanes.iter().map(|l| l.name.as_str()).collect();
+        let sessions = store.sessions(TR).unwrap();
+        let names: Vec<&str> = sessions.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["docs", "ui", "conductor"]);
-        let ui = lanes.iter().find(|l| l.name == "ui").unwrap();
+        let ui = sessions.iter().find(|l| l.name == "ui").unwrap();
         assert_eq!(ui.runs, 2);
         assert_eq!(ui.last_run, "t003");
         assert_eq!(ui.last_status, RunStatus::Done);
@@ -1604,8 +1613,8 @@ mod tests {
     fn failure_records_error_and_folds() {
         let store = Store::in_memory().unwrap();
         let run = store.begin_run(TR, "solo", "claude_code", "p", ".").unwrap();
-        store.append(&run, 1, &LaneEvent::Message { text: "partial".into() }).unwrap();
-        store.append(&run, 2, &LaneEvent::Failed { error: "boom".into() }).unwrap();
+        store.append(&run, 1, &AgentEvent::Message { text: "partial".into() }).unwrap();
+        store.append(&run, 2, &AgentEvent::Failed { error: "boom".into() }).unwrap();
         let s = store.run(&run).unwrap().unwrap();
         assert_eq!(s.status, RunStatus::Failed);
         assert_eq!(s.error.as_deref(), Some("boom"));
@@ -1616,7 +1625,7 @@ mod tests {
     fn events_after_end_do_not_reopen_or_reindex() {
         let store = Store::in_memory().unwrap();
         let run = drive_run(&store, "solo", "p", &["done"], &[]);
-        store.append(&run, 100, &LaneEvent::Failed { error: "late".into() }).unwrap();
+        store.append(&run, 100, &AgentEvent::Failed { error: "late".into() }).unwrap();
         let s = store.run(&run).unwrap().unwrap();
         assert_eq!(s.status, RunStatus::Done);
         assert_eq!(s.error, None);
@@ -1633,8 +1642,8 @@ mod tests {
         let run = {
             let store = Store::open(&path).unwrap();
             let run = store.begin_run(TR, "solo", "claude_code", "never finishes", ".").unwrap();
-            store.append(&run, 7, &LaneEvent::Started { session_id: "s".into(), cwd: ".".into() }).unwrap();
-            store.append(&run, 8, &LaneEvent::Message { text: "half".into() }).unwrap();
+            store.append(&run, 7, &AgentEvent::Started { session_id: "s".into(), cwd: ".".into() }).unwrap();
+            store.append(&run, 8, &AgentEvent::Message { text: "half".into() }).unwrap();
             run
         };
 

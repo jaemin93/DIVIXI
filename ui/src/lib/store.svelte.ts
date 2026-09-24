@@ -4,8 +4,8 @@ import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Lang, type LangPref } from "./i18n.svelte";
 
-/** Mirrors `orchestra_core::LaneEvent` — serde tags it with `kind`. */
-export type LaneEvent =
+/** Mirrors `orchestra_core::AgentEvent` — serde tags it with `kind`. */
+export type AgentEvent =
   | { kind: "connected"; protocol: string; load_session: boolean }
   | { kind: "started"; session_id: string; cwd: string }
   | { kind: "message"; text: string }
@@ -26,16 +26,16 @@ export type ConductorState = { open: boolean; busy: boolean; agent: string | nul
 
 export type Envelope = {
   track: string;
-  lane: string;
+  session: string;
   run: string;
   at_ms: number;
-  event: LaneEvent;
+  event: AgentEvent;
 };
 
 /** Session options chosen for one role: `option id → value id`, in the agent's own terms. */
 export type OptionConfig = Record<string, string>;
 
-/** Mirrors `orchestra_store::TrackInfo`: one conductor, its lanes, one folder. */
+/** Mirrors `orchestra_store::TrackInfo`: one conductor, its workers, one folder. */
 export type Track = {
   id: string;
   name: string;
@@ -44,7 +44,7 @@ export type Track = {
   /** Agent the conductor runs on. */
   agent: string;
   conductor_config: OptionConfig;
-  /** Agent lanes run on; empty means the conductor's. */
+  /** Agent workers run on; empty means the conductor's. */
   worker_agent: string;
   worker_config: OptionConfig;
   /** `#rrggbb` for the list, or empty. */
@@ -91,13 +91,13 @@ export type TagDef = { name: string; color: string };
 /** Colours a track can carry in the list; muted enough for both themes. */
 export const TRACK_COLORS = ["#7aa2f7", "#73daca", "#9ece6a", "#e0af68", "#ff9e64", "#f7768e", "#bb9af7", "#c0caf5"];
 
-/** The agent a track's lanes run on. */
-export function laneAgentOf(track: Track): string {
+/** The agent a track's workers run on. */
+export function workerAgentOf(track: Track): string {
   return track.worker_agent || track.agent;
 }
 
-/** The options lanes open with: the worker's own, else (never set apart) the conductor's. */
-export function laneConfigOf(track: Track): OptionConfig {
+/** The options workers open with: the worker's own, else (never set apart) the conductor's. */
+export function workerConfigOf(track: Track): OptionConfig {
   const own = track.worker_agent !== "" || Object.keys(track.worker_config).length > 0;
   return own ? track.worker_config : track.conductor_config;
 }
@@ -109,7 +109,7 @@ export type Role = "conductor" | "worker";
 export type RunSummary = {
   id: string;
   track: string;
-  lane: string;
+  session: string;
   agent: string;
   prompt: string;
   cwd: string;
@@ -125,7 +125,7 @@ export type RunSummary = {
 };
 
 /** Mirrors `orchestra_store::StoredEvent`. */
-export type StoredEvent = { seq: number; at_ms: number; event: LaneEvent };
+export type StoredEvent = { seq: number; at_ms: number; event: AgentEvent };
 
 /** Mirrors `orchestra_agents::AgentKind` ids. */
 export type AgentId = "claude_code" | "codex" | "copilot" | "antigravity";
@@ -196,7 +196,7 @@ export type Usage = { used: number; size: number; cost?: number; currency?: stri
 export type Run = {
   id: string;
   track: string;
-  lane: string;
+  session: string;
   agent: string;
   prompt: string;
   status: RunStatus;
@@ -225,7 +225,7 @@ export type Run = {
   segments: Segment[];
 };
 
-export type View = "track" | "settings" | "lane" | "new-track" | "edit-track" | "design";
+export type View = "track" | "settings" | "worker" | "new-track" | "edit-track" | "design";
 
 // ----- artifacts: what the human keeps beside tracks and attaches to them —
 // designs (a sketch board worked out with an agent), knowledge later -----
@@ -268,7 +268,7 @@ export type DesignOp =
   | { op: "delete"; ids: string[] }
   | { op: "connect"; from: string; to: string; label?: string };
 export type DesignResult = { ok: boolean; id?: string; error?: string };
-export const ARTIFACT_LANE = "artifact";
+export const ARTIFACT_SESSION = "artifact";
 /** What changed on a design's board, as the core sends it. */
 export type DesignDelta = {
   id: string;
@@ -304,7 +304,7 @@ export function withDelta(doc: DesignDoc, d: DesignDelta): DesignDoc {
 export const artifactKey = (id: string) => `artifact:${id}`;
 const EMPTY_DOC: DesignDoc = { version: 0, nodes: [], edges: [], changes: [], next: 0 };
 
-/** Prefix of conductor prompts Orchestra injects itself (lane reports). Language-neutral. */
+/** Prefix of conductor prompts Orchestra injects itself (worker reports). Language-neutral. */
 export const REPORT_PREFIX = "[worker-report]";
 /** Heads the list of files under a human message, as the core stores it. */
 export const ATTACH_MARK = "[attachments]";
@@ -428,12 +428,12 @@ class Store {
   setupStep = $state<1 | 2>(1);
   /** Left rail folded to icons. Persisted. */
   railCollapsed = $state(false);
-  /** Second column (tracks and their lanes) shown. Persisted. */
+  /** Second column (tracks and their workers) shown. Persisted. */
   trackListOpen = $state(true);
   /** Which settings section is open. */
   settingsSection = $state<SettingsSection>("overview");
-  /** Lane whose session is open in the main area (view === "lane"). */
-  openLane = $state("");
+  /** Worker whose session is open in the main area (view === "worker"). */
+  openWorker = $state("");
   /** Conversation text size. Persisted. */
   chatFont = $state<ChatFont>("s");
   /** Interface typeface. Persisted. */
@@ -691,7 +691,7 @@ class Store {
 
   /** The turns of the conversation on screen, oldest first. */
   get chatRuns(): Run[] {
-    return this.chatArtifact ? this.artifactRuns : this.trackRuns.filter((r) => r.lane === "conductor");
+    return this.chatArtifact ? this.artifactRuns : this.trackRuns.filter((r) => r.session === "conductor");
   }
 
   /** Decision cards of the conversation on screen; artifacts have none. */
@@ -857,7 +857,7 @@ class Store {
 
   /** Last detection result; null until setup has run once. */
   agents = $state<AgentStatus[] | null>(null);
-  /** Agent id lanes are opened on. */
+  /** Agent id workers are opened on. */
   agent = $state<AgentId>("claude_code");
   detecting = $state(false);
   /** Agent ids with a login or download in flight. */
@@ -1133,7 +1133,7 @@ class Store {
     const pending: Run = {
       id: `pending-${Date.now()}`,
       track: artifactKey(id),
-      lane: ARTIFACT_LANE,
+      session: ARTIFACT_SESSION,
       agent: d.agent,
       prompt: text,
       status: "connecting",
@@ -1367,7 +1367,7 @@ class Store {
     if (this.chatArtifact) return this.currentArtifact?.agent ?? this.agent;
     const track = this.currentTrack;
     if (!track) return this.agent;
-    return role === "conductor" ? track.agent : laneAgentOf(track);
+    return role === "conductor" ? track.agent : workerAgentOf(track);
   }
 
   /** A role's chosen options in the current track. */
@@ -1375,7 +1375,7 @@ class Store {
     if (this.chatArtifact) return this.currentArtifact?.config ?? {};
     const track = this.currentTrack;
     if (!track) return {};
-    return role === "conductor" ? track.conductor_config : laneConfigOf(track);
+    return role === "conductor" ? track.conductor_config : workerConfigOf(track);
   }
 
   /** Put a role on an agent. Takes effect at the next session. A worker
@@ -1393,8 +1393,8 @@ class Store {
       this.agent = agent as AgentId;
       await this.updateTrack(track.id, { agent });
     } else {
-      const same = agent === laneAgentOf(track);
-      await this.updateTrack(track.id, { worker_agent: agent, worker_config: same ? laneConfigOf(track) : {} });
+      const same = agent === workerAgentOf(track);
+      await this.updateTrack(track.id, { worker_agent: agent, worker_config: same ? workerConfigOf(track) : {} });
     }
   }
 
@@ -1446,12 +1446,12 @@ class Store {
     }
   }
 
-  /** Show a lane's session: the conductor's messages and the worker's replies. */
-  async openLaneView(name: string) {
-    this.openLane = name;
-    this.view = "lane";
+  /** Show a worker's session: the conductor's messages and the worker's replies. */
+  async openWorkerView(name: string) {
+    this.openWorker = name;
+    this.view = "worker";
     // Restored runs only carry their folded text; replay them for the full turn.
-    await Promise.all(this.trackRuns.filter((r) => r.lane === name && !r.loaded).map((r) => this.hydrate(r)));
+    await Promise.all(this.trackRuns.filter((r) => r.session === name && !r.loaded).map((r) => this.hydrate(r)));
   }
 
   /** Open settings on a section. */
@@ -1666,7 +1666,7 @@ class Store {
         this.view = "new-track";
       }
       // Setup comes first when nothing has been detected yet, or when the
-      // last detection left nothing to run lanes on.
+      // last detection left nothing to run workers on.
       if (agents === null || this.readyAgents.length === 0) {
         this.setupStep = 1;
         this.setupOpen = true;
@@ -1760,8 +1760,8 @@ class Store {
 
   /**
    * Send a message to the conductor on the selected agent. The conductor
-   * decides whether to answer or to open lanes; lane runs arrive as
-   * `lane` events with their own run ids and are added when first seen.
+   * decides whether to answer or to open workers; worker runs arrive as
+   * `agent` events with their own run ids and are added when first seen.
    */
   async send(prompt: string) {
     if (this.chatArtifact) return this.artifactSend(prompt);
@@ -1782,7 +1782,7 @@ class Store {
     const pending: Run = {
       id: `pending-${Date.now()}`,
       track,
-      lane: "conductor",
+      session: "conductor",
       agent,
       prompt: text,
       status: "connecting",
@@ -1806,7 +1806,7 @@ class Store {
       if (run) {
         run.id = id;
         run.track = track;
-        run.lane = "conductor";
+        run.session = "conductor";
         run.agent = agent;
         run.prompt = text;
       }
@@ -1820,22 +1820,22 @@ class Store {
     }
   }
 
-  /** Fold one live lane event into the run it belongs to, creating lane runs on first sight. */
+  /** Fold one live agent event into the run it belongs to, creating worker runs on first sight. */
   apply(env: Envelope) {
     let run = this.runs.find((r) => r.id === env.run);
-    if (!run && (env.lane === "conductor" || env.lane === ARTIFACT_LANE)) {
+    if (!run && (env.session === "conductor" || env.session === ARTIFACT_SESSION)) {
       // The conductor (or artifact agent) turn we just sent, still waiting for its id.
-      run = this.runs.find((r) => r.track === env.track && r.lane === env.lane && r.id.startsWith("pending-"));
+      run = this.runs.find((r) => r.track === env.track && r.session === env.session && r.id.startsWith("pending-"));
       if (run) run.id = env.run;
     }
     if (!run) {
-      // A lane the conductor opened, or a report turn Orchestra injected:
+      // A worker the conductor opened, or a report turn Orchestra injected:
       // the core registered it, we have not. Show it now; the prompt text
       // comes with the summary right after.
       run = {
         id: env.run,
         track: env.track,
-        lane: env.lane,
+        session: env.session,
         agent: this.tracks.find((t) => t.id === env.track)?.agent ?? this.agent,
         prompt: "",
         status: "connecting",
@@ -1852,11 +1852,11 @@ class Store {
       this.runs.push(run);
       void this.refreshRun(env.run);
     }
-    if (env.event.kind === "commands" && env.lane === "conductor") this.rememberCommands(env.track, env.event.commands);
-    if (env.lane === ARTIFACT_LANE && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
+    if (env.event.kind === "commands" && env.session === "conductor") this.rememberCommands(env.track, env.event.commands);
+    if (env.session === ARTIFACT_SESSION && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
       void this.refreshArtifactSession();
     }
-    if (env.lane === "conductor" && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
+    if (env.session === "conductor" && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
       void this.refreshConductor();
     }
     fold(run, env.at_ms, env.event);
@@ -1866,7 +1866,7 @@ class Store {
     }
   }
 
-  /** Fill a lane run's prompt and agent from the store once it exists there. */
+  /** Fill a worker run's prompt and agent from the store once it exists there. */
   private async refreshRun(id: string) {
     try {
       const summaries = await invoke<RunSummary[]>("list_runs");
@@ -1882,20 +1882,20 @@ class Store {
     }
   }
 
-  /** Lane names seen in a track, in first-seen order, excluding the conductor. */
-  laneNamesIn(track: string): string[] {
+  /** Worker names seen in a track, in first-seen order, excluding the conductor. */
+  workerNamesIn(track: string): string[] {
     const seen: string[] = [];
-    for (const r of this.runs) if (r.track === track && r.lane !== "conductor" && !seen.includes(r.lane)) seen.push(r.lane);
+    for (const r of this.runs) if (r.track === track && r.session !== "conductor" && !seen.includes(r.session)) seen.push(r.session);
     return seen;
   }
 
-  get laneNames(): string[] {
-    return this.laneNamesIn(this.track);
+  get workerNames(): string[] {
+    return this.workerNamesIn(this.track);
   }
 }
 
 /** Pure state transition: the same fold serves live events and replay. */
-function fold(run: Run, ms: number, ev: LaneEvent) {
+function fold(run: Run, ms: number, ev: AgentEvent) {
   switch (ev.kind) {
     case "connected":
       push(run, ms, "connect", `protocol ${ev.protocol} · loadSession=${ev.load_session}`, "ok");
@@ -1973,7 +1973,7 @@ function fromSummary(s: RunSummary): Run {
   return {
     id: s.id,
     track: s.track,
-    lane: s.lane,
+    session: s.session,
     agent: s.agent,
     prompt: s.prompt,
     status: s.status,
@@ -2021,10 +2021,10 @@ export function agentLabel(id: string): string {
 
 export const store = new Store();
 
-/** Subscribe once; the core emits one `lane` event per lane event. */
+/** Subscribe once; the core emits one `agent` event per agent event. */
 export async function connectEvents() {
   await Promise.all([
-    listen<Envelope>("lane", (e) => store.apply(e.payload)),
+    listen<Envelope>("agent", (e) => store.apply(e.payload)),
     listen<DownloadProgress>("agent_download", (e) => store.progress(e.payload)),
     listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
     listen<DesignDelta>("design", (e) => store.takeDesign(e.payload)),

@@ -29,7 +29,7 @@
    * The worker starts on the conductor's agent and options and keeps
    * following them until it is set apart: the first change on its tab
    * copies what the conductor has and goes from there. A track whose
-   * worker was never set apart saves it that way, and lanes then open
+   * worker was never set apart saves it that way, and workers then open
    * with the conductor's options.
    */
   const followed = !seed?.worker_agent && Object.keys(seed?.worker_config ?? {}).length === 0;
@@ -47,11 +47,11 @@
   let busy = $state(false);
   let nameInput = $state<HTMLInputElement>();
 
-  /** The agent and options lanes will run on, as the worker tab shows them. */
-  const laneAgent = $derived(workerApart ? workerAgent || agent : agent);
-  const laneConfig = $derived(workerApart ? workerConfig : conductorConfig);
+  /** The agent and options workers will run on, as the worker tab shows them. */
+  const shownWorkerAgent = $derived(workerApart ? workerAgent || agent : agent);
+  const shownWorkerConfig = $derived(workerApart ? workerConfig : conductorConfig);
   const conductorOptions = $derived(store.optionsOf(agent));
-  const workerOptions = $derived(store.optionsOf(laneAgent));
+  const workerOptions = $derived(store.optionsOf(shownWorkerAgent));
 
   /** "Claude Code · Opus" for a role's tab. */
   function roleSummary(id: string, options: ConfigOption[], config: OptionConfig): string {
@@ -102,7 +102,7 @@
         cwd,
         agent,
         conductor_config: prune(conductorConfig, conductorOptions),
-        worker_agent: workerApart ? laneAgent : "",
+        worker_agent: workerApart ? shownWorkerAgent : "",
         worker_config: workerApart ? prune(workerConfig, workerOptions) : {},
       };
       const ok = track ? await store.updateTrack(track.id, patch) : await store.createTrack(patch);
@@ -187,7 +187,7 @@
           </button>
           <button type="button" class="roletab" class:on={tab === "worker"} role="tab" aria-selected={tab === "worker"} onclick={() => (tab = "worker")}>
             <span class="mlab-sm">{t("newtrack.workers")}</span>
-            <span class="mono sum">{roleSummary(laneAgent, workerOptions, laneConfig)}</span>
+            <span class="mono sum">{roleSummary(shownWorkerAgent, workerOptions, shownWorkerConfig)}</span>
           </button>
         </div>
         {#if tab === "conductor"}
@@ -196,19 +196,19 @@
           {@render role(
             t("newtrack.workerNote"),
             t("newtrack.workerAgent"),
-            laneAgent,
+            shownWorkerAgent,
             (a) => {
               setApart();
               if (a !== workerAgent) workerConfig = {};
               workerAgent = a;
             },
             workerOptions,
-            laneConfig,
+            shownWorkerConfig,
             (id, v) => {
               setApart();
               workerConfig[id] = v;
             },
-            laneAgent,
+            shownWorkerAgent,
           )}
         {/if}
       {/if}

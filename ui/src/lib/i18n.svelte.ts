@@ -38,10 +38,10 @@ const ko = {
   "tracks.close": "목록 닫기",
   "tracks.search": "Track 검색",
   "tracks.width": "Tracks 열 너비",
-  "tracks.foldLanes": "작업자 접기",
-  "tracks.unfoldLanes": "작업자 펼치기",
+  "tracks.foldWorkers": "작업자 접기",
+  "tracks.unfoldWorkers": "작업자 펼치기",
   "tracks.none": "없음",
-  "tracks.lanes": "작업자 {n}",
+  "tracks.workers": "작업자 {n}",
   "tracks.filter": "필터와 정렬",
   "tracks.filterTitle": "필터",
   "tracks.running": "진행 중",
@@ -194,14 +194,14 @@ const ko = {
   "decision.others": "다른 선택지",
   "tracks.decisionsOpen": "결정 대기 {n}건",
 
-  // Lane view
-  "lane.back": "← Track",
-  "lane.empty": "이 작업자의 기록이 없습니다.",
-  "lane.conductor": "지휘자",
-  "lane.worker": "작업자",
-  "lane.starting": "시작 중…",
-  "lane.turns": "{n} turns",
-  "lane.tools": "{n} tools",
+  // Worker view
+  "worker.back": "← Track",
+  "worker.empty": "이 작업자의 기록이 없습니다.",
+  "worker.conductor": "지휘자",
+  "worker.worker": "작업자",
+  "worker.starting": "시작 중…",
+  "worker.turns": "{n} turns",
+  "worker.tools": "{n} tools",
 
 
   // Working-folder panel
@@ -428,10 +428,10 @@ const en: Record<Key, string> = {
   "tracks.close": "Close list",
   "tracks.search": "Search tracks",
   "tracks.width": "Tracks column width",
-  "tracks.foldLanes": "Fold workers",
-  "tracks.unfoldLanes": "Unfold workers",
+  "tracks.foldWorkers": "Fold workers",
+  "tracks.unfoldWorkers": "Unfold workers",
   "tracks.none": "None",
-  "tracks.lanes": "{n} workers",
+  "tracks.workers": "{n} workers",
   "tracks.filter": "Filter and sort",
   "tracks.filterTitle": "Filter",
   "tracks.running": "Running",
@@ -583,13 +583,13 @@ const en: Record<Key, string> = {
   "decision.others": "Other options",
   "tracks.decisionsOpen": "{n} decision(s) waiting",
 
-  "lane.back": "← Track",
-  "lane.empty": "Nothing recorded for this worker.",
-  "lane.conductor": "Conductor",
-  "lane.worker": "Worker",
-  "lane.starting": "Starting…",
-  "lane.turns": "{n} turns",
-  "lane.tools": "{n} tools",
+  "worker.back": "← Track",
+  "worker.empty": "Nothing recorded for this worker.",
+  "worker.conductor": "Conductor",
+  "worker.worker": "Worker",
+  "worker.starting": "Starting…",
+  "worker.turns": "{n} turns",
+  "worker.tools": "{n} tools",
 
 
   // Working-folder panel

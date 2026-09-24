@@ -8,7 +8,7 @@
 
 use orchestra_acp::{scrub_inherited_session_env, AgentSession, McpHttp, SessionOptions};
 use orchestra_agents::{detect, AgentKind, DetectOptions};
-use orchestra_core::LaneEvent;
+use orchestra_core::AgentEvent;
 use orchestra_mcp::{McpServer, Tool};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -111,9 +111,9 @@ async fn turn(session: &AgentSession, text: &str) -> anyhow::Result<String> {
         let mut out = String::new();
         while let Some(ev) = rx.recv().await {
             match ev {
-                LaneEvent::Message { text } => out.push_str(&text),
-                LaneEvent::ToolCall { title, tool_kind, .. } => println!("  tool  {tool_kind}  {title}"),
-                LaneEvent::Finished { .. } | LaneEvent::Failed { .. } => break,
+                AgentEvent::Message { text } => out.push_str(&text),
+                AgentEvent::ToolCall { title, tool_kind, .. } => println!("  tool  {tool_kind}  {title}"),
+                AgentEvent::Finished { .. } | AgentEvent::Failed { .. } => break,
                 _ => {}
             }
         }

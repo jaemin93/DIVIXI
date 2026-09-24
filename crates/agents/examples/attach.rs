@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use orchestra_acp::{scrub_inherited_session_env, AgentSession, SessionOptions};
 use orchestra_agents::{detect, AgentKind, DetectOptions};
-use orchestra_core::LaneEvent;
+use orchestra_core::AgentEvent;
 
 fn main() -> anyhow::Result<()> {
     scrub_inherited_session_env();
@@ -30,13 +30,13 @@ async fn turn(session: &AgentSession, text: &str, files: Vec<PathBuf>) -> anyhow
         let mut tools = 0;
         while let Some(event) = rx.recv().await {
             match event {
-                LaneEvent::Message { text } => out.push_str(&text),
-                LaneEvent::ToolCall { title, .. } => {
+                AgentEvent::Message { text } => out.push_str(&text),
+                AgentEvent::ToolCall { title, .. } => {
                     tools += 1;
                     println!("  tool: {title}");
                 }
-                LaneEvent::Finished { stop_reason } => println!("  finished: {stop_reason} ({tools} tools)"),
-                LaneEvent::Failed { error } => println!("  failed: {error}"),
+                AgentEvent::Finished { stop_reason } => println!("  finished: {stop_reason} ({tools} tools)"),
+                AgentEvent::Failed { error } => println!("  failed: {error}"),
                 _ => {}
             }
         }

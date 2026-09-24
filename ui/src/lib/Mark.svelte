@@ -2,10 +2,10 @@
   /**
    * The Divixi mark: four staves and an X across them.
    *
-   * The staves are the lanes the work runs along; the X is the conductor's
+   * The staves are the lines the work runs along; the X is the conductor's
    * beat cutting across all of them, and the x in the name: crossing
    * providers, one becoming many. It is a brand mark, not a gauge: it does
-   * not count agents or lanes. The only thing it shows is whether the
+   * not count agents or workers. The only thing it shows is whether the
    * conductor is live (`live` turns the X).
    *
    * Drawn with its own colours on no background, the same in both themes

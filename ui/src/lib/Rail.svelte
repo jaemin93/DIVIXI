@@ -10,7 +10,7 @@
    * and what selecting it does. `soon` entries are drawn but inert, so the
    * shape of the product is visible before every part of it exists.
    *
-   * The rail is only ever one level deep; lists (tracks, lanes, agents)
+   * The rail is only ever one level deep; lists (tracks, workers, agents)
    * live in the column it opens, like Kiro Crew's session panel.
    */
   type Item = { id: string; icon: IconName; label: Key; soon?: boolean; go?: () => void };

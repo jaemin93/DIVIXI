@@ -1,8 +1,8 @@
 //! ACP client: spawns an agent subprocess, runs one prompt, streams
-//! [`LaneEvent`]s back.
+//! [`AgentEvent`]s back.
 //!
 //! This is the only place that knows about the wire protocol. Everything above
-//! it sees lane events and nothing else, which is what lets a non-ACP backend
+//! it sees session events and nothing else, which is what lets a non-ACP backend
 //! (a PTY-driven CLI) be added later behind the same channel.
 
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use agent_client_protocol::{
     },
     Client, ErrorCode,
 };
-use orchestra_core::LaneEvent;
+use orchestra_core::AgentEvent;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -49,7 +49,7 @@ pub struct AgentSpec {
 ///
 /// Note the package name: `@zed-industries/claude-code-acp` was renamed and
 /// its last release (0.16.2, Feb 2026) is stale. Pinning that one silently
-/// freezes the lane on a months-old agent SDK.
+/// freezes the session on a months-old agent SDK.
 pub const CLAUDE_ADAPTER: &str = "@agentclientprotocol/claude-agent-acp@0.79.0";
 
 /// Where the locally installed Claude adapter's entry point lives, relative to
@@ -103,7 +103,7 @@ impl AgentSpec {
     /// Claude Code has no native ACP mode as of CLI 2.1.x, so the adapter
     /// bridges it. A local install (`npm i -D @agentclientprotocol/claude-agent-acp`)
     /// is preferred and run directly under `node`. Going through `npx` with
-    /// nothing installed costs ten seconds per lane on a warm cache and twenty
+    /// nothing installed costs ten seconds per session on a warm cache and twenty
     /// on a cold one, all of it before `initialize`. Without a local install
     /// this falls back to `npx`.
     pub fn claude_code() -> Self {
@@ -148,9 +148,9 @@ pub fn find_local_script(relative: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Everything needed to execute one run in one lane.
+/// Everything needed to execute one run in one session.
 #[derive(Debug, Clone)]
-pub struct LaneSpec {
+pub struct PromptSpec {
     /// Which agent to launch.
     pub agent: AgentSpec,
     /// Working directory handed to the agent's session.
@@ -160,7 +160,7 @@ pub struct LaneSpec {
     /// Session mode to request before prompting, e.g. `bypassPermissions`.
     ///
     /// Orchestra surfaces deliberate escalations, not tool-approval prompts,
-    /// so lanes run without per-tool permission round-trips. `None` picks the
+    /// so sessions run without per-tool permission round-trips. `None` picks the
     /// most autonomous mode the agent advertises.
     pub mode: Option<String>,
     /// Session options to set before prompting: `(option id, value id)`, as
@@ -171,7 +171,7 @@ pub struct LaneSpec {
 
 /// Environment variables that mark "you are inside a Claude Code session".
 ///
-/// A lane's agent must not inherit them. Claude Code refuses to start a nested
+/// A session's agent must not inherit them. Claude Code refuses to start a nested
 /// session, so an agent spawned from inside one dies during `session/new` with
 /// `Query closed before response received` — an error that names nothing
 /// useful. Orchestra is frequently launched from exactly such a terminal.
@@ -532,24 +532,24 @@ async fn probe_inner(
 ///
 /// Returns once the agent reports a stop reason or the connection fails. The
 /// subprocess is torn down when this future resolves.
-pub async fn run_lane(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyhow::Result<()> {
+pub async fn run_prompt(spec: PromptSpec, tx: UnboundedSender<AgentEvent>) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     tracing::info!(
         program = %spec.agent.program,
         cwd = %spec.cwd.display(),
         prompt_chars = spec.prompt.chars().count(),
-        "lane run starting"
+        "one-shot run starting"
     );
-    let result = run_lane_inner(spec, tx).await;
+    let result = run_prompt_inner(spec, tx).await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match &result {
-        Ok(()) => tracing::info!(elapsed_ms, "lane run finished"),
-        Err(err) => tracing::warn!(elapsed_ms, %err, "lane run failed"),
+        Ok(()) => tracing::info!(elapsed_ms, "one-shot run finished"),
+        Err(err) => tracing::warn!(elapsed_ms, %err, "one-shot run failed"),
     }
     result
 }
 
-async fn run_lane_inner(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyhow::Result<()> {
+async fn run_prompt_inner(spec: PromptSpec, tx: UnboundedSender<AgentEvent>) -> anyhow::Result<()> {
     let session = AgentSession::open(
         &spec.agent,
         SessionOptions {
@@ -561,11 +561,11 @@ async fn run_lane_inner(spec: LaneSpec, tx: UnboundedSender<LaneEvent>) -> anyho
         },
     )
     .await?;
-    let _ = tx.send(LaneEvent::Connected {
+    let _ = tx.send(AgentEvent::Connected {
         protocol: "ProtocolVersion(1)".to_string(),
         load_session: false,
     });
-    let _ = tx.send(LaneEvent::Started {
+    let _ = tx.send(AgentEvent::Started {
         session_id: session.session_id().to_string(),
         cwd: spec.cwd.display().to_string(),
     });
@@ -604,8 +604,8 @@ const AUTONOMOUS_MODE_IDS: &[&str] = &[
 
 /// The most autonomous mode among `(id, name)` pairs the agent offers.
 ///
-/// Lanes run without per-tool approval by design: Orchestra surfaces the
-/// escalations a lane raises on purpose, not permission prompts. When an
+/// Sessions run without per-tool approval by design: Orchestra surfaces the
+/// escalations a session raises on purpose, not permission prompts. When an
 /// agent offers nothing recognizable, its default mode is kept.
 pub fn pick_autonomous_mode(available: &[(String, String)]) -> Option<String> {
     fn key(s: &str) -> String {
@@ -622,16 +622,16 @@ pub fn pick_autonomous_mode(available: &[(String, String)]) -> Option<String> {
 use agent_client_protocol::schema::v1::{AvailableCommandInput, ContentBlock, SessionUpdate};
 use orchestra_core::SlashCommand;
 
-/// Map one protocol update onto zero or more lane events.
-pub(crate) fn translate(update: SessionUpdate) -> Vec<LaneEvent> {
+/// Map one protocol update onto zero or more session events.
+pub(crate) fn translate(update: SessionUpdate) -> Vec<AgentEvent> {
     match update {
         SessionUpdate::AgentMessageChunk(chunk) => text_of(&chunk.content)
-            .map(|text| vec![LaneEvent::Message { text }])
+            .map(|text| vec![AgentEvent::Message { text }])
             .unwrap_or_default(),
         SessionUpdate::AgentThoughtChunk(chunk) => text_of(&chunk.content)
-            .map(|text| vec![LaneEvent::Thought { text }])
+            .map(|text| vec![AgentEvent::Thought { text }])
             .unwrap_or_default(),
-        SessionUpdate::ToolCall(call) => vec![LaneEvent::ToolCall {
+        SessionUpdate::ToolCall(call) => vec![AgentEvent::ToolCall {
             id: format!("{}", call.tool_call_id),
             title: call.title.clone(),
             tool_kind: format!("{:?}", call.kind).to_lowercase(),
@@ -644,19 +644,19 @@ pub(crate) fn translate(update: SessionUpdate) -> Vec<LaneEvent> {
             .fields
             .status
             .map(|status| {
-                vec![LaneEvent::ToolUpdate {
+                vec![AgentEvent::ToolUpdate {
                     id: format!("{}", update.tool_call_id),
                     status: format!("{status:?}").to_lowercase(),
                 }]
             })
             .unwrap_or_default(),
-        SessionUpdate::Plan(plan) => vec![LaneEvent::Plan {
+        SessionUpdate::Plan(plan) => vec![AgentEvent::Plan {
             entries: plan.entries.iter().map(|e| e.content.clone()).collect(),
         }],
-        SessionUpdate::UsageUpdate(usage) => vec![LaneEvent::Usage {
+        SessionUpdate::UsageUpdate(usage) => vec![AgentEvent::Usage {
             raw: serde_json::to_value(&usage).unwrap_or(serde_json::Value::Null),
         }],
-        SessionUpdate::AvailableCommandsUpdate(update) => vec![LaneEvent::Commands {
+        SessionUpdate::AvailableCommandsUpdate(update) => vec![AgentEvent::Commands {
             commands: update
                 .available_commands
                 .iter()

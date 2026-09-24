@@ -1,8 +1,8 @@
 //! Divixi desktop shell.
 //!
 //! The webview is a view. Everything that decides anything lives in Rust: this
-//! module owns run identity, knows which agents are installed, spawns lanes,
-//! persists every lane event to the store, and coalesces the event stream so
+//! module owns run identity, knows which agents are installed, spawns sessions,
+//! persists every session event to the store, and coalesces the event stream so
 //! the IPC channel carries frames, not tokens.
 
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use orchestra_acp::{AgentSpec, ConfigOptionInfo};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
-use orchestra_core::{LaneEnvelope, LaneEvent};
+use orchestra_core::{AgentEnvelope, AgentEvent};
 use orchestra_store::{ArtifactInfo, ArtifactPatch, Decision, RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -53,7 +53,7 @@ pub struct AppState {
     pub(crate) boards: design::Boards,
     /// Last detection result, mirrored from the store for quick lookups.
     agents: Mutex<Option<Vec<AgentStatus>>>,
-    /// Conductor and lane sessions, across tracks.
+    /// Conductor and session sessions, across tracks.
     pub(crate) sessions: conductor::Sessions,
     /// CPU, memory and disk readings for the title bar.
     meter: metrics::Meter,
@@ -182,9 +182,9 @@ fn create_track(state: State<'_, AppState>, mut patch: TrackPatch) -> Result<Tra
     state.store.create_track(&patch).map_err(|e| e.to_string())
 }
 
-/// Change a track: name, intent, folder, or the conductor's and lanes'
+/// Change a track: name, intent, folder, or the conductor's and sessions'
 /// agent and session options. The conductor reopens with the new options
-/// at its next message (keeping its memory); open lanes keep theirs until
+/// at its next message (keeping its memory); open sessions keep theirs until
 /// closed. A new folder closes every session and forgets their memory,
 /// since a session belongs to the directory it was opened in.
 #[tauri::command]
@@ -234,7 +234,7 @@ async fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<Str
 }
 
 /// Send one human message to a track's conductor. Returns the conductor run
-/// id; the turn streams under it, and any lanes it opens stream under
+/// id; the turn streams under it, and any sessions it opens stream under
 /// theirs. `agent`, when given, becomes the track's conductor agent.
 #[tauri::command]
 async fn conductor_prompt(
@@ -752,7 +752,7 @@ async fn download_agent(
     state.update_agent(next)
 }
 
-/// Persist lane events and forward them to the webview, coalescing message text.
+/// Persist session events and forward them to the webview, coalescing message text.
 ///
 /// The store write happens before the emit, so anything the webview has seen
 /// is already durable. A store failure is logged and the event still reaches
@@ -760,9 +760,9 @@ async fn download_agent(
 pub(crate) async fn pump(
     app: AppHandle,
     track: String,
-    lane: String,
+    session: String,
     run: String,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<LaneEvent>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
 ) {
     let started = std::time::Instant::now();
     let mut pending = String::new();
@@ -772,18 +772,18 @@ pub(crate) async fn pump(
     // A run whose row is gone (its track was deleted mid-turn) fails on
     // every frame; say so once.
     let mut persist_failed = false;
-    let mut emit = |event: LaneEvent, at_ms: u64| {
+    let mut emit = |event: AgentEvent, at_ms: u64| {
         if let Err(err) = app.state::<AppState>().store.append(&run, at_ms, &event) {
             if !persist_failed {
-                tracing::error!(run = %run, kind = event.kind(), %err, "failed to persist lane event");
+                tracing::error!(run = %run, kind = event.kind(), %err, "failed to persist agent event");
             }
             persist_failed = true;
         }
         let _ = app.emit(
-            "lane",
-            LaneEnvelope {
+            "agent",
+            AgentEnvelope {
                 track: track.clone(),
-                lane: lane.clone(),
+                session: session.clone(),
                 run: run.clone(),
                 at_ms,
                 event,
@@ -794,11 +794,11 @@ pub(crate) async fn pump(
     loop {
         tokio::select! {
             received = rx.recv() => match received {
-                Some(LaneEvent::Message { text }) => pending.push_str(&text),
+                Some(AgentEvent::Message { text }) => pending.push_str(&text),
                 Some(event) => {
                     let ms = started.elapsed().as_millis() as u64;
                     if !pending.is_empty() {
-                        emit(LaneEvent::Message { text: std::mem::take(&mut pending) }, ms);
+                        emit(AgentEvent::Message { text: std::mem::take(&mut pending) }, ms);
                     }
                     let terminal = event.is_terminal();
                     emit(event, ms);
@@ -811,7 +811,7 @@ pub(crate) async fn pump(
             _ = ticker.tick() => {
                 if !pending.is_empty() {
                     let ms = started.elapsed().as_millis() as u64;
-                    emit(LaneEvent::Message { text: std::mem::take(&mut pending) }, ms);
+                    emit(AgentEvent::Message { text: std::mem::take(&mut pending) }, ms);
                 }
             }
         }
@@ -819,7 +819,7 @@ pub(crate) async fn pump(
 
     if !pending.is_empty() {
         emit(
-            LaneEvent::Message { text: pending },
+            AgentEvent::Message { text: pending },
             started.elapsed().as_millis() as u64,
         );
     }

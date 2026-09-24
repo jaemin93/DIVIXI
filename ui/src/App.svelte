@@ -8,7 +8,7 @@
   import Setup from "./lib/Setup.svelte";
   import TagDialog from "./lib/TagDialog.svelte";
   import Settings from "./lib/Settings.svelte";
-  import LaneView from "./lib/LaneView.svelte";
+  import WorkerView from "./lib/WorkerView.svelte";
   import TrackForm from "./lib/TrackForm.svelte";
   import TrackHeader from "./lib/TrackHeader.svelte";
   import DesignView from "./lib/DesignView.svelte";
@@ -70,8 +70,8 @@
       <Settings />
     {:else if store.view === "design"}
       <DesignView />
-    {:else if store.view === "lane"}
-      <LaneView />
+    {:else if store.view === "worker"}
+      <WorkerView />
     {:else if store.view === "new-track" || !store.currentTrack}
       <TrackForm />
     {:else if store.view === "edit-track"}
