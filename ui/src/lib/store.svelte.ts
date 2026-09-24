@@ -269,6 +269,37 @@ export type DesignOp =
   | { op: "connect"; from: string; to: string; label?: string };
 export type DesignResult = { ok: boolean; id?: string; error?: string };
 export const ARTIFACT_LANE = "artifact";
+/** What changed on a design's board, as the core sends it. */
+export type DesignDelta = {
+  id: string;
+  base: number;
+  version: number;
+  nodes: DesignNode[];
+  removed_nodes: string[];
+  edges: DesignEdge[];
+  removed_edges: string[];
+  changes: DesignChange[];
+  next: number;
+};
+
+/** A board with a delta applied: changed items in place, new ones at the end. */
+export function withDelta(doc: DesignDoc, d: DesignDelta): DesignDoc {
+  const merge = <T extends { id: string }>(list: T[], changed: T[], removed: string[]): T[] => {
+    const byId = new Map(changed.map((x) => [x.id, x]));
+    const gone = new Set(removed);
+    const kept = list.filter((x) => !gone.has(x.id)).map((x) => byId.get(x.id) ?? x);
+    const known = new Set(list.map((x) => x.id));
+    return [...kept, ...changed.filter((x) => !known.has(x.id))];
+  };
+  return {
+    version: d.version,
+    nodes: merge(doc.nodes, d.nodes, d.removed_nodes),
+    edges: merge(doc.edges, d.edges, d.removed_edges),
+    changes: d.changes,
+    next: d.next,
+  };
+}
+
 /** Artifact conversations are kept under this key, apart from tracks. */
 export const artifactKey = (id: string) => `artifact:${id}`;
 const EMPTY_DOC: DesignDoc = { version: 0, nodes: [], edges: [], changes: [], next: 0 };
@@ -1057,14 +1088,32 @@ class Store {
     }
   }
 
-  /** Take a board the core sent, when it is the open one and newer. */
-  takeDesign(id: string, doc: DesignDoc) {
-    if (id === this.artifact && (this.designLoaded !== id || doc.version >= this.designDoc.version)) {
-      this.designDoc = doc;
-      this.designLoaded = id;
-    }
+  /** Take what changed on a board. It applies to the open board when that
+   *  is the version it was made on; a board that missed a change (or is
+   *  still loading) is read again whole. */
+  takeDesign(delta: DesignDelta) {
+    const id = delta.id;
     const d = this.artifacts.find((x) => x.id === id);
     if (d) d.updated_at = Date.now();
+    if (id !== this.artifact) return;
+    if (this.designLoaded === id && delta.base === this.designDoc.version) {
+      this.designDoc = withDelta(this.designDoc, delta);
+    } else if (!(this.designLoaded === id && delta.version <= this.designDoc.version)) {
+      void this.reloadDesign(id);
+    }
+  }
+
+  /** Read the open board whole again, keeping whichever is newer. */
+  private async reloadDesign(id: string) {
+    try {
+      const doc = await invoke<DesignDoc>("design_doc", { id });
+      if (this.artifact === id && !(this.designLoaded === id && this.designDoc.version >= doc.version)) {
+        this.designDoc = doc;
+        this.designLoaded = id;
+      }
+    } catch (err) {
+      this.lastError = String(err);
+    }
   }
 
   /** One message to the artifact's agent: the composer's text and files, the
@@ -1978,6 +2027,6 @@ export async function connectEvents() {
     listen<Envelope>("lane", (e) => store.apply(e.payload)),
     listen<DownloadProgress>("agent_download", (e) => store.progress(e.payload)),
     listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
-    listen<{ id: string; doc: DesignDoc }>("design", (e) => store.takeDesign(e.payload.id, e.payload.doc)),
+    listen<DesignDelta>("design", (e) => store.takeDesign(e.payload)),
   ]);
 }

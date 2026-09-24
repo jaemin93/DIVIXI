@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use orchestra_acp::AgentSession;
 use orchestra_core::LaneEvent;
@@ -33,11 +34,19 @@ pub fn run_key(id: &str) -> String {
     format!("artifact:{id}")
 }
 
+/// A session nobody has used for this long is closed; its conversation is
+/// remembered, so the next message reopens it with that memory.
+pub const IDLE_CLOSE: Duration = Duration::from_secs(60 * 60);
+/// How often idle sessions are looked for.
+const IDLE_SWEEP: Duration = Duration::from_secs(5 * 60);
+
 /// An artifact's agent session and the MCP server that is its hands.
 struct Agent {
     live: Live,
     /// Agent and options it was opened with; a change reopens it.
     fingerprint: String,
+    /// When a turn last started or ended on it.
+    used: Instant,
     _mcp: McpServer,
 }
 
@@ -63,6 +72,35 @@ impl Artifacts {
             a.live.session.cancel();
         }
     }
+
+    /// Close sessions idle for `idle` or longer, other than those with a
+    /// turn in flight. Returns the artifacts whose session was closed.
+    pub async fn close_idle(&self, idle: Duration) -> Vec<String> {
+        let mut sessions = self.sessions.lock().await;
+        let stale: Vec<String> = sessions
+            .iter()
+            .filter(|(id, a)| a.live.running.is_none() && !self.is_busy(id) && a.used.elapsed() >= idle)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &stale {
+            // Dropping the session ends the agent and its MCP server.
+            sessions.remove(id);
+        }
+        stale
+    }
+}
+
+/// Look for idle artifact sessions every few minutes, for as long as the app runs.
+pub fn sweep_idle(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(IDLE_SWEEP).await;
+            let state = app.state::<AppState>();
+            for id in state.artifacts.close_idle(IDLE_CLOSE).await {
+                tracing::info!(artifact = %id, "closed an idle artifact session");
+            }
+        }
+    });
 }
 
 /// The run an artifact's agent has in flight: what its tool calls hang off.
@@ -130,6 +168,7 @@ async fn open(app: &AppHandle, a: &ArtifactInfo) -> Result<(Arc<AgentSession>, b
             Agent {
                 live: Live { agent: a.agent.clone(), session: session.clone(), turns, running: None },
                 fingerprint: wanted,
+                used: Instant::now(),
                 _mcp: mcp,
             },
         );
@@ -191,6 +230,7 @@ pub async fn turn(
         if let Some(s) = state.artifacts.sessions.lock().await.get_mut(&id) {
             s.live.running = Some(run.clone());
             s.live.turns += 1;
+            s.used = Instant::now();
         }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tauri::async_runtime::spawn(pump(app.clone(), run_key(&id), LANE.to_string(), run.clone(), rx));
@@ -210,6 +250,7 @@ pub async fn turn(
                     if s.live.running.as_deref() == Some(run_t.as_str()) {
                         s.live.running = None;
                     }
+                    s.used = Instant::now();
                 }
             }
             st.artifacts.busy.lock().remove(&id_t);

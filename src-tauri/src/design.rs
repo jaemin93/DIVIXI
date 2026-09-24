@@ -649,11 +649,44 @@ pub fn doc(state: &AppState, id: &str) -> Result<Doc, String> {
     board.clone().ok_or_else(|| format!("design {id} vanished"))
 }
 
-/// What the window hears after every change.
-#[derive(Clone, Serialize)]
-struct DesignEvent<'a> {
-    id: &'a str,
-    doc: &'a Doc,
+/// What the window hears after every change: only what changed. `base`
+/// is the version the change was made on; a window holding another version
+/// has missed one and reads the whole board again.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DesignDelta {
+    pub id: String,
+    pub base: u64,
+    pub version: u64,
+    /// Items new or changed, in board order.
+    pub nodes: Vec<Node>,
+    pub removed_nodes: Vec<String>,
+    pub edges: Vec<Edge>,
+    pub removed_edges: Vec<String>,
+    /// The suggestions waiting now (whole: they are few, and small unless
+    /// the agent removed ink).
+    pub changes: Vec<Change>,
+    pub next: u64,
+}
+
+impl DesignDelta {
+    /// What turned `old` into `new`.
+    pub fn between(id: &str, old: &Doc, new: &Doc) -> Self {
+        let old_nodes: HashMap<&str, &Node> = old.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        let old_edges: HashMap<&str, &Edge> = old.edges.iter().map(|e| (e.id.as_str(), e)).collect();
+        let new_nodes: HashSet<&str> = new.nodes.iter().map(|n| n.id.as_str()).collect();
+        let new_edges: HashSet<&str> = new.edges.iter().map(|e| e.id.as_str()).collect();
+        DesignDelta {
+            id: id.to_string(),
+            base: old.version,
+            version: new.version,
+            nodes: new.nodes.iter().filter(|n| old_nodes.get(n.id.as_str()) != Some(n)).cloned().collect(),
+            removed_nodes: old.nodes.iter().filter(|n| !new_nodes.contains(n.id.as_str())).map(|n| n.id.clone()).collect(),
+            edges: new.edges.iter().filter(|e| old_edges.get(e.id.as_str()) != Some(e)).cloned().collect(),
+            removed_edges: old.edges.iter().filter(|e| !new_edges.contains(e.id.as_str())).map(|e| e.id.clone()).collect(),
+            changes: new.changes.clone(),
+            next: new.next,
+        }
+    }
 }
 
 /// Run `f` on the board, save it, and tell the window. The board's lock
@@ -662,23 +695,33 @@ struct DesignEvent<'a> {
 fn edit<R>(app: &AppHandle, id: &str, f: impl FnOnce(&mut Doc) -> R) -> Result<R, String> {
     let state = app.state::<AppState>();
     let slot = state.boards.slot(id);
-    let (out, current) = {
+    let (out, delta) = {
         let mut board = slot.lock();
         if board.is_none() {
             *board = Some(load_doc(&state, id)?);
         }
-        let mut current = board.clone().ok_or_else(|| format!("design {id} vanished"))?;
+        let old = board.take().ok_or_else(|| format!("design {id} vanished"))?;
+        let mut current = old.clone();
         let out = f(&mut current);
         current.version += 1;
-        let json = serde_json::to_string(&current).map_err(|e| e.to_string())?;
-        state
-            .store
-            .update_artifact(id, &orchestra_store::ArtifactPatch { body: Some(json), ..Default::default() })
-            .map_err(|e| e.to_string())?;
-        *board = Some(current.clone());
-        (out, current)
+        let saved = serde_json::to_string(&current)
+            .map_err(|e| e.to_string())
+            .and_then(|json| {
+                state
+                    .store
+                    .update_artifact(id, &orchestra_store::ArtifactPatch { body: Some(json), ..Default::default() })
+                    .map_err(|e| e.to_string())
+            });
+        if let Err(err) = saved {
+            // Not saved: the board stays as it was.
+            *board = Some(old);
+            return Err(err);
+        }
+        let delta = DesignDelta::between(id, &old, &current);
+        *board = Some(current);
+        (out, delta)
     };
-    let _ = app.emit("design", DesignEvent { id, doc: &current });
+    let _ = app.emit("design", &delta);
     Ok(out)
 }
 
@@ -910,6 +953,27 @@ mod tests {
         assert_eq!(d.nodes.len(), 2);
         let agent = d.apply(ops(json!([{ "op": "add_stroke", "stroke": stroke(0.0) }])), &Actor::Agent { run: None });
         assert_eq!(agent[0]["ok"], false, "agents do not draw");
+    }
+
+    #[test]
+    fn a_delta_carries_only_what_changed() {
+        let mut d = Doc::default();
+        d.apply(ops(json!([
+            { "op": "create_note", "x": 0, "y": 0, "text": "a" },
+            { "op": "create_note", "x": 300, "y": 0, "text": "b" },
+            { "op": "create_note", "x": 600, "y": 0, "text": "c" }
+        ])), &Actor::Human);
+        let (a, b) = (d.nodes[0].id.clone(), d.nodes[1].id.clone());
+        let old = d.clone();
+        d.apply(ops(json!([{ "op": "move", "id": a, "x": 5, "y": 5 }, { "op": "delete", "ids": [b] }, { "op": "create_note", "x": 0, "y": 300 }])), &Actor::Human);
+        d.version += 1;
+        let delta = DesignDelta::between("ar001", &old, &d);
+        assert_eq!((delta.base, delta.version), (old.version, d.version));
+        let changed: Vec<&str> = delta.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(changed.len(), 2, "the moved note and the new one: {changed:?}");
+        assert!(changed.contains(&a.as_str()));
+        assert_eq!(delta.removed_nodes, vec![b]);
+        assert!(delta.edges.is_empty() && delta.removed_edges.is_empty());
     }
 
     #[test]

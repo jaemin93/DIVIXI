@@ -975,6 +975,8 @@ pub fn run() {
                 meter: metrics::Meter::default(),
                 terminals: terminal::Terminals::default(),
             });
+            // Artifact agents nobody has talked to for an hour are closed.
+            artifact::sweep_idle(app.handle().clone());
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Divixi");
             }
