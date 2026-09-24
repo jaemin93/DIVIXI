@@ -120,6 +120,20 @@ pub enum AgentEvent {
     Commands {
         commands: Vec<SlashCommand>,
     },
+    /// The agent asks before it acts (`session/request_permission`): what
+    /// it wants to do and the answers it offers. It waits until someone
+    /// answers through the session (`AgentSession::answer_permission`).
+    Permission {
+        /// Divixi's id for this question, to answer it by.
+        request: String,
+        /// What the agent wants to do, e.g. the command.
+        title: String,
+        /// Tool category (`execute`, `edit`, …).
+        tool_kind: String,
+        /// The tool's input as the agent gave it, shortened.
+        input: String,
+        options: Vec<PermissionChoice>,
+    },
     /// The turn ended.
     Finished {
         /// Why the turn stopped, e.g. `end_turn`.
@@ -160,6 +174,7 @@ impl AgentEvent {
             AgentEvent::Plan { .. } => "plan",
             AgentEvent::Usage { .. } => "usage",
             AgentEvent::Commands { .. } => "commands",
+            AgentEvent::Permission { .. } => "permission",
             AgentEvent::Finished { .. } => "finished",
             AgentEvent::Failed { .. } => "failed",
         }
@@ -182,10 +197,22 @@ impl AgentEvent {
             AgentEvent::Plan { .. } => "plan",
             AgentEvent::Usage { .. } => "usage",
             AgentEvent::Commands { .. } => "commands",
+            AgentEvent::Permission { .. } => "asks",
             AgentEvent::Finished { .. } => "done",
             AgentEvent::Failed { .. } => "error",
         }
     }
+}
+
+/// One answer an agent offers to a permission question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionChoice {
+    /// The agent's id for it, sent back as the answer.
+    pub id: String,
+    /// What the agent calls it, e.g. "Allow".
+    pub name: String,
+    /// `allow_once`, `allow_always`, `reject_once` or `reject_always`.
+    pub kind: String,
 }
 
 /// A slash command the agent offers, as the composer completes it.
@@ -255,6 +282,13 @@ mod tests {
             AgentEvent::Plan { entries: vec![] },
             AgentEvent::Usage { raw: serde_json::Value::Null },
             AgentEvent::Commands { commands: vec![] },
+            AgentEvent::Permission {
+                request: "p1".into(),
+                title: "rm x".into(),
+                tool_kind: "execute".into(),
+                input: String::new(),
+                options: vec![],
+            },
             AgentEvent::Finished { stop_reason: "end_turn".into() },
             AgentEvent::Failed { error: "boom".into() },
         ];

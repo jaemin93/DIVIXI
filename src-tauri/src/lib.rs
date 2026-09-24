@@ -534,8 +534,11 @@ async fn answer_decision(
 
 /// The human sets a decision aside; the conductor is not told.
 #[tauri::command]
-fn dismiss_decision(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<Decision, String> {
+async fn dismiss_decision(app: AppHandle, id: i64) -> Result<Decision, String> {
+    let state = app.state::<AppState>();
     let decision = state.store.dismiss_decision(id).map_err(|e| e.to_string())?;
+    // A permission card set aside is a refusal to the agent that asked.
+    conductor::refuse_permission(&app, &decision).await;
     let _ = app.emit("decision", &decision);
     Ok(decision)
 }
@@ -801,6 +804,10 @@ pub(crate) async fn pump(
                         emit(AgentEvent::Message { text: std::mem::take(&mut pending) }, ms);
                     }
                     let terminal = event.is_terminal();
+                    // An agent asking before it acts: to whoever answers for it.
+                    if matches!(event, AgentEvent::Permission { .. }) {
+                        conductor::route_permission(&app, &track, &session, &run, &event);
+                    }
                     emit(event, ms);
                     if terminal {
                         break;

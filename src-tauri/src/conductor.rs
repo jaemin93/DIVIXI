@@ -32,7 +32,7 @@ use std::time::Duration;
 use orchestra_acp::{AgentSession, AgentSpec, McpHttp, SessionOptions};
 use orchestra_core::AgentEvent;
 use orchestra_mcp::{McpServer, Tool};
-use orchestra_store::{Decision, DecisionOption, NewDecision, TrackInfo};
+use orchestra_store::{Decision, DecisionOption, NewDecision, PermissionAsk, TrackInfo};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
@@ -64,6 +64,9 @@ pub(crate) fn with_attachments(prompt: &str, files: &[PathBuf]) -> String {
 
 /// First line of a turn that carries the human's answer to a decision card.
 pub const DECISION_PREFIX: &str = "[decision]";
+/// First line of a turn that hands the conductor a worker's permission
+/// question, for it to answer with `answer_worker` (or put to the human).
+pub const PERMISSION_PREFIX: &str = "[worker-permission]";
 
 /// A worker run waits at most this long for the agent to finish a turn.
 const WORKER_TURN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -192,6 +195,7 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
 - 닫힌 작업자는 같은 이름으로 `spawn_worker`나 `ask_worker`를 부르면 이전 대화를 기억한 채 다시 열립니다. 기억을 버리고 처음부터 시작하려면 `spawn_worker`에 fresh=true를 줍니다. `close_worker`는 세션만 닫고 기록은 남깁니다.
 - 도구가 오류를 돌려주면 오류 문구에 적힌 대로 한 번만 다시 시도하고, 그래도 안 되면 사람에게 무엇이 막혔는지 말합니다. 같은 도구를 반복해서 부르지 않습니다.
 - 사람이 골라야 할 일(여러 갈래 중 선택, 되돌리기 어려운 변경, 취향이나 우선순위)은 스스로 정하지 않습니다. 선택지를 본문에 A/B/C로 늘어놓지 말고 `request_decision`을 부르세요. 앱이 선택지를 버튼이 있는 결정 카드로 보여 줍니다. 부른 뒤에는 무엇을 물었는지 한 문장만 말하고 턴을 끝냅니다. 사람의 답은 `{DECISION_PREFIX}`로 시작하는 메시지로 옵니다. 작업자 보고에 사람이 정해야 할 질문이 있으면 그것도 `request_decision`으로 올립니다. 사람이 대화 중에 직접 정한 것은 `record_decision`으로 남깁니다.
+- 사람은 작업자와 직접 이야기하지 않습니다. 작업자가 무언가를 해도 되는지 물으면 `{PERMISSION_PREFIX}`로 시작하는 메시지로 당신에게 옵니다. 사람의 지시와 맡긴 일의 범위 안이면 당신이 직접 골라 `answer_worker`로 답합니다(허용할 때는 보통 이번만 허용). 되돌리기 어렵거나 맡긴 범위를 벗어나거나 사람이 정해야 할 일이면 `request_decision`으로 사람에게 묻고, 답이 오면 그대로 `answer_worker`로 전합니다. 작업자는 답을 받을 때까지 기다리므로 미루지 않습니다.
 - 한국어로 말합니다. 짧게, 명확하게.
 
 작업 디렉터리는 {cwd} 입니다. 작업자도 같은 디렉터리에서 일합니다.
@@ -218,6 +222,7 @@ Rules:
 - A closed worker reopens with its earlier conversation when you call `spawn_worker` or `ask_worker` with its name. To drop that memory and start over, pass fresh=true to `spawn_worker`. `close_worker` only closes the session; the record stays.
 - If a tool returns an error, retry once as the message suggests; if that fails, tell the human what is blocked. Never call the same tool repeatedly.
 - Choices that belong to the human (a choice between directions, hard-to-undo changes, taste or priorities) are not yours to make. Do not list options as A/B/C in prose: call `request_decision`, and the app shows them as a decision card with buttons. After calling it, say in one sentence what you asked and end your turn. The human's answer arrives as a message starting with `{DECISION_PREFIX}`. If a worker report raises a question only the human can answer, put that to them with `request_decision` too. Decisions the human makes in conversation are recorded with `record_decision`.
+- The human does not talk to workers. When a worker asks whether it may do something, the question reaches you as a message starting with `{PERMISSION_PREFIX}`. If it is within the human's instructions and the task you gave, choose yourself and answer with `answer_worker` (usually allow once). If it is hard to undo, outside the task, or the human's call, ask them with `request_decision` and pass their answer on with `answer_worker`. The worker waits until answered, so do not leave it.
 - Speak English. Short and clear.
 
 The working directory is {cwd}. Workers work in the same directory.
@@ -237,6 +242,7 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
     let report = app.clone();
     let close = (app.clone(), track.clone());
     let ask_human = (app.clone(), track.clone());
+    let answer = (app.clone(), track.clone());
     let decide = (app, track);
 
     vec![
@@ -382,10 +388,11 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                             list.iter()
                                 .filter_map(|o| match o {
                                     // Tolerate a bare list of strings.
-                                    Value::String(s) => Some(DecisionOption { label: s.trim().to_string(), detail: String::new() }),
+                                    Value::String(s) => Some(DecisionOption { label: s.trim().to_string(), detail: String::new(), id: String::new() }),
                                     Value::Object(_) => Some(DecisionOption {
                                         label: o.get("label").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
                                         detail: o.get("detail").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
+                                        id: String::new(),
                                     }),
                                     _ => None,
                                 })
@@ -408,6 +415,7 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                             options,
                             recommended: args.get("recommended").and_then(Value::as_u64).map(|i| i as usize),
                             allow_other: args.get("allow_other").and_then(Value::as_bool).unwrap_or(true),
+                            permission: None,
                         })
                         .map_err(|e| e.to_string())?;
                     let _ = app.emit("decision", &decision);
@@ -416,6 +424,36 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                         "status": "waiting for the human",
                         "note": format!("The human sees this as a card with buttons. Do not repeat the options in prose; say in one sentence what you asked and end your turn. The answer arrives as a {DECISION_PREFIX} message."),
                     }))
+                }
+            },
+        ),
+        Tool::new(
+            "answer_worker",
+            &format!("Answer a permission question a worker is waiting on (a {PERMISSION_PREFIX} message): the id of one option it offered, or \"cancel\" to refuse. Decide it yourself when the human's instructions and the task cover it; when it is the human's call, ask with request_decision first and answer with their choice."),
+            json!({
+                "type": "object",
+                "properties": {
+                    "worker": { "type": "string", "description": "The worker that asked." },
+                    "request": { "type": "string", "description": "The request id from the message, e.g. p1." },
+                    "option": { "type": "string", "description": "One of the option ids it offered, or \"cancel\"." }
+                },
+                "required": ["worker", "request", "option"]
+            }),
+            move |args| {
+                let (app, track) = answer.clone();
+                async move {
+                    let worker = str_arg(&args, "worker")?;
+                    let request = str_arg(&args, "request")?;
+                    let option = str_arg(&args, "option")?;
+                    let state = app.state::<AppState>();
+                    let session = {
+                        let workers = state.sessions.workers.lock().await;
+                        workers.get(&worker_key(&track, &worker)).map(|w| w.session.clone())
+                    };
+                    let session = session.ok_or_else(|| format!("no open worker {worker}; its question went with its session"))?;
+                    let choice = if option == "cancel" { None } else { Some(option.as_str()) };
+                    session.answer_permission(&request, choice).map_err(|e| e.to_string())?;
+                    Ok(json!({ "answered": request, "worker": worker, "option": option }))
                 }
             },
         ),
@@ -470,6 +508,88 @@ async fn conductor_run(state: &AppState, track: &str) -> Option<String> {
     state.sessions.conductors.lock().await.get(track).and_then(|c| c.live.running.clone())
 }
 
+/// Where an agent's permission question goes. A worker's goes to its
+/// conductor, which answers for the human; the conductor's own, and an
+/// artifact agent's, go to the human as a card (nobody above them answers).
+pub fn route_permission(app: &AppHandle, track: &str, session: &str, run: &str, event: &AgentEvent) {
+    let AgentEvent::Permission { request, title, tool_kind, input, options } = event else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let artifact = track.starts_with("artifact:");
+    if artifact || session == CONDUCTOR_SESSION {
+        let ko = state.store.get_meta("setting:language").ok().flatten().as_deref() != Some("en");
+        let who = match (artifact, ko) {
+            (true, true) => "디자인 에이전트",
+            (true, false) => "The design agent",
+            (false, true) => "지휘자",
+            (false, false) => "The conductor",
+        };
+        let question = if ko { format!("{who}가 허락을 구합니다: {title}") } else { format!("{who} asks to: {title}") };
+        let mut context = tool_kind.clone();
+        if !input.is_empty() {
+            context = format!("{context}\n{input}");
+        }
+        let choices: Vec<DecisionOption> = options
+            .iter()
+            .map(|o| DecisionOption { label: o.name.clone(), detail: String::new(), id: o.id.clone() })
+            .collect();
+        let opened = state.store.open_decision(&NewDecision {
+            track: track.to_string(),
+            run: Some(run.to_string()),
+            question,
+            context,
+            options: choices,
+            recommended: None,
+            allow_other: false,
+            permission: Some(PermissionAsk {
+                session: if artifact { "artifact".to_string() } else { CONDUCTOR_SESSION.to_string() },
+                request: request.clone(),
+            }),
+        });
+        match opened {
+            Ok(d) => {
+                let _ = app.emit("decision", &d);
+            }
+            Err(err) => tracing::warn!(%err, %track, "could not put a permission question to the human"),
+        }
+        return;
+    }
+    // A worker's: to the conductor, which answers with answer_worker.
+    let list: Vec<String> = options.iter().map(|o| format!("- {}: {} ({})", o.id, o.name, o.kind)).collect();
+    let mut text = format!("{PERMISSION_PREFIX} worker={session} request={request}\nwants to: {title} ({tool_kind})");
+    if !input.is_empty() {
+        text.push_str(&format!("\ninput: {input}"));
+    }
+    text.push_str(&format!(
+        "\noptions:\n{}\n\nAnswer with answer_worker(worker=\"{session}\", request=\"{request}\", option=...). Decide yourself unless it is the human's call; then ask with request_decision and pass their choice on.",
+        list.join("\n")
+    ));
+    tauri::async_runtime::spawn(deliver(app.clone(), track.to_string(), text, true, format!("permission {request} of {session}")));
+}
+
+/// Answer the agent behind a permission card: the chosen option, or `None`
+/// to cancel.
+async fn answer_asker(app: &AppHandle, decision: &Decision, ask: &PermissionAsk, option: Option<&str>) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    if ask.session == "artifact" {
+        let id = decision.track.strip_prefix("artifact:").unwrap_or(&decision.track);
+        return crate::artifact::answer_permission(app, id, &ask.request, option).await;
+    }
+    let session = st.sessions.conductors.lock().await.get(&decision.track).map(|c| c.live.session.clone());
+    let session = session.ok_or("the conductor's session is closed; the question went with it")?;
+    session.answer_permission(&ask.request, option).map_err(|e| e.to_string())
+}
+
+/// Refuse the agent behind a permission card the human set aside.
+pub async fn refuse_permission(app: &AppHandle, decision: &Decision) {
+    if let Some(ask) = &decision.permission {
+        if let Err(err) = answer_asker(app, decision, ask, None).await {
+            tracing::info!(%err, decision = decision.id, "no agent waiting on a dismissed permission card");
+        }
+    }
+}
+
 /// The turn that hands the human's answer to the conductor.
 fn decision_text(d: &Decision) -> String {
     let letter = |i: usize| char::from(b'A' + (i % 26) as u8);
@@ -496,6 +616,21 @@ pub async fn answer_decision(
     note: String,
 ) -> Result<Decision, String> {
     let st = app.state::<AppState>();
+    // A permission card answers the agent that asked, not the conductor's
+    // conversation: the agent is mid-turn, waiting.
+    let open = st.store.decision(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no decision {id}"))?;
+    if let Some(ask) = &open.permission {
+        let option = choice.and_then(|i| open.options.get(i)).map(|o| o.id.clone()).ok_or("choose one of the options")?;
+        if let Err(err) = answer_asker(&app, &open, ask, Some(&option)).await {
+            if let Ok(gone) = st.store.dismiss_decision(id) {
+                let _ = app.emit("decision", &gone);
+            }
+            return Err(err);
+        }
+        let decision = st.store.answer_decision(id, choice, None, &note).map_err(|e| e.to_string())?;
+        let _ = app.emit("decision", &decision);
+        return Ok(decision);
+    }
     let decision = st
         .store
         .answer_decision(id, choice, own.as_deref(), &note)

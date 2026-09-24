@@ -40,7 +40,7 @@
 
 <section class="decision" class:open class:dismissed={decision.status === "dismissed"}>
   <div class="head">
-    <span class="mlab kind">{t("decision.label")} · #{decision.id}</span>
+    <span class="mlab kind">{decision.permission ? t("decision.permission") : t("decision.label")} · #{decision.id}</span>
     {#if open}
       <span class="mono state waiting">{t("decision.waiting")}</span>
     {:else if decision.status === "decided"}
@@ -91,7 +91,7 @@
         <button class="link mono" onclick={() => (noteOpen = true)}>{t("decision.addNote")}</button>
       {/if}
       <span class="grow"></span>
-      <button class="btn" onclick={() => store.dismissDecision(decision.id)} disabled={sending}>{t("decision.skip")}</button>
+      <button class="btn" onclick={() => store.dismissDecision(decision.id)} disabled={sending}>{decision.permission ? t("decision.refuse") : t("decision.skip")}</button>
       <button class="btn btn-acc" onclick={submit} disabled={!ready}>{sending ? t("decision.sending") : t("decision.submit")}</button>
     </div>
   {:else if decision.status === "decided"}

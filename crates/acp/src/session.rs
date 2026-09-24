@@ -23,14 +23,15 @@ use agent_client_protocol::{
         v1::{
             HttpHeader, InitializeRequest, LoadSessionRequest, McpServer, McpServerHttp,
             CancelNotification, NewSessionRequest, SessionConfigOptionValue, SessionNotification,
-            PromptRequest, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason,
+            PermissionOptionKind, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+            SelectedPermissionOutcome, SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason,
         },
         ProtocolVersion,
     },
     util::MatchDispatch,
-    ActiveSession, Agent, Client, SessionMessage,
+    ActiveSession, Agent, Client, Responder, SessionMessage,
 };
-use orchestra_core::{AgentEvent, SlashCommand};
+use orchestra_core::{AgentEvent, PermissionChoice, SlashCommand};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{pick_autonomous_mode, process, translate, AgentSpec};
@@ -77,6 +78,55 @@ struct Ready {
     resumed: bool,
 }
 
+/// Permission questions the agent is waiting on, by Divixi's request id.
+type Pending = Arc<Mutex<PendingQuestions>>;
+
+#[derive(Default)]
+struct PendingQuestions {
+    next: u64,
+    waiting: std::collections::HashMap<String, Responder<RequestPermissionResponse>>,
+}
+
+/// A permission question as an event, and the question kept to answer.
+fn hold_question(pending: &Pending, req: RequestPermissionRequest, responder: Responder<RequestPermissionResponse>) -> AgentEvent {
+    let fields = &req.tool_call.fields;
+    let kind = |k: &PermissionOptionKind| {
+        match k {
+            PermissionOptionKind::AllowOnce => "allow_once",
+            PermissionOptionKind::AllowAlways => "allow_always",
+            PermissionOptionKind::RejectOnce => "reject_once",
+            PermissionOptionKind::RejectAlways => "reject_always",
+            _ => "other",
+        }
+        .to_string()
+    };
+    let mut input = fields.raw_input.as_ref().map(|v| v.to_string()).unwrap_or_default();
+    if input.chars().count() > 2000 {
+        input = format!("{}…", input.chars().take(2000).collect::<String>());
+    }
+    let options = req
+        .options
+        .iter()
+        .map(|o| PermissionChoice { id: o.option_id.to_string(), name: o.name.clone(), kind: kind(&o.kind) })
+        .collect();
+    let request = match pending.lock() {
+        Ok(mut p) => {
+            p.next += 1;
+            let id = format!("p{}", p.next);
+            p.waiting.insert(id.clone(), responder);
+            id
+        }
+        Err(_) => String::new(),
+    };
+    AgentEvent::Permission {
+        request,
+        title: fields.title.clone().unwrap_or_else(|| req.tool_call.tool_call_id.to_string()),
+        tool_kind: fields.kind.as_ref().map(|k| format!("{k:?}").to_lowercase()).unwrap_or_default(),
+        input,
+        options,
+    }
+}
+
 /// A live session. Dropping it ends the session and kills the agent.
 pub struct AgentSession {
     turns: mpsc::Sender<Turn>,
@@ -86,6 +136,8 @@ pub struct AgentSession {
     resumed: bool,
     /// The latest slash-command list the agent sent.
     commands: Arc<Mutex<Vec<SlashCommand>>>,
+    /// Permission questions waiting for an answer.
+    pending: Pending,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -112,6 +164,8 @@ impl AgentSession {
         let opts_for_task = opts.clone();
         let commands: Arc<Mutex<Vec<SlashCommand>>> = Arc::new(Mutex::new(Vec::new()));
         let commands_task = commands.clone();
+        let pending: Pending = Arc::default();
+        let pending_task = pending.clone();
 
         let task = tokio::spawn(async move {
             let ready: Arc<Mutex<Option<ReadyTx>>> = Arc::new(Mutex::new(Some(ready_tx)));
@@ -246,7 +300,7 @@ impl AgentSession {
                         }
                         // A cancel asked for before this turn is not for this turn.
                         while cancel_rx.try_recv().is_ok() {}
-                        let result = run_turn(&mut session, &turn.text, &turn.files, images, &turn.tx, &commands_task, &mut cancel_rx).await;
+                        let result = run_turn(&mut session, &turn.text, &turn.files, images, &turn.tx, &commands_task, &pending_task, &mut cancel_rx).await;
                         if let Err(err) = &result {
                             let _ = turn.tx.send(AgentEvent::Failed { error: err.to_string() });
                         }
@@ -282,6 +336,7 @@ impl AgentSession {
                 session_id: ready.session_id,
                 resumed: ready.resumed,
                 commands,
+                pending,
                 task,
             }),
             Ok(Err(err)) => {
@@ -333,7 +388,38 @@ impl AgentSession {
     /// The agent ends the turn with a `cancelled` stop reason; the session
     /// stays open. Nothing happens when no turn is running.
     pub fn cancel(&self) {
+        // Questions still waiting are answered "cancelled", as ACP asks of a
+        // client that cancels a turn.
+        let waiting: Vec<_> = self.pending.lock().map(|mut p| p.waiting.drain().collect()).unwrap_or_default();
+        for (_, responder) in waiting {
+            let _ = responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+        }
         let _ = self.cancel.send(());
+    }
+
+    /// Answer a permission question the agent is waiting on: one of the
+    /// options it offered, or `None` to cancel. Errors when no question has
+    /// that id (answered already, or the session was reopened since).
+    pub fn answer_permission(&self, request: &str, option: Option<&str>) -> anyhow::Result<()> {
+        let responder = self
+            .pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("permission questions are unavailable"))?
+            .waiting
+            .remove(request)
+            .ok_or_else(|| anyhow::anyhow!("no permission question {request} is waiting"))?;
+        let outcome = match option {
+            Some(id) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(id.to_string())),
+            None => RequestPermissionOutcome::Cancelled,
+        };
+        responder
+            .respond(RequestPermissionResponse::new(outcome))
+            .map_err(|e| anyhow::anyhow!("could not answer the agent: {e}"))
+    }
+
+    /// Permission questions the agent is waiting on now.
+    pub fn waiting_questions(&self) -> Vec<String> {
+        self.pending.lock().map(|p| p.waiting.keys().cloned().collect()).unwrap_or_default()
     }
 
     /// End the session and wait for the agent to go away.
@@ -380,6 +466,7 @@ async fn run_turn(
     images: bool,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     commands: &Arc<Mutex<Vec<SlashCommand>>>,
+    pending: &Pending,
     cancel: &mut mpsc::UnboundedReceiver<()>,
 ) -> anyhow::Result<()> {
     // The prompt goes out as blocks (text, then the files), which the
@@ -406,7 +493,7 @@ async fn run_turn(
             stop = &mut stop_rx => {
                 // Whatever is already queued belongs to this turn.
                 while let Some(Ok(update)) = futures::FutureExt::now_or_never(session.read_update()) {
-                    forward(update, tx, commands).await?;
+                    forward(update, tx, commands, pending).await?;
                 }
                 match stop {
                     Ok(Ok(reason)) => {
@@ -429,7 +516,7 @@ async fn run_turn(
                 continue;
             }
         };
-        forward(update, tx, commands).await?;
+        forward(update, tx, commands, pending).await?;
     }
 }
 
@@ -438,10 +525,13 @@ async fn forward(
     update: SessionMessage,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     commands: &Arc<Mutex<Vec<SlashCommand>>>,
+    pending: &Pending,
 ) -> anyhow::Result<()> {
     if let SessionMessage::SessionMessage(dispatch) = update {
         let tx = tx.clone();
+        let tx_ask = tx.clone();
         let commands = commands.clone();
+        let pending = pending.clone();
         MatchDispatch::new(dispatch)
             .if_notification(async move |notif: SessionNotification| {
                 let events = translate(notif.update);
@@ -449,6 +539,13 @@ async fn forward(
                 for ev in events {
                     let _ = tx.send(ev);
                 }
+                Ok(())
+            })
+            .await
+            // The agent asks before acting: keep the question, say it was
+            // asked, and let whoever decides answer it through the session.
+            .if_request(async move |req: RequestPermissionRequest, responder: Responder<RequestPermissionResponse>| {
+                let _ = tx_ask.send(hold_question(&pending, req, responder));
                 Ok(())
             })
             .await

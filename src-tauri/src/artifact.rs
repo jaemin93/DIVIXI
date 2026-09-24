@@ -264,6 +264,14 @@ pub async fn turn(
     outcome
 }
 
+/// Answer a permission question an artifact's agent is waiting on.
+pub async fn answer_permission(app: &AppHandle, id: &str, request: &str, option: Option<&str>) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let sessions = state.artifacts.sessions.lock().await;
+    let s = sessions.get(id).ok_or("the agent's session is closed; the question went with it")?;
+    s.live.session.answer_permission(request, option).map_err(|e| e.to_string())
+}
+
 /// Stop the artifact agent's turn in flight.
 pub async fn cancel(app: &AppHandle, id: &str) {
     let state = app.state::<AppState>();

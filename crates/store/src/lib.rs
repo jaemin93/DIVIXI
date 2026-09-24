@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -143,6 +143,9 @@ const MIGRATIONS: &[&str] = &[
     // `artifact`), and a worker's remembered session moves to its new key.
     "ALTER TABLE runs RENAME COLUMN lane TO session;
     UPDATE meta SET key = 'worker_session:' || substr(key, 14) WHERE key LIKE 'lane_session:%';",
+    // 11 -> 12: a decision can be an agent's permission question put to the
+    // human: which session asked, and its request id, as JSON.
+    "ALTER TABLE decisions ADD COLUMN permission TEXT;",
 ];
 
 const SCHEMA: &str = r#"
@@ -212,7 +215,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     answer      TEXT,
     note        TEXT    NOT NULL DEFAULT '',
     created_at  INTEGER NOT NULL,
-    decided_at  INTEGER
+    decided_at  INTEGER,
+    permission  TEXT
 );
 CREATE INDEX IF NOT EXISTS decisions_by_track ON decisions(track, id);
 
@@ -279,6 +283,17 @@ pub struct DecisionOption {
     /// What choosing it means: consequences, trade-offs. May be empty.
     #[serde(default)]
     pub detail: String,
+    /// For a permission question, the agent's id for this answer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+}
+
+/// A decision that is an agent's permission question: which session asked
+/// (`conductor`, or `artifact` for an artifact's agent) and its request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionAsk {
+    pub session: String,
+    pub request: String,
 }
 
 /// Where a decision stands.
@@ -336,6 +351,8 @@ pub struct Decision {
     /// Unix milliseconds.
     pub created_at: i64,
     pub decided_at: Option<i64>,
+    /// Set when the decision is an agent's permission question.
+    pub permission: Option<PermissionAsk>,
 }
 
 /// What a new open decision carries.
@@ -348,9 +365,10 @@ pub struct NewDecision {
     pub options: Vec<DecisionOption>,
     pub recommended: Option<usize>,
     pub allow_other: bool,
+    pub permission: Option<PermissionAsk>,
 }
 
-const DECISION_SELECT: &str = "SELECT id, track, run, question, context, options, recommended, allow_other, status, choice, answer, note, created_at, decided_at FROM decisions";
+const DECISION_SELECT: &str = "SELECT id, track, run, question, context, options, recommended, allow_other, status, choice, answer, note, created_at, decided_at, permission FROM decisions";
 
 fn row_to_decision(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decision> {
     let options: String = r.get(5)?;
@@ -370,6 +388,7 @@ fn row_to_decision(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decision> {
         note: r.get(11)?,
         created_at: r.get(12)?,
         decided_at: r.get(13)?,
+        permission: r.get::<_, Option<String>>(14)?.and_then(|p| serde_json::from_str(&p).ok()),
     })
 }
 
@@ -926,8 +945,8 @@ impl Store {
         }
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT INTO decisions(track, run, question, context, options, recommended, allow_other, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO decisions(track, run, question, context, options, recommended, allow_other, status, created_at, permission)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 new.track,
                 new.run,
@@ -938,6 +957,7 @@ impl Store {
                 new.allow_other as i64,
                 DecisionStatus::Open.as_str(),
                 now_ms(),
+                new.permission.as_ref().map(serde_json::to_string).transpose()?,
             ],
         )?;
         let id = conn.last_insert_rowid();
@@ -957,7 +977,7 @@ impl Store {
     ) -> anyhow::Result<Decision> {
         let options: Vec<DecisionOption> = options
             .iter()
-            .map(|label| DecisionOption { label: label.clone(), detail: String::new() })
+            .map(|label| DecisionOption { label: label.clone(), detail: String::new(), id: String::new() })
             .collect();
         let index = options.iter().position(|o| o.label == choice);
         let now = now_ms();
@@ -1376,6 +1396,8 @@ mod tests {
             conn.execute("DROP TABLE tracks", []).unwrap();
             // Before v11 a run's session column was called lane.
             conn.execute("ALTER TABLE runs RENAME COLUMN session TO lane", []).unwrap();
+            // Nor did decisions carry a permission before v12.
+            conn.execute("ALTER TABLE decisions DROP COLUMN permission", []).unwrap();
             // Artifacts came at v10 (drafts at v7); the migrations make them.
             conn.execute("DROP TABLE artifacts", []).unwrap();
             conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')", []).unwrap();
@@ -1493,6 +1515,7 @@ mod tests {
             conn.execute_batch(SCHEMA).unwrap();
             conn.execute_batch(
                 "ALTER TABLE runs RENAME COLUMN session TO lane;
+                 ALTER TABLE decisions DROP COLUMN permission;
                  DROP TABLE artifacts;
                  CREATE TABLE drafts (id TEXT PRIMARY KEY, title TEXT NOT NULL, agent TEXT NOT NULL,
                    doc TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
@@ -1519,7 +1542,7 @@ mod tests {
     #[test]
     fn decisions_open_answer_dismiss() {
         let store = Store::in_memory().unwrap();
-        let opt = |l: &str| DecisionOption { label: l.into(), detail: String::new() };
+        let opt = |l: &str| DecisionOption { label: l.into(), detail: String::new(), id: String::new() };
         let new = NewDecision {
             track: "tr001".into(),
             run: Some("t001".into()),
@@ -1528,6 +1551,7 @@ mod tests {
             options: vec![opt("A"), opt("B"), opt("C")],
             recommended: Some(1),
             allow_other: true,
+            permission: None,
         };
         let d = store.open_decision(&new).unwrap();
         assert_eq!((d.status, d.recommended, d.run.as_deref()), (DecisionStatus::Open, Some(1), Some("t001")));

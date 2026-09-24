@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel, splitAttachments, REPORT_PREFIX, DECISION_PREFIX, type Decision, type Segment, type Tool } from "./store.svelte";
+  import { store, agentLabel, splitAttachments, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Segment, type Tool } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import DecisionCard from "./DecisionCard.svelte";
   import Working from "./Working.svelte";
@@ -63,6 +63,13 @@
     return { byRun, orphans };
   });
 
+  /** "fix-parser · Write src/a.ts" from a worker's permission question. */
+  function permissionLine(prompt: string): string {
+    const [head, second = ""] = prompt.split("\n");
+    const worker = head.match(/worker=(\S+)/)?.[1] ?? "";
+    return `${worker} · ${second.replace(/^wants to: /, "")}`;
+  }
+
   /** "#3 · B. label" from the turn that carried an answer to the conductor. */
   function decisionLine(prompt: string): string {
     const lines = prompt.split("\n");
@@ -92,6 +99,9 @@
   {#each conductorRuns as run (run.id)}
     {#if run.prompt.startsWith(REPORT_PREFIX)}
       <div class="sys mono">{t("timeline.reportArrived")} · {run.prompt.split("\n")[0].replace(REPORT_PREFIX, "").trim()}</div>
+    {:else if run.prompt.startsWith(PERMISSION_PREFIX)}
+      <!-- A worker asked; the conductor answers for the human. -->
+      <div class="sys mono decided">{t("timeline.permissionAsked")} · {permissionLine(run.prompt)}</div>
     {:else if run.prompt.startsWith(DECISION_PREFIX)}
       <div class="sys mono decided">{t("timeline.decisionSent")} · {decisionLine(run.prompt)}</div>
     {:else}

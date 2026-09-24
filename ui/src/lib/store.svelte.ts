@@ -15,6 +15,14 @@ export type AgentEvent =
   | { kind: "plan"; entries: string[] }
   | { kind: "usage"; raw: unknown }
   | { kind: "commands"; commands: SlashCommand[] }
+  | {
+      kind: "permission";
+      request: string;
+      title: string;
+      tool_kind: string;
+      input: string;
+      options: { id: string; name: string; kind: string }[];
+    }
   | { kind: "finished"; stop_reason: string }
   | { kind: "failed"; error: string };
 
@@ -331,11 +339,14 @@ function withAttachments(text: string, files: string[]): string {
   return `${text}\n\n${ATTACH_MARK}\n${files.map((f) => `- ${f}`).join("\n")}`;
 }
 
+/** First line of a turn that hands the conductor a worker's permission question. */
+export const PERMISSION_PREFIX = "[worker-permission]";
+
 /** First line of the turn that carries the human's answer to a decision card. */
 export const DECISION_PREFIX = "[decision]";
 
 /** A question the conductor put to the human, as the core keeps it. */
-export type DecisionOption = { label: string; detail: string };
+export type DecisionOption = { label: string; detail: string; id?: string };
 export type DecisionStatus = "open" | "decided" | "dismissed";
 export type Decision = {
   id: number;
@@ -354,6 +365,8 @@ export type Decision = {
   note: string;
   created_at: number;
   decided_at: number | null;
+  /** Set when the card is an agent's permission question. */
+  permission: { session: string; request: string } | null;
 };
 
 /** What the user asked for; `system` follows the OS. */
@@ -696,7 +709,11 @@ class Store {
 
   /** Decision cards of the conversation on screen; artifacts have none. */
   get chatDecisions(): Decision[] {
-    return this.chatArtifact ? [] : this.trackDecisions;
+    if (this.chatArtifact) {
+      const key = artifactKey(this.artifact);
+      return this.decisions.filter((d) => d.track === key);
+    }
+    return this.trackDecisions;
   }
 
   get slashCommands(): SlashCommand[] {
@@ -1954,6 +1971,9 @@ function fold(run: Run, ms: number, ev: AgentEvent) {
       }
       break;
     }
+    case "permission":
+      push(run, ms, "asks", `${ev.tool_kind} · ${ev.title}`, "warn");
+      break;
     case "finished":
       run.status = "done";
       run.stopReason = ev.stop_reason;
