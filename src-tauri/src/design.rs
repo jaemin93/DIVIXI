@@ -417,12 +417,21 @@ impl Doc {
 
     /// Put an item back as it was, or take it away when it was not there.
     fn restore(&mut self, target: &str, what: Option<&Entity>) {
-        self.nodes.retain(|n| n.id != target);
-        self.edges.retain(|e| e.id != target);
         match what {
-            Some(Entity::Node(n)) => self.nodes.push(n.clone()),
-            Some(Entity::Edge(e)) => self.edges.push(e.clone()),
-            None => {}
+            Some(Entity::Node(n)) => match self.nodes.iter().position(|x| x.id == target) {
+                Some(i) => self.nodes[i] = n.clone(),
+                // A frame lies under what it holds.
+                None if n.kind == Kind::Frame => self.nodes.insert(0, n.clone()),
+                None => self.nodes.push(n.clone()),
+            },
+            Some(Entity::Edge(e)) => match self.edges.iter().position(|x| x.id == target) {
+                Some(i) => self.edges[i] = e.clone(),
+                None => self.edges.push(e.clone()),
+            },
+            None => {
+                self.nodes.retain(|n| n.id != target);
+                self.edges.retain(|e| e.id != target);
+            }
         }
     }
 
@@ -442,12 +451,24 @@ impl Doc {
 
     /// Put the items of an undo step back as they were before it (or, with
     /// `again`, as it left them). Arrows whose ends are gone go too.
+    ///
+    /// An item that changed since (the agent moved or rewrote it) is left
+    /// alone: undo never overwrites someone else's later work. Suggestions
+    /// on what it puts back are settled, as a human edit settles them.
     fn replay(&mut self, step: &Step, again: bool) {
         for (target, before, after) in step.iter().rev() {
-            self.restore(target, if again { after.as_ref() } else { before.as_ref() });
+            let (expected, wanted) = if again { (before, after) } else { (after, before) };
+            if &self.entity(target) != expected {
+                continue;
+            }
+            self.restore(target, wanted.as_ref());
+            self.changes.retain(|c| &c.target != target);
         }
         let nodes: HashSet<String> = self.nodes.iter().map(|n| n.id.clone()).collect();
-        self.edges.retain(|e| nodes.contains(&e.from) && nodes.contains(&e.to));
+        let gone: Vec<String> = self.edges.iter().filter(|e| !nodes.contains(&e.from) || !nodes.contains(&e.to)).map(|e| e.id.clone()).collect();
+        self.edges.retain(|e| !gone.contains(&e.id));
+        // A suggestion about an arrow that went with its note has nothing left to review.
+        self.changes.retain(|c| !gone.contains(&c.target));
         self.journal.clear();
     }
 
@@ -642,6 +663,13 @@ impl Doc {
                     }
                     let url = url.map(|u| check_url(&u)).transpose()?;
                     let node = self.nodes.iter_mut().find(|n| n.id == id).ok_or_else(|| format!("no item {id}"))?;
+                    // Checked before anything changes, so a refused edit leaves the item as it was.
+                    if answer.is_some() && node.kind != Kind::Question {
+                        return Err(format!("{id} is not a question"));
+                    }
+                    if url.is_some() && node.kind != Kind::Link {
+                        return Err(format!("{id} is not a link"));
+                    }
                     if let Some(t) = text {
                         node.text = t;
                     }
@@ -649,15 +677,9 @@ impl Doc {
                         node.tag = t;
                     }
                     if let Some(a) = answer {
-                        if node.kind != Kind::Question {
-                            return Err(format!("{id} is not a question"));
-                        }
                         node.answer = a;
                     }
                     if let Some(u) = url {
-                        if node.kind != Kind::Link {
-                            return Err(format!("{id} is not a link"));
-                        }
                         node.url = u;
                     }
                     if let Some(t) = title {
@@ -928,8 +950,19 @@ impl Doc {
 /// and after.
 type Step = Vec<(String, Option<Entity>, Option<Entity>)>;
 
-/// Undo steps kept per board.
+/// Undo steps kept per board, and roughly how many bytes they may hold.
 const UNDO_DEPTH: usize = 100;
+const UNDO_BYTES: usize = 20 * 1024 * 1024;
+
+/// About how much memory an undo step holds.
+fn step_bytes(step: &Step) -> usize {
+    let entity = |e: &Option<Entity>| match e {
+        Some(Entity::Node(n)) => 200 + n.text.len() + n.answer.len() + n.strokes.iter().map(|s| s.points.len() * 24 + 32).sum::<usize>(),
+        Some(Entity::Edge(e)) => 100 + e.label.len(),
+        None => 0,
+    };
+    step.iter().map(|(t, b, a)| t.len() + entity(b) + entity(a)).sum()
+}
 
 /// One board, loaded on first use, with the human's undo and redo steps
 /// (in memory only). Its lock is held for a whole edit (read, change,
@@ -1166,6 +1199,7 @@ fn change<R>(app: &AppHandle, id: &str, f: impl FnOnce(&mut Doc, &mut Vec<Step>,
         let old = board.doc.take().ok_or_else(|| format!("design {id} vanished"))?;
         let mut current = old.clone();
         current.journal.clear();
+        let (kept_undo, kept_redo) = (board.undo.clone(), board.redo.clone());
         let (mut undo, mut redo) = (std::mem::take(&mut board.undo), std::mem::take(&mut board.redo));
         let out = f(&mut current, &mut undo, &mut redo);
         current.version += 1;
@@ -1180,8 +1214,8 @@ fn change<R>(app: &AppHandle, id: &str, f: impl FnOnce(&mut Doc, &mut Vec<Step>,
         if let Err(err) = saved {
             // Not saved: the board and its undo steps stay as they were.
             board.doc = Some(old);
-            board.undo = undo;
-            board.redo = redo;
+            board.undo = kept_undo;
+            board.redo = kept_redo;
             return Err(err);
         }
         let delta = DesignDelta::between(id, &old, &current);
@@ -1201,10 +1235,13 @@ fn edit<R>(app: &AppHandle, id: &str, f: impl FnOnce(&mut Doc) -> R) -> Result<R
         let out = f(d);
         if let Some(step) = d.take_step() {
             undo.push(step);
-            if undo.len() > UNDO_DEPTH {
-                undo.remove(0);
-            }
             redo.clear();
+            // Within a count and a size: a sketch is kept whole before and
+            // after every stroke, so steps can be large.
+            let mut total: usize = undo.iter().map(step_bytes).sum();
+            while undo.len() > UNDO_DEPTH || (total > UNDO_BYTES && undo.len() > 1) {
+                total -= step_bytes(&undo.remove(0));
+            }
         }
         out
     })
@@ -1239,6 +1276,14 @@ pub fn review(app: &AppHandle, id: &str, changes: &[u64], keep: bool) -> Result<
 const MAX_FILE: u64 = 50 * 1024 * 1024;
 /// Files brought in one go.
 const MAX_FILES: usize = 20;
+
+/// Refuse anything but an existing design (its id names a folder).
+fn check_design(state: &AppState, id: &str) -> Result<(), String> {
+    match state.store.artifact(id).map_err(|e| e.to_string())? {
+        Some((a, _)) if a.kind == KIND => Ok(()),
+        _ => Err(format!("no design {id}")),
+    }
+}
 
 /// A media type by extension; what the board and the agent go by.
 pub fn mime_of(name: &str) -> &'static str {
@@ -1297,6 +1342,7 @@ pub fn add_files(app: &AppHandle, id: &str, incoming: Vec<Incoming>, x: f64, y: 
         return Err(format!("at most {MAX_FILES} files at once"));
     }
     let state = app.state::<AppState>();
+    check_design(&state, id)?;
     let dir = crate::artifact::workdir(&state, id)?.join("files");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut ops = Vec::new();
@@ -1341,7 +1387,16 @@ pub fn add_files(app: &AppHandle, id: &str, incoming: Vec<Incoming>, x: f64, y: 
             continue;
         }
         let mime = mime_of(&name).to_string();
-        let (w, h) = file_size(&mime);
+        let (mut w, mut h) = file_size(&mime);
+        // A picture's card takes the picture's shape from the start.
+        if mime.starts_with("image/") {
+            if let Ok(size) = imagesize::size(&target) {
+                if size.width > 0 && size.height > 0 {
+                    w = 320.0;
+                    h = (320.0 * size.height as f64 / size.width as f64).clamp(60.0, 1200.0).round();
+                }
+            }
+        }
         ops.push(Op::AddFile { x: at, y, w: Some(w), h: Some(h), src: format!("files/{stored}"), name, mime });
         at += w + 40.0;
     }
@@ -1357,6 +1412,7 @@ enum Source {
 
 /// Where a reference file of a design is on disk; only its own files.
 pub fn file_path(state: &AppState, id: &str, src: &str) -> Result<std::path::PathBuf, String> {
+    check_design(state, id)?;
     let src = check_src(src)?;
     let path = crate::artifact::workdir(state, id)?.join(src);
     if path.is_file() {
@@ -1548,6 +1604,35 @@ mod tests {
         d.replay(&del, false);
         assert!(d.nodes.iter().any(|n| n.id == a));
         assert_eq!(d.edges.len(), 1, "its arrow is back too");
+    }
+
+    #[test]
+    fn undo_leaves_what_the_agent_changed_since() {
+        let mut d = Doc::default();
+        let res = d.apply(ops(json!([{ "op": "create_note", "x": 0, "y": 0, "text": "A" }])), &Actor::Human);
+        let id = res[0]["id"].as_str().unwrap().to_string();
+        d.take_step();
+        d.apply(ops(json!([{ "op": "update", "id": id, "text": "B" }])), &Actor::Human);
+        let edit = d.take_step().unwrap();
+        // The agent moves it after the human's edit.
+        d.apply(ops(json!([{ "op": "move", "id": id, "x": 300, "y": 0 }])), &Actor::Agent { run: None });
+        d.replay(&edit, false);
+        let n = d.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!((n.text.as_str(), n.x), ("B", 300.0), "the agent's move is not overwritten");
+
+        // A refused update changes nothing.
+        let r = d.apply(ops(json!([{ "op": "update", "id": id, "text": "sneaky", "url": "https://x.dev" }])), &Actor::Agent { run: None });
+        assert_eq!(r[0]["ok"], false);
+        assert_eq!(d.nodes.iter().find(|n| n.id == id).unwrap().text, "B");
+
+        // A frame undone back into being lies under the rest.
+        let f = d.apply(ops(json!([{ "op": "create_frame", "x": -50, "y": -50, "w": 900, "h": 400 }])), &Actor::Human);
+        let fid = f[0]["id"].as_str().unwrap().to_string();
+        d.take_step();
+        d.apply(ops(json!([{ "op": "delete", "ids": [fid.clone()] }])), &Actor::Human);
+        let del = d.take_step().unwrap();
+        d.replay(&del, false);
+        assert_eq!(d.nodes[0].id, fid);
     }
 
     #[test]

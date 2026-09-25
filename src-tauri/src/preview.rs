@@ -9,7 +9,7 @@
 use std::borrow::Cow;
 
 use tauri::http::{header, Request, Response, StatusCode};
-use tauri::{Manager, Runtime, UriSchemeContext};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::AppState;
 
@@ -112,7 +112,7 @@ pub const BOARD_SCHEME: &str = "board";
 /// `<design>/<file>` → a file of a design board's `files/` folder, for
 /// its cards (`http://board.localhost/…` on Windows). Only plain names in
 /// that folder are served.
-pub fn handle_board<R: Runtime>(ctx: UriSchemeContext<'_, R>, request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
+pub fn handle_board<R: Runtime>(app: &AppHandle<R>, request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
     let path = request.uri().path().trim_start_matches('/');
     let (design, file) = path.split_once('/').unwrap_or((path, ""));
     let (design, file) = (decode(design), decode(file));
@@ -120,7 +120,7 @@ pub fn handle_board<R: Runtime>(ctx: UriSchemeContext<'_, R>, request: Request<V
     if !plain(&design) || !plain(&file) {
         return refuse(StatusCode::NOT_FOUND, "no such file");
     }
-    let Some(state) = ctx.app_handle().try_state::<AppState>() else {
+    let Some(state) = app.try_state::<AppState>() else {
         return refuse(StatusCode::SERVICE_UNAVAILABLE, "starting");
     };
     let full = state.artifacts_dir.join(&design).join("files").join(&file);
@@ -131,7 +131,8 @@ pub fn handle_board<R: Runtime>(ctx: UriSchemeContext<'_, R>, request: Request<V
     let mut res = Response::builder()
         .header(header::CONTENT_TYPE, mime(&ext))
         .header("X-Content-Type-Options", "nosniff")
-        .header(header::CACHE_CONTROL, "no-store");
+        // Stored names carry a stamp and never change.
+        .header(header::CACHE_CONTROL, "private, max-age=86400");
     // An SVG or a page opened from here runs nothing (pictures and PDFs are left to their viewers).
     if matches!(ext.as_str(), "svg" | "html" | "htm") {
         res = res.header("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
@@ -142,14 +143,14 @@ pub fn handle_board<R: Runtime>(ctx: UriSchemeContext<'_, R>, request: Request<V
 }
 
 /// `<track>/<path…>` → the file's bytes, typed by extension.
-pub fn handle<R: Runtime>(ctx: UriSchemeContext<'_, R>, request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
+pub fn handle<R: Runtime>(app: &AppHandle<R>, request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
     let path = request.uri().path().trim_start_matches('/');
     let (track, rel) = path.split_once('/').unwrap_or((path, ""));
     let (track, rel) = (decode(track), decode(rel));
     if track.is_empty() || rel.is_empty() {
         return refuse(StatusCode::NOT_FOUND, "no such file");
     }
-    let Some(state) = ctx.app_handle().try_state::<AppState>() else {
+    let Some(state) = app.try_state::<AppState>() else {
         return refuse(StatusCode::SERVICE_UNAVAILABLE, "starting");
     };
     let full = match crate::track_root(&state, &track).and_then(|root| crate::workspace::resolve(&root, &rel)) {

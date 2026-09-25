@@ -274,15 +274,6 @@
     await store.designApply([{ op: "create_link", x: at.x, y: at.y, url: href }]);
   }
 
-  /** Pictures come in at a guessed size; once seen, a card takes the picture's shape. */
-  const shaped = new Set<string>();
-  function shapeToImage(n: DesignNode, img: HTMLImageElement) {
-    if (shaped.has(n.id) || !img.naturalWidth || n.w !== 320 || n.h !== 240) return;
-    shaped.add(n.id);
-    const h = Math.round(Math.min(1200, Math.max(60, (n.w * img.naturalHeight) / img.naturalWidth)));
-    if (Math.abs(h - n.h) > 4) void store.designApply([{ op: "move", id: n.id, x: n.x, y: n.y, w: n.w, h }]);
-  }
-
   function hostOf(url: string | undefined): string {
     try {
       return new URL(url ?? "").host;
@@ -300,6 +291,7 @@
     store.designBoardEl = el ?? null;
     // Files dropped from the system onto the board become cards where they land.
     let unlisten: (() => void) | undefined;
+    let gone = false;
     getCurrentWebview()
       .onDragDropEvent((e) => {
         const p = e.payload;
@@ -316,14 +308,15 @@
           void store.designAddFiles(p.paths, Math.round(at.x), Math.round(at.y));
         }
       })
-      .then((u) => (unlisten = u))
+      .then((u) => (gone ? u() : (unlisten = u)))
       .catch(() => {});
     // Pasting onto the board: a picture becomes a file card, an address a
     // link, any other text a note.
     const onPaste = (e: ClipboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (store.view !== "design" || editing || answering || linkAt) return;
-      if (target?.closest?.("input, textarea, select, [contenteditable]")) return;
+      if (store.view !== "design" || editing || answering || linkAt || store.tagDialog) return;
+      if (target?.closest?.("input, textarea, select, [contenteditable], [role=menu], [role=dialog]")) return;
+      if (target && target !== document.body && !el?.contains(target)) return;
       const data = e.clipboardData;
       if (!data || !el) return;
       const at = centre();
@@ -344,6 +337,7 @@
     };
     window.addEventListener("paste", onPaste);
     return () => {
+      gone = true;
       unlisten?.();
       window.removeEventListener("paste", onPaste);
       if (store.designBoardEl === el) store.designBoardEl = null;
@@ -615,8 +609,10 @@
     const keys: Record<string, Tool> = { v: "select", n: "note", p: "pen", e: "eraser", a: "arrow", f: "frame", q: "question" };
     const k = e.key.toLowerCase();
     if (k === "l" && el) {
+      e.preventDefault();
       linkAt = centre();
     } else if (k === "u" && el) {
+      e.preventDefault();
       const c = centre();
       void store.designPickFiles(Math.round(c.x), Math.round(c.y));
     } else if (keys[k]) {
@@ -723,7 +719,7 @@
         {:else if n.kind === "file"}
           {@const url = store.boardFileUrl(n.src ?? "")}
           {#if (n.mime ?? "").startsWith("image/")}
-            <img class="pic" src={url} alt={n.name} draggable="false" onload={(ev) => shapeToImage(n, ev.currentTarget as HTMLImageElement)} />
+            <img class="pic" src={url} alt={n.name} draggable="false" />
           {:else}
             <div class="fhead">
               <span class="mono ext">{extOf(n.name)}</span>
@@ -816,7 +812,6 @@
       <div class="framing" style="left: {framing.x}px; top: {framing.y}px; width: {framing.w}px; height: {framing.h}px"></div>
     {/if}
     {#if linkAt}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="linkin"
         style="left: {linkAt.x - 160}px; top: {linkAt.y - 18}px"
@@ -828,7 +823,7 @@
           else if (ev.key === "Escape") linkAt = null;
         }}
         onblur={() => void addLink()}
-        autofocus
+        use:focusOnMount
       />
     {/if}
 

@@ -403,6 +403,10 @@ fn design_add_files(app: AppHandle, id: String, paths: Vec<String>, x: f64, y: f
 #[tauri::command(async)]
 fn design_add_blob(app: AppHandle, id: String, name: String, data: String, x: f64, y: f64) -> Result<Vec<serde_json::Value>, String> {
     use base64::Engine;
+    // 50 MB of bytes is about 67 MB of base64; refuse before decoding.
+    if data.len() > 70 * 1024 * 1024 {
+        return Err("files over 50 MB are not added".to_string());
+    }
     let data = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|e| format!("bad data: {e}"))?;
     design::add_files(&app, &id, vec![design::Incoming::Bytes { name, data }], x, y)
 }
@@ -415,6 +419,8 @@ fn open_url(url: String) -> Result<(), String> {
     if !ok {
         return Err("only http(s) addresses open".to_string());
     }
+    // explorer.exe splits its argument at commas; an address keeps them escaped.
+    let url = url.replace(',', "%2C");
     #[cfg(windows)]
     let mut cmd = std::process::Command::new("explorer.exe");
     #[cfg(target_os = "macos")]
@@ -1019,9 +1025,16 @@ pub fn run() {
             knowledge::knowledge_default_config,
         ])
         // The side panel's HTML preview, on an origin apart from the app's.
-        .register_uri_scheme_protocol(preview::SCHEME, |ctx, request| preview::handle(ctx, request))
+        // Both read files, so they answer off the UI thread.
+        .register_asynchronous_uri_scheme_protocol(preview::SCHEME, |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || responder.respond(preview::handle(&app, request)));
+        })
         // A design board's reference files (pictures, PDFs) for its cards.
-        .register_uri_scheme_protocol(preview::BOARD_SCHEME, |ctx, request| preview::handle_board(ctx, request))
+        .register_asynchronous_uri_scheme_protocol(preview::BOARD_SCHEME, |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || responder.respond(preview::handle_board(&app, request)));
+        })
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             // The app was Orchestra before it was Divixi; its data folder moves along.
