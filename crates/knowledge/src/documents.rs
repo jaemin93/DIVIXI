@@ -42,6 +42,12 @@ fn docx_xml_text(xml: &str) -> String {
     let mut rest = xml;
     while let Some(start) = find_tag(rest, "w:p") {
         let after = &rest[start..];
+        // An empty paragraph (<w:p/>) closes itself; it must not run on into the next one.
+        let open_end = after.find('>').map(|e| e + 1).unwrap_or(after.len());
+        if after[..open_end].ends_with("/>") {
+            rest = &after[open_end..];
+            continue;
+        }
         let end = after.find("</w:p>").map(|e| e + "</w:p>".len()).unwrap_or(after.len());
         let para = &after[..end];
         let text = runs_text(para);
@@ -171,10 +177,12 @@ mod tests {
             <w:p><w:r><w:t xml:space="preserve">Bronze </w:t></w:r><w:r><w:t>&amp; Silver</w:t></w:r><w:r><w:tab/><w:t>tiers</w:t></w:r></w:p>
             <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Gold</w:t></w:r></w:p>
             <w:p/>
+            <w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr><w:r><w:t>Next</w:t></w:r></w:p>
+            <w:p w:rsidR="00AB"/>
             <w:proofErr w:type="spellStart"/><w:p><w:r><w:t>line one</w:t><w:br/><w:t>line two</w:t></w:r></w:p>
         </w:body></w:document>"#;
         let text = docx_text(&docx(xml)).unwrap();
-        assert_eq!(text, "# 설계 개요\n\nBronze & Silver\ttiers\n\n## Gold\n\nline one\nline two\n");
+        assert_eq!(text, "# 설계 개요\n\nBronze & Silver\ttiers\n\n## Gold\n\n### Next\n\nline one\nline two\n");
     }
 
     #[test]

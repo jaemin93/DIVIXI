@@ -189,6 +189,7 @@
     const timer = setTimeout(async () => {
       if (!q) {
         kbResults = [];
+        kbSearching = false;
         return;
       }
       kbSearching = true;
@@ -203,7 +204,7 @@
       } finally {
         if (seq === kbSeq) kbSearching = false;
       }
-    }, 250);
+    }, 400);
     return () => clearTimeout(timer);
   });
   const kbTokens = $derived(kbResults.filter((r) => kbChosen.includes(r.id)).reduce((n, r) => n + r.tokens, 0));
