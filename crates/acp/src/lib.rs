@@ -642,7 +642,24 @@ pub fn pick_autonomous_mode(available: &[(String, String)]) -> Option<String> {
     })
 }
 
-use agent_client_protocol::schema::v1::{AvailableCommandInput, ContentBlock, SessionUpdate};
+use agent_client_protocol::schema::v1::{AvailableCommandInput, ContentBlock, SessionUpdate, ToolCallContent, ToolCallLocation};
+
+/// Files a tool call touches: its locations and the paths of its diffs
+/// (Codex names an edit's file only in the diff it sends).
+fn touched<'a>(locations: impl IntoIterator<Item = &'a ToolCallLocation>, content: impl IntoIterator<Item = &'a ToolCallContent>) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let found = locations.into_iter().map(|l| &l.path).chain(content.into_iter().filter_map(|c| match c {
+        ToolCallContent::Diff(d) => Some(&d.path),
+        _ => None,
+    }));
+    for p in found {
+        let p = p.display().to_string();
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
+    paths
+}
 use orchestra_core::SlashCommand;
 
 /// Map one protocol update onto zero or more session events.
@@ -659,21 +676,25 @@ pub(crate) fn translate(update: SessionUpdate) -> Vec<AgentEvent> {
             title: call.title.clone(),
             tool_kind: format!("{:?}", call.kind).to_lowercase(),
             status: format!("{:?}", call.status).to_lowercase(),
-            paths: call.locations.iter().map(|l| l.path.display().to_string()).collect(),
+            paths: touched(&call.locations, &call.content),
         }],
         // Most tool-call updates carry content (terminal output, diffs), not a
         // status change. Emitting those as `status: unknown` buries the real
-        // transitions, so only forward updates that actually move the state.
-        SessionUpdate::ToolCallUpdate(update) => update
-            .fields
-            .status
-            .map(|status| {
+        // transitions, so only forward updates that move the state or name
+        // the files the call touches.
+        SessionUpdate::ToolCallUpdate(update) => {
+            let status = update.fields.status.map(|s| format!("{s:?}").to_lowercase()).unwrap_or_default();
+            let paths = touched(update.fields.locations.iter().flatten(), update.fields.content.iter().flatten());
+            if status.is_empty() && paths.is_empty() {
+                Vec::new()
+            } else {
                 vec![AgentEvent::ToolUpdate {
                     id: format!("{}", update.tool_call_id),
-                    status: format!("{status:?}").to_lowercase(),
+                    status,
+                    paths,
                 }]
-            })
-            .unwrap_or_default(),
+            }
+        }
         SessionUpdate::Plan(plan) => vec![AgentEvent::Plan {
             entries: plan.entries.iter().map(|e| e.content.clone()).collect(),
         }],

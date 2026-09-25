@@ -11,7 +11,7 @@ export type AgentEvent =
   | { kind: "message"; text: string }
   | { kind: "thought"; text: string }
   | { kind: "tool_call"; id: string; title: string; tool_kind: string; status: string }
-  | { kind: "tool_update"; id: string; status: string }
+  | { kind: "tool_update"; id: string; status?: string; paths?: string[] }
   | { kind: "plan"; entries: string[] }
   | { kind: "usage"; raw: unknown }
   | { kind: "commands"; commands: SlashCommand[] }
@@ -2318,6 +2318,8 @@ function fold(run: Run, ms: number, ev: AgentEvent) {
       break;
     }
     case "tool_update": {
+      // An update that only names files moves nothing here.
+      if (!ev.status) break;
       const tool = run.tools.find((t) => t.id === ev.id);
       if (tool) tool.status = ev.status;
       const seg = run.segments.find((s) => s.kind === "tool" && s.tool.id === ev.id);

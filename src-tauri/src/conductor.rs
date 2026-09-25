@@ -1171,17 +1171,27 @@ pub fn stored_report(state: &AppState, run: &str) -> Option<Report> {
 fn edits_seen(state: &AppState, run: &str, cwd: &str) -> Vec<String> {
     let root = cwd.replace('\\', "/").trim_end_matches('/').to_string() + "/";
     let mut seen: Vec<String> = Vec::new();
+    // Calls that change files; their updates may name the files later.
+    let mut editing: HashSet<String> = HashSet::new();
     for e in state.store.events(run).unwrap_or_default() {
-        if let AgentEvent::ToolCall { tool_kind, paths, .. } = e.event {
-            if !matches!(tool_kind.as_str(), "edit" | "delete" | "move") {
-                continue;
-            }
-            for p in paths {
-                let p = p.replace('\\', "/");
-                let p = if p.to_lowercase().starts_with(&root.to_lowercase()) { p[root.len()..].to_string() } else { p };
-                if !seen.contains(&p) {
-                    seen.push(p);
+        let paths = match e.event {
+            AgentEvent::ToolCall { id, tool_kind, paths, .. } => {
+                if !matches!(tool_kind.as_str(), "edit" | "delete" | "move") {
+                    continue;
                 }
+                editing.insert(id);
+                paths
+            }
+            AgentEvent::ToolUpdate { id, paths, .. } if editing.contains(&id) => paths,
+            _ => continue,
+        };
+        for p in paths {
+            let p = p.replace('\\', "/");
+            // Windows paths differ in case only; the prefix is compared bytewise so slicing stays on a boundary.
+            let inside = p.is_char_boundary(root.len()) && p.get(..root.len()).is_some_and(|head| head.eq_ignore_ascii_case(&root));
+            let p = if inside { p[root.len()..].to_string() } else { p };
+            if !seen.contains(&p) {
+                seen.push(p);
             }
         }
     }

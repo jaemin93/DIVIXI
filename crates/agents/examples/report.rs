@@ -30,12 +30,20 @@ async fn ask(session: &AgentSession, prompt: String) -> anyhow::Result<(String, 
     let collect = async {
         let mut text = String::new();
         let mut edits = Vec::new();
+        let mut editing = std::collections::HashSet::new();
         while let Some(ev) = rx.recv().await {
             match ev {
                 AgentEvent::Message { text: t } => text.push_str(&t),
-                AgentEvent::ToolCall { title, tool_kind, paths, .. } => {
+                AgentEvent::ToolCall { id, title, tool_kind, paths, .. } => {
                     println!("  tool  {tool_kind}  {title}  {paths:?}");
                     if tool_kind == "edit" {
+                        editing.insert(id);
+                        edits.extend(paths);
+                    }
+                }
+                AgentEvent::ToolUpdate { id, paths, .. } if !paths.is_empty() => {
+                    println!("  update  {id}  {paths:?}");
+                    if editing.contains(&id) {
                         edits.extend(paths);
                     }
                 }
@@ -71,7 +79,7 @@ async fn run() -> anyhow::Result<()> {
 
     let task = "calc.js의 add가 두 수를 더하지 않고 뺍니다. 고치고, node로 add(2, 3)이 5인지 확인하세요.";
     let started = std::time::Instant::now();
-    let (reply, edits) = ask(&session, format!("{task}\n\n{}", report::instructions())).await?;
+    let (reply, mut edits) = ask(&session, format!("{task}\n\n{}", report::instructions())).await?;
     println!("--- reply ({:.0}s) ---\n{reply}\n---", started.elapsed().as_secs_f32());
     let parsed = match report::parse(&reply) {
         Ok(r) => Ok(r),
@@ -83,6 +91,9 @@ async fn run() -> anyhow::Result<()> {
         }
     };
     let mut r = parsed.map_err(|e| anyhow::anyhow!("REPORT: FAILED ({e})"))?;
+    let mut unique = std::collections::HashSet::new();
+    edits.retain(|p| unique.insert(p.clone()));
+    println!("edits seen: {edits:?}");
     r.edits_seen = edits;
     println!("--- for the conductor ---\n{}\n---", r.for_conductor("t1"));
 

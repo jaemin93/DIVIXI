@@ -102,12 +102,17 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         paths: Vec<String>,
     },
-    /// A tool call changed status.
+    /// A tool call changed status, or said which files it touches.
     ToolUpdate {
         /// Agent-assigned tool call id.
         id: String,
-        /// New lifecycle status.
+        /// New lifecycle status; empty when only `paths` came.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         status: String,
+        /// Files the call touches, when the update says (some agents, e.g.
+        /// Codex, name an edit's files only after it starts).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        paths: Vec<String>,
     },
     /// The agent published or revised its plan.
     Plan {
@@ -285,7 +290,8 @@ mod tests {
                 status: "pending".into(),
                 paths: vec![],
             },
-            AgentEvent::ToolUpdate { id: "1".into(), status: "completed".into() },
+            AgentEvent::ToolUpdate { id: "1".into(), status: "completed".into(), paths: vec![] },
+            AgentEvent::ToolUpdate { id: "1".into(), status: String::new(), paths: vec!["a.rs".into()] },
             AgentEvent::Plan { entries: vec![] },
             AgentEvent::Usage { raw: serde_json::Value::Null },
             AgentEvent::Commands { commands: vec![] },
