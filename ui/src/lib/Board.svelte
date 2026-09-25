@@ -372,7 +372,9 @@
     if (!el || editing) return;
     const target = e.target as Element;
     const nodeEl = target.closest<HTMLElement>("[data-node]");
-    const id = nodeEl?.dataset.node ?? "";
+    // A frame's open area is board to pick in; the frame itself is taken by its title.
+    const frameBody = tool === "select" && !!nodeEl?.classList.contains("frame") && !target.closest(".ftitle");
+    const id = frameBody ? "" : (nodeEl?.dataset.node ?? "");
     const p = toWorld(e);
 
     // Pan: the middle button, or space held (a touchpad pans with two fingers).
@@ -999,16 +1001,24 @@
     border: 1.5px dashed var(--lines);
   }
 
+  /* The frame's handle: picking and moving a frame is done by its title. */
   .ftitle {
     position: absolute;
     left: 0;
-    top: -26px;
+    top: -28px;
+    min-width: 80px;
     max-width: 100%;
+    padding: 4px 8px 4px 2px;
     font-size: 13px;
     color: var(--dim);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    cursor: move;
+  }
+
+  .ftitle:hover {
+    color: var(--hi);
   }
 
   .ftitle .empty {
