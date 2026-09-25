@@ -113,6 +113,16 @@
     if (resize?.settle !== undefined && v > resize.settle) resize = null;
   });
 
+  /** The box being dragged out to pick with. */
+  let marquee = $state<Box | null>(null);
+
+  /** What a picking box takes: cards it touches; frames and ink only when wholly inside. */
+  function taken(m: Box): string[] {
+    const touches = (b: Box) => b.x < m.x + m.w && m.x < b.x + b.w && b.y < m.y + m.h && m.y < b.y + b.h;
+    const within = (b: Box) => b.x >= m.x && b.y >= m.y && b.x + b.w <= m.x + m.w && b.y + b.h <= m.y + m.h;
+    return doc.nodes.filter((n) => (n.kind === "frame" || n.kind === "sketch" ? within(n) : touches(n))).map((n) => n.id);
+  }
+
   /** What a drag moves: the picked items and what picked frames hold. */
   let dragIds = $state<string[]>([]);
 
@@ -365,12 +375,8 @@
     const id = nodeEl?.dataset.node ?? "";
     const p = toWorld(e);
 
-    // Pan: middle button, space held, or the empty board with the select tool.
-    if (e.button === 1 || spaceHeld || (tool === "select" && !id && e.button === 0)) {
-      if (tool === "select" && !id && !e.shiftKey) {
-        selected = [];
-        selectedEdge = "";
-      }
+    // Pan: the middle button, or space held (a touchpad pans with two fingers).
+    if (e.button === 1 || spaceHeld) {
       const start = { cx: e.clientX, cy: e.clientY, x: view.x, y: view.y };
       follow(
         e,
@@ -380,6 +386,30 @@
       return;
     }
     if (e.button !== 0) return;
+
+    // The empty board with the select tool: drag a box to pick what it
+    // takes in (Shift adds to what is picked); a click clears.
+    if (tool === "select" && !id) {
+      const start = p;
+      const keep = e.shiftKey ? [...selected] : [];
+      if (!e.shiftKey) {
+        selected = [];
+        selectedEdge = "";
+      }
+      marquee = { x: p.x, y: p.y, w: 0, h: 0 };
+      follow(
+        e,
+        (ev) => {
+          const q = toWorld(ev);
+          const m = { x: Math.min(start.x, q.x), y: Math.min(start.y, q.y), w: Math.abs(q.x - start.x), h: Math.abs(q.y - start.y) };
+          marquee = m;
+          selected = [...new Set([...keep, ...taken(m)])];
+        },
+        () => (marquee = null),
+        () => (marquee = null),
+      );
+      return;
+    }
 
     if (tool === "question") {
       tool = "select";
@@ -811,6 +841,9 @@
     {#if framing}
       <div class="framing" style="left: {framing.x}px; top: {framing.y}px; width: {framing.w}px; height: {framing.h}px"></div>
     {/if}
+    {#if marquee && (marquee.w > 2 || marquee.h > 2)}
+      <div class="marquee" style="left: {marquee.x}px; top: {marquee.y}px; width: {marquee.w}px; height: {marquee.h}px"></div>
+    {/if}
     {#if linkAt}
       <input
         class="linkin"
@@ -913,6 +946,13 @@
   {#if dropOver}
     <div class="mono dropnote">{t("design.dropHere")}</div>
   {/if}
+  {#if selected.length && !marquee && tool === "select"}
+    <!-- What is picked goes with the next message to the agent. -->
+    <div class="picked" role="status" onpointerdown={(e) => e.stopPropagation()}>
+      <span>{t("design.picked", { n: selected.length })}</span>
+      <button type="button" class="btn sm" onclick={() => (selected = [])}>{t("design.unpick")}</button>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -924,7 +964,7 @@
     overflow: hidden;
     background-color: var(--bg);
     background-image: radial-gradient(var(--dot) 1px, transparent 1px);
-    cursor: grab;
+    cursor: default;
     touch-action: none;
     user-select: none;
   }
@@ -991,6 +1031,35 @@
     padding: 1px 6px;
     outline: none;
     user-select: text;
+  }
+
+  .marquee {
+    position: absolute;
+    border: 1px solid var(--acc);
+    background: color-mix(in srgb, var(--acc) 10%, transparent);
+    pointer-events: none;
+  }
+
+  .picked {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 6px 5px 12px;
+    font-size: 12px;
+    color: var(--acct);
+    background: var(--accbg);
+    border: 1px solid var(--accln);
+    cursor: default;
+    white-space: nowrap;
+  }
+
+  .picked .btn.sm {
+    height: 24px;
+    padding: 0 9px;
   }
 
   .framing {
