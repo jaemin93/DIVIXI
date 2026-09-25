@@ -1019,6 +1019,7 @@ pub fn run() {
             knowledge::knowledge_entity_items,
             knowledge::knowledge_stats,
             knowledge::knowledge_formats,
+            knowledge::knowledge_context,
             knowledge::knowledge_embedding_status,
             knowledge::knowledge_embed_test,
             knowledge::knowledge_embed_now,

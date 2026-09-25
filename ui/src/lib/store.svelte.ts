@@ -331,6 +331,49 @@ export const ATTACH_MARK = "[attachments]";
 /** A file waiting in the composer to go with the next message. */
 export type Attachment = { path: string; name: string; size: number };
 
+/** A passage from the knowledge library, picked with `@kb` for the next message. */
+export type KbPick = {
+  id: number;
+  title: string;
+  source: string;
+  section: string | null;
+  line_start: number;
+  line_end: number;
+  summary: string;
+  content: string;
+  tokens: number;
+  match_type: string;
+};
+
+/** Where picked knowledge sits in a message. */
+export const KB_OPEN = "[knowledge]";
+export const KB_CLOSE = "[/knowledge]";
+
+/** The message with picked knowledge after what the human wrote. */
+export function withKnowledge(text: string, picks: KbPick[]): string {
+  if (!picks.length) return text;
+  const parts = picks.map((p) => {
+    const where = [p.source, p.section ? `§ ${p.section}` : "", `lines ${p.line_start}-${p.line_end}`].filter(Boolean).join(" · ");
+    return `### ${p.title || "(untitled)"} — ${where}\n${p.content.trim()}`;
+  });
+  const block = `${KB_OPEN}\nThe human attached these passages from the knowledge library:\n\n${parts.join("\n\n")}\n${KB_CLOSE}`;
+  return text.trim() ? `${text}\n\n${block}` : block;
+}
+
+/** A message split into what the human wrote and the titles of the knowledge it carries. */
+export function splitKnowledge(text: string): { text: string; titles: string[] } {
+  const at = text.startsWith(`${KB_OPEN}\n`) ? 0 : text.indexOf(`\n\n${KB_OPEN}\n`);
+  if (at < 0) return { text, titles: [] };
+  const end = text.indexOf(KB_CLOSE, at);
+  const block = text.slice(at, end < 0 ? undefined : end);
+  const titles = block
+    .split("\n")
+    .filter((l) => l.startsWith("### "))
+    .map((l) => l.slice(4).split(" — ")[0]);
+  const rest = end < 0 ? "" : text.slice(end + KB_CLOSE.length);
+  return { text: (text.slice(0, at) + rest).trim(), titles };
+}
+
 /** A stored prompt split into what the human wrote and the files they attached. */
 export function splitAttachments(prompt: string): { text: string; files: string[] } {
   const at = prompt.indexOf(`\n\n${ATTACH_MARK}\n`);
@@ -523,6 +566,33 @@ class Store {
   artifactSession = $state<{ open: boolean; busy: boolean }>({ open: false, busy: false });
 
   /** Files in the composer, waiting for the next message. */
+  /** Knowledge picked with `@kb`, waiting in each conversation's composer. */
+  kbPickedBy = $state<Record<string, KbPick[]>>({});
+
+  get kbPicked(): KbPick[] {
+    return this.kbPickedBy[this.chatKey] ?? [];
+  }
+
+  /** Add passages to the next message (each once). */
+  pickKnowledge(picks: KbPick[]) {
+    const key = this.chatKey;
+    const now = this.kbPickedBy[key] ?? [];
+    const fresh = picks.filter((p) => !now.some((x) => x.id === p.id));
+    this.kbPickedBy = { ...this.kbPickedBy, [key]: [...now, ...fresh] };
+  }
+
+  unpickKnowledge(id: number) {
+    const key = this.chatKey;
+    this.kbPickedBy = { ...this.kbPickedBy, [key]: (this.kbPickedBy[key] ?? []).filter((p) => p.id !== id) };
+  }
+
+  /** Take the picked knowledge for the message going out now. */
+  private takeKnowledge(key: string): KbPick[] {
+    const picks = this.kbPickedBy[key] ?? [];
+    if (picks.length) this.kbPickedBy = { ...this.kbPickedBy, [key]: [] };
+    return picks;
+  }
+
   /** Files waiting in each conversation's composer (a track's, an artifact's). */
   attachmentsBy = $state<Record<string, Attachment[]>>({});
   /** Design briefs being written out to attach; the composer waits for them. */
@@ -1365,11 +1435,12 @@ class Store {
     const key = this.chatKey;
     const files = this.attachments.map((a) => a.path);
     const selected = [...this.designSelected];
-    if (!id || !d || this.artifactBusy || (!typed && !files.length && !selected.length)) return;
+    if (!id || !d || this.artifactBusy || (!typed && !files.length && !selected.length && !this.kbPicked.length)) return;
     this.lastError = "";
     this.attachments = [];
+    const typedWithKb = withKnowledge(typed, this.takeKnowledge(key));
     const image = boardPng(this.designDoc);
-    const text = withAttachments(typed, files);
+    const text = withAttachments(typedWithKb, files);
     const pending: Run = {
       id: `pending-${Date.now()}`,
       track: artifactKey(id),
@@ -1390,7 +1461,7 @@ class Store {
     const pendingId = pending.id;
     this.runs.push(pending);
     try {
-      const run = await invoke<string>("artifact_prompt", { id, text: typed, image, selected, lang: i18n.lang, files });
+      const run = await invoke<string>("artifact_prompt", { id, text: typedWithKb, image, selected, lang: i18n.lang, files });
       const r = this.runs.find((x) => x.id === pendingId || x.id === run);
       if (r) r.id = run;
       void this.refreshArtifactSession();
@@ -2024,12 +2095,13 @@ class Store {
     const track = this.track;
     const key = this.chatKey;
     const files = this.attachments.map((a) => a.path);
-    if ((!typed && !files.length) || !track || this.busy) return;
+    if ((!typed && !files.length && !this.kbPicked.length) || !track || this.busy) return;
     this.lastError = "";
     const agent = this.agent;
-    // The files go with this message; the composer starts empty again.
+    // The files and picked knowledge go with this message; the composer starts empty again.
     this.attachments = [];
-    const text = withAttachments(typed, files);
+    const typedWithKb = withKnowledge(typed, this.takeKnowledge(key));
+    const text = withAttachments(typedWithKb, files);
 
     // Show the message the moment Enter is pressed. The run gets its real id
     // when the core answers; until then it carries a pending id, and events
@@ -2056,7 +2128,7 @@ class Store {
     this.runs.push(pending);
 
     try {
-      const id = await invoke<string>("conductor_prompt", { track, prompt: typed, agent, lang: i18n.lang, files });
+      const id = await invoke<string>("conductor_prompt", { track, prompt: typedWithKb, agent, lang: i18n.lang, files });
       const run = this.runs.find((r) => r.id === pendingId || r.id === id);
       if (run) {
         run.id = id;

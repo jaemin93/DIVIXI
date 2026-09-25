@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel, splitAttachments, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Segment, type Tool } from "./store.svelte";
+  import { store, agentLabel, splitAttachments, splitKnowledge, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Segment, type Tool } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import DecisionCard from "./DecisionCard.svelte";
   import Working from "./Working.svelte";
@@ -105,11 +105,20 @@
     {:else if run.prompt.startsWith(DECISION_PREFIX)}
       <div class="sys mono decided">{t("timeline.decisionSent")} · {decisionLine(run.prompt)}</div>
     {:else}
-      {@const said = splitAttachments(run.prompt)}
+      {@const attached = splitAttachments(run.prompt)}
+      {@const kb = splitKnowledge(attached.text)}
+      {@const said = { text: kb.text, files: attached.files }}
       <div class="me">
         <div class="mlab">{t("timeline.me")}</div>
         <div class="bubble">
           {#if said.text.trim()}<p>{said.text}</p>{/if}
+          {#if kb.titles.length}
+            <div class="files" class:alone={!said.text.trim()} aria-label={t("composer.kb.attached")}>
+              {#each kb.titles as title, i (i)}
+                <span class="file kbchip" title={title}><span aria-hidden="true">📚</span><span>{title}</span></span>
+              {/each}
+            </div>
+          {/if}
           {#if said.files.length}
             <div class="files" class:alone={!said.text.trim()} aria-label={t("timeline.attached")}>
               {#each said.files as f (f)}
@@ -231,6 +240,10 @@
     flex-wrap: wrap;
     gap: 6px;
     margin-top: 10px;
+  }
+
+  .kbchip {
+    border-color: var(--lines);
   }
 
   .files.alone {

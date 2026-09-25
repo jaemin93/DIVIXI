@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { store, type ArtifactInfo, type WsEntry } from "./store.svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { store, type ArtifactInfo, type KbPick, type WsEntry } from "./store.svelte";
   import AgentPicker from "./AgentPicker.svelte";
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
@@ -17,7 +18,9 @@
   function submit(e?: Event) {
     e?.preventDefault();
     const text = draft;
-    const something = text.trim() || store.attachments.length || (store.chatArtifact && store.designSelected.length);
+    // "@kb …" typed but not picked from is a search, not a message.
+    if (kbQuery !== null) return;
+    const something = text.trim() || store.attachments.length || store.kbPicked.length || (store.chatArtifact && store.designSelected.length);
     // A design picked a moment ago is still being written out: wait for it.
     if (!something || store.busy || store.attaching > 0) return;
     draft = "";
@@ -73,6 +76,34 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    if (kbQuery !== null) {
+      if (e.key === "ArrowDown" && kbResults.length) {
+        e.preventDefault();
+        kbIndex = (kbIndex + 1) % kbResults.length;
+        return;
+      }
+      if (e.key === "ArrowUp" && kbResults.length) {
+        e.preventDefault();
+        kbIndex = (kbIndex - 1 + kbResults.length) % kbResults.length;
+        return;
+      }
+      if (e.key === "Tab" && kbResults.length) {
+        e.preventDefault();
+        toggleKb(kbResults[kbIndex]);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        attachKb();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        draft = "";
+        queueMicrotask(grow);
+        return;
+      }
+    }
     if (atOpen && atItems.length) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -135,10 +166,69 @@
     caret = box?.selectionStart ?? draft.length;
   }
 
+  // ----- @kb: passages from the knowledge library -----
+  /** What follows a leading "@kb " (or "@knowledge ", "/kb "), or null. */
+  const kbQuery = $derived.by(() => {
+    const m = /^(?:@kb|@knowledge|\/kb)\s+([^\n]*)$/i.exec(draft);
+    return m ? m[1].trim() : null;
+  });
+  let kbResults = $state<KbPick[]>([]);
+  let kbIndex = $state(0);
+  let kbChosen = $state<number[]>([]);
+  let kbSearching = $state(false);
+  let kbSeq = 0;
+  $effect(() => {
+    const q = kbQuery;
+    if (q === null) {
+      kbResults = [];
+      kbChosen = [];
+      return;
+    }
+    // A moment after typing stops; only the newest answer lands.
+    const seq = ++kbSeq;
+    const timer = setTimeout(async () => {
+      if (!q) {
+        kbResults = [];
+        return;
+      }
+      kbSearching = true;
+      try {
+        const found = await invoke<KbPick[]>("knowledge_context", { query: q });
+        if (seq === kbSeq) {
+          kbResults = found;
+          kbIndex = 0;
+        }
+      } catch (err) {
+        if (seq === kbSeq) store.lastError = String(err);
+      } finally {
+        if (seq === kbSeq) kbSearching = false;
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  });
+  const kbTokens = $derived(kbResults.filter((r) => kbChosen.includes(r.id)).reduce((n, r) => n + r.tokens, 0));
+
+  function toggleKb(r: KbPick | undefined) {
+    if (!r) return;
+    kbChosen = kbChosen.includes(r.id) ? kbChosen.filter((id) => id !== r.id) : [...kbChosen, r.id];
+  }
+
+  /** Put the chosen passages (or the highlighted one) on the next message; the box empties for the question. */
+  function attachKb() {
+    const chosen = kbResults.filter((r) => kbChosen.includes(r.id));
+    const picks = chosen.length ? chosen : kbResults[kbIndex] ? [kbResults[kbIndex]] : [];
+    if (!picks.length) return;
+    store.pickKnowledge(picks);
+    draft = "";
+    kbChosen = [];
+    box?.focus();
+    queueMicrotask(grow);
+  }
+
   /** The "@word" right before the caret, or null. */
   const atToken = $derived.by(() => {
-    // An artifact has no folder to search.
-    if (store.chatArtifact) return null;
+    // An artifact has no folder to search; "@kb" searches knowledge instead.
+    if (store.chatArtifact || kbQuery !== null) return null;
     const before = draft.slice(0, caret);
     const m = before.match(/(?:^|\s)@([^\s@]*)$/);
     return m ? { query: m[1].toLowerCase(), start: before.length - m[1].length - 1 } : null;
@@ -347,9 +437,17 @@
 </script>
 
 <div class="composer" class:dropping>
-  {#if store.attachments.length}
+  {#if store.attachments.length || store.kbPicked.length}
     <!-- What goes with the next message. -->
     <div class="attached" aria-label={t("composer.attached")}>
+      {#each store.kbPicked as k (k.id)}
+        <span class="file" title="{k.source}{k.section ? ` · ${k.section}` : ''}">
+          <span aria-hidden="true">📚</span>
+          <span class="fname">{k.title}</span>
+          <span class="mono fsize">{t("composer.kb.tokens", { n: k.tokens })}</span>
+          <button type="button" class="fx" onclick={() => store.unpickKnowledge(k.id)} aria-label={t("composer.detach")} title={t("composer.detach")}><Icon name="close" size={10} /></button>
+        </span>
+      {/each}
       {#each store.attachments as a (a.path)}
         <span class="file" title={a.path}>
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4z" /><path d="M9 1.5v3h3" /></svg>
@@ -404,7 +502,46 @@
       </div>
     </Popover>
     <div class="boxwrap">
-      {#if atOpen}
+      {#if kbQuery !== null}
+        <!-- Passages from the knowledge library for what follows "@kb". -->
+        <div class="slash kb" role="listbox" aria-label={t("composer.kb.title")}>
+          <div class="mlab-sm ph">{t("composer.kb.title")}</div>
+          {#if !kbQuery}
+            <div class="mono waiting">{t("composer.kb.hint")}</div>
+          {:else if kbSearching && !kbResults.length}
+            <div class="mono waiting"><span class="dot pulse"></span>{t("composer.kb.searching")}</div>
+          {:else if !kbResults.length}
+            <div class="mono waiting">{t("composer.kb.none")}</div>
+          {/if}
+          {#each kbResults as r, i (r.id)}
+            <div
+              class="frow kbrow"
+              class:on={i === kbIndex}
+              role="option"
+              aria-selected={kbChosen.includes(r.id)}
+              tabindex="-1"
+              onmouseenter={() => (kbIndex = i)}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => toggleKb(r)}
+              onkeydown={() => {}}
+            >
+              <span class="kbcheck" class:checked={kbChosen.includes(r.id)} aria-hidden="true">{kbChosen.includes(r.id) ? "✓" : ""}</span>
+              <span class="fcol">
+                <span class="fn">{r.title}</span>
+                <span class="mono fp">{r.source}{r.section ? ` · § ${r.section}` : ""} · L{r.line_start}-{r.line_end}</span>
+                {#if r.summary}<span class="kbsum">{r.summary}</span>{/if}
+              </span>
+              <span class="mono fs">{t("composer.kb.tokens", { n: r.tokens })}</span>
+            </div>
+          {/each}
+          {#if kbResults.length}
+            <div class="kbfoot mono">
+              <span>{kbChosen.length ? t("composer.kb.chosen", { n: kbChosen.length, tokens: kbTokens }) : t("composer.kb.keys")}</span>
+              <button type="button" class="btn sm" onmousedown={(e) => e.preventDefault()} onclick={attachKb}>{t("composer.kb.attach")}</button>
+            </div>
+          {/if}
+        </div>
+      {:else if atOpen}
         <!-- Designs (most recent first), then files in the track's folder, narrowed by what follows the "@". -->
         <div class="slash" role="listbox" aria-label={t("composer.files")}>
           {#if designMatches.length}
@@ -563,6 +700,57 @@
   .composer.dropping {
     outline-color: var(--acc);
     background: var(--accbg);
+  }
+
+  .kbrow {
+    align-items: flex-start;
+  }
+
+  .kbcheck {
+    width: 14px;
+    height: 14px;
+    margin-top: 2px;
+    flex-shrink: 0;
+    border: 1px solid var(--lines);
+    font-size: 10px;
+    line-height: 12px;
+    text-align: center;
+    color: var(--accon);
+  }
+
+  .kbcheck.checked {
+    background: var(--acc);
+    border-color: var(--acc);
+  }
+
+  .kbsum {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    font-size: 11.5px;
+    color: var(--dim);
+    margin-top: 2px;
+  }
+
+  .kbfoot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    border-top: 1px solid var(--line);
+    font-size: 10.5px;
+    color: var(--lab);
+  }
+
+  .kbfoot span {
+    flex: 1;
+  }
+
+  .kbfoot .btn.sm {
+    height: 24px;
+    padding: 0 10px;
   }
 
   .attached {

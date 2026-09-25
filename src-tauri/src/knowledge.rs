@@ -749,6 +749,57 @@ pub fn knowledge_stats(state: State<'_, AppState>) -> Result<Stats, String> {
     state.library.db.stats().map_err(|e| e.to_string())
 }
 
+/// A passage found for the human to attach to a message (`@kb`).
+#[derive(Serialize)]
+pub struct ContextHit {
+    id: i64,
+    title: String,
+    /// The document's file name.
+    source: String,
+    section: Option<String>,
+    line_start: i64,
+    line_end: i64,
+    summary: String,
+    content: String,
+    /// About how many tokens it adds to the message.
+    tokens: usize,
+    match_type: String,
+}
+
+/// Passages for `@kb <query>`: the library searched as the conductor
+/// searches it, the best few with their size.
+#[tauri::command]
+pub async fn knowledge_context(app: AppHandle, query: String) -> Result<Vec<ContextHit>, String> {
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let vector = query_vector(&app, &query).await;
+    let db = app.state::<AppState>().library.db.clone();
+    let hits = tokio::task::spawn_blocking(move || db.search(&query, 8, None, vector.as_ref().map(|(v, s)| (v.as_slice(), s.as_str()))))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(hits
+        .into_iter()
+        .map(|h| {
+            let source = std::path::Path::new(&h.source_uri).file_name().and_then(|n| n.to_str()).unwrap_or(&h.source_uri).to_string();
+            ContextHit {
+                id: h.item.id,
+                tokens: orchestra_knowledge::chunk::tokens(&h.item.content),
+                title: h.item.title,
+                source,
+                section: h.item.section,
+                line_start: h.item.line_start,
+                line_end: h.item.line_end,
+                summary: h.item.summary,
+                content: h.item.content,
+                match_type: h.match_type,
+            }
+        })
+        .collect())
+}
+
 /// Where embeddings stand: whether they are on, the model, how many items
 /// have a vector in its space, and the last failure.
 #[derive(Serialize)]
