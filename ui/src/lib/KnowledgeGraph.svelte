@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
   import { kb, type KItem, type KNode } from "./knowledge.svelte";
   import { t } from "./i18n.svelte";
 
@@ -54,6 +53,24 @@
       return a && b ? [{ a, b }] : [];
     });
     heat = 1;
+    kick();
+  }
+
+  /** Below this the layout has settled and the loop rests. */
+  const SETTLED = 0.021;
+  /** Theme colours, read when an animation starts rather than every frame. */
+  let ink = { lines: "#555", label: "#ccc", font: "sans-serif" };
+
+  /** Start drawing again (the layout or the view changed). */
+  function kick() {
+    if (frame || !canvas) return;
+    const styles = getComputedStyle(canvas);
+    ink = {
+      lines: styles.getPropertyValue("--lines") || "#555",
+      label: styles.getPropertyValue("--txt") || "#ccc",
+      font: styles.getPropertyValue("--sans") || "sans-serif",
+    };
+    frame = requestAnimationFrame(loop);
   }
 
   function step() {
@@ -125,8 +142,7 @@
     ctx.clearRect(0, 0, w, h);
     ctx.translate(w / 2 + view.x, h / 2 + view.y);
     ctx.scale(view.k, view.k);
-    const styles = getComputedStyle(c);
-    ctx.strokeStyle = styles.getPropertyValue("--lines") || "#555";
+    ctx.strokeStyle = ink.lines;
     ctx.lineWidth = 1 / view.k;
     ctx.beginPath();
     for (const { a, b } of links) {
@@ -134,8 +150,8 @@
       ctx.lineTo(b.x, b.y);
     }
     ctx.stroke();
-    const label = styles.getPropertyValue("--txt") || "#ccc";
-    ctx.font = `${11 / view.k}px ${styles.getPropertyValue("--sans") || "sans-serif"}`;
+    const label = ink.label;
+    ctx.font = `${11 / view.k}px ${ink.font}`;
     for (const b of bodies) {
       ctx.fillStyle = color(b.node.kind);
       ctx.beginPath();
@@ -157,7 +173,8 @@
   function loop() {
     if (running) step();
     draw();
-    frame = requestAnimationFrame(loop);
+    // Keep going while the layout moves or a node is held; otherwise rest until kicked.
+    frame = (running && heat > SETTLED) || drag ? requestAnimationFrame(loop) : 0;
   }
 
   $effect(() => {
@@ -168,11 +185,12 @@
 
   $effect(() => {
     if (!canvas) return;
-    frame = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(frame);
+    kick();
+    return () => {
+      cancelAnimationFrame(frame);
+      frame = 0;
+    };
   });
-
-  onDestroy(() => cancelAnimationFrame(frame));
 
   function toWorld(e: PointerEvent | WheelEvent): { x: number; y: number } {
     const rect = canvas!.getBoundingClientRect();
@@ -198,6 +216,7 @@
     const body = hit(toWorld(e));
     drag = { body, sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y, moved: false };
     if (body) body.pinned = true;
+    kick();
   }
 
   function move(e: PointerEvent) {
@@ -212,16 +231,22 @@
       view.x = drag.vx + e.clientX - drag.sx;
       view.y = drag.vy + e.clientY - drag.sy;
     }
+    kick();
   }
 
   async function up() {
     if (!drag) return;
     const { body, moved } = drag;
     drag = null;
+    kick();
     if (body && !moved) {
       body.pinned = false;
+      const id = body.node.id;
       picked = body.node;
-      pickedItems = await kb.entityItems(body.node.id);
+      pickedItems = [];
+      const items = await kb.entityItems(id);
+      // Another node may have been picked meanwhile.
+      if (picked?.id === id) pickedItems = items;
     } else if (!body && !moved) {
       picked = null;
       pickedItems = [];
@@ -236,12 +261,14 @@
     const after = toWorld(e);
     view.x += (after.x - before.x) * k;
     view.y += (after.y - before.y) * k;
+    kick();
   }
 
   function recenter() {
     view = { x: 0, y: 0, k: 1 };
     for (const b of bodies) b.pinned = false;
     heat = 1;
+    kick();
   }
 
   const kinds = $derived([...new Set(kb.graph.nodes.map((n) => n.kind))]);
@@ -255,7 +282,11 @@
   <div class="bar">
     <span class="mono count">{t("kb.graphCount", { nodes: kb.graph.nodes.length, edges: kb.graph.edges.length })}</span>
     <button class="btn sm" onclick={recenter}>{t("kb.recenter")}</button>
-    <button class="btn sm" class:on={running} onclick={() => (running = !running)}>{t("kb.physics")}</button>
+    <button class="btn sm" class:on={running} onclick={() => {
+        running = !running;
+        if (running) heat = Math.max(heat, 0.3);
+        kick();
+      }}>{t("kb.physics")}</button>
     <span class="grow"></span>
     {#each kinds as k (k)}
       <span class="legend"><span class="dot" style="background: {color(k)}"></span>{k}</span>
@@ -272,7 +303,7 @@
           <span class="dot" style="background: {color(picked.kind)}"></span>
           <span class="dname">{picked.name}</span>
           <span class="mono kind">{picked.kind}</span>
-          <button class="x" onclick={() => { picked = null; pickedItems = []; }} aria-label={t("kb.close")}>×</button>
+          <button class="x" onclick={() => { picked = null; pickedItems = []; kick(); }} aria-label={t("kb.close")}>×</button>
         </div>
         {#if picked.description}<p class="desc">{picked.description}</p>{/if}
         <div class="mlab">{t("kb.mentionedIn", { n: pickedItems.length })}</div>

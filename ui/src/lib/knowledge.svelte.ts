@@ -48,7 +48,7 @@ export type KStats = { sources: number; items: number; entities: number; relatio
 export type KTab = "list" | "graph" | "sources";
 
 /** Mirrors `knowledge::EmbeddingStatus`. */
-export type KEmbedding = { enabled: boolean; model: string; embedded: number; total: number; error: string };
+export type KEmbedding = { enabled: boolean; model: string; embedded: number; failed: number; total: number; error: string };
 
 /** Settings keys, as `knowledge.rs` reads them. */
 export const K_AGENT = "knowledge.agent";
@@ -74,7 +74,7 @@ class Knowledge {
   items = $state<KItem[]>([]);
   graph = $state<KGraph>({ nodes: [], edges: [] });
   stats = $state<KStats>({ sources: 0, items: 0, entities: 0, relations: 0 });
-  embedding = $state<KEmbedding>({ enabled: false, model: "", embedded: 0, total: 0, error: "" });
+  embedding = $state<KEmbedding>({ enabled: false, model: "", embedded: 0, failed: 0, total: 0, error: "" });
   query = $state("");
   /** The query the items shown answer ("" for the plain list). */
   shownQuery = $state("");
@@ -141,19 +141,25 @@ class Knowledge {
     await this.refreshTab();
   }
 
+  /** Only the newest search may land. */
+  private searchSeq = 0;
+
   /** List items, or the matches of `query` when it is not empty. */
   async search(query: string) {
+    const seq = ++this.searchSeq;
     this.loading = true;
     try {
-      this.items = await invoke<KItem[]>("knowledge_items", {
+      const items = await invoke<KItem[]>("knowledge_items", {
         source: this.sourceFilter || null,
         query: query.trim() || null,
       });
+      if (seq !== this.searchSeq) return;
+      this.items = items;
       this.shownQuery = query.trim();
     } catch (err) {
-      store.lastError = String(err);
+      if (seq === this.searchSeq) store.lastError = String(err);
     } finally {
-      this.loading = false;
+      if (seq === this.searchSeq) this.loading = false;
     }
   }
 
@@ -234,13 +240,24 @@ class Knowledge {
     }
   }
 
+  /** Which file `viewerSource` answers for: `track\0path`. */
+  viewerKey = $state("");
+
   /** Whether a file of the workspace panel is in the library. */
   async checkViewer(track: string, path: string) {
-    try {
-      this.viewerSource = await invoke<KSource | null>("knowledge_source_for", { track, path });
-    } catch {
+    const key = `${track}\0${path}`;
+    if (this.viewerKey !== key) {
+      // Nothing is known about a new file until its answer lands.
+      this.viewerKey = key;
       this.viewerSource = null;
     }
+    let found: KSource | null = null;
+    try {
+      found = await invoke<KSource | null>("knowledge_source_for", { track, path });
+    } catch {
+      found = null;
+    }
+    if (this.viewerKey === key) this.viewerSource = found;
   }
 
   upsert(s: KSource) {
@@ -259,17 +276,22 @@ class Knowledge {
   }
 
   private timer: ReturnType<typeof setTimeout> | undefined;
+  /** Whether any change since the last refresh brought new content. */
+  private contentChanged = false;
   /** Counts (and, once a sync lands, the open tab) follow changes, at most twice a second. */
   private scheduleRefresh(content: boolean) {
+    this.contentChanged ||= content;
     clearTimeout(this.timer);
     this.timer = setTimeout(async () => {
+      const changed = this.contentChanged;
+      this.contentChanged = false;
       try {
         this.stats = await invoke<KStats>("knowledge_stats");
       } catch {
         /* counts can wait */
       }
       await this.loadEmbedding();
-      if (content && store.view === "knowledge") await this.refreshTab();
+      if (changed && store.view === "knowledge") await this.refreshTab();
     }, 500);
   }
 }

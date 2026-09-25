@@ -59,7 +59,7 @@ async fn run() -> anyhow::Result<()> {
     let agent = detect(kind, &opts).await.spec.ok_or_else(|| anyhow::anyhow!("{} has no launchable adapter", kind.name()))?;
     let cwd = std::env::temp_dir().join("divixi-knowledge");
     std::fs::create_dir_all(&cwd)?;
-    let session = AgentSession::open(&agent, SessionOptions { cwd, mode: Some("plan".into()), ..Default::default() }).await?;
+    let session = AgentSession::open(&agent, SessionOptions { cwd, restricted: true, ..Default::default() }).await?;
     println!("session on {}", kind.name());
 
     let file = read::read_file(&path)?;

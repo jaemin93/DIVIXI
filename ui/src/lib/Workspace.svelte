@@ -26,7 +26,7 @@
     const path = store.activeFile;
     if (track && path && store.panelTab === "file") void knowledge.checkViewer(track, path);
   });
-  const inLibrary = $derived(!!knowledge.viewerSource && knowledge.viewerSource.uri.replace(/\\/g, "/").endsWith(store.activeFile));
+  const inLibrary = $derived(!!knowledge.viewerSource && knowledge.viewerKey === `${store.track}\0${store.activeFile}`);
   const canAdd = $derived(!!activeFile && (activeFile.kind === "markdown" || activeFile.kind === "text") && knowledge.formats.includes(activeFile.ext.toLowerCase()));
   async function addToLibrary() {
     const track = store.track;

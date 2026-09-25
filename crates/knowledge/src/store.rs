@@ -14,13 +14,15 @@ use crate::chunk::Chunk;
 use crate::extract::Extraction;
 use crate::fts;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Upgrades from each version to the next; `MIGRATIONS[v - 1]` takes v to v + 1.
 const MIGRATIONS: &[&str] = &[
     // 1 -> 2: vectors from a remote embedding API, and which space they are in.
     "ALTER TABLE items ADD COLUMN embedding BLOB;
      ALTER TABLE items ADD COLUMN embedding_sig TEXT NOT NULL DEFAULT '';",
+    // 2 -> 3: finding whether a space has vectors without scanning every item.
+    "CREATE INDEX IF NOT EXISTS items_by_sig ON items(embedding_sig);",
 ];
 
 const SCHEMA: &str = r#"
@@ -58,6 +60,7 @@ CREATE TABLE items (
     embedding_sig TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX items_by_source ON items(source_id, chunk_index);
+CREATE INDEX items_by_sig ON items(embedding_sig);
 CREATE VIRTUAL TABLE items_fts USING fts5(title, content, tags);
 CREATE TABLE entities (
     id           INTEGER PRIMARY KEY,
@@ -155,6 +158,15 @@ pub struct Hit {
     pub source_uri: String,
 }
 
+/// An item waiting for its vector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToEmbed {
+    pub id: i64,
+    /// Tells the item apart from a later one given the same id.
+    pub created_at: i64,
+    pub text: String,
+}
+
 /// A chunk and what was extracted from it, ready to store.
 #[derive(Debug, Clone)]
 pub struct NewItem {
@@ -231,6 +243,10 @@ fn row_to_source(r: &rusqlite::Row<'_>) -> rusqlite::Result<Source> {
 }
 
 const ITEM_SELECT: &str = "SELECT id, source_id, chunk_index, title, content, summary, category, tags, section, line_start, line_end, created_at FROM items";
+
+/// [`ITEM_SELECT`] with each item's source joined as `s`, items as `i`.
+const ITEM_SELECT_BY_SOURCE: &str = "SELECT i.id, i.source_id, i.chunk_index, i.title, i.content, i.summary, i.category, i.tags, i.section,
+    i.line_start, i.line_end, i.created_at FROM items i JOIN sources s ON s.id = i.source_id";
 
 fn row_to_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
     Ok(Item {
@@ -359,23 +375,13 @@ impl KnowledgeDb {
         Ok(())
     }
 
-    /// Forget the text a source was indexed from, so the next sync
-    /// describes it again even if the file is unchanged.
-    pub fn forget_hash(&self, id: &str) -> anyhow::Result<()> {
-        let changed = self.conn.lock().execute("UPDATE sources SET content_hash = '' WHERE id = ?1", params![id])?;
-        if changed == 0 {
-            anyhow::bail!("no knowledge source {id}");
-        }
-        Ok(())
-    }
-
     /// Another source already holding exactly this text.
     pub fn hash_owner(&self, hash: &str, except: &str) -> anyhow::Result<Option<String>> {
         let conn = self.conn.lock();
         Ok(conn
             .query_row(
-                "SELECT id FROM sources WHERE content_hash = ?1 AND id != ?2 AND status != ?3 LIMIT 1",
-                params![hash, except, status::DUPLICATE],
+                "SELECT id FROM sources WHERE content_hash = ?1 AND id != ?2 AND status = ?3 LIMIT 1",
+                params![hash, except, status::SYNCED],
                 |r| r.get(0),
             )
             .optional()?)
@@ -466,13 +472,14 @@ impl KnowledgeDb {
         Ok(())
     }
 
-    /// Items, in document order, of one source or of all.
-    pub fn items(&self, source: Option<&str>) -> anyhow::Result<Vec<Item>> {
+    /// Items, in document order, of one source or of all (newest
+    /// documents first), at most `limit`.
+    pub fn items(&self, source: Option<&str>, limit: usize) -> anyhow::Result<Vec<Item>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&format!(
-            "{ITEM_SELECT} WHERE ?1 IS NULL OR source_id = ?1 ORDER BY (SELECT created_at FROM sources WHERE id = source_id) DESC, source_id, chunk_index"
+            "{ITEM_SELECT_BY_SOURCE} WHERE ?1 IS NULL OR i.source_id = ?1 ORDER BY s.created_at DESC, i.source_id, i.chunk_index LIMIT ?2"
         ))?;
-        let rows = stmt.query_map(params![source], row_to_item)?;
+        let rows = stmt.query_map(params![source, limit as i64], row_to_item)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -595,38 +602,71 @@ impl KnowledgeDb {
         Ok(scored.into_iter().take(limit).map(|(id, _)| id).collect())
     }
 
-    /// Items not yet embedded in the space `sig` names, with the text to
-    /// embed (title, summary, content), up to `limit`.
-    pub fn to_embed(&self, sig: &str, limit: usize) -> anyhow::Result<Vec<(i64, String)>> {
+    /// Items after `after` (by id) not yet embedded in the space `sig`
+    /// names, nor given up on in it, up to `limit`: the text to embed
+    /// (title, summary, content) and the item's stamp for [`Self::set_embeddings`].
+    pub fn to_embed(&self, sig: &str, after: i64, limit: usize) -> anyhow::Result<Vec<ToEmbed>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, title, summary, content FROM items WHERE embedding IS NULL OR embedding_sig != ?1 ORDER BY id LIMIT ?2",
+            "SELECT id, created_at, title, summary, content FROM items
+             WHERE id > ?3 AND (embedding IS NULL OR embedding_sig != ?1) AND embedding_sig != ('failed:' || ?1)
+             ORDER BY id LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![sig, limit as i64], |r| {
-            let text = format!("{}\n{}\n{}", r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?);
-            Ok((r.get(0)?, text.chars().take(EMBED_CHARS).collect()))
+        let rows = stmt.query_map(params![sig, limit as i64, after], |r| {
+            let text = format!("{}\n{}\n{}", r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?);
+            Ok(ToEmbed { id: r.get(0)?, created_at: r.get(1)?, text: text.chars().take(EMBED_CHARS).collect() })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Keep vectors for items (skipping any that are gone).
-    pub fn set_embeddings(&self, sig: &str, vectors: &[(i64, Vec<f32>)]) -> anyhow::Result<()> {
+    /// Keep vectors for items. An item that is gone, or whose id now names
+    /// a newer item (ids of a re-synced source are reused), is skipped.
+    pub fn set_embeddings(&self, sig: &str, vectors: &[(&ToEmbed, Vec<f32>)]) -> anyhow::Result<()> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
-        for (id, v) in vectors {
-            tx.execute("UPDATE items SET embedding = ?2, embedding_sig = ?3 WHERE id = ?1", params![id, to_blob(v), sig])?;
+        for (item, v) in vectors {
+            tx.execute(
+                "UPDATE items SET embedding = ?3, embedding_sig = ?4 WHERE id = ?1 AND created_at = ?2",
+                params![item.id, item.created_at, to_blob(v), sig],
+            )?;
         }
         tx.commit()?;
         Ok(())
     }
 
-    /// Items embedded in the space `sig` names, and all items.
-    pub fn embedded(&self, sig: &str) -> anyhow::Result<(i64, i64)> {
+    /// Give up on embedding an item in the space `sig` names (the endpoint
+    /// refuses it); it is not retried until the space changes.
+    pub fn embed_failed(&self, sig: &str, item: &ToEmbed) -> anyhow::Result<()> {
+        self.conn.lock().execute(
+            "UPDATE items SET embedding = NULL, embedding_sig = 'failed:' || ?3 WHERE id = ?1 AND created_at = ?2",
+            params![item.id, item.created_at, sig],
+        )?;
+        Ok(())
+    }
+
+    /// Try again every item given up on, in any space.
+    pub fn retry_refused(&self) -> anyhow::Result<usize> {
+        Ok(self.conn.lock().execute("UPDATE items SET embedding_sig = '' WHERE embedding_sig LIKE 'failed:%'", [])?)
+    }
+
+    /// Whether any item has a vector in the space `sig` names.
+    pub fn has_vectors(&self, sig: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row("SELECT 1 FROM items WHERE embedding_sig = ?1 AND embedding IS NOT NULL LIMIT 1", params![sig], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    /// Items embedded in the space `sig` names, items given up on in it,
+    /// and all items.
+    pub fn embedded(&self, sig: &str) -> anyhow::Result<(i64, i64, i64)> {
         let conn = self.conn.lock();
         Ok(conn.query_row(
-            "SELECT COUNT(*) FILTER (WHERE embedding IS NOT NULL AND embedding_sig = ?1), COUNT(*) FROM items",
+            "SELECT COUNT(*) FILTER (WHERE embedding IS NOT NULL AND embedding_sig = ?1),
+                    COUNT(*) FILTER (WHERE embedding_sig = 'failed:' || ?1), COUNT(*) FROM items",
             params![sig],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?)
     }
 
@@ -772,7 +812,7 @@ mod tests {
     fn stores_and_counts() {
         let db = seeded();
         assert_eq!(db.stats().unwrap(), Stats { sources: 2, items: 3, entities: 3, relations: 1 });
-        let items = db.items(Some("ar002")).unwrap();
+        let items = db.items(Some("ar002"), 100).unwrap();
         assert_eq!(items[1].title, "Backups", "no extraction: the first line");
         assert_eq!(db.source("ar002").unwrap().unwrap().items, 2);
         assert_eq!(db.source_by_uri("/docs/rust.md").unwrap().unwrap().status, status::SYNCED);
@@ -816,18 +856,29 @@ mod tests {
     #[test]
     fn vectors_find_by_meaning_in_their_own_space() {
         let db = seeded();
-        let todo = db.to_embed("s1", 10).unwrap();
+        let todo = db.to_embed("s1", 0, 10).unwrap();
         assert_eq!(todo.len(), 3);
-        assert!(todo[0].1.starts_with("Ownership in Rust"), "title, summary, content");
+        assert!(todo[0].text.starts_with("Ownership in Rust"), "title, summary, content");
+        assert_eq!(db.to_embed("s1", todo[0].id, 10).unwrap().len(), 2, "the cursor skips what came before");
         // Pretend the store doc's backup chunk is about "restore".
-        let vecs: Vec<(i64, Vec<f32>)> = todo
-            .iter()
-            .map(|(id, text)| (*id, if text.contains("nightly") { vec![0.0, 1.0] } else { vec![1.0, 0.0] }))
-            .collect();
+        let vecs: Vec<(&ToEmbed, Vec<f32>)> =
+            todo.iter().map(|t| (t, if t.text.contains("nightly") { vec![0.0, 1.0] } else { vec![1.0, 0.0] })).collect();
         db.set_embeddings("s1", &vecs).unwrap();
-        assert_eq!(db.embedded("s1").unwrap(), (3, 3));
-        assert!(db.to_embed("s1", 10).unwrap().is_empty());
-        assert_eq!(db.to_embed("s2", 10).unwrap().len(), 3, "another space starts over");
+        assert_eq!(db.embedded("s1").unwrap(), (3, 0, 3));
+        assert!(db.has_vectors("s1").unwrap());
+        assert!(db.to_embed("s1", 0, 10).unwrap().is_empty());
+        let other = db.to_embed("s2", 0, 10).unwrap();
+        assert_eq!(other.len(), 3, "another space starts over");
+        db.embed_failed("s2", &other[0]).unwrap();
+        assert_eq!(db.to_embed("s2", 0, 10).unwrap().len(), 2, "a refused item is not retried in that space");
+        assert_eq!(db.embedded("s2").unwrap(), (0, 1, 3));
+        assert_eq!(db.retry_refused().unwrap(), 1);
+        assert_eq!(db.to_embed("s2", 0, 10).unwrap().len(), 3, "a retry brings it back");
+        db.embed_failed("s2", &other[0]).unwrap();
+        // A vector for an item whose id now names a newer one is dropped.
+        let stale = ToEmbed { created_at: other[1].created_at - 1, ..other[1].clone() };
+        db.set_embeddings("s2", &[(&stale, vec![1.0, 0.0])]).unwrap();
+        assert_eq!(db.embedded("s2").unwrap().0, 0);
         let hits = db.search("restore", 3, None, Some((&[0.1, 0.9], "s1"))).unwrap();
         assert_eq!(hits[0].item.title, "Backups");
         assert_eq!(hits[0].match_type, "vector");
@@ -840,13 +891,16 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(&SCHEMA.replace(",\n    embedding    BLOB,\n    embedding_sig TEXT NOT NULL DEFAULT ''", "")).unwrap();
+            let v1 = SCHEMA
+                .replace(",\n    embedding    BLOB,\n    embedding_sig TEXT NOT NULL DEFAULT ''", "")
+                .replace("CREATE INDEX items_by_sig ON items(embedding_sig);\n", "");
+            conn.execute_batch(&v1).unwrap();
             conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema_version', '1');").unwrap();
             let cols: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('items') WHERE name = 'embedding'", [], |r| r.get(0)).unwrap();
             assert_eq!(cols, 0, "the old schema really lacks the column");
         }
         let db = KnowledgeDb::open(&path).unwrap();
-        assert_eq!(db.embedded("x").unwrap(), (0, 0));
+        assert_eq!(db.embedded("x").unwrap(), (0, 0, 0));
         drop(db);
         let _ = std::fs::remove_file(&path);
     }

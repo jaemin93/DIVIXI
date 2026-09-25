@@ -34,7 +34,7 @@ use agent_client_protocol::{
 use orchestra_core::{AgentEvent, PermissionChoice, SlashCommand};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{pick_autonomous_mode, process, translate, AgentSpec};
+use crate::{is_autonomous_mode, pick_autonomous_mode, pick_restricted_mode, process, translate, AgentSpec};
 
 /// An MCP server the agent should connect to over HTTP.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +59,11 @@ pub struct SessionOptions {
     /// its history. When loading fails, a fresh session is opened instead and
     /// [`AgentSession::resumed`] says so.
     pub resume: Option<String>,
+    /// Never act unasked: run in the most restrictive mode the agent offers
+    /// (plan, read-only, ask, default), never fall back to an autonomous
+    /// one, and refuse to open when only autonomous modes are left. For
+    /// sessions fed untrusted text. `mode` is ignored.
+    pub restricted: bool,
 }
 
 /// How long to wait for more replayed history after `session/load`.
@@ -83,8 +88,30 @@ type Pending = Arc<Mutex<PendingQuestions>>;
 
 #[derive(Default)]
 struct PendingQuestions {
+    /// Stamped on every id this session gives out, so an id held from an
+    /// earlier session (a card left open, a stale message) can never name
+    /// a question this one asks.
+    prefix: String,
     next: u64,
     waiting: std::collections::HashMap<String, Responder<RequestPermissionResponse>>,
+}
+
+impl PendingQuestions {
+    fn new() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        Self { prefix: format!("q{:x}", (nanos as u64) ^ ((std::process::id() as u64) << 40)), ..Default::default() }
+    }
+}
+
+/// Answer every question still waiting with "cancelled".
+fn refuse_all(pending: &Pending) {
+    let waiting: Vec<_> = pending.lock().map(|mut p| p.waiting.drain().collect()).unwrap_or_default();
+    for (_, responder) in waiting {
+        let _ = responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
+    }
 }
 
 /// A permission question as an event, and the question kept to answer.
@@ -112,7 +139,7 @@ fn hold_question(pending: &Pending, req: RequestPermissionRequest, responder: Re
     let request = match pending.lock() {
         Ok(mut p) => {
             p.next += 1;
-            let id = format!("p{}", p.next);
+            let id = format!("{}-{}", p.prefix, p.next);
             p.waiting.insert(id.clone(), responder);
             id
         }
@@ -164,7 +191,7 @@ impl AgentSession {
         let opts_for_task = opts.clone();
         let commands: Arc<Mutex<Vec<SlashCommand>>> = Arc::new(Mutex::new(Vec::new()));
         let commands_task = commands.clone();
-        let pending: Pending = Arc::default();
+        let pending: Pending = Arc::new(Mutex::new(PendingQuestions::new()));
         let pending_task = pending.clone();
 
         let task = tokio::spawn(async move {
@@ -240,8 +267,15 @@ impl AgentSession {
                         .unwrap_or_default();
                     let current = session.modes().map(|m| m.current_mode_id.to_string());
                     tracing::info!(?available, ?current, "session modes");
-                    let fallback = pick_autonomous_mode(&available);
-                    if let Some(wanted) = opts_for_task.mode.clone().or_else(|| fallback.clone()) {
+                    let restricted = opts_for_task.restricted;
+                    let fallback = if restricted { None } else { pick_autonomous_mode(&available) };
+                    let chosen = if restricted { pick_restricted_mode(&available) } else { opts_for_task.mode.clone() };
+                    if restricted && chosen.is_none() && current.as_deref().is_some_and(is_autonomous_mode) {
+                        return Err(agent_client_protocol::util::internal_error(
+                            "the agent offers no mode that asks before acting",
+                        ));
+                    }
+                    if let Some(wanted) = chosen.or_else(|| fallback.clone()) {
                         if current.as_deref() != Some(wanted.as_str()) {
                             tracing::info!(mode = %wanted, "setting session mode");
                             let set = session
@@ -301,6 +335,8 @@ impl AgentSession {
                         // A cancel asked for before this turn is not for this turn.
                         while cancel_rx.try_recv().is_ok() {}
                         let result = run_turn(&mut session, &turn.text, &turn.files, images, &turn.tx, &commands_task, &pending_task, &mut cancel_rx).await;
+                        // A question the turn ended without is moot; nobody may answer it later.
+                        refuse_all(&pending_task);
                         if let Err(err) = &result {
                             let _ = turn.tx.send(AgentEvent::Failed { error: err.to_string() });
                         }
@@ -390,10 +426,7 @@ impl AgentSession {
     pub fn cancel(&self) {
         // Questions still waiting are answered "cancelled", as ACP asks of a
         // client that cancels a turn.
-        let waiting: Vec<_> = self.pending.lock().map(|mut p| p.waiting.drain().collect()).unwrap_or_default();
-        for (_, responder) in waiting {
-            let _ = responder.respond(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled));
-        }
+        refuse_all(&self.pending);
         let _ = self.cancel.send(());
     }
 

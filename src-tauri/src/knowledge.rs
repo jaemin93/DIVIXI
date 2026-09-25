@@ -21,7 +21,7 @@ use std::time::Duration;
 use orchestra_acp::{AgentSession, ConfigOptionInfo};
 use orchestra_core::AgentEvent;
 use orchestra_knowledge::store::status;
-use orchestra_knowledge::{chunk_document, extract, read, Extraction, FileState, Graph, Item, KnowledgeDb, NewItem, Shape, Source, Stats};
+use orchestra_knowledge::{chunk_document, extract, read, Extraction, FileState, Graph, Item, KnowledgeDb, NewItem, Shape, Source, Stats, ToEmbed};
 use orchestra_store::ArtifactInfo;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -33,6 +33,8 @@ use crate::{embed, AppState, SETTING_PREFIX};
 pub const KIND: &str = "knowledge";
 /// Window event carrying a source whenever it changes.
 const EVENT: &str = "knowledge";
+/// Items listed at most when nothing narrows the list.
+const LIST_LIMIT: usize = 1000;
 /// Window event when embeddings moved on (or failed).
 const EMBED_EVENT: &str = "knowledge-embedding";
 /// Window event when a source is gone.
@@ -69,6 +71,8 @@ pub struct Library {
     embed_wake: tokio::sync::Notify,
     /// Why the last embedding request failed, "" when it did not.
     embed_error: parking_lot::Mutex<String>,
+    /// Sources to describe again on their next sync even if unchanged.
+    forced: parking_lot::Mutex<HashSet<String>>,
 }
 
 impl Library {
@@ -86,6 +90,7 @@ impl Library {
             work_dir,
             embed_wake: tokio::sync::Notify::new(),
             embed_error: Default::default(),
+            forced: Default::default(),
         })
     }
 
@@ -186,15 +191,6 @@ pub fn cheapest_config(options: &[ConfigOptionInfo]) -> BTreeMap<String, String>
     out
 }
 
-/// A mode that reads but does not act, when the agent offers one.
-fn read_only_mode(options: &[ConfigOptionInfo]) -> Option<String> {
-    let modes = options.iter().find(|o| o.category == "mode")?;
-    let key = |id: &str| id.rsplit(['#', '/']).next().unwrap_or(id).to_ascii_lowercase();
-    ["plan", "read-only", "readonly", "ask", "default"]
-        .iter()
-        .find_map(|want| modes.choices.iter().find(|c| key(&c.id) == *want).map(|c| c.id.clone()))
-}
-
 /// One describing session.
 struct Worker {
     session: AgentSession,
@@ -214,16 +210,16 @@ async fn open_worker(app: &AppHandle, s: &Settings, dir: &Path) -> Result<Worker
     let state = app.state::<AppState>();
     let spec = state.spec_for(&s.agent)?;
     let mut opts = crate::conductor::session_options(&state, &s.agent, &dir.to_string_lossy(), &s.config, None);
-    if opts.mode.is_none() {
-        opts.mode = read_only_mode(&state.config_options_for(&s.agent));
-    }
+    // It reads untrusted text: never in a mode that acts unasked.
+    opts.restricted = true;
+    opts.mode = None;
     let session = AgentSession::open(&spec, opts).await.map_err(|e| format!("could not start {}: {e}", s.agent))?;
     Ok(Worker { session, calls: 0 })
 }
 
-/// One prompt to a describing session, its reply text. Permission questions
-/// are refused: describing needs no tools. A failure closes the session so
-/// the next call starts a fresh one.
+/// One prompt to a describing session, its reply text. Describing needs no
+/// tools: permission questions are refused, and a tool call cancels the
+/// turn. A failure closes the session so the next call starts a fresh one.
 async fn ask(app: &AppHandle, s: &Settings, dir: &Path, slot: &mut Option<Worker>, prompt: String) -> Result<String, String> {
     if slot.as_ref().is_some_and(|w| w.calls >= RESET_AFTER) {
         *slot = None;
@@ -238,20 +234,30 @@ async fn ask(app: &AppHandle, s: &Settings, dir: &Path, slot: &mut Option<Worker
     let turn = session.prompt(prompt, tx);
     let collect = async {
         let mut text = String::new();
+        let mut used_tool = false;
         while let Some(ev) = rx.recv().await {
             match ev {
                 AgentEvent::Message { text: t } => text.push_str(&t),
                 AgentEvent::Permission { request, .. } => {
                     let _ = session.answer_permission(&request, None);
                 }
+                AgentEvent::ToolCall { title, .. } if !used_tool => {
+                    used_tool = true;
+                    tracing::warn!(%title, "the describing agent reached for a tool; cancelling the turn");
+                    session.cancel();
+                }
                 _ => {}
             }
         }
-        text
+        (text, used_tool)
     };
     let outcome = tokio::time::timeout(CALL_TIMEOUT, async { tokio::join!(turn, collect) }).await;
     match outcome {
-        Ok((Ok(()), text)) => Ok(text),
+        Ok((Ok(()), (_, true))) => {
+            *slot = None;
+            Err("the agent tried to use a tool while describing; its reply was dropped".to_string())
+        }
+        Ok((Ok(()), (text, false))) => Ok(text),
         Ok((Err(err), _)) => {
             *slot = None;
             Err(err.to_string())
@@ -342,7 +348,9 @@ async fn sync(app: &AppHandle, id: &str, pool: &mut Option<Pool>) {
         }
     };
     let file_state = FileState { hash: file.hash.clone(), mtime_ms: file.mtime_ms, size: file.size as i64 };
-    if file.hash == src.content_hash && src.items > 0 {
+    // Taken here, so a request made while this sync runs forces the next one.
+    let forced = lib.forced.lock().remove(id);
+    if !forced && file.hash == src.content_hash && src.items > 0 {
         let _ = db.touch(id, &file_state);
         emit_source(app, &db, id);
         return;
@@ -453,7 +461,8 @@ fn check_files(app: &AppHandle) {
             }
             Ok(meta) => {
                 let changed = read::mtime_ms(&meta) != s.mtime_ms || meta.len() as i64 != s.size;
-                if changed || s.status == status::PENDING || s.status == status::MISSING {
+                // A duplicate is rechecked too: its original may be gone.
+                if changed || matches!(s.status.as_str(), status::PENDING | status::MISSING | status::DUPLICATE) {
                     lib.enqueue(&s.id);
                 }
             }
@@ -468,28 +477,64 @@ async fn embed_pending(app: &AppHandle) {
     let Some(ep) = embed::endpoint(&state) else { return };
     let sig = ep.signature();
     let db = state.library.db.clone();
+    let mut after = 0;
+    let fail = |err: String| {
+        tracing::warn!(%err, "embedding failed");
+        *state.library.embed_error.lock() = err;
+        let _ = app.emit(EMBED_EVENT, ());
+    };
     loop {
-        let batch = match db.to_embed(&sig, embed::BATCH) {
-            Ok(b) if !b.is_empty() => b,
+        let (d, s) = (db.clone(), sig.clone());
+        let batch = match tokio::task::spawn_blocking(move || d.to_embed(&s, after, embed::BATCH)).await {
+            Ok(Ok(b)) if !b.is_empty() => b,
+            Ok(Err(err)) => return fail(err.to_string()),
             _ => break,
         };
-        let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+        after = batch.last().map(|t| t.id).unwrap_or(after);
+        let texts: Vec<String> = batch.iter().map(|t| t.text.clone()).collect();
+        let mut done: Vec<(ToEmbed, Vec<f32>)> = Vec::new();
+        let mut refused: Vec<ToEmbed> = Vec::new();
         match embed::embed(&ep, &texts).await {
-            Ok(vectors) => {
-                let pairs: Vec<(i64, Vec<f32>)> = batch.iter().map(|(id, _)| *id).zip(vectors).collect();
-                if let Err(err) = db.set_embeddings(&sig, &pairs) {
-                    *state.library.embed_error.lock() = err.to_string();
-                    break;
+            Ok(vectors) => done.extend(batch.into_iter().zip(vectors)),
+            // The endpoint refuses something in the batch: find out which, one at a time.
+            Err(err) if err.permanent && batch.len() > 1 => {
+                let size = batch.len();
+                for item in batch {
+                    match embed::embed(&ep, std::slice::from_ref(&item.text)).await {
+                        Ok(mut v) => done.push((item, v.pop().unwrap_or_default())),
+                        Err(e) if e.permanent => {
+                            tracing::info!(item = item.id, err = %e, "the endpoint refuses this item; skipping it");
+                            refused.push(item);
+                        }
+                        Err(e) => return fail(e.message),
+                    }
+                    tokio::time::sleep(embed::spacing(embed::per_minute(&state))).await;
                 }
+                // Every item refused alone: the endpoint, not the items, is the problem.
+                if done.is_empty() && refused.len() == size {
+                    return fail(err.message);
+                }
+            }
+            Err(err) if err.permanent => refused.extend(batch),
+            Err(err) => return fail(err.message),
+        }
+        let (d, s) = (db.clone(), sig.clone());
+        let stored = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let pairs: Vec<(&ToEmbed, Vec<f32>)> = done.iter().map(|(t, v)| (t, v.clone())).collect();
+            d.set_embeddings(&s, &pairs)?;
+            for item in &refused {
+                d.embed_failed(&s, item)?;
+            }
+            Ok(())
+        })
+        .await;
+        match stored {
+            Ok(Ok(())) => {
                 state.library.embed_error.lock().clear();
                 let _ = app.emit(EMBED_EVENT, ());
             }
-            Err(err) => {
-                tracing::warn!(%err, "embedding failed");
-                *state.library.embed_error.lock() = err;
-                let _ = app.emit(EMBED_EVENT, ());
-                break;
-            }
+            Ok(Err(err)) => return fail(err.to_string()),
+            Err(err) => return fail(err.to_string()),
         }
         // The settings may have changed meanwhile: go again in the new space.
         if embed::endpoint(&state).map(|e| e.signature()) != Some(sig.clone()) {
@@ -506,7 +551,8 @@ pub async fn query_vector(app: &AppHandle, query: &str) -> Option<(Vec<f32>, Str
     let state = app.state::<AppState>();
     let ep = embed::endpoint(&state)?;
     let sig = ep.signature();
-    if state.library.db.embedded(&sig).ok()?.0 == 0 {
+    let (db, s) = (state.library.db.clone(), sig.clone());
+    if !tokio::task::spawn_blocking(move || db.has_vectors(&s)).await.ok()?.ok()? {
         return None;
     }
     match tokio::time::timeout(embed::QUERY_TIMEOUT, embed::embed(&ep, &[query.to_string()])).await {
@@ -617,6 +663,12 @@ pub fn remove(app: &AppHandle, id: &str) {
     if let Err(err) = state.library.db.delete_source(id) {
         tracing::warn!(%err, source = id, "could not remove knowledge source");
     }
+    // A duplicate of it may now be the only copy.
+    for s in state.library.db.sources().unwrap_or_default() {
+        if s.status == status::DUPLICATE {
+            state.library.enqueue(&s.id);
+        }
+    }
     let _ = app.emit(REMOVED_EVENT, id);
 }
 
@@ -636,7 +688,10 @@ pub fn knowledge_source_for(state: State<'_, AppState>, path: String, track: Opt
 #[tauri::command(async)]
 pub fn knowledge_sync(app: AppHandle, id: String) -> Result<(), String> {
     let state = app.state::<AppState>();
-    state.library.db.forget_hash(&id).map_err(|e| e.to_string())?;
+    if state.library.db.source(&id).map_err(|e| e.to_string())?.is_none() {
+        return Err(format!("no knowledge source {id}"));
+    }
+    state.library.forced.lock().insert(id.clone());
     state.library.db.set_status(&id, status::PENDING, "").map_err(|e| e.to_string())?;
     state.library.enqueue(&id);
     emit_source(&app, &state.library.db, &id);
@@ -656,20 +711,27 @@ pub struct Listed {
 #[tauri::command]
 pub async fn knowledge_items(app: AppHandle, source: Option<String>, query: Option<String>) -> Result<Vec<Listed>, String> {
     let db = app.state::<AppState>().library.db.clone();
-    match query.filter(|q| !q.trim().is_empty()) {
+    let query = query.filter(|q| !q.trim().is_empty());
+    let vector = match &query {
+        Some(q) => query_vector(&app, q).await,
+        None => None,
+    };
+    tokio::task::spawn_blocking(move || match query {
         Some(q) => Ok(db
-            .search(&q, 30, source.as_deref(), query_vector(&app, &q).await.as_ref().map(|(v, s)| (v.as_slice(), s.as_str())))
+            .search(&q, 30, source.as_deref(), vector.as_ref().map(|(v, s)| (v.as_slice(), s.as_str())))
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|h| Listed { item: h.item, score: Some(h.score), match_type: Some(h.match_type) })
             .collect()),
         None => Ok(db
-            .items(source.as_deref())
+            .items(source.as_deref(), LIST_LIMIT)
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|item| Listed { item, score: None, match_type: None })
             .collect()),
-    }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command(async)]
@@ -694,6 +756,8 @@ pub struct EmbeddingStatus {
     enabled: bool,
     model: String,
     embedded: i64,
+    /// Items the endpoint refused; they are not retried in this space.
+    failed: i64,
     total: i64,
     error: String,
 }
@@ -702,11 +766,12 @@ pub struct EmbeddingStatus {
 pub fn knowledge_embedding_status(state: State<'_, AppState>) -> Result<EmbeddingStatus, String> {
     let ep = embed::endpoint(&state);
     let sig = ep.as_ref().map(|e| e.signature()).unwrap_or_default();
-    let (embedded, total) = state.library.db.embedded(&sig).map_err(|e| e.to_string())?;
+    let (embedded, failed, total) = state.library.db.embedded(&sig).map_err(|e| e.to_string())?;
     Ok(EmbeddingStatus {
         enabled: ep.is_some(),
         model: ep.map(|e| e.model).unwrap_or_default(),
         embedded,
+        failed,
         total,
         error: state.library.embed_error.lock().clone(),
     })
@@ -719,13 +784,17 @@ pub async fn knowledge_embed_test(url: String, model: String, key: String, dims:
     if ep.url.is_empty() || ep.model.is_empty() {
         return Err("the endpoint URL and the model are needed".to_string());
     }
-    let v = embed::embed(&ep, &["Divixi knowledge library 지식 라이브러리".to_string()]).await?;
+    let v = embed::embed(&ep, &["Divixi knowledge library 지식 라이브러리".to_string()]).await.map_err(|e| e.message)?;
     Ok(v.first().map(Vec::len).unwrap_or(0))
 }
 
 /// Start embedding now (the settings just changed).
 #[tauri::command]
 pub fn knowledge_embed_now(state: State<'_, AppState>) {
+    // Items refused before are tried again: the settings may be what changed.
+    if let Err(err) = state.library.db.retry_refused() {
+        tracing::warn!(%err, "could not reset refused embeddings");
+    }
     state.library.embed_error.lock().clear();
     state.library.embed_wake.notify_one();
 }

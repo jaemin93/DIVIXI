@@ -542,12 +542,8 @@ async fn answer_decision(
 /// The human sets a decision aside; the conductor is not told.
 #[tauri::command]
 async fn dismiss_decision(app: AppHandle, id: i64) -> Result<Decision, String> {
-    let state = app.state::<AppState>();
-    let decision = state.store.dismiss_decision(id).map_err(|e| e.to_string())?;
     // A permission card set aside is a refusal to the agent that asked.
-    conductor::refuse_permission(&app, &decision).await;
-    let _ = app.emit("decision", &decision);
-    Ok(decision)
+    conductor::dismiss_decision(&app, id).await
 }
 
 /// How the machine is doing, measured on the disk of `track`'s folder.
@@ -817,6 +813,8 @@ pub(crate) async fn pump(
                     }
                     emit(event, ms);
                     if terminal {
+                        // Permission cards of this run are moot once it ends.
+                        tauri::async_runtime::spawn(conductor::dismiss_stale_permissions(app.clone(), Some(run.clone())));
                         break;
                     }
                 }
@@ -1006,6 +1004,8 @@ pub fn run() {
             });
             // Artifact agents nobody has talked to for an hour are closed.
             artifact::sweep_idle(app.handle().clone());
+            // Permission cards left from an earlier run of the app: their agents are gone.
+            tauri::async_runtime::spawn(conductor::dismiss_stale_permissions(app.handle().clone(), None));
             // Library sync, and a watch on its files.
             knowledge::start(app.handle().clone());
             if let Some(window) = app.get_webview_window("main") {

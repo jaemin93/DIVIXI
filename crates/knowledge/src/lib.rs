@@ -11,7 +11,7 @@ pub mod store;
 
 pub use chunk::{chunk_document, Chunk, Shape};
 pub use extract::{Extraction, SourceSummary};
-pub use store::{FileState, Graph, Hit, Item, KnowledgeDb, NewItem, Source, Stats};
+pub use store::{FileState, Graph, Hit, Item, KnowledgeDb, NewItem, Source, Stats, ToEmbed};
 
 /// Search results as the agent reads them: each hit's title, where it comes
 /// from (file, section, lines), and its text. After Kiro Crew's

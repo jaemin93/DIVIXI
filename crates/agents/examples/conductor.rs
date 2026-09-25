@@ -72,6 +72,7 @@ async fn run() -> anyhow::Result<()> {
                 headers: vec![server.auth_header()],
             }],
             resume: resume.clone(),
+            restricted: false,
         },
     )
     .await?;

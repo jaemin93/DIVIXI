@@ -558,6 +558,7 @@ async fn run_prompt_inner(spec: PromptSpec, tx: UnboundedSender<AgentEvent>) -> 
             config: spec.config.clone(),
             mcp_servers: Vec::new(),
             resume: None,
+            restricted: false,
         },
     )
     .await?;
@@ -601,6 +602,28 @@ const AUTONOMOUS_MODE_IDS: &[&str] = &[
     "acceptedits",
     "accept-edits",
 ];
+
+/// Mode ids that ask before acting, most restrictive first.
+const RESTRICTED_MODE_IDS: &[&str] = &["plan", "read-only", "readonly", "read_only", "ask", "manual", "default"];
+
+fn mode_key(s: &str) -> String {
+    s.rsplit(['#', '/']).next().unwrap_or(s).to_ascii_lowercase()
+}
+
+/// Whether a mode id is one that acts without asking.
+pub fn is_autonomous_mode(id: &str) -> bool {
+    AUTONOMOUS_MODE_IDS.contains(&mode_key(id).as_str())
+}
+
+/// The most restrictive mode among `(id, name)` pairs the agent offers.
+pub fn pick_restricted_mode(available: &[(String, String)]) -> Option<String> {
+    RESTRICTED_MODE_IDS.iter().find_map(|want| {
+        available
+            .iter()
+            .find(|(id, name)| mode_key(id) == *want || mode_key(name) == *want)
+            .map(|(id, _)| id.clone())
+    })
+}
 
 /// The most autonomous mode among `(id, name)` pairs the agent offers.
 ///

@@ -32,7 +32,7 @@ use std::time::Duration;
 use orchestra_acp::{AgentSession, AgentSpec, McpHttp, SessionOptions};
 use orchestra_core::AgentEvent;
 use orchestra_mcp::{McpServer, Tool};
-use orchestra_store::{Decision, DecisionOption, NewDecision, PermissionAsk, TrackInfo};
+use orchestra_store::{Decision, DecisionOption, DecisionStatus, NewDecision, PermissionAsk, TrackInfo};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
@@ -618,7 +618,50 @@ pub fn route_permission(app: &AppHandle, track: &str, session: &str, run: &str, 
         "\noptions:\n{}\n\nAnswer with answer_worker(worker=\"{session}\", request=\"{request}\", option=...). Decide yourself unless it is the human's call; then ask with request_decision and pass their choice on.",
         list.join("\n")
     ));
-    tauri::async_runtime::spawn(deliver(app.clone(), track.to_string(), text, true, format!("permission {request} of {session}")));
+    let (app, track, worker, request) = (app.clone(), track.to_string(), session.to_string(), request.clone());
+    tauri::async_runtime::spawn(async move {
+        if deliver(app.clone(), track.clone(), text, true, format!("permission {request} of {worker}")).await {
+            return;
+        }
+        // Nobody will answer it: refuse, so the worker carries on (or reports) instead of waiting out its turn.
+        let st = app.state::<AppState>();
+        let live = st.sessions.workers.lock().await.get(&worker_key(&track, &worker)).map(|w| w.session.clone());
+        if let Some(session) = live {
+            let _ = session.answer_permission(&request, None);
+        }
+    });
+}
+
+/// Permission cards are answered or set aside one at a time, each after
+/// checking the card is still open, so an agent is never told one thing
+/// while the record says another.
+static PERMISSION_CARDS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Set a decision aside; a permission card's agent is refused.
+pub async fn dismiss_decision(app: &AppHandle, id: i64) -> Result<Decision, String> {
+    let _one = PERMISSION_CARDS.lock().await;
+    let st = app.state::<AppState>();
+    let decision = st.store.dismiss_decision(id).map_err(|e| e.to_string())?;
+    refuse_permission(app, &decision).await;
+    let _ = app.emit("decision", &decision);
+    Ok(decision)
+}
+
+/// Set aside the open permission cards of a run that ended (or of every
+/// run, at start): the questions went with the turn. Under the cards'
+/// lock, so an answer being given right now is not overtaken.
+pub async fn dismiss_stale_permissions(app: AppHandle, run: Option<String>) {
+    let _one = PERMISSION_CARDS.lock().await;
+    let st = app.state::<AppState>();
+    let Ok(open) = st.store.decisions(None) else { return };
+    for d in open {
+        let stale = d.status == DecisionStatus::Open && d.permission.is_some() && run.as_deref().is_none_or(|r| d.run.as_deref() == Some(r));
+        if stale {
+            if let Ok(gone) = st.store.dismiss_decision(d.id) {
+                let _ = app.emit("decision", &gone);
+            }
+        }
+    }
 }
 
 /// Answer the agent behind a permission card: the chosen option, or `None`
@@ -672,7 +715,14 @@ pub async fn answer_decision(
     // A permission card answers the agent that asked, not the conductor's
     // conversation: the agent is mid-turn, waiting.
     let open = st.store.decision(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no decision {id}"))?;
-    if let Some(ask) = &open.permission {
+    if open.permission.is_some() {
+        let _one = PERMISSION_CARDS.lock().await;
+        // Re-read under the lock: it may have been answered or set aside meanwhile.
+        let open = st.store.decision(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no decision {id}"))?;
+        if open.status != DecisionStatus::Open {
+            return Err("this question was already answered or set aside".to_string());
+        }
+        let Some(ask) = &open.permission else { return Err("not a permission question".to_string()) };
         let option = choice.and_then(|i| open.options.get(i)).map(|o| o.id.clone()).ok_or("choose one of the options")?;
         if let Err(err) = answer_asker(&app, &open, ask, Some(&option)).await {
             if let Ok(gone) = st.store.dismiss_decision(id) {
@@ -699,27 +749,28 @@ pub async fn answer_decision(
 /// itself claims the busy mark, so a refusal is retried rather than
 /// trusting an earlier free check that another turn may have overtaken.
 /// `open` lets it start a closed conductor; a worker report does not.
-async fn deliver(app: AppHandle, track: String, text: String, open: bool, what: String) {
+/// Returns whether the turn started.
+async fn deliver(app: AppHandle, track: String, text: String, open: bool, what: String) -> bool {
     let state = app.state::<AppState>();
     let deadline = std::time::Instant::now() + REPORT_WAIT;
     let lang = state.store.get_meta("setting:language").ok().flatten().unwrap_or_default();
     loop {
         if !open && !state.sessions.conductors.lock().await.contains_key(&track) {
             tracing::warn!(%track, %what, "no conductor session to deliver to");
-            return;
+            return false;
         }
         match conductor_turn(app.clone(), track.clone(), text.clone(), None, lang.clone(), Vec::new()).await {
-            Ok(_) => return,
+            Ok(_) => return true,
             Err(err) if err == BUSY => {
                 if std::time::Instant::now() > deadline {
                     tracing::warn!(%track, %what, "conductor stayed busy; dropped");
-                    return;
+                    return false;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
             Err(err) => {
                 tracing::warn!(%track, %what, %err, "could not deliver to the conductor");
-                return;
+                return false;
             }
         }
     }
@@ -845,6 +896,7 @@ pub(crate) fn session_options(
             })
             .unwrap_or_default(),
         resume: None,
+        restricted: false,
     }
 }
 
@@ -999,6 +1051,7 @@ async fn start_worker_turn(
                 let _ = tx.send(AgentEvent::Failed { error: err.to_string() });
             }
             Err(_) => {
+                session.cancel();
                 let _ = tx.send(AgentEvent::Failed { error: "worker turn timed out".to_string() });
             }
         }

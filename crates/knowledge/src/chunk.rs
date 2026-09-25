@@ -71,11 +71,13 @@ impl Chunker {
         let mut raw = self.split(text, &SEPARATORS);
         raw.truncate(MAX_CHUNKS);
         let mut out = Vec::with_capacity(raw.len());
-        let mut line = 1;
+        let mut cursor = 0;
         for (i, piece) in raw.iter().enumerate() {
-            let line_start = line;
+            // Where the piece really sits, not a count that assumes blank lines between.
+            let line_start = locate(text, &mut cursor, piece).map(|at| text[..at].matches('\n').count() + 1).unwrap_or_else(|| {
+                text[..cursor].matches('\n').count() + 1
+            });
             let line_end = line_start + piece.matches('\n').count();
-            line = line_end + 2;
             let mut content = piece.clone();
             if i > 0 && self.overlap > 0 {
                 content = format!("{}\n{}", tail(&raw[i - 1], self.overlap), piece);
@@ -228,12 +230,11 @@ impl Chunker {
         let mut end = 1;
         let flush = |out: &mut Vec<Chunk>, title: &Option<String>, body: &str, start: usize, end: usize| {
             if tokens(body) > self.target {
-                let mut offset = 0;
+                let mut cursor = 0;
                 for sub in self.split(body, &SEPARATORS) {
-                    let s = start + offset;
+                    let s = start + locate(body, &mut cursor, &sub).map(|at| body[..at].matches('\n').count()).unwrap_or(0);
                     let lines = sub.matches('\n').count();
                     out.push(Chunk { section: title.clone(), index: out.len(), line_start: s, line_end: s + lines, content: sub });
-                    offset += lines + 1;
                 }
             } else if !body.trim().is_empty() {
                 out.push(Chunk { content: body.trim().to_string(), section: title.clone(), index: out.len(), line_start: start, line_end: end });
@@ -246,7 +247,9 @@ impl Chunker {
                 start = line;
                 end = end_line(line, b);
             } else if tokens(&body) + tokens(b) <= self.target {
-                body.push('\n');
+                if !body.ends_with('\n') {
+                    body.push('\n');
+                }
                 body.push_str(b);
                 end = end_line(line, b);
                 if title.is_none() {
@@ -266,6 +269,25 @@ impl Chunker {
         out.truncate(MAX_CHUNKS);
         out
     }
+}
+
+/// Byte offset of `piece` in `hay`, searching from `cursor` on (pieces
+/// come in order) and moving it past the match. A piece rejoined from
+/// words may not appear verbatim; then its first line is looked for.
+fn locate(hay: &str, cursor: &mut usize, piece: &str) -> Option<usize> {
+    let rest = &hay[*cursor..];
+    if let Some(i) = rest.find(piece) {
+        let at = *cursor + i;
+        *cursor = at + piece.len();
+        return Some(at);
+    }
+    let head: String = piece.chars().take_while(|c| *c != '\n').take(40).collect();
+    if head.trim().is_empty() {
+        return None;
+    }
+    let at = *cursor + rest.find(head.as_str())?;
+    *cursor = at + head.len();
+    Some(at)
 }
 
 /// The end of `prev` worth about `budget` tokens: its last words, or its
@@ -351,6 +373,26 @@ mod tests {
         assert_eq!(c[0].section.as_deref(), Some("A"));
         assert_eq!(c[1].section.as_deref(), Some("B"));
         assert_eq!(c[1].line_start, 3);
+    }
+
+    #[test]
+    fn lines_are_where_the_text_is() {
+        // A log: no blank lines, so pieces are cut at single newlines.
+        let log: String = (1..=400).map(|i| format!("{i} {}\n", words(6, "event"))).collect();
+        let c = Chunker::default().text(&log);
+        assert!(c.len() > 1);
+        for chunk in &c {
+            let first = chunk.content.lines().last().unwrap();
+            let n: usize = first.split(' ').next().unwrap().parse().unwrap();
+            assert_eq!(chunk.line_end, n, "chunk {} ends on the line its last text is on", chunk.index);
+        }
+        // Paragraphs split inside one big markdown section.
+        let md = format!("# A\n{}\n\n{}\n\n{}\n", words(400, "one"), words(400, "two"), words(400, "three"));
+        let c = Chunker::default().markdown(&md);
+        let two = c.iter().find(|x| x.content.starts_with("two")).unwrap();
+        assert_eq!(two.line_start, 4);
+        let three = c.iter().find(|x| x.content.starts_with("three")).unwrap();
+        assert_eq!(three.line_start, 6);
     }
 
     #[test]

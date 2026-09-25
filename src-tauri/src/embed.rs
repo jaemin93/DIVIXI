@@ -79,8 +79,31 @@ pub fn endpoint(state: &AppState) -> Option<Endpoint> {
     })
 }
 
+/// Why a request failed, and whether trying again later can help.
+#[derive(Debug, Clone)]
+pub struct EmbedError {
+    pub message: String,
+    /// The endpoint refused these texts themselves (400, 413, 422): the
+    /// same texts will fail again. Auth, address and model problems, rate
+    /// limits, server errors and unreadable replies are not the texts'
+    /// fault and are retried once fixed.
+    pub permanent: bool,
+}
+
+impl std::fmt::Display for EmbedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl EmbedError {
+    fn passing(message: String) -> Self {
+        Self { message, permanent: false }
+    }
+}
+
 /// One request: a vector per text, in order.
-pub async fn embed(ep: &Endpoint, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+pub async fn embed(ep: &Endpoint, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
@@ -97,14 +120,15 @@ pub async fn embed(ep: &Endpoint, texts: &[String]) -> Result<Vec<Vec<f32>>, Str
     if !ep.key.is_empty() {
         req = req.header("authorization", format!("Bearer {}", ep.key));
     }
-    let res = req.send().await.map_err(|e| format!("{url}: {e}"))?;
+    let res = req.send().await.map_err(|e| EmbedError::passing(format!("{url}: {e}")))?;
     let status = res.status();
-    let text = res.text().await.map_err(|e| e.to_string())?;
+    let text = res.text().await.map_err(|e| EmbedError::passing(e.to_string()))?;
     if !status.is_success() {
         let detail: String = text.chars().take(300).collect();
-        return Err(format!("{url}: {status} {detail}"));
+        let refused = matches!(status.as_u16(), 400 | 413 | 422);
+        return Err(EmbedError { message: format!("{url}: {status} {detail}"), permanent: refused });
     }
-    parse(&text, texts.len())
+    parse(&text, texts.len()).map_err(|message| EmbedError::passing(format!("{url}: {message}")))
 }
 
 /// Read `{data: [{index, embedding}]}`, putting vectors back in input order.

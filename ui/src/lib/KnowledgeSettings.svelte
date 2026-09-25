@@ -64,11 +64,14 @@
   const modelOption = $derived(agentOptions.find((o) => o.category === "model"));
   const effortOption = $derived(agentOptions.find((o) => o.category === "thought_level"));
 
-  async function save(key: string, value: string) {
+  /** Write one setting; false (and the error shown) when it failed. */
+  async function save(key: string, value: string): Promise<boolean> {
     try {
       await invoke("set_setting", { key, value });
+      return true;
     } catch (err) {
       store.lastError = String(err);
+      return false;
     }
   }
 
@@ -76,7 +79,10 @@
   async function setAgent(agent: string) {
     if (agent === sAgent) return;
     sAgent = agent;
-    cheap = await defaults(agent);
+    const found = await defaults(agent);
+    // Another agent may have been chosen meanwhile.
+    if (sAgent !== agent) return;
+    cheap = found;
     sConfig = { ...cheap };
     await save(K_AGENT, agent);
     await save(K_CONFIG, JSON.stringify(sConfig));
@@ -133,16 +139,25 @@
 
   async function saveEmbedding() {
     saving = true;
+    // What is written is what was on screen when Save was pressed; edits
+    // made meanwhile stay unsaved.
+    const snap = { on: eOn, url: eUrl.trim(), model: eModel.trim(), key: eKey.trim(), dims: eDims.trim(), rate: rateValue(eRate) };
     try {
-      await save(K_EMBED_URL, eUrl.trim());
-      await save(K_EMBED_MODEL, eModel.trim());
-      await save(K_EMBED_KEY, eKey.trim());
-      await save(K_EMBED_DIMS, eDims.trim());
-      eRate = rateValue(eRate);
-      await save(K_EMBED_RATE, eRate);
-      await save(K_EMBED_ENABLED, eOn ? "on" : "off");
-      eSaved = { on: eOn, url: eUrl.trim(), model: eModel.trim(), key: eKey.trim(), dims: eDims.trim(), rate: eRate };
-      await invoke("knowledge_embed_now").catch(() => {});
+      const writes = [
+        [K_EMBED_URL, snap.url],
+        [K_EMBED_MODEL, snap.model],
+        [K_EMBED_KEY, snap.key],
+        [K_EMBED_DIMS, snap.dims],
+        [K_EMBED_RATE, snap.rate],
+        [K_EMBED_ENABLED, snap.on ? "on" : "off"],
+      ];
+      for (const [key, value] of writes) {
+        if (!(await save(key, value))) return;
+      }
+      eSaved = snap;
+      await invoke("knowledge_embed_now").catch((err) => {
+        store.lastError = String(err);
+      });
       await kb.loadEmbedding();
     } finally {
       saving = false;
@@ -270,10 +285,11 @@
           {t("kb.emb.savedOff")}
         {:else if kb.embedding.error}
           {t("kb.embedError", { error: kb.embedding.error })}
-        {:else if kb.embedding.embedded < kb.embedding.total}
+        {:else if kb.embedding.embedded + kb.embedding.failed < kb.embedding.total}
           <span class="pulse"></span>{t("kb.emb.working", { done: kb.embedding.embedded, total: kb.embedding.total })}
         {:else}
           ✓ {t("kb.emb.savedDone", { done: kb.embedding.embedded, total: kb.embedding.total })}
+          {#if kb.embedding.failed}<span class="dim">· {t("kb.emb.refused", { n: kb.embedding.failed })}</span>{/if}
         {/if}
       </span>
       <span class="grow"></span>
