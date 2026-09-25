@@ -215,6 +215,12 @@ pub async fn turn(
                     .map_err(|e| e.to_string())??;
                     files.push(path);
                 }
+                // Reference files the human picked go with the message itself.
+                for f in design::reference_files(&state, &id, Some(&selected)) {
+                    if !files.contains(&f) {
+                        files.push(f);
+                    }
+                }
                 (design::preamble(&lang, &a.title), design::context(&state, &id, &selected)?)
             }
             other => return Err(format!("{other} artifacts have no agent yet")),
@@ -299,6 +305,10 @@ pub fn export(state: &AppState, id: &str, markdown: &str, png: Option<&str>) -> 
     let md = dir.join(format!("{stem}.md"));
     std::fs::write(&md, markdown).map_err(|e| e.to_string())?;
     let mut out = vec![md];
+    // A design's reference files go along to the track too.
+    if a.kind == design::KIND {
+        out.extend(design::reference_files(state, id, None).into_iter().take(10));
+    }
     if let Some(data) = png.filter(|d| !d.is_empty()) {
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|e| format!("bad picture: {e}"))?;

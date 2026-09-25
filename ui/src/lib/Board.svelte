@@ -1,18 +1,22 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { store, type DesignNode, type DesignOp, type DesignTag, type Stroke } from "./store.svelte";
   import { strokePath, strokesBox, worldStrokes, localStrokes, overlaps, edgeEnds, TAG_COLORS, type Box } from "./ink";
   import { t } from "./i18n.svelte";
 
   /**
-   * The design's sketch board: notes, freehand ink and arrows on an endless
-   * surface. Drag the empty board to pan, wheel to zoom. The agent's
-   * changes show dashed until kept or reverted, right on the item.
-   * `selected` is what goes with the next message to the agent.
+   * The design's sketch board, after Huabu: notes, freehand ink and arrows,
+   * reference files (pictures, PDFs, documents), links, frames that group
+   * and questions the human answers, on an endless surface. Files come by
+   * dropping them on the board, pasting, or the upload tool. Drag the empty
+   * board to pan, wheel to zoom. The agent's changes show dashed until kept
+   * or reverted, right on the item. `selected` is what goes with the next
+   * message to the agent (picked files go as attachments).
    */
   let { selected = $bindable<string[]>([]) }: { selected?: string[] } = $props();
 
-  type Tool = "select" | "note" | "pen" | "eraser" | "arrow";
+  type Tool = "select" | "note" | "pen" | "eraser" | "arrow" | "frame" | "question";
   let tool = $state<Tool>("select");
   let penColor = $state("");
   const PEN_COLORS = ["", "#e03127", "#3b82f6", "#46c46a"];
@@ -109,9 +113,25 @@
     if (resize?.settle !== undefined && v > resize.settle) resize = null;
   });
 
+  /** What a drag moves: the picked items and what picked frames hold. */
+  let dragIds = $state<string[]>([]);
+
+  function inside(n: DesignNode, f: DesignNode): boolean {
+    return n.x >= f.x && n.y >= f.y && n.x + n.w <= f.x + f.w && n.y + n.h <= f.y + f.h;
+  }
+
+  function withMembers(ids: string[]): string[] {
+    const out = new Set(ids);
+    for (const f of doc.nodes) {
+      if (f.kind !== "frame" || !ids.includes(f.id)) continue;
+      for (const n of doc.nodes) if (n.kind !== "frame" && inside(n, f)) out.add(n.id);
+    }
+    return [...out];
+  }
+
   function box(n: DesignNode): Box {
     let { x, y, w, h } = n;
-    if (dragNow && selected.includes(n.id)) {
+    if (dragNow && dragIds.includes(n.id)) {
       x += dragNow.dx;
       y += dragNow.dy;
     }
@@ -209,10 +229,126 @@
     if (arrowFrom && !ids.has(arrowFrom)) arrowFrom = "";
   });
   function startEdit(n: DesignNode) {
-    if (n.kind !== "note") return;
+    if (n.kind === "sketch") return;
     editing = n.id;
     editText = n.text;
   }
+
+  /** The question whose answer is being written. */
+  let answering = $state("");
+  let answerText = $state("");
+  function startAnswer(n: DesignNode) {
+    answering = n.id;
+    answerText = n.answer ?? "";
+  }
+  async function endAnswer() {
+    const id = answering;
+    if (!id) return;
+    answering = "";
+    const n = doc.nodes.find((x) => x.id === id);
+    if (n && (n.answer ?? "") !== answerText) await store.designApply([{ op: "update", id, answer: answerText }]);
+  }
+
+  // ----- frames, questions, links, files -----
+  /** A frame being drawn. */
+  let framing = $state<Box | null>(null);
+  /** Where a link is being typed in, and what. */
+  let linkAt = $state<{ x: number; y: number } | null>(null);
+  let linkDraft = $state("");
+  /** A drop from the system is over the board. */
+  let dropOver = $state(false);
+
+  /** The middle of the view, in board units. */
+  function centre(): { x: number; y: number } {
+    const r = el!.getBoundingClientRect();
+    return { x: (r.width / 2 - view.x) / view.k, y: (r.height / 2 - view.y) / view.k };
+  }
+
+  async function addLink() {
+    const url = linkDraft.trim();
+    const at = linkAt;
+    linkAt = null;
+    linkDraft = "";
+    if (!url || !at) return;
+    const href = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+    await store.designApply([{ op: "create_link", x: at.x, y: at.y, url: href }]);
+  }
+
+  /** Pictures come in at a guessed size; once seen, a card takes the picture's shape. */
+  const shaped = new Set<string>();
+  function shapeToImage(n: DesignNode, img: HTMLImageElement) {
+    if (shaped.has(n.id) || !img.naturalWidth || n.w !== 320 || n.h !== 240) return;
+    shaped.add(n.id);
+    const h = Math.round(Math.min(1200, Math.max(60, (n.w * img.naturalHeight) / img.naturalWidth)));
+    if (Math.abs(h - n.h) > 4) void store.designApply([{ op: "move", id: n.id, x: n.x, y: n.y, w: n.w, h }]);
+  }
+
+  function hostOf(url: string | undefined): string {
+    try {
+      return new URL(url ?? "").host;
+    } catch {
+      return url ?? "";
+    }
+  }
+
+  function extOf(name: string | undefined): string {
+    const m = /\.([a-z0-9]+)$/i.exec(name ?? "");
+    return m ? m[1].toUpperCase() : "FILE";
+  }
+
+  onMount(() => {
+    store.designBoardEl = el ?? null;
+    // Files dropped from the system onto the board become cards where they land.
+    let unlisten: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((e) => {
+        const p = e.payload;
+        if (p.type === "leave") {
+          dropOver = false;
+          return;
+        }
+        const over = store.overDesignBoard(p.position);
+        if (p.type === "enter" || p.type === "over") dropOver = over;
+        else if (p.type === "drop") {
+          dropOver = false;
+          if (!over || !el) return;
+          const at = toWorld({ clientX: p.position.x / devicePixelRatio, clientY: p.position.y / devicePixelRatio });
+          void store.designAddFiles(p.paths, Math.round(at.x), Math.round(at.y));
+        }
+      })
+      .then((u) => (unlisten = u))
+      .catch(() => {});
+    // Pasting onto the board: a picture becomes a file card, an address a
+    // link, any other text a note.
+    const onPaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (store.view !== "design" || editing || answering || linkAt) return;
+      if (target?.closest?.("input, textarea, select, [contenteditable]")) return;
+      const data = e.clipboardData;
+      if (!data || !el) return;
+      const at = centre();
+      const files = [...data.files];
+      if (files.length) {
+        e.preventDefault();
+        files.forEach((f, i) => {
+          const ext = f.type.split("/")[1]?.replace("jpeg", "jpg") ?? "bin";
+          void store.designAddBlob(f, f.name || `pasted.${ext}`, Math.round(at.x + i * 40), Math.round(at.y + i * 40));
+        });
+        return;
+      }
+      const text = data.getData("text/plain").trim();
+      if (!text) return;
+      e.preventDefault();
+      if (/^https?:\/\/\S+$/i.test(text)) void store.designApply([{ op: "create_link", x: Math.round(at.x), y: Math.round(at.y), url: text }]);
+      else void store.designApply([{ op: "create_note", x: Math.round(at.x - 130), y: Math.round(at.y - 75), text }]);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => {
+      unlisten?.();
+      window.removeEventListener("paste", onPaste);
+      if (store.designBoardEl === el) store.designBoardEl = null;
+    };
+  });
   async function endEdit() {
     const id = editing;
     if (!id) return;
@@ -250,6 +386,49 @@
       return;
     }
     if (e.button !== 0) return;
+
+    if (tool === "question") {
+      tool = "select";
+      void store.designApply([{ op: "create_question", x: p.x - 130, y: p.y - 95, text: "" }]).then((res) => {
+        const nid = res[0]?.id;
+        if (nid) {
+          selected = [nid];
+          pendingEdit = nid;
+        }
+      });
+      return;
+    }
+
+    if (tool === "frame") {
+      const start = p;
+      framing = { x: p.x, y: p.y, w: 0, h: 0 };
+      follow(
+        e,
+        (ev) => {
+          const q = toWorld(ev);
+          framing = { x: Math.min(start.x, q.x), y: Math.min(start.y, q.y), w: Math.abs(q.x - start.x), h: Math.abs(q.y - start.y) };
+        },
+        () => {
+          const f = framing;
+          framing = null;
+          tool = "select";
+          if (!f) return;
+          // A click rather than a drag: a frame of the usual size.
+          const b = f.w < 40 || f.h < 40 ? { x: f.x, y: f.y, w: 640, h: 420 } : f;
+          void store
+            .designApply([{ op: "create_frame", x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h), title: "" }])
+            .then((res) => {
+              const nid = res[0]?.id;
+              if (nid) {
+                selected = [nid];
+                pendingEdit = nid;
+              }
+            });
+        },
+        () => (framing = null),
+      );
+      return;
+    }
 
     if (tool === "note") {
       tool = "select";
@@ -313,6 +492,7 @@
     else if (!selected.includes(id)) selected = [id];
     if (!selected.includes(id)) return;
     const start = p;
+    dragIds = withMembers(selected);
     drag = { dx: 0, dy: 0, moved: false };
     follow(
       e,
@@ -329,7 +509,7 @@
           return;
         }
         const ops: DesignOp[] = doc.nodes
-          .filter((n) => selected.includes(n.id))
+          .filter((n) => dragIds.includes(n.id))
           .map((n) => ({ op: "move", id: n.id, x: Math.round(n.x + d.dx), y: Math.round(n.y + d.dy) }));
         drag = { ...d, settle: doc.version };
         void store.designApply(ops).then((res) => {
@@ -423,9 +603,14 @@
     if (target?.closest?.("input, textarea, select, [contenteditable], [role=menu], [role=dialog]")) return;
     if (e.key === " ") spaceHeld = true;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const keys: Record<string, Tool> = { v: "select", n: "note", p: "pen", e: "eraser", a: "arrow" };
+    const keys: Record<string, Tool> = { v: "select", n: "note", p: "pen", e: "eraser", a: "arrow", f: "frame", q: "question" };
     const k = e.key.toLowerCase();
-    if (keys[k]) {
+    if (k === "l" && el) {
+      linkAt = centre();
+    } else if (k === "u" && el) {
+      const c = centre();
+      void store.designPickFiles(Math.round(c.x), Math.round(c.y));
+    } else if (keys[k]) {
       tool = keys[k];
       arrowFrom = "";
     } else if (e.key === "Delete" || e.key === "Backspace") {
@@ -442,7 +627,7 @@
   const single = $derived(selected.length === 1 ? doc.nodes.find((n) => n.id === selected[0]) : undefined);
   const TAG_LIST: DesignTag[] = ["goal", "constraint", "question", "idea"];
 
-  function focusOnMount(node: HTMLTextAreaElement) {
+  function focusOnMount(node: HTMLTextAreaElement | HTMLInputElement) {
     node.focus();
     node.setSelectionRange(node.value.length, node.value.length);
   }
@@ -456,6 +641,8 @@
   class:eraser={tool === "eraser"}
   class:note={tool === "note"}
   class:arrow={tool === "arrow"}
+  class:framing={tool === "frame" || tool === "question"}
+  class:dropover={dropOver}
   bind:this={el}
   onpointerdown={onDown}
   role="application"
@@ -509,7 +696,74 @@
         ondblclick={() => startEdit(n)}
         role="presentation"
       >
-        {#if n.kind === "note"}
+        {#if n.kind === "frame"}
+          <div class="ftitle">
+            {#if editing === n.id}
+              <input
+                class="fedit"
+                bind:value={editText}
+                onblur={endEdit}
+                onpointerdown={(ev) => ev.stopPropagation()}
+                onkeydown={(ev) => (ev.key === "Enter" || ev.key === "Escape") && (ev.currentTarget as HTMLInputElement).blur()}
+                use:focusOnMount
+              />
+            {:else}
+              <span class:empty={!n.text}>{n.text || t("design.frameUntitled")}</span>
+            {/if}
+          </div>
+        {:else if n.kind === "file"}
+          {@const url = store.boardFileUrl(n.src ?? "")}
+          {#if (n.mime ?? "").startsWith("image/")}
+            <img class="pic" src={url} alt={n.name} draggable="false" onload={(ev) => shapeToImage(n, ev.currentTarget as HTMLImageElement)} />
+          {:else}
+            <div class="fhead">
+              <span class="mono ext">{extOf(n.name)}</span>
+              <span class="fname" title={n.name}>{n.name}</span>
+              <button type="button" class="fopen" title={t("design.open")} onpointerdown={(ev) => ev.stopPropagation()} onclick={() => store.designOpenFile(n.src ?? "")}>↗</button>
+            </div>
+            {#if n.mime === "application/pdf"}
+              <!-- Scrolls and zooms only once picked, so the card still drags. -->
+              <iframe class="pdf" class:live={single?.id === n.id} src={url} title={n.name}></iframe>
+            {/if}
+          {/if}
+          {#if editing === n.id}
+            <textarea class="edit caption" bind:value={editText} onblur={endEdit} onpointerdown={(ev) => ev.stopPropagation()} use:focusOnMount></textarea>
+          {:else if n.text}
+            <div class="caption">{n.text}</div>
+          {/if}
+        {:else if n.kind === "link"}
+          <div class="lhead">
+            <span class="ltitle">{n.name || hostOf(n.url)}</span>
+            <button type="button" class="fopen" title={t("design.openLink")} onpointerdown={(ev) => ev.stopPropagation()} onclick={() => store.openUrl(n.url ?? "")}>↗</button>
+          </div>
+          <div class="mono lurl" title={n.url}>{n.url}</div>
+          {#if editing === n.id}
+            <textarea class="edit" bind:value={editText} onblur={endEdit} onpointerdown={(ev) => ev.stopPropagation()} use:focusOnMount></textarea>
+          {:else if n.text}
+            <div class="text">{n.text}</div>
+          {/if}
+        {:else if n.kind === "question"}
+          <span class="mono qlab">? {t("design.questionLabel")}</span>
+          {#if editing === n.id}
+            <textarea class="edit" bind:value={editText} onblur={endEdit} onpointerdown={(ev) => ev.stopPropagation()} use:focusOnMount></textarea>
+          {:else}
+            <div class="text" class:empty={!n.text}>{n.text || t("design.emptyNote")}</div>
+          {/if}
+          <div class="answer" role="presentation" onpointerdown={(ev) => ev.stopPropagation()} ondblclick={(ev) => ev.stopPropagation()} onclick={() => answering !== n.id && startAnswer(n)}>
+            {#if answering === n.id}
+              <textarea
+                class="edit"
+                bind:value={answerText}
+                placeholder={t("design.answerPlaceholder")}
+                onblur={endAnswer}
+                onkeydown={(ev) => (ev.key === "Escape" || (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey))) && (ev.currentTarget as HTMLTextAreaElement).blur()}
+                use:focusOnMount
+              ></textarea>
+            {:else}
+              <span class:empty={!n.answer}>{n.answer || t("design.answerPlaceholder")}</span>
+            {/if}
+          </div>
+        {:else if n.kind === "note"}
           {#if n.tag}<span class="mono tag">{t(`design.tag.${n.tag}` as "design.tag.goal")}</span>{/if}
           {#if editing === n.id}
             <textarea
@@ -528,15 +782,15 @@
           {:else}
             <div class="text" class:empty={!n.text}>{n.text || t("design.emptyNote")}</div>
           {/if}
-          {#if selected.length === 1 && selected[0] === n.id && editing !== n.id}
-            <span class="grip" role="presentation" onpointerdown={(ev) => startResize(ev, n)}></span>
-          {/if}
         {:else}
           <svg class="ink" width={b.w} height={b.h} viewBox="0 0 {n.w} {n.h}" preserveAspectRatio="none">
             {#each n.strokes as s, i (i)}
               <path d={outline(n, i, s)} fill={s.color || "var(--txt)"} class:gone={(erased[n.id] ?? []).includes(i)} />
             {/each}
           </svg>
+        {/if}
+        {#if n.kind !== "sketch" && selected.length === 1 && selected[0] === n.id && editing !== n.id}
+          <span class="grip" role="presentation" onpointerdown={(ev) => startResize(ev, n)}></span>
         {/if}
         {#if change !== undefined}
           <!-- The agent's suggestion: keep it or put it back, right here. -->
@@ -549,6 +803,26 @@
       </div>
     {/each}
 
+    {#if framing}
+      <div class="framing" style="left: {framing.x}px; top: {framing.y}px; width: {framing.w}px; height: {framing.h}px"></div>
+    {/if}
+    {#if linkAt}
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        class="linkin"
+        style="left: {linkAt.x - 160}px; top: {linkAt.y - 18}px"
+        placeholder={t("design.linkPlaceholder")}
+        bind:value={linkDraft}
+        onpointerdown={(ev) => ev.stopPropagation()}
+        onkeydown={(ev) => {
+          if (ev.key === "Enter") void addLink();
+          else if (ev.key === "Escape") linkAt = null;
+        }}
+        onblur={() => void addLink()}
+        autofocus
+      />
+    {/if}
+
     {#if ink}
       <svg class="live" style="left: 0; top: 0" width="1" height="1">
         <path d={strokePath(ink)} fill={ink.color || "var(--txt)"} />
@@ -558,7 +832,7 @@
 
   <!-- Tools, like a sketchbook's: V select · N note · P pen · E eraser · A arrow. -->
   <div class="tools" role="toolbar" aria-label={t("design.tools")} tabindex="-1" onpointerdown={(e) => e.stopPropagation()}>
-    {#each [["select", "V"], ["note", "N"], ["pen", "P"], ["eraser", "E"], ["arrow", "A"]] as [id, key] (id)}
+    {#each [["select", "V"], ["note", "N"], ["question", "Q"], ["frame", "F"], ["pen", "P"], ["eraser", "E"], ["arrow", "A"]] as [id, key] (id)}
       <button
         type="button"
         class="tool"
@@ -575,10 +849,28 @@
           {:else if id === "note"}<rect x="2.5" y="2.5" width="11" height="11" /><path d="M5 6h6M5 9h4" />
           {:else if id === "pen"}<path d="M3 13l1-3 7-7 2 2-7 7z" /><path d="M9.5 4.5l2 2" />
           {:else if id === "eraser"}<path d="M6 13h7M2.5 9.5l5-5 4 4-4 4H5z" />
+          {:else if id === "question"}<circle cx="8" cy="8" r="5.5" /><path d="M6.3 6.4a1.8 1.8 0 1 1 2.4 1.7c-.5.2-.7.6-.7 1.1v.4M8 11.5v.3" />
+          {:else if id === "frame"}<path d="M2.5 5h11M5 2.5v11M2.5 11h11M11 2.5v11" />
           {:else}<path d="M2 12L13 3M13 3H8M13 3v5" />{/if}
         </svg>
       </button>
     {/each}
+    <span class="sep"></span>
+    <button type="button" class="tool" title="{t('design.tool.link')} (L)" aria-label={t("design.tool.link")} onclick={() => (linkAt = centre())}>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M6.5 9.5l3-3M7 4.5l1.3-1.3a2.5 2.5 0 0 1 3.5 3.5L10.5 8M9 11.5l-1.3 1.3a2.5 2.5 0 0 1-3.5-3.5L5.5 8" /></svg>
+    </button>
+    <button
+      type="button"
+      class="tool"
+      title="{t('design.tool.upload')} (U)"
+      aria-label={t("design.tool.upload")}
+      onclick={() => {
+        const c = centre();
+        void store.designPickFiles(Math.round(c.x), Math.round(c.y));
+      }}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M8 10.5V2.5M5 5.5l3-3 3 3M2.5 10v3.5h11V10" /></svg>
+    </button>
     {#if tool === "pen"}
       <span class="sep"></span>
       {#each PEN_COLORS as c (c)}
@@ -614,6 +906,9 @@
   {#if tool === "arrow"}
     <div class="mono mode">{arrowFrom ? t("design.arrowTo") : t("design.arrowFrom")}</div>
   {/if}
+  {#if dropOver}
+    <div class="mono dropnote">{t("design.dropHere")}</div>
+  {/if}
 </div>
 
 <style>
@@ -638,6 +933,236 @@
 
   .board.eraser {
     cursor: cell;
+  }
+
+  .board.framing {
+    cursor: crosshair;
+  }
+
+  .board.dropover {
+    box-shadow: inset 0 0 0 2px var(--acc);
+  }
+
+  .dropnote {
+    position: absolute;
+    left: 50%;
+    top: 14px;
+    transform: translateX(-50%);
+    padding: 5px 10px;
+    font-size: 10px;
+    color: var(--acct);
+    background: var(--accbg);
+    border: 1px solid var(--accln);
+    pointer-events: none;
+  }
+
+  /* A frame: an area under the cards it holds, its title above it. */
+  .node.frame {
+    background: color-mix(in srgb, var(--sel) 45%, transparent);
+    border: 1.5px dashed var(--lines);
+  }
+
+  .ftitle {
+    position: absolute;
+    left: 0;
+    top: -26px;
+    max-width: 100%;
+    font-size: 13px;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .ftitle .empty {
+    color: var(--lab);
+    font-style: italic;
+  }
+
+  .fedit {
+    background: var(--inp);
+    border: 1px solid var(--acc);
+    color: var(--txt);
+    font-size: 13px;
+    padding: 1px 6px;
+    outline: none;
+    user-select: text;
+  }
+
+  .framing {
+    position: absolute;
+    border: 1.5px dashed var(--acc);
+    background: var(--accbg);
+    pointer-events: none;
+  }
+
+  /* Reference cards. */
+  .node.file,
+  .node.link,
+  .node.question {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--card);
+    border: 1px solid var(--lines);
+    overflow: hidden;
+  }
+
+  .node.file {
+    padding: 0;
+  }
+
+  .pic {
+    display: block;
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+    object-fit: contain;
+    background: var(--bg);
+    pointer-events: none;
+  }
+
+  .fhead,
+  .lhead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    min-width: 0;
+  }
+
+  .node.file .fhead {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .ext {
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    color: var(--acct);
+    border: 1px solid var(--accln);
+    padding: 1px 5px;
+    flex-shrink: 0;
+  }
+
+  .fname,
+  .ltitle {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    color: var(--hi);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .fopen {
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    flex-shrink: 0;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--dim);
+    font-size: 12px;
+  }
+
+  .fopen:hover {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .pdf {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    border: 0;
+    background: #fff;
+    pointer-events: none;
+  }
+
+  .pdf.live {
+    pointer-events: auto;
+  }
+
+  .caption {
+    padding: 6px 10px 8px;
+    font-size: 12px;
+    color: var(--dim);
+    line-height: 1.45;
+    white-space: pre-wrap;
+    flex-shrink: 0;
+  }
+
+  textarea.caption {
+    min-height: 48px;
+  }
+
+  .node.link {
+    padding: 0 0 8px;
+    border-left: 3px solid var(--acc);
+  }
+
+  .node.link .text,
+  .node.link .edit {
+    padding: 0 10px;
+    font-size: 12.5px;
+  }
+
+  .lurl {
+    padding: 0 10px;
+    font-size: 10.5px;
+    color: var(--lab);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .node.question {
+    padding: 10px 12px;
+    border-top: 2px solid var(--warn);
+  }
+
+  .qlab {
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--warn);
+  }
+
+  .answer {
+    min-height: 44px;
+    padding: 6px 8px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--txt);
+    background: var(--bg);
+    border: 1px dashed var(--lines);
+    white-space: pre-wrap;
+    word-break: break-word;
+    cursor: text;
+    display: flex;
+  }
+
+  .answer .empty {
+    color: var(--lab);
+  }
+
+  .answer .edit {
+    min-height: 40px;
+  }
+
+  .linkin {
+    position: absolute;
+    width: 320px;
+    height: 36px;
+    padding: 0 10px;
+    background: var(--card);
+    border: 1px solid var(--acc);
+    color: var(--txt);
+    font-family: var(--mono);
+    font-size: 12px;
+    outline: none;
+    user-select: text;
   }
 
   .world {

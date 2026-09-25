@@ -206,5 +206,26 @@ export function briefOf(title: string, doc: DesignDoc, labels: Record<string, st
   }
   const rest = notes.filter((n) => !n.tag).map((n) => `- ${n.text.trim().replace(/\n+/g, " ")}`);
   if (rest.length) parts.push(`## ${labels.note ?? "notes"}\n${rest.join("\n")}`);
+  const one = (s: string | undefined) => (s ?? "").trim().replace(/\n+/g, " ");
+  const inside = (n: DesignNode, f: DesignNode) => n.x >= f.x && n.y >= f.y && n.x + n.w <= f.x + f.w && n.y + n.h <= f.y + f.h;
+  const questions = doc.nodes
+    .filter((n) => n.kind === "question" && n.text.trim())
+    .map((n) => `- ${one(n.text)}\n  - ${labels.answer ?? "answer"}: ${one(n.answer) || (labels.unanswered ?? "(open)")}`);
+  if (questions.length) parts.push(`## ${labels.questions ?? "questions"}\n${questions.join("\n")}`);
+  const links = doc.nodes
+    .filter((n) => n.kind === "link" && n.url)
+    .map((n) => `- [${one(n.name) || n.url}](${n.url})${one(n.text) ? ` — ${one(n.text)}` : ""}`);
+  if (links.length) parts.push(`## ${labels.links ?? "links"}\n${links.join("\n")}`);
+  const files = doc.nodes
+    .filter((n) => n.kind === "file")
+    .map((n) => `- ${one(n.name) || n.src}${one(n.text) ? ` — ${one(n.text)}` : ""}`);
+  if (files.length) parts.push(`## ${labels.files ?? "references"}\n${files.join("\n")}`);
+  const frames = doc.nodes
+    .filter((n) => n.kind === "frame")
+    .map((f) => {
+      const held = doc.nodes.filter((n) => n.kind !== "frame" && n.kind !== "sketch" && inside(n, f)).map((n) => one(n.text) || one(n.name)).filter(Boolean);
+      return `- **${one(f.text) || "—"}**${held.length ? `: ${held.join(" · ")}` : ""}`;
+    });
+  if (frames.length) parts.push(`## ${labels.frames ?? "frames"}\n${frames.join("\n")}`);
   return parts.join("\n\n");
 }

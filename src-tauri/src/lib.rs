@@ -392,6 +392,51 @@ fn design_apply(app: AppHandle, id: String, ops: Vec<serde_json::Value>) -> Resu
     design::apply(&app, &id, ops, design::Actor::Human)
 }
 
+/// Bring files onto a design's board (dropped or picked), as cards from (x, y).
+#[tauri::command(async)]
+fn design_add_files(app: AppHandle, id: String, paths: Vec<String>, x: f64, y: f64) -> Result<Vec<serde_json::Value>, String> {
+    let incoming = paths.into_iter().map(|p| design::Incoming::Path(PathBuf::from(p))).collect();
+    design::add_files(&app, &id, incoming, x, y)
+}
+
+/// Bring a pasted image (base64) onto a design's board.
+#[tauri::command(async)]
+fn design_add_blob(app: AppHandle, id: String, name: String, data: String, x: f64, y: f64) -> Result<Vec<serde_json::Value>, String> {
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|e| format!("bad data: {e}"))?;
+    design::add_files(&app, &id, vec![design::Incoming::Bytes { name, data }], x, y)
+}
+
+/// Open a link card's page in the system browser. Only http(s) addresses,
+/// handed to the OS as one argument (never through a shell).
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let ok = (url.starts_with("https://") || url.starts_with("http://")) && url.len() <= 2000 && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"');
+    if !ok {
+        return Err("only http(s) addresses open".to_string());
+    }
+    #[cfg(windows)]
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(&url).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Open one of a design's reference files in the system's app for it.
+#[tauri::command(async)]
+fn design_open_file(state: State<'_, AppState>, id: String, src: String) -> Result<(), String> {
+    let path = design::file_path(&state, &id, &src)?;
+    #[cfg(windows)]
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(&path).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// Keep or revert the design agent's suggestions.
 #[tauri::command(async)]
 fn design_review(app: AppHandle, id: String, changes: Vec<u64>, keep: bool) -> Result<(), String> {
@@ -924,6 +969,10 @@ pub fn run() {
             design_doc,
             design_apply,
             design_review,
+            design_add_files,
+            design_add_blob,
+            open_url,
+            design_open_file,
             file_stats,
             pick_files,
             save_attachment,
@@ -964,6 +1013,8 @@ pub fn run() {
         ])
         // The side panel's HTML preview, on an origin apart from the app's.
         .register_uri_scheme_protocol(preview::SCHEME, |ctx, request| preview::handle(ctx, request))
+        // A design board's reference files (pictures, PDFs) for its cards.
+        .register_uri_scheme_protocol(preview::BOARD_SCHEME, |ctx, request| preview::handle_board(ctx, request))
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             // The app was Orchestra before it was Divixi; its data folder moves along.

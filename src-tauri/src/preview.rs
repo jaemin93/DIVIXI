@@ -44,6 +44,7 @@ fn mime(ext: &str) -> &'static str {
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",
         "txt" | "md" | "csv" => "text/plain; charset=utf-8",
+        "pdf" => "application/pdf",
         "wasm" => "application/wasm",
         _ => "application/octet-stream",
     }
@@ -104,6 +105,40 @@ fn refuse(status: StatusCode, why: &str) -> Response<Cow<'static, [u8]>> {
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(Cow::Owned(why.as_bytes().to_vec()))
         .unwrap_or_else(|_| Response::new(Cow::Owned(Vec::new())))
+}
+
+pub const BOARD_SCHEME: &str = "board";
+
+/// `<design>/<file>` → a file of a design board's `files/` folder, for
+/// its cards (`http://board.localhost/…` on Windows). Only plain names in
+/// that folder are served.
+pub fn handle_board<R: Runtime>(ctx: UriSchemeContext<'_, R>, request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
+    let path = request.uri().path().trim_start_matches('/');
+    let (design, file) = path.split_once('/').unwrap_or((path, ""));
+    let (design, file) = (decode(design), decode(file));
+    let plain = |s: &str| !s.is_empty() && !s.starts_with('.') && !s.contains(['/', '\\', ':']);
+    if !plain(&design) || !plain(&file) {
+        return refuse(StatusCode::NOT_FOUND, "no such file");
+    }
+    let Some(state) = ctx.app_handle().try_state::<AppState>() else {
+        return refuse(StatusCode::SERVICE_UNAVAILABLE, "starting");
+    };
+    let full = state.artifacts_dir.join(&design).join("files").join(&file);
+    let Ok(bytes) = std::fs::read(&full) else {
+        return refuse(StatusCode::NOT_FOUND, "no such file");
+    };
+    let ext = file.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    let mut res = Response::builder()
+        .header(header::CONTENT_TYPE, mime(&ext))
+        .header("X-Content-Type-Options", "nosniff")
+        .header(header::CACHE_CONTROL, "no-store");
+    // An SVG or a page opened from here runs nothing (pictures and PDFs are left to their viewers).
+    if matches!(ext.as_str(), "svg" | "html" | "htm") {
+        res = res.header("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
+    }
+    res
+        .body(Cow::Owned(bytes))
+        .unwrap_or_else(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR, "could not build the response"))
 }
 
 /// `<track>/<path…>` → the file's bytes, typed by extension.

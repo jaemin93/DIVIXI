@@ -276,6 +276,12 @@
       question: t("design.tag.question"),
       idea: t("design.tag.idea"),
       note: t("design.notes"),
+      questions: t("design.brief.questions"),
+      answer: t("design.brief.answer"),
+      unanswered: t("design.brief.unanswered"),
+      links: t("design.brief.links"),
+      files: t("design.brief.files"),
+      frames: t("design.brief.frames"),
     });
     box?.focus();
   }
@@ -305,6 +311,11 @@
       .onDragDropEvent((e) => {
         if (store.view !== "track" && store.view !== "design") return;
         const p = e.payload;
+        // Over a design's board, the board takes it.
+        if ("position" in p && store.overDesignBoard(p.position)) {
+          dropping = false;
+          return;
+        }
         if (p.type === "enter" || p.type === "over") dropping = true;
         else if (p.type === "leave") dropping = false;
         else if (p.type === "drop") {

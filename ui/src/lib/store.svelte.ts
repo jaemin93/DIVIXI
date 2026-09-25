@@ -253,7 +253,7 @@ export type Stroke = { points: [number, number, number][]; color: string; size: 
 export type DesignTag = "" | "goal" | "constraint" | "question" | "idea";
 export type DesignNode = {
   id: string;
-  kind: "note" | "sketch";
+  kind: "note" | "sketch" | "file" | "link" | "frame" | "question";
   x: number;
   y: number;
   w: number;
@@ -262,6 +262,14 @@ export type DesignNode = {
   tag: DesignTag;
   strokes: Stroke[];
   by: string;
+  /** A file's place in the design's folder (`files/…`). */
+  src?: string;
+  /** A file's name, or a link's page title. */
+  name?: string;
+  mime?: string;
+  url?: string;
+  /** A question's answer. */
+  answer?: string;
 };
 export type DesignEdge = { id: string; from: string; to: string; label: string; by: string };
 export type DesignChange = { id: number; target: string; run: string | null; before: unknown; after: unknown };
@@ -271,7 +279,10 @@ export type DesignOp =
   | { op: "create_note"; x: number; y: number; w?: number; h?: number; text?: string; tag?: DesignTag }
   | { op: "add_stroke"; stroke: Stroke }
   | { op: "set_sketch"; id?: string; x: number; y: number; w: number; h: number; strokes: Stroke[] }
-  | { op: "update"; id: string; text?: string; tag?: DesignTag }
+  | { op: "update"; id: string; text?: string; tag?: DesignTag; answer?: string; url?: string; title?: string }
+  | { op: "create_frame"; x: number; y: number; w: number; h: number; title?: string }
+  | { op: "create_question"; x: number; y: number; text: string; w?: number; h?: number }
+  | { op: "create_link"; x: number; y: number; url: string; title?: string; text?: string }
   | { op: "move"; id: string; x: number; y: number; w?: number; h?: number }
   | { op: "delete"; ids: string[] }
   | { op: "connect"; from: string; to: string; label?: string };
@@ -1207,6 +1218,80 @@ class Store {
       this.lastError = String(err);
       return [];
     }
+  }
+
+  /** Files from disk onto the open board, as cards from (x, y). */
+  async designAddFiles(paths: string[], x: number, y: number) {
+    const id = this.artifact;
+    if (!id || !paths.length) return;
+    try {
+      const res = await invoke<DesignResult[]>("design_add_files", { id, paths, x, y });
+      const bad = res.filter((r) => !r.ok);
+      if (bad.length) this.lastError = bad.map((r) => r.error).join("\n");
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** A pasted image onto the open board. */
+  async designAddBlob(blob: Blob, name: string, x: number, y: number) {
+    const id = this.artifact;
+    if (!id) return;
+    try {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      const res = await invoke<DesignResult[]>("design_add_blob", { id, name, data: btoa(binary), x, y });
+      const bad = res.find((r) => !r.ok);
+      if (bad) this.lastError = bad.error ?? "the file was not added";
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Pick files and put them on the open board at (x, y). */
+  async designPickFiles(x: number, y: number) {
+    try {
+      const paths = await invoke<string[]>("pick_files", { start: null });
+      await this.designAddFiles(paths, x, y);
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Where a card shows a reference file of the open design. */
+  boardFileUrl(src: string): string {
+    const base = navigator.userAgent.includes("Windows") ? "http://board.localhost/" : "board://localhost/";
+    return `${base}${encodeURIComponent(this.artifact)}/${encodeURIComponent(src.replace(/^files\//, ""))}`;
+  }
+
+  async designOpenFile(src: string) {
+    try {
+      await invoke("design_open_file", { id: this.artifact, src });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  async openUrl(url: string) {
+    try {
+      await invoke("open_url", { url });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** The board's element, so a drop from the system lands on it rather than in the composer. */
+  designBoardEl: HTMLElement | null = null;
+
+  /** Whether a drop at a window position (physical pixels) is over the board. */
+  overDesignBoard(pos: { x: number; y: number }): boolean {
+    const el = this.designBoardEl;
+    if (!el || this.view !== "design") return false;
+    const r = el.getBoundingClientRect();
+    const x = pos.x / devicePixelRatio;
+    const y = pos.y / devicePixelRatio;
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
   }
 
   async designReview(changes: number[], keep: boolean) {
