@@ -661,6 +661,12 @@ fn workspace_read(state: State<'_, AppState>, track: String, path: String) -> Re
     workspace::read(&track_root(&state, &track)?, &path)
 }
 
+/// Save a file edited in the panel; see `workspace::write`.
+#[tauri::command(async)]
+fn workspace_write(state: State<'_, AppState>, track: String, path: String, text: String, base: String, force: bool) -> Result<workspace::FileContent, String> {
+    workspace::write(&track_root(&state, &track)?, &path, &text, &base, force)
+}
+
 /// What git says has changed in the track's folder.
 #[tauri::command(async)]
 fn workspace_git_status(state: State<'_, AppState>, track: String) -> Result<workspace::GitStatus, String> {
@@ -937,6 +943,7 @@ pub fn run() {
             app_info,
             workspace_tree,
             workspace_read,
+            workspace_write,
             workspace_git_status,
             workspace_git_diff,
             workspace_reveal,

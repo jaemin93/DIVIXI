@@ -43,6 +43,9 @@ pub struct FileContent {
     pub text: Option<String>,
     /// `data:` URL for images.
     pub data_url: Option<String>,
+    /// Whether the text is the file's exact contents (valid UTF-8), so it
+    /// can be edited and written back without mangling bytes.
+    pub editable: bool,
 }
 
 /// One changed path as `git status` reports it.
@@ -198,6 +201,7 @@ pub fn read(root: &Path, rel: &str) -> Result<FileContent, String> {
         ext: ext.clone(),
         text: None,
         data_url: None,
+        editable: false,
     };
     if IMAGE_EXT.contains(&ext.as_str()) {
         if size > MAX_IMAGE {
@@ -219,11 +223,62 @@ pub fn read(root: &Path, rel: &str) -> Result<FileContent, String> {
         out.kind = "binary".into();
         return Ok(out);
     }
-    out.text = Some(String::from_utf8_lossy(&bytes).into_owned());
+    match String::from_utf8(bytes) {
+        Ok(text) => {
+            out.text = Some(text);
+            out.editable = true;
+        }
+        // Shown with replacement characters; saving that would corrupt it.
+        Err(e) => out.text = Some(String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    }
     if matches!(ext.as_str(), "md" | "markdown" | "mdx") {
         out.kind = "markdown".into();
     }
     Ok(out)
+}
+
+/// What `write` refuses with when the file changed on disk since it was
+/// opened; the panel offers to overwrite or reload.
+pub const CHANGED_ON_DISK: &str = "changed on disk";
+
+/// Line breaks as one `\n`, for comparing texts that differ only in them.
+fn lf(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('\r') {
+        std::borrow::Cow::Owned(s.replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
+/// Save an edited file. `base` is the text the edit started from: when the
+/// file on disk no longer holds it, nothing is written and the error is
+/// [`CHANGED_ON_DISK`], unless `force`. The file keeps its line endings
+/// (CRLF stays CRLF). The new bytes go to a temporary file beside it first,
+/// so a failed write never leaves it half written.
+pub fn write(root: &Path, rel: &str, text: &str, base: &str, force: bool) -> Result<FileContent, String> {
+    let full = resolve(root, rel)?;
+    let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err(format!("{rel} is not a file"));
+    }
+    if text.len() as u64 > MAX_TEXT {
+        return Err("the text is larger than the panel edits".to_string());
+    }
+    let current = std::fs::read(&full).map_err(|e| e.to_string())?;
+    let current = String::from_utf8(current).map_err(|_| format!("{rel} is not UTF-8 text; it is not edited here"))?;
+    if !force && lf(&current) != lf(base) {
+        return Err(CHANGED_ON_DISK.to_string());
+    }
+    let crlf = current.contains("\r\n");
+    let body = lf(text);
+    let out = if crlf { body.replace('\n', "\r\n") } else { body.into_owned() };
+    let tmp = full.with_file_name(format!(".{}.divixi-save", full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+    std::fs::write(&tmp, out.as_bytes()).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::rename(&tmp, &full) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    read(root, rel)
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
@@ -324,6 +379,33 @@ pub fn reveal(root: &Path, rel: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writes_keep_line_endings_and_refuse_stale_edits() {
+        let dir = std::env::temp_dir().join(format!("divixi-ws-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.py"), "x = 1\r\ny = 2\r\n").unwrap();
+        let opened = read(&dir, "a.py").unwrap();
+        assert!(opened.editable);
+        // The panel edits with \n, as a textarea gives it back.
+        let saved = write(&dir, "a.py", "x = 1\ny = 3\n", "x = 1\ny = 2\n", false).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.py")).unwrap(), "x = 1\r\ny = 3\r\n", "CRLF kept");
+        assert_eq!(saved.text.as_deref(), Some("x = 1\r\ny = 3\r\n"));
+        // Someone else changed it since: refused, then forced.
+        std::fs::write(dir.join("a.py"), "z = 9\n").unwrap();
+        assert_eq!(write(&dir, "a.py", "x = 4\n", "x = 1\ny = 3\n", false).unwrap_err(), CHANGED_ON_DISK);
+        write(&dir, "a.py", "x = 4\n", "x = 1\ny = 3\n", true).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.py")).unwrap(), "x = 4\n");
+        assert!(!dir.join(".a.py.divixi-save").exists(), "no temporary file left");
+        // Not UTF-8: shown, not editable, not written.
+        std::fs::write(dir.join("b.txt"), [0x68, 0x69, 0xff, 0x0a]).unwrap();
+        assert!(!read(&dir, "b.txt").unwrap().editable);
+        assert!(write(&dir, "b.txt", "hi\n", "hi\n", true).is_err());
+        // Outside the folder: refused.
+        assert!(write(&dir, "../x.txt", "", "", true).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("orchestra-ws-{name}-{}", std::process::id()));

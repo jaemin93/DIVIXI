@@ -398,7 +398,20 @@ export type WsFile = {
   ext: string;
   text: string | null;
   data_url: string | null;
+  /** The text is the file's exact contents, so it can be edited and saved. */
+  editable: boolean;
 };
+
+/** An edit not yet saved: its text, and the file's text it started from. */
+export type WsDraft = { text: string; base: string };
+
+/** Line breaks as one `\n`. */
+function lf(text: string): string {
+  return text.includes("\r") ? text.replace(/\r\n/g, "\n") : text;
+}
+
+/** Mirrors `workspace::CHANGED_ON_DISK`. */
+const CHANGED_ON_DISK = "changed on disk";
 
 /** Mirrors `workspace::Change`. */
 export type WsChange = { path: string; code: string; untracked: boolean; from: string | null };
@@ -541,6 +554,17 @@ class Store {
   files = $state<Record<string, WsFile>>({});
   /** Markdown files render as a preview unless the raw text is asked for. */
   rawMarkdown = $state<Record<string, boolean>>({});
+  /**
+   * Unsaved edits, by `track\0path`, so they outlive switching tracks and
+   * reloading the file: the base they started from is kept with them.
+   */
+  drafts = $state<Record<string, WsDraft>>({});
+  /** Files whose save found them changed on disk, by `track\0path`. */
+  saveConflicts = $state<Record<string, boolean>>({});
+  /** Files being saved now, by `track\0path`. */
+  saving = $state<Record<string, boolean>>({});
+  /** The file whose close was asked while it had unsaved edits; a second close discards. */
+  closeAsked = $state("");
 
   private persistWidth(key: string, value: number) {
     invoke("set_setting", { key, value: String(value) }).catch((err) => {
@@ -659,7 +683,96 @@ class Store {
     await this.loadFile(path);
   }
 
+  private draftKey(path: string): string {
+    return `${this.track}\0${path}`;
+  }
+
+  /**
+   * The text to edit: the unsaved draft, else the file as loaded. Line
+   * breaks are `\n`, as a textarea gives them back; saving restores the
+   * file's own (CRLF stays CRLF).
+   */
+  textOf(path: string): string {
+    return this.drafts[this.draftKey(path)]?.text ?? lf(this.files[path]?.text ?? "");
+  }
+
+  isDirty(path: string): boolean {
+    return !!this.drafts[this.draftKey(path)];
+  }
+
+  isSaving(path: string): boolean {
+    return !!this.saving[this.draftKey(path)];
+  }
+
+  hasConflict(path: string): boolean {
+    return !!this.saveConflicts[this.draftKey(path)];
+  }
+
+  /** Keep an edit; back to the file's text, it is no longer a draft. */
+  setDraft(path: string, text: string) {
+    const key = this.draftKey(path);
+    const base = this.drafts[key]?.base ?? this.files[path]?.text ?? "";
+    if (text === lf(base)) {
+      const { [key]: _gone, ...rest } = this.drafts;
+      this.drafts = rest;
+    } else {
+      this.drafts = { ...this.drafts, [key]: { text, base } };
+    }
+    if (this.closeAsked === path) this.closeAsked = "";
+  }
+
+  /**
+   * Write a draft to disk. When the file changed on disk since the edit
+   * began, nothing is written and the file is marked in conflict, unless
+   * `force`.
+   */
+  async saveFile(path: string, force = false) {
+    const track = this.track;
+    const key = this.draftKey(path);
+    const draft = this.drafts[key];
+    if (!track || !draft || this.saving[key]) return;
+    this.saving = { ...this.saving, [key]: true };
+    try {
+      const file = await invoke<WsFile>("workspace_write", { track, path, text: draft.text, base: draft.base, force });
+      // Edits typed while it saved stay a draft over the new base.
+      const now = this.drafts[key];
+      const { [key]: _saved, ...rest } = this.drafts;
+      this.drafts = now && now.text !== draft.text ? { ...rest, [key]: { text: now.text, base: file.text ?? "" } } : rest;
+      const { [key]: _c, ...conflicts } = this.saveConflicts;
+      this.saveConflicts = conflicts;
+      if (this.track === track) {
+        this.files = { ...this.files, [path]: file };
+        void this.loadGit();
+      }
+    } catch (err) {
+      if (String(err).includes(CHANGED_ON_DISK)) this.saveConflicts = { ...this.saveConflicts, [key]: true };
+      else this.lastError = String(err);
+    } finally {
+      const { [key]: _s, ...rest } = this.saving;
+      this.saving = rest;
+    }
+  }
+
+  /** Drop an unsaved edit and show the file as it is on disk. */
+  async discardDraft(path: string) {
+    const key = this.draftKey(path);
+    const { [key]: _d, ...drafts } = this.drafts;
+    this.drafts = drafts;
+    const { [key]: _c, ...conflicts } = this.saveConflicts;
+    this.saveConflicts = conflicts;
+    await this.loadFile(path);
+  }
+
   closeFile(path: string) {
+    // Unsaved edits: the first close asks, the second discards.
+    if (this.isDirty(path) && this.closeAsked !== path) {
+      this.closeAsked = path;
+      return;
+    }
+    if (this.closeAsked === path) this.closeAsked = "";
+    const key = this.draftKey(path);
+    const { [key]: _d, ...drafts } = this.drafts;
+    this.drafts = drafts;
     const i = this.openFiles.indexOf(path);
     this.openFiles = this.openFiles.filter((p) => p !== path);
     const { [path]: _gone, ...rest } = this.files;

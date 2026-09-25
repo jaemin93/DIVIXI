@@ -4,6 +4,7 @@
   import Icon from "./Icon.svelte";
   import Markdown from "./Markdown.svelte";
   import SplitHandle from "./SplitHandle.svelte";
+  import CodeEditor from "./CodeEditor.svelte";
   import { highlight, languageFor } from "./highlight";
   import { t } from "./i18n.svelte";
 
@@ -113,9 +114,11 @@
   }
 
   const diffHtml = $derived(store.diffPath ? highlight(store.diffs[store.diffPath] ?? "", "diff") : "");
-  const codeHtml = $derived(activeFile?.text !== undefined && activeFile.text !== null ? highlight(activeFile.text, languageFor(activeFile.ext)) : "");
+  const codeHtml = $derived(activeFile?.text !== undefined && activeFile.text !== null && !activeFile.editable ? highlight(activeFile.text, languageFor(activeFile.ext)) : "");
   const crumbs = $derived(store.activeFile ? store.activeFile.split("/") : []);
   const raw = $derived(!!store.rawMarkdown[store.activeFile]);
+  /** Code and text open straight in the editor; markdown when shown as source. */
+  const editing = $derived(!!activeFile?.editable && (activeFile.kind === "text" || (activeFile.kind === "markdown" && raw)));
 </script>
 
 <aside style="width: {store.panelWidth}px">
@@ -142,7 +145,13 @@
       {#each store.openFiles as path (path)}
         <div class="tab file" class:on={store.panelTab === "file" && store.activeFile === path}>
           <button class="fname mono" onclick={() => { store.activeFile = path; store.panelTab = "file"; }} title={path}>{path.split("/").at(-1)}</button>
-          <button class="x" onclick={() => store.closeFile(path)} aria-label={t("ws.closeFile")}><Icon name="close" size={10} /></button>
+          {#if store.closeAsked === path}
+            <button class="mono discard" onclick={() => store.closeFile(path)} title={t("ws.discardTitle")}>{t("ws.discard")}</button>
+          {:else if store.isDirty(path)}
+            <button class="x dirty" onclick={() => store.closeFile(path)} aria-label={t("ws.unsavedClose")} title={t("ws.unsavedClose")}><span class="dot"></span></button>
+          {:else}
+            <button class="x" onclick={() => store.closeFile(path)} aria-label={t("ws.closeFile")}><Icon name="close" size={10} /></button>
+          {/if}
         </div>
       {/each}
     </div>
@@ -197,6 +206,9 @@
         {/each}
       </nav>
       <span class="grow"></span>
+      {#if editing && store.isDirty(store.activeFile)}
+        <button class="btn sm btn-acc" disabled={store.isSaving(store.activeFile)} onclick={() => store.saveFile(store.activeFile)} title="Ctrl+S">{store.isSaving(store.activeFile) ? t("ws.saving") : t("ws.save")}</button>
+      {/if}
       {#if activeFile?.kind === "markdown"}
         <button class="btn sm" onclick={() => (store.rawMarkdown = { ...store.rawMarkdown, [store.activeFile]: !raw })}>{raw ? t("ws.preview") : t("ws.raw")}</button>
       {/if}
@@ -219,7 +231,24 @@
         {#if !activeFile}
           <div class="mono empty">{t("ws.loading")}</div>
         {:else if activeFile.kind === "markdown" && !raw}
-          <div class="mdwrap"><Markdown source={activeFile.text ?? ""} /></div>
+          <div class="mdwrap"><Markdown source={store.textOf(store.activeFile)} /></div>
+        {:else if editing}
+          {#if store.hasConflict(store.activeFile)}
+            <div class="conflict">
+              <span>{t("ws.conflict")}</span>
+              <span class="grow"></span>
+              <button class="btn sm" onclick={() => store.saveFile(store.activeFile, true)}>{t("ws.overwrite")}</button>
+              <button class="btn sm" onclick={() => store.discardDraft(store.activeFile)}>{t("ws.reload")}</button>
+            </div>
+          {/if}
+          {#key store.activeFile}
+            <CodeEditor
+              value={store.textOf(store.activeFile)}
+              language={languageFor(activeFile.ext)}
+              onchange={(text) => store.setDraft(store.activeFile, text)}
+              onsave={() => store.saveFile(store.activeFile)}
+            />
+          {/key}
         {:else if activeFile.kind === "markdown" || activeFile.kind === "text"}
           <pre class="src hljs">{@html codeHtml}</pre>
         {:else if activeFile.kind === "image"}
@@ -645,5 +674,39 @@
 
   .kbin {
     color: var(--acct);
+  }
+
+  .x.dirty .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--hi);
+    display: block;
+  }
+
+  .x.dirty:hover .dot {
+    background: var(--deltx);
+  }
+
+  .discard {
+    background: var(--delbg);
+    border: 0;
+    color: var(--deltx);
+    font-size: 9.5px;
+    padding: 0 6px;
+    height: 18px;
+    align-self: center;
+    margin-right: 4px;
+  }
+
+  .conflict {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 12px;
+    font-size: 12px;
+    color: var(--warn);
+    background: var(--warnbg);
+    border-bottom: 1px solid var(--warnln);
   }
 </style>
