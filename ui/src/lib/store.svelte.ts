@@ -345,6 +345,16 @@ export type WorkerReport = {
   reminder_run?: string;
 };
 
+/** What a worker changed in its own checkout and the human has not merged (worktree.rs). */
+export type WorkerChanges = {
+  isolated: boolean;
+  branch: string;
+  sub: string;
+  files: { path: string; status: string; added: number | null; removed: number | null }[];
+};
+/** How a merge ended: files written, or the conflicts that stopped it. */
+export type WorkerMerged = { files: string[]; conflicts: string[] };
+
 /** A worker's reply without its report block (the card shows the report). */
 export function withoutReportBlock(text: string): string {
   const at = text.indexOf(REPORT_FENCE);
@@ -2269,6 +2279,39 @@ class Store {
     } finally {
       this.reportsAsked.delete(run);
     }
+  }
+
+  /** Workers' unmerged changes, by `track/worker`. */
+  workerChanges = $state<Record<string, WorkerChanges>>({});
+
+  async loadWorkerChanges(track: string, worker: string) {
+    try {
+      const c = await invoke<WorkerChanges>("worker_changes", { track, worker });
+      this.workerChanges = { ...this.workerChanges, [`${track}/${worker}`]: c };
+    } catch {
+      // Cosmetic: no changes section.
+    }
+  }
+
+  async workerFileDiff(track: string, worker: string, path: string): Promise<string> {
+    try {
+      return await invoke<string>("worker_file_diff", { track, worker, path });
+    } catch (err) {
+      return String(err);
+    }
+  }
+
+  /** Bring a worker's changes into the track folder; the panel catches up. */
+  async mergeWorker(track: string, worker: string): Promise<WorkerMerged> {
+    const merged = await invoke<WorkerMerged>("worker_merge", { track, worker });
+    await this.loadWorkerChanges(track, worker);
+    if (merged.files.length && this.panelOpen && this.track === track) void this.refreshWorkspace();
+    return merged;
+  }
+
+  async discardWorker(track: string, worker: string) {
+    await invoke("worker_discard", { track, worker });
+    await this.loadWorkerChanges(track, worker);
   }
 
   /** Worker names seen in a track, in first-seen order, excluding the conductor. */

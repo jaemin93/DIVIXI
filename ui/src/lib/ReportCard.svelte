@@ -1,13 +1,27 @@
 <script lang="ts">
   import { store, type WorkerReport } from "./store.svelte";
   import { t } from "./i18n.svelte";
+  import WorkerChanges from "./WorkerChanges.svelte";
 
   /**
    * A worker's report as it crossed the membrane: where the work stands, a
    * summary, and counts of changes, checks and questions; the lists open on
    * demand. Questions always show: they are what someone has to answer.
    */
-  let { run, worker = "", compact = false }: { run: string; worker?: string; compact?: boolean } = $props();
+  let {
+    run,
+    worker = "",
+    compact = false,
+    track = "",
+    latest = false,
+  }: {
+    run: string;
+    worker?: string;
+    compact?: boolean;
+    /** With `latest`, the worker's unmerged changes show under its newest report. */
+    track?: string;
+    latest?: boolean;
+  } = $props();
 
   const report = $derived<WorkerReport | undefined>(store.reports[run]);
   let open = $state(false);
@@ -108,6 +122,10 @@
           </ul>
         {/if}
       </div>
+    {/if}
+
+    {#if latest && track && worker}
+      <WorkerChanges {track} {worker} />
     {/if}
   </section>
 {/if}

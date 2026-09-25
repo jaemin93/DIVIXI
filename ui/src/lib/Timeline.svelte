@@ -53,6 +53,16 @@
    *  by a run no longer here) go at the end. */
   /** The human and the conductor, or the human and an artifact's agent. */
   const conductorRuns = $derived(store.chatRuns);
+  /** The newest report turn of each worker: its card carries the unmerged changes. */
+  const latestReport = $derived.by(() => {
+    const out: Record<string, string> = {};
+    for (const r of conductorRuns) {
+      if (!r.prompt.startsWith(REPORT_PREFIX)) continue;
+      const w = /\bworker=(\S+)/.exec(r.prompt.split("\n")[0])?.[1];
+      if (w) out[w] = r.id;
+    }
+    return out;
+  });
   const decisionsByRun = $derived.by(() => {
     const byRun: Record<string, Decision[]> = {};
     const orphans: Decision[] = [];
@@ -102,11 +112,12 @@
       {@const head = run.prompt.split("\n")[0]}
       {@const workerRun = /\brun=(\S+)/.exec(head)?.[1] ?? ""}
       {@const worker = /\bworker=(\S+)/.exec(head)?.[1] ?? ""}
+      {@const latest = latestReport[worker] === run.id}
       {#if workerRun && store.reports[workerRun]}
-        <ReportCard run={workerRun} {worker} />
+        <ReportCard run={workerRun} {worker} track={run.track} {latest} />
       {:else}
         <div class="sys mono">{t("timeline.reportArrived")} · {head.replace(REPORT_PREFIX, "").trim()}</div>
-        {#if workerRun}<ReportCard run={workerRun} {worker} />{/if}
+        {#if workerRun}<ReportCard run={workerRun} {worker} track={run.track} {latest} />{/if}
       {/if}
     {:else if run.prompt.startsWith(PERMISSION_PREFIX)}
       <!-- A worker asked; the conductor answers for the human. -->

@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
-use crate::{pump, AppState};
+use crate::{pump, worktree, AppState};
 
 /// The worker name conductor turns are recorded under.
 pub const CONDUCTOR_SESSION: &str = "conductor";
@@ -177,6 +177,7 @@ fn worker_key(track: &str, worker: &str) -> String {
 /// interface language. Only the wording differs; the rules are the same.
 fn preamble(lang: &str, track: &TrackInfo) -> String {
     let intent = track.intent.trim();
+    let isolated = worktree::repository(std::path::Path::new(&track.cwd)).is_some();
     if lang.starts_with("ko") {
         let about = if intent.is_empty() {
             String::new()
@@ -200,10 +201,15 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
 - 사람이 고른 문서가 모인 지식 라이브러리가 있습니다. 사람이 "우리가 아는 것", 자기 문서·노트, 이름으로 특정 문서를 언급하거나, 맡기려는 일이 라이브러리가 다루는 주제에 닿으면 `knowledge_search`로 찾습니다(무엇이 있는지는 `knowledge_list_sources`). 일반적인 코딩 질문이나 작업 폴더만 봐도 되는 일에는 부르지 않습니다. 작업자는 라이브러리를 볼 수 없으므로, 작업자에게 필요한 내용은 핵심 사실과 읽을 파일 경로를 task에 직접 담아 넘깁니다. 라이브러리에서 가져온 내용은 출처(파일)를 밝힙니다.
 - 한국어로 말합니다. 짧게, 명확하게.
 
-작업 디렉터리는 {cwd} 입니다. 작업자도 같은 디렉터리에서 일합니다.
+작업 디렉터리는 {cwd} 입니다. {folders}
 "#,
             name = track.name,
             cwd = track.cwd,
+            folders = if isolated {
+                "git 저장소이므로 작업자는 저마다 자기 checkout(git worktree)에서 일합니다. 작업자의 변경은 사람이 보고 카드에서 합치기를 눌러야 이 디렉터리에 들어옵니다. 합치기 전에는 당신도 다른 작업자도 그 변경을 볼 수 없으니, 보고를 전할 때 변경이 아직 합쳐지지 않았다고 말하고, 한 작업자의 결과가 다음 작업의 전제면 사람에게 먼저 합쳐 달라고 한 뒤 맡깁니다. `worker_status`의 unmerged_files가 합쳐지지 않은 파일 수입니다."
+            } else {
+                "git 저장소가 아니므로 작업자는 모두 이 디렉터리를 같이 씁니다. 같은 파일을 두 작업자에게 동시에 맡기지 않습니다."
+            },
         );
     }
     let about = if intent.is_empty() {
@@ -228,10 +234,15 @@ Rules:
 - There is a knowledge library of documents the human chose. When the human asks what we know about something, refers to their docs or notes or to a document by name, or when work you are about to delegate touches a topic the library covers, search it with `knowledge_search` (`knowledge_list_sources` shows what is there). Do not call it for general coding questions or what the working folder answers. Workers cannot see the library: put what they need from it (the key facts and the file paths to read) into their task. Name the file when you use something from the library.
 - Speak English. Short and clear.
 
-The working directory is {cwd}. Workers work in the same directory.
+The working directory is {cwd}. {folders}
 "#,
         name = track.name,
         cwd = track.cwd,
+        folders = if isolated {
+            "It is a git repository, so each worker works in a checkout of its own (a git worktree). A worker's changes reach this directory only when the human merges them from its report card. Until then neither you nor other workers can see them: when you relay a report, say the changes are not merged yet, and when one worker's result is the ground for the next task, ask the human to merge it first. `worker_status` shows unmerged_files per worker."
+        } else {
+            "It is not a git repository, so all workers share this directory. Never give two workers the same files at the same time."
+        },
     )
 }
 
@@ -858,7 +869,21 @@ async fn worker_list(state: &AppState, track: &str) -> Vec<Value> {
             }));
         }
     }
+    drop(workers);
+    for item in list.iter_mut() {
+        let Some(name) = item["name"].as_str().map(str::to_string) else { continue };
+        if let Ok(c) = worktree::changes(&state.store, track, &name) {
+            if c.isolated {
+                item["unmerged_files"] = json!(c.files.len());
+            }
+        }
+    }
     list
+}
+
+/// Whether a worker is in a turn right now.
+pub async fn worker_running(state: &AppState, track: &str, worker: &str) -> bool {
+    state.sessions.workers.lock().await.get(&worker_key(track, worker)).is_some_and(|l| l.running.is_some())
 }
 
 /// Session options for an agent: working directory, the track's choices
@@ -937,6 +962,30 @@ async fn start_worker_turn(
     let info = track_info(&state, &track)?;
     let key = worker_key(&track, &name);
 
+    // The worker's own checkout when the track is in git (made the first
+    // time, brought up to date when nothing is pending), else the track
+    // folder. Never touched while the worker is in a turn.
+    if let Some(run) = state.sessions.workers.lock().await.get(&key).and_then(|l| l.running.clone()) {
+        return Err(format!("worker {name} is still working on run {run}. Wait for its {REPORT_PREFIX} before sending more."));
+    }
+    let checkout = {
+        let (app, track, name, cwd) = (app.clone(), track.clone(), name.clone(), info.cwd.clone());
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<AppState>();
+            worktree::ensure(&state.store, &state.worktrees_dir, &track, &name, std::path::Path::new(&cwd))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    };
+    let (worker_cwd, folder) = match checkout {
+        Ok(Some(c)) => (c.cwd().to_string_lossy().into_owned(), format!("its own checkout (branch {}); the human merges its changes into the track folder", c.branch)),
+        Ok(None) => (info.cwd.clone(), "the track folder, shared with other workers (not a git repository)".to_string()),
+        Err(err) => {
+            tracing::warn!(%err, worker = %name, "could not make the worker's checkout; it works in the track folder");
+            (info.cwd.clone(), format!("the track folder, shared (its own checkout failed: {err})"))
+        }
+    };
+
     // Resolve or open the worker session; refuse a second turn on a busy worker.
     let (agent_id, turns, session, resumed, note, run) = {
         let mut workers = state.sessions.workers.lock().await;
@@ -988,7 +1037,7 @@ async fn start_worker_turn(
                 // a worker on some other agent gets that agent's defaults.
                 let empty = BTreeMap::new();
                 let chosen = if agent_id == info.effective_worker_agent() { info.effective_worker_config() } else { &empty };
-                let mut opts = session_options(&state, &agent_id, &info.cwd, chosen, None);
+                let mut opts = session_options(&state, &agent_id, &worker_cwd, chosen, None);
                 opts.resume = resume;
                 tracing::info!(%track, worker = %name, agent = %agent_id, resume = ?opts.resume, "opening worker session");
                 let session = Arc::new(AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?);
@@ -1028,7 +1077,7 @@ async fn start_worker_turn(
         // parallel asks cannot both pass it.
         let run = state
             .store
-            .begin_run(&track, &name, &agent_id, &text, &info.cwd)
+            .begin_run(&track, &name, &agent_id, &text, &worker_cwd)
             .map_err(|e| e.to_string())?;
         if let Some(live) = workers.get_mut(&key) {
             live.running = Some(run.clone());
@@ -1039,7 +1088,7 @@ async fn start_worker_turn(
     // The turn itself, in the background. The task ends with how to report;
     // the stored prompt stays what the conductor wrote.
     let app_for_turn = app.clone();
-    let (track_t, name_t, run_t, cwd_t, agent_t) = (track.clone(), name.clone(), run.clone(), info.cwd.clone(), agent_id.clone());
+    let (track_t, name_t, run_t, cwd_t, agent_t) = (track.clone(), name.clone(), run.clone(), worker_cwd.clone(), agent_id.clone());
     let task = format!("{text}\n\n{}", report::instructions());
     tauri::async_runtime::spawn(async move {
         let app = app_for_turn;
@@ -1078,6 +1127,7 @@ async fn start_worker_turn(
         "turn": turns,
         "resumed": resumed,
         "status": "running",
+        "folder": folder,
         "note": format!("The worker is working. Its report will arrive as a {REPORT_PREFIX} message; tell the human what you delegated and end your turn."),
     });
     if let Some(note) = note {

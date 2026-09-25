@@ -25,6 +25,7 @@ mod metrics;
 mod preview;
 mod terminal;
 mod workspace;
+mod worktree;
 
 /// How often accumulated message text is flushed to the webview and the store.
 ///
@@ -50,6 +51,8 @@ pub struct AppState {
     attachments_dir: PathBuf,
     /// One working folder per artifact, for its agent.
     pub(crate) artifacts_dir: PathBuf,
+    /// Workers' own git checkouts (`<app data>/worktrees/<track>/<worker>`).
+    pub(crate) worktrees_dir: PathBuf,
     /// Artifacts' agent sessions.
     pub(crate) artifacts: artifact::Artifacts,
     /// Designs' boards, cached from the store.
@@ -211,7 +214,14 @@ async fn update_track(state: State<'_, AppState>, id: String, mut patch: TrackPa
         if state.sessions.is_active(&id).await {
             return Err("the track is still working; wait before changing the folder".to_string());
         }
+        let workers = track_workers(&state, &id);
+        for w in &workers {
+            if worktree::changes(&state.store, &id, w).is_ok_and(|c| !c.files.is_empty()) {
+                return Err(format!("worker {w} has changes not merged into the track folder; merge or discard them first"));
+            }
+        }
         state.sessions.close_track(&id).await;
+        worktree::remove_track(&state.store, &id, &workers);
         state.store.forget_track_sessions(&id).map_err(|e| e.to_string())?;
     }
     state.store.update_track(&id, &patch).map_err(|e| e.to_string())
@@ -224,7 +234,68 @@ async fn delete_track(state: State<'_, AppState>, id: String) -> Result<(), Stri
         return Err("the track is still working; wait for it to finish".to_string());
     }
     state.sessions.close_track(&id).await;
+    // Its workers' checkouts go first; their records go with the track.
+    let workers = track_workers(&state, &id);
+    worktree::remove_track(&state.store, &id, &workers);
     state.store.delete_track(&id).map_err(|e| e.to_string())
+}
+
+/// The names of a track's workers, as the store has them.
+fn track_workers(state: &AppState, track: &str) -> Vec<String> {
+    state
+        .store
+        .sessions(track)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.name)
+        .filter(|n| n != conductor::CONDUCTOR_SESSION)
+        .collect()
+}
+
+/// Refused while the worker is in a turn: its checkout is changing under it.
+async fn worker_idle(state: &AppState, track: &str, worker: &str) -> Result<(), String> {
+    if conductor::worker_running(state, track, worker).await {
+        return Err(format!("{worker} is still working; wait for its report"));
+    }
+    Ok(())
+}
+
+/// What a worker has changed in its own checkout and the human has not merged.
+#[tauri::command]
+async fn worker_changes(app: AppHandle, track: String, worker: String) -> Result<worktree::Changes, String> {
+    tauri::async_runtime::spawn_blocking(move || worktree::changes(&app.state::<AppState>().store, &track, &worker))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// One of those files' diff.
+#[tauri::command]
+async fn worker_file_diff(app: AppHandle, track: String, worker: String, path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || worktree::file_diff(&app.state::<AppState>().store, &track, &worker, &path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Bring a worker's changes into the track folder (all or nothing).
+#[tauri::command]
+async fn worker_merge(app: AppHandle, track: String, worker: String) -> Result<worktree::Merged, String> {
+    worker_idle(&app.state::<AppState>(), &track, &worker).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let scratch = state.worktrees_dir.join(".merge").join(format!("{track}-{worker}"));
+        worktree::merge(&state.store, &track, &worker, &scratch)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Throw away a worker's unmerged changes.
+#[tauri::command]
+async fn worker_discard(app: AppHandle, track: String, worker: String) -> Result<(), String> {
+    worker_idle(&app.state::<AppState>(), &track, &worker).await?;
+    tauri::async_runtime::spawn_blocking(move || worktree::discard(&app.state::<AppState>().store, &track, &worker))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Let the human pick a folder for a track. `None` when they cancel.
@@ -964,6 +1035,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_tracks,
             worker_report,
+            worker_changes,
+            worker_file_diff,
+            worker_merge,
+            worker_discard,
             create_track,
             update_track,
             delete_track,
@@ -1061,6 +1136,7 @@ pub fn run() {
             let adapters_dir = data_dir.join("adapters");
             let attachments_dir = data_dir.join("attachments");
             let artifacts_dir = data_dir.join("artifacts");
+            let worktrees_dir = data_dir.join("worktrees");
             // Drafts became artifacts: their agents' folders move along
             // (dr001 → ar001), as the store moved their records.
             let old = data_dir.join("drafts");
@@ -1083,6 +1159,7 @@ pub fn run() {
                 adapters_dir,
                 attachments_dir,
                 artifacts_dir,
+                worktrees_dir,
                 artifacts: artifact::Artifacts::default(),
                 boards: design::Boards::default(),
                 agents: Mutex::new(None),
