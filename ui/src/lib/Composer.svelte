@@ -11,26 +11,26 @@
 
   // Each conversation keeps its own draft: what is typed in one track stays there.
   let draftKey = store.chatKey;
-  let draft = $state(store.drafts[draftKey] ?? "");
+  let draft = $state(store.messageDrafts[draftKey] ?? "");
   $effect(() => {
-    store.drafts[draftKey] = draft;
+    store.messageDrafts[draftKey] = draft;
   });
   $effect(() => {
     const key = store.chatKey;
     untrack(() => {
       if (key === draftKey) return;
       // A knowledge search left open keeps what was typed before it, not the search.
-      if (kbStash !== null) store.drafts[draftKey] = kbStash;
+      if (kbStash !== null) store.messageDrafts[draftKey] = kbStash;
       kbStash = null;
       kbChosen = [];
       draftKey = key;
-      draft = store.drafts[key] ?? "";
+      draft = store.messageDrafts[key] ?? "";
       atHidden = false;
       queueMicrotask(grow);
     });
   });
   onDestroy(() => {
-    if (kbStash !== null) store.drafts[draftKey] = kbStash;
+    if (kbStash !== null) store.messageDrafts[draftKey] = kbStash;
   });
   let contextOpen = $state(false);
   let box = $state<HTMLTextAreaElement>();

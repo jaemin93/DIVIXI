@@ -569,7 +569,7 @@ class Store {
   artifactSession = $state<{ open: boolean; busy: boolean }>({ open: false, busy: false });
 
   /** What is typed but not sent, per conversation; the box shows the one on screen. */
-  drafts: Record<string, string> = {};
+  messageDrafts: Record<string, string> = {};
 
   /** Knowledge picked with `@kb`, waiting in each conversation's composer. */
   kbPickedBy = $state<Record<string, KbPick[]>>({});
