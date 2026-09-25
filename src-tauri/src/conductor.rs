@@ -1067,7 +1067,7 @@ async fn start_worker_turn(
             }
         }
         hand_running(&app, &track_t, &name_t, &current, None).await;
-        let report = finish_report(&app, &run_t, outcome, &cwd_t);
+        let report = finish_report(&app, &run_t, (current != run_t).then_some(current.as_str()), outcome, &cwd_t);
         report_to_conductor(app, track_t, name_t, run_t, report).await;
     });
 
@@ -1121,7 +1121,7 @@ async fn hand_running(app: &AppHandle, track: &str, name: &str, from: &str, to: 
 
 /// Whether a run ended normally (not failed, cancelled or timed out).
 fn ended_well(app: &AppHandle, run: &str) -> bool {
-    matches!(app.state::<AppState>().store.run(run), Ok(Some(s)) if s.status == RunStatus::Done && s.stop_reason.as_deref() != Some("cancelled"))
+    matches!(app.state::<AppState>().store.run(run), Ok(Some(s)) if s.status == RunStatus::Done && !s.stop_reason.as_deref().is_some_and(|r| r.eq_ignore_ascii_case("cancelled")))
 }
 
 /// The report block of a run's reply, checked.
@@ -1135,7 +1135,7 @@ fn checked_report(app: &AppHandle, run: &str) -> Result<Report, String> {
 
 /// The report as kept: the worker's, or one made from its reply; with the
 /// files the app saw its edit tools touch. Stored for the timeline's card.
-fn finish_report(app: &AppHandle, run: &str, outcome: Result<Report, String>, cwd: &str) -> Report {
+fn finish_report(app: &AppHandle, run: &str, reminder: Option<&str>, outcome: Result<Report, String>, cwd: &str) -> Report {
     let state = app.state::<AppState>();
     let mut report = outcome.unwrap_or_else(|problem| {
         let (well, reply) = match state.store.run(run) {
@@ -1145,6 +1145,14 @@ fn finish_report(app: &AppHandle, run: &str, outcome: Result<Report, String>, cw
         report::Report::unstructured(well, &reply, &problem)
     });
     report.edits_seen = edits_seen(&state, run, cwd);
+    // A worker told to do no more work in the reminder may still have.
+    if let Some(again) = reminder {
+        for p in edits_seen(&state, again, cwd) {
+            if !report.edits_seen.contains(&p) {
+                report.edits_seen.push(p);
+            }
+        }
+    }
     match serde_json::to_string(&report) {
         Ok(json) => {
             if let Err(err) = state.store.set_meta(&report_key(run), &json) {

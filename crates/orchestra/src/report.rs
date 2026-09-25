@@ -291,9 +291,12 @@ impl Report {
                 out.push_str(&format!("- {e}\n"));
             }
         }
-        out.trim_end().to_string()
+        clip(&out, MAX_FOR_CONDUCTOR)
     }
 }
+
+/// The most the conductor reads of one report; the rest is in read_report.
+const MAX_FOR_CONDUCTOR: usize = 12_000;
 
 /// What every task to a worker ends with: how to report.
 pub fn instructions() -> String {
@@ -386,6 +389,14 @@ mod tests {
         assert!(text.contains("- [not run] clippy"));
         assert!(text.contains("the report does not list:\n- C:/w/src/lexer.rs"), "{text}");
         assert!(!text.contains("parser.rs\n- C:/w/src/parser.rs"));
+    }
+
+    #[test]
+    fn the_conductor_reads_a_bounded_report() {
+        let mut r = parse(GOOD).unwrap();
+        r.risks = vec!["x".repeat(400); 30];
+        r.next = vec!["y".repeat(400); 30];
+        assert!(r.for_conductor("t1").chars().count() <= MAX_FOR_CONDUCTOR + 1);
     }
 
     #[test]

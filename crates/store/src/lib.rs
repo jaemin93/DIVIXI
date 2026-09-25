@@ -819,6 +819,9 @@ impl Store {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM runs_fts WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![id])?;
+        // Worker reports the app keeps as meta `report:<run>`; run ids are
+        // reused once the newest runs are gone, so they must not outlive them.
+        tx.execute("DELETE FROM meta WHERE key IN (SELECT 'report:' || id FROM runs WHERE track = ?1)", params![id])?;
         tx.execute("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![id])?;
         tx.execute("DELETE FROM runs WHERE track = ?1", params![id])?;
         tx.execute("DELETE FROM decisions WHERE track = ?1", params![id])?;
@@ -1368,7 +1371,9 @@ mod tests {
         store.set_meta("conductor_session:tr001:copilot", "s1").unwrap();
         store.set_meta("worker_session:tr001/ui", "{}").unwrap();
         store.set_meta("worker_session:tr002/ui", "{}").unwrap();
+        store.set_meta("report:t001", "{}").unwrap();
         store.delete_track("tr001").unwrap();
+        assert_eq!(store.get_meta("report:t001").unwrap(), None, "reports go with their runs");
         assert_eq!(store.tracks().unwrap().len(), 1);
         assert!(store.run("t001").unwrap().is_none());
         assert_eq!(store.runs().unwrap().len(), 1);
