@@ -4,6 +4,7 @@
 //! knowledge library, without local embeddings.
 
 pub mod chunk;
+pub mod documents;
 pub mod extract;
 pub mod fts;
 pub mod read;

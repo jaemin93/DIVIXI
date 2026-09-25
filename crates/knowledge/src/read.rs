@@ -4,8 +4,13 @@ use std::path::Path;
 
 use crate::chunk::Shape;
 
-/// Files larger than this are refused.
+/// Text files larger than this are refused.
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// Documents (PDF, Word) are larger for the text they hold.
+pub const MAX_DOCUMENT_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Documents whose text is extracted rather than read.
+const DOCUMENTS: &[&str] = &["pdf", "docx"];
 
 const MARKDOWN: &[&str] = &["md", "markdown", "mdx"];
 const CODE: &[&str] = &[
@@ -26,8 +31,11 @@ pub fn extension(path: &Path) -> String {
 /// How a supported file is chunked; `None` when it cannot be knowledge.
 pub fn shape_of(path: &Path) -> Option<Shape> {
     let ext = extension(path);
-    if MARKDOWN.contains(&ext.as_str()) {
+    // A Word document's headings come out as markdown headings.
+    if MARKDOWN.contains(&ext.as_str()) || ext == "docx" {
         Some(Shape::Markdown)
+    } else if ext == "pdf" {
+        Some(Shape::Text)
     } else if CODE.contains(&ext.as_str()) {
         Some(Shape::Code)
     } else if TEXT.contains(&ext.as_str()) {
@@ -39,7 +47,7 @@ pub fn shape_of(path: &Path) -> Option<Shape> {
 
 /// Every supported extension, for the UI.
 pub fn supported_extensions() -> Vec<&'static str> {
-    MARKDOWN.iter().chain(CODE).chain(TEXT).copied().collect()
+    MARKDOWN.iter().chain(CODE).chain(TEXT).chain(DOCUMENTS).copied().collect()
 }
 
 /// Files that hold secrets are never read into the library.
@@ -88,6 +96,15 @@ pub fn read_file(path: &Path) -> anyhow::Result<FileText> {
         anyhow::bail!(why);
     }
     let meta = std::fs::metadata(path)?;
+    let ext = extension(path);
+    if DOCUMENTS.contains(&ext.as_str()) {
+        if meta.len() > MAX_DOCUMENT_BYTES {
+            anyhow::bail!("document is larger than {} MB", MAX_DOCUMENT_BYTES / 1024 / 1024);
+        }
+        let bytes = std::fs::read(path)?;
+        let text = if ext == "pdf" { crate::documents::pdf_text(&bytes)? } else { crate::documents::docx_text(&bytes)? };
+        return Ok(FileText { hash: hash(&text), size: meta.len(), mtime_ms: mtime_ms(&meta), text });
+    }
     if meta.len() > MAX_FILE_BYTES {
         anyhow::bail!("file is larger than {} MB", MAX_FILE_BYTES / 1024 / 1024);
     }
@@ -175,6 +192,8 @@ mod tests {
         assert!(refusal(Path::new(".env.local")).is_some());
         assert!(refusal(&PathBuf::from("home").join(".ssh").join("config.txt")).is_some());
         assert!(refusal(Path::new("docs/guide.md")).is_none());
+        assert_eq!(shape_of(Path::new("spec.PDF")), Some(Shape::Text));
+        assert_eq!(shape_of(Path::new("plan.docx")), Some(Shape::Markdown));
     }
 
     #[test]
