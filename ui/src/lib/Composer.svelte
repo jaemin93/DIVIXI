@@ -270,7 +270,13 @@
   }
   async function attachDesign(id: string) {
     menuOpen = false;
-    await store.attachDesign(id);
+    await store.attachDesign(id, {
+      goal: t("design.tag.goal"),
+      constraint: t("design.tag.constraint"),
+      question: t("design.tag.question"),
+      idea: t("design.tag.idea"),
+      note: t("design.notes"),
+    });
     box?.focus();
   }
 

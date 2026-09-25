@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { scenePng, type BoardApi, type DesignDelta, type DesignScene } from "./excalidraw";
+import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Lang, type LangPref } from "./i18n.svelte";
 
@@ -249,9 +249,68 @@ export type ArtifactInfo = {
   created_at: number;
   updated_at: number;
 };
+export type Stroke = { points: [number, number, number][]; color: string; size: number };
+export type DesignTag = "" | "goal" | "constraint" | "question" | "idea";
+export type DesignNode = {
+  id: string;
+  kind: "note" | "sketch";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+  tag: DesignTag;
+  strokes: Stroke[];
+  by: string;
+};
+export type DesignEdge = { id: string; from: string; to: string; label: string; by: string };
+export type DesignChange = { id: number; target: string; run: string | null; before: unknown; after: unknown };
+export type DesignDoc = { version: number; nodes: DesignNode[]; edges: DesignEdge[]; changes: DesignChange[]; next: number };
+/** One edit to a board, as the core applies it. */
+export type DesignOp =
+  | { op: "create_note"; x: number; y: number; w?: number; h?: number; text?: string; tag?: DesignTag }
+  | { op: "add_stroke"; stroke: Stroke }
+  | { op: "set_sketch"; id?: string; x: number; y: number; w: number; h: number; strokes: Stroke[] }
+  | { op: "update"; id: string; text?: string; tag?: DesignTag }
+  | { op: "move"; id: string; x: number; y: number; w?: number; h?: number }
+  | { op: "delete"; ids: string[] }
+  | { op: "connect"; from: string; to: string; label?: string };
+export type DesignResult = { ok: boolean; id?: string; error?: string };
 export const ARTIFACT_SESSION = "artifact";
+/** What changed on a design's board, as the core sends it. */
+export type DesignDelta = {
+  id: string;
+  base: number;
+  version: number;
+  nodes: DesignNode[];
+  removed_nodes: string[];
+  edges: DesignEdge[];
+  removed_edges: string[];
+  changes: DesignChange[];
+  next: number;
+};
+
+/** A board with a delta applied: changed items in place, new ones at the end. */
+export function withDelta(doc: DesignDoc, d: DesignDelta): DesignDoc {
+  const merge = <T extends { id: string }>(list: T[], changed: T[], removed: string[]): T[] => {
+    const byId = new Map(changed.map((x) => [x.id, x]));
+    const gone = new Set(removed);
+    const kept = list.filter((x) => !gone.has(x.id)).map((x) => byId.get(x.id) ?? x);
+    const known = new Set(list.map((x) => x.id));
+    return [...kept, ...changed.filter((x) => !known.has(x.id))];
+  };
+  return {
+    version: d.version,
+    nodes: merge(doc.nodes, d.nodes, d.removed_nodes),
+    edges: merge(doc.edges, d.edges, d.removed_edges),
+    changes: d.changes,
+    next: d.next,
+  };
+}
+
 /** Artifact conversations are kept under this key, apart from tracks. */
 export const artifactKey = (id: string) => `artifact:${id}`;
+const EMPTY_DOC: DesignDoc = { version: 0, nodes: [], edges: [], changes: [], next: 0 };
 
 /** Prefix of conductor prompts Orchestra injects itself (worker reports). Language-neutral. */
 export const REPORT_PREFIX = "[worker-report]";
@@ -424,12 +483,10 @@ class Store {
   /** Artifacts of every kind, most recently touched first, and the one open. */
   artifacts = $state<ArtifactInfo[]>([]);
   artifact = $state("");
-  /** The open design's Excalidraw, while its board is on screen. */
-  designApi: BoardApi | null = null;
-  /** Where the agent's board changes go while its board is on screen. */
-  designRemote: ((delta: DesignDelta) => void) | null = null;
-  /** Shapes on the open board filled as goals, constraints, questions and ideas. */
-  designCounts = $state({ goal: 0, constraint: 0, question: 0, idea: 0 });
+  /** Replaced whole by each board the core sends; never changed in place. */
+  designDoc = $state.raw<DesignDoc>({ ...EMPTY_DOC });
+  /** The design whose board `designDoc` holds. */
+  designLoaded = $state("");
   /** Width of the conversation beside a design's board. Persisted. */
   artifactChatWidth = $state(460);
   /** The designs column shown. Persisted. */
@@ -1020,15 +1077,15 @@ class Store {
    * (goals, constraints, questions, notes) and, when it has ink, a picture
    * of it — written out as files and attached like any other.
    */
-  async attachDesign(id: string) {
+  async attachDesign(id: string, labels: Record<string, string>) {
     const a = this.artifacts.find((x) => x.id === id);
     if (!a) return;
     const key = this.chatKey;
     this.attaching += 1;
     try {
-      const [markdown, scene] = await Promise.all([invoke<string>("design_brief", { id }), invoke<DesignScene>("design_scene", { id })]);
-      const image = await scenePng(scene.elements, scene.files);
-      const paths = await invoke<string[]>("export_artifact", { id, markdown, image: image || null });
+      const doc = await invoke<DesignDoc>("design_doc", { id });
+      const markdown = briefOf(a.title, doc, labels);
+      const paths = await invoke<string[]>("export_artifact", { id, markdown, image: boardPng(doc) });
       await this.attach(paths, key);
     } catch (err) {
       this.lastError = String(err);
@@ -1077,6 +1134,20 @@ class Store {
     this.artifact = id;
     this.view = "design";
     void this.refreshArtifactSession();
+    if (this.designLoaded !== id) {
+      this.designLoaded = "";
+      this.designDoc = { ...EMPTY_DOC };
+    }
+    try {
+      const doc = await invoke<DesignDoc>("design_doc", { id });
+      // An event may have brought a newer board meanwhile; keep that one.
+      if (this.artifact === id && !(this.designLoaded === id && this.designDoc.version > doc.version)) {
+        this.designDoc = doc;
+        this.designLoaded = id;
+      }
+    } catch (err) {
+      this.lastError = String(err);
+    }
   }
 
   async createDesign(title: string) {
@@ -1115,16 +1186,64 @@ class Store {
     if (this.artifact === id) {
       const next = this.designs[0];
       if (next) await this.openArtifact(next.id);
-      else this.artifact = "";
+      else {
+        this.artifact = "";
+        this.designDoc = { ...EMPTY_DOC };
+      }
     }
     return "";
   }
 
-  /** What the agent drew: into the open board, when it is the one on screen. */
+  /** Edit the open board. The core answers with the new board as an event. */
+  async designApply(ops: DesignOp[]): Promise<DesignResult[]> {
+    const id = this.artifact;
+    if (!id || !ops.length) return [];
+    try {
+      const res = await invoke<DesignResult[]>("design_apply", { id, ops });
+      const bad = res.find((r) => !r.ok);
+      if (bad) this.lastError = bad.error ?? "the board edit did not go through";
+      return res;
+    } catch (err) {
+      this.lastError = String(err);
+      return [];
+    }
+  }
+
+  async designReview(changes: number[], keep: boolean) {
+    if (!this.artifact || !changes.length) return;
+    try {
+      await invoke("design_review", { id: this.artifact, changes, keep });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Take what changed on a board. It applies to the open board when that
+   *  is the version it was made on; a board that missed a change (or is
+   *  still loading) is read again whole. */
   takeDesign(delta: DesignDelta) {
-    const d = this.artifacts.find((x) => x.id === delta.id);
+    const id = delta.id;
+    const d = this.artifacts.find((x) => x.id === id);
     if (d) d.updated_at = Date.now();
-    this.designRemote?.(delta);
+    if (id !== this.artifact) return;
+    if (this.designLoaded === id && delta.base === this.designDoc.version) {
+      this.designDoc = withDelta(this.designDoc, delta);
+    } else if (!(this.designLoaded === id && delta.version <= this.designDoc.version)) {
+      void this.reloadDesign(id);
+    }
+  }
+
+  /** Read the open board whole again, keeping whichever is newer. */
+  private async reloadDesign(id: string) {
+    try {
+      const doc = await invoke<DesignDoc>("design_doc", { id });
+      if (this.artifact === id && !(this.designLoaded === id && this.designDoc.version >= doc.version)) {
+        this.designDoc = doc;
+        this.designLoaded = id;
+      }
+    } catch (err) {
+      this.lastError = String(err);
+    }
   }
 
   /** One message to the artifact's agent: the composer's text and files, the
@@ -1139,9 +1258,7 @@ class Store {
     if (!id || !d || this.artifactBusy || (!typed && !files.length && !selected.length)) return;
     this.lastError = "";
     this.attachments = [];
-    // A picture of the board as it is on screen, when anything is on it.
-    const api = this.designApi;
-    const image = api ? await scenePng(api.getSceneElements() as never, api.getFiles() as never).catch(() => "") : "";
+    const image = boardPng(this.designDoc);
     const text = withAttachments(typed, files);
     const pending: Run = {
       id: `pending-${Date.now()}`,

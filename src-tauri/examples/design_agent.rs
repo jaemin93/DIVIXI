@@ -1,25 +1,24 @@
-//! A design's agent drawing on a real Excalidraw scene, without the window.
+//! A design's agent on a real board, without the window.
 //!
 //! Run with:
 //!   cargo run -p orchestra-app --example design_agent -- claude_code
 //!
-//! The board starts with one labelled rectangle of the human's. The agent
-//! gets the design preamble and the same two MCP tools the app gives it
-//! (`board_read`, `board_write`, same descriptions and schema), and is asked
-//! to draw the idea out as a diagram. Checks: it drew through the tool; the
-//! scene gained several labelled shapes, a frame and arrows bound at both
-//! ends, one of them to the human's rectangle. The scene is written to a
-//! `.excalidraw` file to open in excalidraw.com.
+//! The board starts with one note of the human's. The agent gets the design
+//! preamble and the same two MCP tools the app gives it (`board_read`,
+//! `board_write`, same descriptions and schema), and is asked to rough the
+//! idea out. Checks: it wrote through the tool; the board gained a goal,
+//! constraints and a question; they hang off the human's note by arrows;
+//! every agent item is a suggestion waiting on the human.
 
 use std::sync::Arc;
 
 use orchestra_acp::{scrub_inherited_session_env, AgentSession, McpHttp, SessionOptions};
 use orchestra_agents::{detect, AgentKind, DetectOptions};
-use orchestra_app::design::{self, Scene};
+use orchestra_app::design::{self, Actor, Doc};
 use orchestra_core::AgentEvent;
 use orchestra_mcp::{McpServer, Tool};
 use parking_lot::Mutex;
-use serde_json::{json, Value};
+use serde_json::json;
 
 fn main() -> anyhow::Result<()> {
     scrub_inherited_session_env();
@@ -33,24 +32,24 @@ async fn run() -> anyhow::Result<()> {
     let id = std::env::args().nth(1).unwrap_or_else(|| "claude_code".to_string());
     let kind = AgentKind::parse(&id).ok_or_else(|| anyhow::anyhow!("unknown agent {id}"))?;
 
-    // The human's board: one rectangle.
-    let board = Arc::new(Mutex::new(Scene::default()));
-    let (res, _) = board.lock().apply(design::parse_commands(&json!({ "commands": [
-        { "op": "add", "type": "rectangle", "x": 0, "y": 0, "width": 260, "height": 120, "label": "Family todo app on the tablet" }
-    ] })).map_err(anyhow::Error::msg)?);
-    let human = res[0]["id"].as_str().unwrap_or_default().to_string();
+    // The human's board: one note, no tags.
+    let board = Arc::new(Mutex::new(Doc::default()));
+    board.lock().apply(
+        serde_json::from_value(json!([{ "op": "create_note", "x": 0, "y": 0, "text": "A shared todo list for my kids, on the family tablet" }]))?,
+        &Actor::Human,
+    );
 
     let (r, w) = (board.clone(), board.clone());
     let tools = vec![
         Tool::new(design::BOARD_READ, design::BOARD_READ_DESC, json!({ "type": "object", "properties": {} }), move |_| {
             let b = r.clone();
-            async move { Ok(Value::String(b.lock().outline())) }
+            async move { Ok(b.lock().outline()) }
         }),
         Tool::new(design::BOARD_WRITE, design::BOARD_WRITE_DESC, design::board_write_schema(), move |args| {
             let b = w.clone();
             async move {
                 let ops = design::parse_commands(&args)?;
-                let (results, _) = b.lock().apply(ops);
+                let results = b.lock().apply(ops, &Actor::Agent { run: None });
                 println!("  board_write → {}", serde_json::to_string(&results).unwrap_or_default());
                 Ok(json!({ "results": results }))
             }
@@ -67,7 +66,7 @@ async fn run() -> anyhow::Result<()> {
     let session = AgentSession::open(
         &agent,
         SessionOptions {
-            cwd: cwd.clone(),
+            cwd,
             mcp_servers: vec![McpHttp { name: "divixi".to_string(), url: server.url(), headers: vec![server.auth_header()] }],
             ..Default::default()
         },
@@ -76,7 +75,7 @@ async fn run() -> anyhow::Result<()> {
 
     let outline = board.lock().outline();
     let prompt = format!(
-        "{}\n\n---\n\nDraw this out with me as a diagram: the main screens as labelled shapes in a frame, how a todo flows between them with arrows, and one decision as a diamond. Connect it to my rectangle.\n\n[board]\n{outline}",
+        "{}\n\n---\n\nRough this idea out with me: put the goal, two constraints and one open question on the board as tagged notes, and connect them to my note.\n\n[board]\n{outline}",
         design::preamble("en", "Family todo")
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -97,29 +96,22 @@ async fn run() -> anyhow::Result<()> {
     let reply = print.await?;
     println!("\n[reply]\n{}\n", reply.trim());
 
-    let sc = board.lock().clone();
-    println!("[board]\n{}\n", sc.outline());
-    let live: Vec<&Value> = sc.elements.iter().filter(|e| e["isDeleted"] != true).collect();
-    let count = |t: &str| live.iter().filter(|e| e["type"] == t).count();
-    let shapes = count("rectangle") + count("ellipse") + count("diamond");
-    let bound = live
-        .iter()
-        .filter(|e| e["type"] == "arrow" && e["startBinding"]["elementId"].is_string() && e["endBinding"]["elementId"].is_string())
-        .count();
-    let to_mine = live
-        .iter()
-        .filter(|e| e["type"] == "arrow" && (e["startBinding"]["elementId"] == human.as_str() || e["endBinding"]["elementId"] == human.as_str()))
-        .count();
-    let labelled = live.iter().filter(|e| e["type"] == "text" && e["containerId"].is_string()).count();
-    let file = cwd.join("board.excalidraw");
-    std::fs::write(&file, serde_json::to_string_pretty(&json!({ "type": "excalidraw", "version": 2, "source": "divixi", "elements": sc.elements, "appState": {}, "files": sc.files }))?)?;
+    let d = board.lock().clone();
+    let tags = |t: &str| d.nodes.iter().filter(|n| n.tag == t).count();
+    let human = &d.nodes[0].id;
+    let attached = d.edges.iter().filter(|e| &e.from == human || &e.to == human).count();
+    let agent_items = d.nodes.iter().filter(|n| n.by == "agent").count() + d.edges.iter().filter(|e| e.by == "agent").count();
+    println!("[board]\n{}", serde_json::to_string_pretty(&d.outline())?);
     println!(
-        "shapes {shapes} · diamonds {} · frames {} · bound arrows {bound} · arrows on mine {to_mine} · labels {labelled}\nscene: {}",
-        count("diamond"),
-        count("frame"),
-        file.display()
+        "\ngoals {} · constraints {} · questions {} · arrows on my note {} · suggestions {}/{}",
+        tags("goal"),
+        tags("constraint"),
+        tags("question"),
+        attached,
+        d.changes.len(),
+        agent_items
     );
-    let ok = shapes >= 4 && count("diamond") >= 1 && count("frame") >= 1 && bound >= 2 && to_mine >= 1 && labelled >= 3;
+    let ok = tags("goal") >= 1 && tags("constraint") >= 2 && tags("question") >= 1 && attached >= 1 && d.changes.len() == agent_items;
     println!("{}", if ok { "DESIGN AGENT: OK" } else { "DESIGN AGENT: CHECK FAILED" });
     Ok(())
 }
