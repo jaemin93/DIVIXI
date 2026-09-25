@@ -28,7 +28,7 @@
     if (track && path && store.panelTab === "file") void knowledge.checkViewer(track, path);
   });
   const inLibrary = $derived(!!knowledge.viewerSource && knowledge.viewerKey === `${store.track}\0${store.activeFile}`);
-  const canAdd = $derived(!!activeFile && (activeFile.kind === "markdown" || activeFile.kind === "text") && knowledge.formats.includes(activeFile.ext.toLowerCase()));
+  const canAdd = $derived(!!activeFile && (activeFile.kind === "markdown" || activeFile.kind === "html" || activeFile.kind === "text") && knowledge.formats.includes(activeFile.ext.toLowerCase()));
   async function addToLibrary() {
     const track = store.track;
     const path = store.activeFile;
@@ -117,8 +117,10 @@
   const codeHtml = $derived(activeFile?.text !== undefined && activeFile.text !== null && !activeFile.editable ? highlight(activeFile.text, languageFor(activeFile.ext)) : "");
   const crumbs = $derived(store.activeFile ? store.activeFile.split("/") : []);
   const raw = $derived(!!store.rawMarkdown[store.activeFile]);
-  /** Code and text open straight in the editor; markdown when shown as source. */
-  const editing = $derived(!!activeFile?.editable && (activeFile.kind === "text" || (activeFile.kind === "markdown" && raw)));
+  /** Markdown and HTML open rendered, with their source a toggle away. */
+  const previewable = $derived(activeFile?.kind === "markdown" || activeFile?.kind === "html");
+  /** Code and text open straight in the editor; markdown and HTML when shown as source. */
+  const editing = $derived(!!activeFile?.editable && (activeFile.kind === "text" || (previewable && raw)));
 </script>
 
 <aside style="width: {store.panelWidth}px">
@@ -207,9 +209,9 @@
       </nav>
       <span class="grow"></span>
       {#if editing && store.isDirty(store.activeFile)}
-        <button class="btn sm btn-acc" disabled={store.isSaving(store.activeFile)} onclick={() => store.saveFile(store.activeFile)} title="Ctrl+S">{store.isSaving(store.activeFile) ? t("ws.saving") : t("ws.save")}</button>
+        <button class="btn sm btn-acc" disabled={store.isSaving(store.activeFile)} onclick={() => store.saveFile(store.activeFile)} title="Ctrl+S">{t("ws.save")}</button>
       {/if}
-      {#if activeFile?.kind === "markdown"}
+      {#if previewable}
         <button class="btn sm" onclick={() => (store.rawMarkdown = { ...store.rawMarkdown, [store.activeFile]: !raw })}>{raw ? t("ws.preview") : t("ws.raw")}</button>
       {/if}
       {#if inLibrary}
@@ -232,6 +234,9 @@
           <div class="mono empty">{t("ws.loading")}</div>
         {:else if activeFile.kind === "markdown" && !raw}
           <div class="mdwrap"><Markdown source={store.textOf(store.activeFile)} /></div>
+        {:else if activeFile.kind === "html" && !raw}
+          <!-- Sandboxed, and under the app's CSP: markup and inline styles show; scripts and outside resources do not. -->
+          <iframe class="htmlframe" sandbox="" srcdoc={store.textOf(store.activeFile)} title={activeFile.name}></iframe>
         {:else if editing}
           {#if store.hasConflict(store.activeFile)}
             <div class="conflict">
@@ -249,7 +254,7 @@
               onsave={() => store.saveFile(store.activeFile)}
             />
           {/key}
-        {:else if activeFile.kind === "markdown" || activeFile.kind === "text"}
+        {:else if previewable || activeFile.kind === "text"}
           <pre class="src hljs">{@html codeHtml}</pre>
         {:else if activeFile.kind === "image"}
           <div class="imgwrap"><img src={activeFile.data_url} alt={activeFile.name} /></div>
@@ -571,6 +576,15 @@
     font-size: var(--chat-fs);
     line-height: 1.7;
     color: var(--txt);
+  }
+
+  .htmlframe {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    border: 0;
+    /* Pages are written for a white page unless they say otherwise. */
+    background: #fff;
   }
 
   .imgwrap {

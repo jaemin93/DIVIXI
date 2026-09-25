@@ -394,7 +394,7 @@ export type WsFile = {
   path: string;
   name: string;
   size: number;
-  kind: "markdown" | "text" | "image" | "binary" | "large";
+  kind: "markdown" | "html" | "text" | "image" | "binary" | "large";
   ext: string;
   text: string | null;
   data_url: string | null;

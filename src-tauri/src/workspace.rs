@@ -36,7 +36,7 @@ pub struct FileContent {
     pub path: String,
     pub name: String,
     pub size: u64,
-    /// `markdown`, `text`, `image`, `binary` or `large`.
+    /// `markdown`, `html`, `text`, `image`, `binary` or `large`.
     pub kind: String,
     /// Extension without the dot, lowercase.
     pub ext: String,
@@ -233,6 +233,8 @@ pub fn read(root: &Path, rel: &str) -> Result<FileContent, String> {
     }
     if matches!(ext.as_str(), "md" | "markdown" | "mdx") {
         out.kind = "markdown".into();
+    } else if matches!(ext.as_str(), "html" | "htm") {
+        out.kind = "html".into();
     }
     Ok(out)
 }
