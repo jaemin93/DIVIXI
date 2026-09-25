@@ -946,13 +946,6 @@
   {#if dropOver}
     <div class="mono dropnote">{t("design.dropHere")}</div>
   {/if}
-  {#if selected.length && !marquee && tool === "select"}
-    <!-- What is picked goes with the next message to the agent. -->
-    <div class="picked" role="status" onpointerdown={(e) => e.stopPropagation()}>
-      <span>{t("design.picked", { n: selected.length })}</span>
-      <button type="button" class="btn sm" onclick={() => (selected = [])}>{t("design.unpick")}</button>
-    </div>
-  {/if}
 </div>
 
 <style>
@@ -1038,28 +1031,6 @@
     border: 1px solid var(--acc);
     background: color-mix(in srgb, var(--acc) 10%, transparent);
     pointer-events: none;
-  }
-
-  .picked {
-    position: absolute;
-    left: 50%;
-    bottom: 14px;
-    transform: translateX(-50%);
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 5px 6px 5px 12px;
-    font-size: 12px;
-    color: var(--acct);
-    background: var(--accbg);
-    border: 1px solid var(--accln);
-    cursor: default;
-    white-space: nowrap;
-  }
-
-  .picked .btn.sm {
-    height: 24px;
-    padding: 0 9px;
   }
 
   .framing {
