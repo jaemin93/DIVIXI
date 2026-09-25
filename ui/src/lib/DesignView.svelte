@@ -6,7 +6,7 @@
   import Icon from "./Icon.svelte";
   import ArtifactMenu from "./ArtifactMenu.svelte";
   import { whenFull } from "./time";
-  import Board from "./Board.svelte";
+  import ExcalidrawBoard from "./ExcalidrawBoard.svelte";
   import Timeline from "./Timeline.svelte";
   import Composer from "./Composer.svelte";
   import { t } from "./i18n.svelte";
@@ -34,11 +34,10 @@
   });
 
   const d = $derived(store.currentArtifact);
-  const notes = $derived(store.designDoc.nodes.filter((n) => n.kind === "note"));
-  const count = (tag: string) => notes.filter((n) => n.tag === tag && n.text.trim()).length;
-  const goals = $derived(count("goal"));
-  const constraints = $derived(count("constraint"));
-  const questions = $derived(count("question"));
+  // Shapes filled as goals, constraints and open questions.
+  const goals = $derived(store.designCounts.goal);
+  const constraints = $derived(store.designCounts.constraint);
+  const questions = $derived(store.designCounts.question);
 
   async function create(e: Event) {
     e.preventDefault();
@@ -157,18 +156,10 @@
       </header>
       <div class="work">
         <div class="boardwrap">
-          <!-- One board per design: its selection, edit and arrow-in-progress never carry over. -->
+          <!-- One Excalidraw per design: nothing carries over from the last. -->
           {#key store.artifact}
-            <Board bind:selected={store.designSelected} />
+            <ExcalidrawBoard id={store.artifact} />
           {/key}
-          {#if store.designDoc.changes.length}
-            <!-- The agent's board changes, all at once; one by one on the items. -->
-            <div class="review">
-              <span class="mono">{t("design.pending", { n: store.designDoc.changes.length })}</span>
-              <button type="button" class="btn sm" onclick={() => store.designReview(store.designDoc.changes.map((c) => c.id), false)}>{t("design.revertAll")}</button>
-              <button type="button" class="btn sm keep" onclick={() => store.designReview(store.designDoc.changes.map((c) => c.id), true)}>{t("design.keepAll")}</button>
-            </div>
-          {/if}
         </div>
         <!-- The conversation beside the board, as on a track. -->
         <div class="talk" style="width: {store.artifactChatWidth}px">
@@ -442,31 +433,6 @@
     flex: 1;
     min-width: 200px;
     display: flex;
-  }
-
-  .review {
-    position: absolute;
-    right: 14px;
-    bottom: 14px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 8px 6px 12px;
-    background: var(--accbg);
-    border: 1px solid var(--accln);
-    font-size: 10px;
-    letter-spacing: 0.08em;
-    color: var(--acct);
-  }
-
-  .review .btn.sm {
-    height: 26px;
-    padding: 0 10px;
-  }
-
-  .review .keep {
-    border-color: var(--acc);
-    color: var(--hi);
   }
 
   /* The conversation: the track's timeline and composer, beside the board. */

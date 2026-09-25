@@ -275,7 +275,7 @@ fn create_artifact(state: State<'_, AppState>, kind: String, title: String, agen
     let title = title.trim();
     let title = if title.is_empty() { "Untitled" } else { title };
     let body = match kind.as_str() {
-        design::KIND => serde_json::to_string(&design::Doc::default()).map_err(|e| e.to_string())?,
+        design::KIND => serde_json::to_string(&design::Scene::default()).map_err(|e| e.to_string())?,
         _ => "{}".to_string(),
     };
     state.store.create_artifact(&kind, title, &agent, &body).map_err(|e| e.to_string())
@@ -375,27 +375,24 @@ fn export_artifact(state: State<'_, AppState>, id: String, markdown: String, ima
         .collect())
 }
 
-/// A design's board as it is now.
+/// A design's board (its Excalidraw scene) as it is now.
 #[tauri::command(async)]
-fn design_doc(state: State<'_, AppState>, id: String) -> Result<design::Doc, String> {
-    design::doc(&state, &id)
+fn design_scene(state: State<'_, AppState>, id: String) -> Result<design::Scene, String> {
+    design::scene(&state, &id)
 }
 
-/// The human edits a design's board.
+/// Keep what the window's Excalidraw holds, merged element by element with
+/// what the agent may have drawn meanwhile. Returns the board's version.
 #[tauri::command(async)]
-fn design_apply(app: AppHandle, id: String, ops: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>, String> {
-    let ops: Vec<design::Op> = ops
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<Result<_, _>>()
-        .map_err(|e| format!("bad edit: {e}"))?;
-    design::apply(&app, &id, ops, design::Actor::Human)
+fn design_save(app: AppHandle, id: String, elements: Vec<serde_json::Value>, files: serde_json::Map<String, serde_json::Value>) -> Result<u64, String> {
+    design::save(&app, &id, elements, files)
 }
 
-/// Keep or revert the design agent's suggestions.
+/// A design as a brief to attach to a track.
 #[tauri::command(async)]
-fn design_review(app: AppHandle, id: String, changes: Vec<u64>, keep: bool) -> Result<(), String> {
-    design::review(&app, &id, &changes, keep)
+fn design_brief(state: State<'_, AppState>, id: String) -> Result<String, String> {
+    let title = state.store.artifact(&id).map_err(|e| e.to_string())?.map(|(a, _)| a.title).unwrap_or_default();
+    Ok(design::scene(&state, &id)?.brief(&title))
 }
 
 /// How many files one message may carry.
@@ -921,9 +918,9 @@ pub fn run() {
             artifact_prompt,
             artifact_cancel,
             export_artifact,
-            design_doc,
-            design_apply,
-            design_review,
+            design_scene,
+            design_save,
+            design_brief,
             file_stats,
             pick_files,
             save_attachment,
