@@ -48,6 +48,33 @@ fn mime(ext: &str) -> &'static str {
     }
 }
 
+/// The app's scrollbar (tokens.css), in the theme the panel is in
+/// (`?theme=lt` for light). Put first in the head, so a page that styles
+/// its own scrollbars still wins.
+fn scrollbar_style(light: bool) -> String {
+    let thumb = if light { "#d3cfc7" } else { "#242424" };
+    format!(
+        "<style data-divixi>::-webkit-scrollbar{{width:9px;height:9px}}::-webkit-scrollbar-thumb{{background:{thumb}}}\
+         ::-webkit-scrollbar-track{{background:transparent}}::-webkit-scrollbar-corner{{background:transparent}}</style>"
+    )
+}
+
+/// An HTML page with `style` put right after its `<head>` (or at its very
+/// start when it has none).
+fn with_style(html: &[u8], style: &str) -> Vec<u8> {
+    let text = String::from_utf8_lossy(html);
+    let lower = text.to_ascii_lowercase();
+    let at = lower
+        .find("<head")
+        .and_then(|i| lower[i..].find('>').map(|j| i + j + 1))
+        .unwrap_or(0);
+    let mut out = String::with_capacity(text.len() + style.len());
+    out.push_str(&text[..at]);
+    out.push_str(style);
+    out.push_str(&text[at..]);
+    out.into_bytes()
+}
+
 /// `%XX` escapes decoded; invalid ones are kept as they are.
 fn decode(s: &str) -> String {
     let bytes = s.as_bytes();
@@ -97,6 +124,12 @@ pub fn handle<R: Runtime>(ctx: UriSchemeContext<'_, R>, request: Request<Vec<u8>
         Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
     let ext = full.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let bytes = if matches!(ext.as_str(), "html" | "htm") {
+        let light = request.uri().query().is_some_and(|q| q.split('&').any(|p| p == "theme=lt"));
+        with_style(&bytes, &scrollbar_style(light))
+    } else {
+        bytes
+    };
     Response::builder()
         .header(header::CONTENT_TYPE, mime(&ext))
         .header("Content-Security-Policy", PAGE_CSP)
@@ -110,6 +143,14 @@ pub fn handle<R: Runtime>(ctx: UriSchemeContext<'_, R>, request: Request<Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn puts_the_scrollbar_style_first_in_the_head() {
+        let s = "<s/>";
+        assert_eq!(String::from_utf8(with_style(b"<html><HEAD lang=x><title>t</title></head>", s)).unwrap(), "<html><HEAD lang=x><s/><title>t</title></head>");
+        assert_eq!(String::from_utf8(with_style(b"<p>bare</p>", s)).unwrap(), "<s/><p>bare</p>");
+        assert!(scrollbar_style(true).contains("#d3cfc7") && scrollbar_style(false).contains("#242424"));
+    }
 
     #[test]
     fn decodes_paths() {

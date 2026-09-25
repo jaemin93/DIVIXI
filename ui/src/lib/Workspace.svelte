@@ -120,7 +120,8 @@
   /** Where the preview protocol serves a file of the current track. */
   function previewUrl(path: string): string {
     const base = navigator.userAgent.includes("Windows") ? "http://preview.localhost/" : "preview://localhost/";
-    return base + [store.track ?? "", ...path.split("/")].map(encodeURIComponent).join("/");
+    // The theme picks the scrollbar colours the page is served with.
+    return base + [store.track ?? "", ...path.split("/")].map(encodeURIComponent).join("/") + `?theme=${store.theme}`;
   }
 
   /** Markdown and HTML open rendered, with their source a toggle away. */
