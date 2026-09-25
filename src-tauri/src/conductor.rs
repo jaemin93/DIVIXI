@@ -30,7 +30,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orchestra_acp::{AgentSession, AgentSpec, McpHttp, SessionOptions};
-use orchestra_core::AgentEvent;
+use orchestra_core::report::{self, Report};
+use orchestra_core::{AgentEvent, RunStatus};
 use orchestra_mcp::{McpServer, Tool};
 use orchestra_store::{Decision, DecisionOption, DecisionStatus, NewDecision, PermissionAsk, TrackInfo};
 use serde_json::{json, Value};
@@ -189,7 +190,7 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
 규칙:
 - 사람의 메시지가 질문이나 잡담이면 직접 답합니다. 작업자를 부르지 않습니다.
 - 코드를 읽거나 고치거나 조사하는 일처럼 실제 작업이 필요하면 `spawn_worker`로 작업자를 불러 맡깁니다. 작업자 이름은 짧은 영문 소문자(예: fix-parser)로 짓고, task에는 작업자가 혼자 끝낼 수 있을 만큼 구체적으로 적습니다.
-- `spawn_worker`와 `ask_worker`는 작업자가 일을 받는 즉시 돌아옵니다. 결과를 기다리지 말고, 사람에게 무엇을 맡겼는지 한 문장으로 알린 뒤 턴을 끝냅니다. 작업자가 끝나면 `{REPORT_PREFIX}`로 시작하는 메시지가 당신에게 옵니다. 그때 무슨 일이 있었는지 한두 문단으로 사람에게 설명합니다. 보고를 그대로 붙여넣지 말고 요점만 말합니다.
+- `spawn_worker`와 `ask_worker`는 작업자가 일을 받는 즉시 돌아옵니다. 결과를 기다리지 말고, 사람에게 무엇을 맡겼는지 한 문장으로 알린 뒤 턴을 끝냅니다. 작업자가 끝나면 `{REPORT_PREFIX}`로 시작하는 메시지가 당신에게 옵니다. 앱이 작업자에게 받은 정해진 보고입니다: status(done·partial·blocked·failed), summary, changes, checks(검증과 결과), risks, questions, next, 그리고 앱이 본 편집 중 보고에 없는 것. 무슨 일이 있었는지 한두 문단으로 사람에게 설명합니다. 보고를 그대로 붙여넣지 말고 요점만 말합니다. checks가 없거나 실패가 있으면 그렇다고 말합니다. questions는 당신이 답할 수 있으면 `ask_worker`로 답하고, 사람이 정할 일이면 `request_decision`으로 올립니다. 작업자의 전체 답은 `read_report`에 있습니다.
 - 같은 작업자에게 이어서 시킬 일은 `ask_worker`로 보냅니다. 작업자는 이전 대화를 기억합니다.
 - 작업자 목록은 열린 것과 닫힌 것 모두 `worker_status`로 봅니다. 터미널이나 파일을 뒤져 작업자를 찾지 않습니다.
 - 닫힌 작업자는 같은 이름으로 `spawn_worker`나 `ask_worker`를 부르면 이전 대화를 기억한 채 다시 열립니다. 기억을 버리고 처음부터 시작하려면 `spawn_worker`에 fresh=true를 줍니다. `close_worker`는 세션만 닫고 기록은 남깁니다.
@@ -217,7 +218,7 @@ Track: {name}{about}
 Rules:
 - If the human's message is a question or small talk, answer it yourself. Do not open a worker.
 - If real work is needed (reading, changing or investigating code), open a worker with `spawn_worker`. Name it short and lowercase (e.g. fix-parser) and make the task specific enough for the worker to finish alone.
-- `spawn_worker` and `ask_worker` return as soon as the worker has the task. Do not wait for the result: tell the human in one sentence what you delegated and end your turn. When the worker finishes, a message starting with `{REPORT_PREFIX}` reaches you. Then explain to the human in a paragraph or two what happened. Do not paste the report; give the gist.
+- `spawn_worker` and `ask_worker` return as soon as the worker has the task. Do not wait for the result: tell the human in one sentence what you delegated and end your turn. When the worker finishes, a message starting with `{REPORT_PREFIX}` reaches you: the structured report the app took from the worker — status (done, partial, blocked, failed), summary, changes, checks (what was verified and how it came out), risks, questions, next, and any edits the app saw that the report does not list. Explain to the human in a paragraph or two what happened. Do not paste the report; give the gist. If there are no checks or a check failed, say so. Answer questions yourself with `ask_worker` when you can; put those only the human can answer to them with `request_decision`. The worker's whole reply is in `read_report`.
 - Follow-ups for the same worker go through `ask_worker`; the worker remembers its earlier turns.
 - `worker_status` lists every worker, open and closed. Never hunt for workers through the terminal or files.
 - A closed worker reopens with its earlier conversation when you call `spawn_worker` or `ask_worker` with its name. To drop that memory and start over, pass fresh=true to `spawn_worker`. `close_worker` only closes the session; the record stays.
@@ -308,7 +309,7 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
         ),
         Tool::new(
             "read_report",
-            "Read a run's report by run id (e.g. t004): status, prompt, output, tools, duration.",
+            "Read a run by id (e.g. t004): status, prompt, the worker's whole reply (output), tools, duration, and its checked report.",
             json!({
                 "type": "object",
                 "properties": { "run": { "type": "string" } },
@@ -320,7 +321,13 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                     let run = str_arg(&args, "run")?;
                     let state = app.state::<AppState>();
                     match state.store.run(&run).map_err(|e| e.to_string())? {
-                        Some(summary) => serde_json::to_value(summary).map_err(|e| e.to_string()),
+                        Some(summary) => {
+                            let mut value = serde_json::to_value(summary).map_err(|e| e.to_string())?;
+                            if let Some(report) = stored_report(&state, &run) {
+                                value["report"] = serde_json::to_value(report).map_err(|e| e.to_string())?;
+                            }
+                            Ok(value)
+                        }
                         None => Err(format!("no run {run}")),
                     }
                 }
@@ -1029,46 +1036,39 @@ async fn start_worker_turn(
         (agent_id, turns, session, resumed, note, run)
     };
 
-    // The turn itself, in the background.
+    // The turn itself, in the background. The task ends with how to report;
+    // the stored prompt stays what the conductor wrote.
     let app_for_turn = app.clone();
-    let (track_t, name_t, run_t, text_t, cwd_t) = (track.clone(), name.clone(), run.clone(), text, info.cwd.clone());
+    let (track_t, name_t, run_t, cwd_t, agent_t) = (track.clone(), name.clone(), run.clone(), info.cwd.clone(), agent_id.clone());
+    let task = format!("{text}\n\n{}", report::instructions());
     tauri::async_runtime::spawn(async move {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let pump_task = tauri::async_runtime::spawn(pump(
-            app_for_turn.clone(),
-            track_t.clone(),
-            name_t.clone(),
-            run_t.clone(),
-            rx,
-        ));
-        let _ = tx.send(AgentEvent::Started {
-            session_id: session.session_id().to_string(),
-            cwd: cwd_t,
-        });
-        match tokio::time::timeout(WORKER_TURN_TIMEOUT, session.prompt(text_t, tx.clone())).await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                let _ = tx.send(AgentEvent::Failed { error: err.to_string() });
-            }
-            Err(_) => {
-                session.cancel();
-                let _ = tx.send(AgentEvent::Failed { error: "worker turn timed out".to_string() });
-            }
-        }
-        drop(tx);
-        let _ = pump_task.await;
-
-        {
-            let state = app_for_turn.state::<AppState>();
-            let mut workers = state.sessions.workers.lock().await;
-            if let Some(live) = workers.get_mut(&worker_key(&track_t, &name_t)) {
-                if live.running.as_deref() == Some(run_t.as_str()) {
-                    live.running = None;
+        let app = app_for_turn;
+        drive_worker_turn(&app, &track_t, &name_t, &run_t, &session, task, &cwd_t).await;
+        let mut outcome = checked_report(&app, &run_t);
+        let mut current = run_t.clone();
+        // A turn that ended well but without a usable block is asked once more,
+        // in the same session, for the block alone.
+        if let Err(problem) = &outcome {
+            if ended_well(&app, &run_t) {
+                let again_text = report::reminder(problem);
+                let again = app.state::<AppState>().store.begin_run(&track_t, &name_t, &agent_t, &again_text, &cwd_t);
+                match again {
+                    Ok(again) => {
+                        hand_running(&app, &track_t, &name_t, &current, Some(again.clone())).await;
+                        current = again.clone();
+                        drive_worker_turn(&app, &track_t, &name_t, &again, &session, again_text, &cwd_t).await;
+                        outcome = checked_report(&app, &again).map(|mut r| {
+                            r.reminder_run = Some(again.clone());
+                            r
+                        });
+                    }
+                    Err(err) => tracing::warn!(%err, "could not ask the worker again for its report"),
                 }
             }
-            drop(workers);
         }
-        report_to_conductor(app_for_turn, track_t, name_t, run_t).await;
+        hand_running(&app, &track_t, &name_t, &current, None).await;
+        let report = finish_report(&app, &run_t, outcome, &cwd_t);
+        report_to_conductor(app, track_t, name_t, run_t, report).await;
     });
 
     let mut result = json!({
@@ -1086,8 +1086,112 @@ async fn start_worker_turn(
     Ok(result)
 }
 
-/// Hand a finished worker run to its track's conductor as a new turn.
-async fn report_to_conductor(app: AppHandle, track: String, worker: String, run: String) {
+/// One worker turn: the prompt in flight, its events stored and shown.
+async fn drive_worker_turn(app: &AppHandle, track: &str, name: &str, run: &str, session: &AgentSession, text: String, cwd: &str) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let pump_task = tauri::async_runtime::spawn(pump(app.clone(), track.to_string(), name.to_string(), run.to_string(), rx));
+    let _ = tx.send(AgentEvent::Started {
+        session_id: session.session_id().to_string(),
+        cwd: cwd.to_string(),
+    });
+    match tokio::time::timeout(WORKER_TURN_TIMEOUT, session.prompt(text, tx.clone())).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            let _ = tx.send(AgentEvent::Failed { error: err.to_string() });
+        }
+        Err(_) => {
+            session.cancel();
+            let _ = tx.send(AgentEvent::Failed { error: "worker turn timed out".to_string() });
+        }
+    }
+    drop(tx);
+    let _ = pump_task.await;
+}
+
+/// Move a worker's "turn in flight" from one run to the next (or to none).
+async fn hand_running(app: &AppHandle, track: &str, name: &str, from: &str, to: Option<String>) {
+    let state = app.state::<AppState>();
+    let mut workers = state.sessions.workers.lock().await;
+    if let Some(live) = workers.get_mut(&worker_key(track, name)) {
+        if live.running.as_deref() == Some(from) {
+            live.running = to;
+        }
+    }
+}
+
+/// Whether a run ended normally (not failed, cancelled or timed out).
+fn ended_well(app: &AppHandle, run: &str) -> bool {
+    matches!(app.state::<AppState>().store.run(run), Ok(Some(s)) if s.status == RunStatus::Done && s.stop_reason.as_deref() != Some("cancelled"))
+}
+
+/// The report block of a run's reply, checked.
+fn checked_report(app: &AppHandle, run: &str) -> Result<Report, String> {
+    match app.state::<AppState>().store.run(run) {
+        Ok(Some(s)) if s.status == RunStatus::Done => report::parse(&s.output),
+        Ok(Some(s)) => Err(format!("the turn {}{}", s.status.as_str(), s.error.map(|e| format!(": {e}")).unwrap_or_default())),
+        _ => Err("the run is gone".to_string()),
+    }
+}
+
+/// The report as kept: the worker's, or one made from its reply; with the
+/// files the app saw its edit tools touch. Stored for the timeline's card.
+fn finish_report(app: &AppHandle, run: &str, outcome: Result<Report, String>, cwd: &str) -> Report {
+    let state = app.state::<AppState>();
+    let mut report = outcome.unwrap_or_else(|problem| {
+        let (well, reply) = match state.store.run(run) {
+            Ok(Some(s)) => (s.status == RunStatus::Done, if s.output.trim().is_empty() { s.error.unwrap_or_default() } else { s.output }),
+            _ => (false, String::new()),
+        };
+        report::Report::unstructured(well, &reply, &problem)
+    });
+    report.edits_seen = edits_seen(&state, run, cwd);
+    match serde_json::to_string(&report) {
+        Ok(json) => {
+            if let Err(err) = state.store.set_meta(&report_key(run), &json) {
+                tracing::warn!(%run, %err, "could not keep the worker's report");
+            }
+        }
+        Err(err) => tracing::warn!(%run, %err, "could not encode the worker's report"),
+    }
+    report
+}
+
+fn report_key(run: &str) -> String {
+    format!("report:{run}")
+}
+
+/// A worker run's kept report, if it has one.
+pub fn stored_report(state: &AppState, run: &str) -> Option<Report> {
+    let json = state.store.get_meta(&report_key(run)).ok().flatten()?;
+    serde_json::from_str(&json).ok()
+}
+
+/// Files a run's edit, delete and move tool calls touched, relative to the
+/// working folder where they are inside it.
+fn edits_seen(state: &AppState, run: &str, cwd: &str) -> Vec<String> {
+    let root = cwd.replace('\\', "/").trim_end_matches('/').to_string() + "/";
+    let mut seen: Vec<String> = Vec::new();
+    for e in state.store.events(run).unwrap_or_default() {
+        if let AgentEvent::ToolCall { tool_kind, paths, .. } = e.event {
+            if !matches!(tool_kind.as_str(), "edit" | "delete" | "move") {
+                continue;
+            }
+            for p in paths {
+                let p = p.replace('\\', "/");
+                let p = if p.to_lowercase().starts_with(&root.to_lowercase()) { p[root.len()..].to_string() } else { p };
+                if !seen.contains(&p) {
+                    seen.push(p);
+                }
+            }
+        }
+    }
+    seen.truncate(50);
+    seen
+}
+
+/// Hand a finished worker run to its track's conductor as a new turn: the
+/// report, not the whole reply (that stays below the membrane, in read_report).
+async fn report_to_conductor(app: AppHandle, track: String, worker: String, run: String, report: Report) {
     let state = app.state::<AppState>();
     let summary = match state.store.run(&run) {
         Ok(Some(s)) => s,
@@ -1096,18 +1200,13 @@ async fn report_to_conductor(app: AppHandle, track: String, worker: String, run:
             return;
         }
     };
-    let mut output = summary.output.trim().to_string();
-    const MAX: usize = 12_000;
-    if output.chars().count() > MAX {
-        output = format!("{}…\n(truncated: read_report(\"{run}\") has it all)", output.chars().take(MAX).collect::<String>());
-    }
     let text = format!(
         "{REPORT_PREFIX} worker={worker} run={run} status={} tools={} duration_ms={}{}\n\n{}",
         summary.status.as_str(),
         summary.tool_count,
         summary.duration_ms.unwrap_or(0),
         summary.error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default(),
-        if output.is_empty() { "(no text output)" } else { &output },
+        report.for_conductor(&run),
     );
 
     deliver(app.clone(), track, text, false, format!("report of {worker} run {run}")).await;

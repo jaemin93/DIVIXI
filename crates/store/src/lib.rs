@@ -1288,6 +1288,7 @@ mod tests {
             title: title.into(),
             tool_kind: "execute".into(),
             status: "pending".into(),
+            paths: vec![],
         }
     }
 

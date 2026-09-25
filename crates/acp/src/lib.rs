@@ -659,6 +659,7 @@ pub(crate) fn translate(update: SessionUpdate) -> Vec<AgentEvent> {
             title: call.title.clone(),
             tool_kind: format!("{:?}", call.kind).to_lowercase(),
             status: format!("{:?}", call.status).to_lowercase(),
+            paths: call.locations.iter().map(|l| l.path.display().to_string()).collect(),
         }],
         // Most tool-call updates carry content (terminal output, diffs), not a
         // status change. Emitting those as `status: unknown` buries the real

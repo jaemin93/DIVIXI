@@ -133,6 +133,12 @@ impl AppState {
 }
 
 /// Every track, oldest first.
+/// A worker run's checked report, once its turn has ended.
+#[tauri::command]
+fn worker_report(state: State<'_, AppState>, run: String) -> Option<orchestra_core::report::Report> {
+    conductor::stored_report(&state, &run)
+}
+
 #[tauri::command]
 fn list_tracks(state: State<'_, AppState>) -> Result<Vec<TrackInfo>, String> {
     state.store.tracks().map_err(|e| e.to_string())
@@ -957,6 +963,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             list_tracks,
+            worker_report,
             create_track,
             update_track,
             delete_track,

@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { store, agentLabel, type Run, type Segment, type Tool } from "./store.svelte";
+  import { store, agentLabel, withoutReportBlock, REPORT_REMINDER, type Run, type Segment, type Tool } from "./store.svelte";
   import Markdown from "./Markdown.svelte";
+  import ReportCard from "./ReportCard.svelte";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
 
@@ -22,7 +23,8 @@
   });
 
   function cleanText(text: string): string {
-    return text
+    // The report block shows as a card under the turn.
+    return withoutReportBlock(text)
       .replace(/Notice: [\w:.-]+ says: .*?(?=Notice: [\w:.-]+ says: |\n|$)/g, "")
       .replace(/[ \t]+\n/g, "\n")
       .replace(/\n{3,}/g, "\n\n");
@@ -72,13 +74,18 @@
       <div class="mono empty">{t("worker.empty")}</div>
     {/if}
     {#each runs as run (run.id)}
-      <!-- What the conductor sent this worker: on the right, as the human's words are on the track. -->
-      <div class="from">
-        <div class="mlab">{t("worker.conductor")}</div>
-        <div class="turn bubble">
-          <div class="ctext"><Markdown source={run.prompt} /></div>
+      {#if run.prompt.startsWith(REPORT_REMINDER)}
+        <!-- The app, not the conductor, asked again for the report. -->
+        <div class="sys mono">{t("report.reminded")}</div>
+      {:else}
+        <!-- What the conductor sent this worker: on the right, as the human's words are on the track. -->
+        <div class="from">
+          <div class="mlab">{t("worker.conductor")}</div>
+          <div class="turn bubble">
+            <div class="ctext"><Markdown source={run.prompt} /></div>
+          </div>
         </div>
-      </div>
+      {/if}
 
       <!-- How the worker answered, as it happened. -->
       <div class="turn to" class:live={run.status === "running" || run.status === "connecting"} class:failed={run.status === "failed"}>
@@ -108,6 +115,9 @@
         {#if run.segments.length === 0 && run.message.trim()}
           <div class="ctext"><Markdown source={cleanText(run.message)} /></div>
         {/if}
+        {#if run.status === "done" || run.status === "failed"}
+          <ReportCard run={run.id} compact />
+        {/if}
         {#if run.status === "failed" && run.error}
           <p class="ctext bad">{run.error}</p>
         {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
@@ -119,6 +129,13 @@
 </main>
 
 <style>
+  .sys {
+    margin: 0 0 14px;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--lab);
+  }
+
   main {
     flex: 1;
     min-width: 0;

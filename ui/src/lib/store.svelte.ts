@@ -325,6 +325,33 @@ const EMPTY_DOC: DesignDoc = { version: 0, nodes: [], edges: [], changes: [], ne
 
 /** Prefix of conductor prompts Orchestra injects itself (worker reports). Language-neutral. */
 export const REPORT_PREFIX = "[worker-report]";
+/** How the app's second ask for a missing report starts (conductor.rs, report::reminder). */
+export const REPORT_REMINDER = "Your reply did not end with a usable report";
+/** The fence a worker's report block opens with. */
+export const REPORT_FENCE = "```divixi-report";
+
+/** A worker turn's checked report (orchestra_core::report::Report). */
+export type WorkerReport = {
+  status: "done" | "partial" | "blocked" | "failed";
+  summary: string;
+  changes: { path: string; what: string }[];
+  checks: { what: string; result: "pass" | "fail" | "not_run"; detail: string }[];
+  risks: string[];
+  questions: string[];
+  next: string[];
+  structured: boolean;
+  problem?: string;
+  edits_seen: string[];
+  reminder_run?: string;
+};
+
+/** A worker's reply without its report block (the card shows the report). */
+export function withoutReportBlock(text: string): string {
+  const at = text.indexOf(REPORT_FENCE);
+  if (at < 0) return text;
+  const close = text.indexOf("```", at + REPORT_FENCE.length);
+  return (text.slice(0, at) + (close < 0 ? "" : text.slice(close + 3))).trimEnd();
+}
 /** Heads the list of files under a human message, as the core stores it. */
 export const ATTACH_MARK = "[attachments]";
 
@@ -2217,9 +2244,30 @@ class Store {
         run.prompt = s.prompt;
         run.agent = s.agent;
         run.startedAt = s.started_at;
+        if (s.prompt.startsWith(REPORT_PREFIX)) this.reportsArrived++;
       }
     } catch {
       // Cosmetic; the next restore fills it in.
+    }
+  }
+
+  /** Worker reports by run id, as far as they have been read. */
+  reports = $state<Record<string, WorkerReport>>({});
+  /** Moves when a report reaches a conductor, so cards still waiting ask again. */
+  reportsArrived = $state(0);
+  private reportsAsked = new Set<string>();
+
+  async loadReport(run: string) {
+    // One question in flight per run; a miss is asked again when a report arrives.
+    if (this.reportsAsked.has(run)) return;
+    this.reportsAsked.add(run);
+    try {
+      const report = await invoke<WorkerReport | null>("worker_report", { run });
+      if (report) this.reports = { ...this.reports, [run]: report };
+    } catch {
+      // Cosmetic: the card stays away.
+    } finally {
+      this.reportsAsked.delete(run);
     }
   }
 

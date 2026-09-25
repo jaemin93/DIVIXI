@@ -4,6 +4,8 @@
 //! [`AgentEvent::above_membrane`] decides what is allowed to reach a Track's
 //! timeline. Everything else stays in the session and is fetched on demand.
 
+pub mod report;
+
 use serde::{Deserialize, Serialize};
 
 /// Which session a run belongs to within its track: `conductor`, a
@@ -96,6 +98,9 @@ pub enum AgentEvent {
         tool_kind: String,
         /// Lifecycle status.
         status: String,
+        /// Files the call touches, when the agent says (ACP `locations`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        paths: Vec<String>,
     },
     /// A tool call changed status.
     ToolUpdate {
@@ -260,7 +265,8 @@ mod tests {
             id: "1".into(),
             title: "cargo test".into(),
             tool_kind: "execute".into(),
-            status: "pending".into()
+            status: "pending".into(),
+            paths: vec![],
         }
         .above_membrane());
     }
@@ -277,6 +283,7 @@ mod tests {
                 title: "ls".into(),
                 tool_kind: "execute".into(),
                 status: "pending".into(),
+                paths: vec![],
             },
             AgentEvent::ToolUpdate { id: "1".into(), status: "completed".into() },
             AgentEvent::Plan { entries: vec![] },

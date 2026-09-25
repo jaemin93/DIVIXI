@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ReportCard from "./ReportCard.svelte";
   import { store, agentLabel, splitAttachments, splitKnowledge, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Segment, type Tool } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import DecisionCard from "./DecisionCard.svelte";
@@ -98,7 +99,15 @@
        to relay; workers themselves are read in their own view. -->
   {#each conductorRuns as run (run.id)}
     {#if run.prompt.startsWith(REPORT_PREFIX)}
-      <div class="sys mono">{t("timeline.reportArrived")} · {run.prompt.split("\n")[0].replace(REPORT_PREFIX, "").trim()}</div>
+      {@const head = run.prompt.split("\n")[0]}
+      {@const workerRun = /\brun=(\S+)/.exec(head)?.[1] ?? ""}
+      {@const worker = /\bworker=(\S+)/.exec(head)?.[1] ?? ""}
+      {#if workerRun && store.reports[workerRun]}
+        <ReportCard run={workerRun} {worker} />
+      {:else}
+        <div class="sys mono">{t("timeline.reportArrived")} · {head.replace(REPORT_PREFIX, "").trim()}</div>
+        {#if workerRun}<ReportCard run={workerRun} {worker} />{/if}
+      {/if}
     {:else if run.prompt.startsWith(PERMISSION_PREFIX)}
       <!-- A worker asked; the conductor answers for the human. -->
       <div class="sys mono decided">{t("timeline.permissionAsked")} · {permissionLine(run.prompt)}</div>
