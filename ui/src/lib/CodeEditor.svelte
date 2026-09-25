@@ -110,6 +110,12 @@
     <textarea
       bind:this={area}
       oninput={(e) => onchange(e.currentTarget.value)}
+      onscroll={(e) => {
+        // It scrolls itself when the caret runs past the drawn text for a
+        // frame; the box around it does the scrolling, so it stays aligned.
+        e.currentTarget.scrollTop = 0;
+        e.currentTarget.scrollLeft = 0;
+      }}
       onkeydown={keydown}
       spellcheck="false"
       autocomplete="off"

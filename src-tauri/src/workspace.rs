@@ -276,6 +276,11 @@ pub fn write(root: &Path, rel: &str, text: &str, base: &str, force: bool) -> Res
     let out = if crlf { body.replace('\n', "\r\n") } else { body.into_owned() };
     let tmp = full.with_file_name(format!(".{}.divixi-save", full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
     std::fs::write(&tmp, out.as_bytes()).map_err(|e| e.to_string())?;
+    // The replacement keeps the file's permissions (a script stays executable).
+    if let Err(e) = std::fs::set_permissions(&tmp, meta.permissions()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
     if let Err(e) = std::fs::rename(&tmp, &full) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.to_string());

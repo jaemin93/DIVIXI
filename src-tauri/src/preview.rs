@@ -23,7 +23,8 @@ const PAGE_CSP: &str = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: b
 
 fn mime(ext: &str) -> &'static str {
     match ext {
-        "html" | "htm" => "text/html; charset=utf-8",
+        // Its charset is decided per file (see `handle`).
+        "html" | "htm" => "text/html",
         "css" => "text/css; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "json" | "map" => "application/json",
@@ -61,18 +62,20 @@ fn scrollbar_style(light: bool) -> String {
 
 /// An HTML page with `style` put right after its `<head>` (or at its very
 /// start when it has none).
+/// Works on the bytes, so a page in another encoding (EUC-KR, Shift_JIS)
+/// is left exactly as it was around the insert.
 fn with_style(html: &[u8], style: &str) -> Vec<u8> {
-    let text = String::from_utf8_lossy(html);
-    let lower = text.to_ascii_lowercase();
+    let lower = html.to_ascii_lowercase();
     let at = lower
-        .find("<head")
-        .and_then(|i| lower[i..].find('>').map(|j| i + j + 1))
+        .windows(5)
+        .position(|w| w == b"<head")
+        .and_then(|i| lower[i..].iter().position(|b| *b == b'>').map(|j| i + j + 1))
         .unwrap_or(0);
-    let mut out = String::with_capacity(text.len() + style.len());
-    out.push_str(&text[..at]);
-    out.push_str(style);
-    out.push_str(&text[at..]);
-    out.into_bytes()
+    let mut out = Vec::with_capacity(html.len() + style.len());
+    out.extend_from_slice(&html[..at]);
+    out.extend_from_slice(style.as_bytes());
+    out.extend_from_slice(&html[at..]);
+    out
 }
 
 /// `%XX` escapes decoded; invalid ones are kept as they are.
@@ -111,7 +114,9 @@ pub fn handle<R: Runtime>(ctx: UriSchemeContext<'_, R>, request: Request<Vec<u8>
     if track.is_empty() || rel.is_empty() {
         return refuse(StatusCode::NOT_FOUND, "no such file");
     }
-    let state = ctx.app_handle().state::<AppState>();
+    let Some(state) = ctx.app_handle().try_state::<AppState>() else {
+        return refuse(StatusCode::SERVICE_UNAVAILABLE, "starting");
+    };
     let full = match crate::track_root(&state, &track).and_then(|root| crate::workspace::resolve(&root, &rel)) {
         Ok(full) => full,
         Err(_) => return refuse(StatusCode::NOT_FOUND, "no such file"),
@@ -124,14 +129,17 @@ pub fn handle<R: Runtime>(ctx: UriSchemeContext<'_, R>, request: Request<Vec<u8>
         Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
     let ext = full.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let bytes = if matches!(ext.as_str(), "html" | "htm") {
+    let html = matches!(ext.as_str(), "html" | "htm");
+    // UTF-8 is said outright; any other page names its own charset in a <meta>.
+    let content_type = if html && std::str::from_utf8(&bytes).is_ok() { "text/html; charset=utf-8" } else { mime(&ext) };
+    let bytes = if html {
         let light = request.uri().query().is_some_and(|q| q.split('&').any(|p| p == "theme=lt"));
         with_style(&bytes, &scrollbar_style(light))
     } else {
         bytes
     };
     Response::builder()
-        .header(header::CONTENT_TYPE, mime(&ext))
+        .header(header::CONTENT_TYPE, content_type)
         .header("Content-Security-Policy", PAGE_CSP)
         .header("X-Content-Type-Options", "nosniff")
         // Saved edits show on the next load.
@@ -149,6 +157,9 @@ mod tests {
         let s = "<s/>";
         assert_eq!(String::from_utf8(with_style(b"<html><HEAD lang=x><title>t</title></head>", s)).unwrap(), "<html><HEAD lang=x><s/><title>t</title></head>");
         assert_eq!(String::from_utf8(with_style(b"<p>bare</p>", s)).unwrap(), "<s/><p>bare</p>");
+        // EUC-KR bytes for "한" around the insert come through untouched.
+        let euc = [b"<head>".as_slice(), &[0xC7, 0xD1]].concat();
+        assert_eq!(with_style(&euc, s), [b"<head><s/>".as_slice(), &[0xC7, 0xD1]].concat());
         assert!(scrollbar_style(true).contains("#d3cfc7") && scrollbar_style(false).contains("#242424"));
     }
 
