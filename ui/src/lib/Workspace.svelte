@@ -117,6 +117,12 @@
   const codeHtml = $derived(activeFile?.text !== undefined && activeFile.text !== null && !activeFile.editable ? highlight(activeFile.text, languageFor(activeFile.ext)) : "");
   const crumbs = $derived(store.activeFile ? store.activeFile.split("/") : []);
   const raw = $derived(!!store.rawMarkdown[store.activeFile]);
+  /** Where the preview protocol serves a file of the current track. */
+  function previewUrl(path: string): string {
+    const base = navigator.userAgent.includes("Windows") ? "http://preview.localhost/" : "preview://localhost/";
+    return base + [store.track ?? "", ...path.split("/")].map(encodeURIComponent).join("/");
+  }
+
   /** Markdown and HTML open rendered, with their source a toggle away. */
   const previewable = $derived(activeFile?.kind === "markdown" || activeFile?.kind === "html");
   /** Code and text open straight in the editor; markdown and HTML when shown as source. */
@@ -235,8 +241,11 @@
         {:else if activeFile.kind === "markdown" && !raw}
           <div class="mdwrap"><Markdown source={store.textOf(store.activeFile)} /></div>
         {:else if activeFile.kind === "html" && !raw}
-          <!-- Sandboxed, and under the app's CSP: markup and inline styles show; scripts and outside resources do not. -->
-          <iframe class="htmlframe" sandbox="" srcdoc={store.textOf(store.activeFile)} title={activeFile.name}></iframe>
+          {#if store.isDirty(store.activeFile)}<div class="previewnote">{t("ws.previewSaved")}</div>{/if}
+          <!-- Served from its own origin, sandboxed: its scripts run, apart from the app. Reloaded when the file is. -->
+          {#key activeFile}
+            <iframe class="htmlframe" sandbox="allow-scripts" src={previewUrl(store.activeFile)} title={activeFile.name}></iframe>
+          {/key}
         {:else if editing}
           {#if store.hasConflict(store.activeFile)}
             <div class="conflict">
@@ -576,6 +585,13 @@
     font-size: var(--chat-fs);
     line-height: 1.7;
     color: var(--txt);
+  }
+
+  .previewnote {
+    padding: 6px 12px;
+    font-size: 11.5px;
+    color: var(--dim);
+    border-bottom: 1px solid var(--line);
   }
 
   .htmlframe {

@@ -22,6 +22,7 @@ pub mod artifact;
 pub mod design;
 mod knowledge;
 mod metrics;
+mod preview;
 mod terminal;
 mod workspace;
 
@@ -961,6 +962,8 @@ pub fn run() {
             knowledge::knowledge_embed_now,
             knowledge::knowledge_default_config,
         ])
+        // The side panel's HTML preview, on an origin apart from the app's.
+        .register_uri_scheme_protocol(preview::SCHEME, |ctx, request| preview::handle(ctx, request))
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             // The app was Orchestra before it was Divixi; its data folder moves along.
