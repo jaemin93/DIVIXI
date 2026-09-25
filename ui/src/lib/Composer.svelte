@@ -514,11 +514,7 @@
   <div class="status">
     <AgentPicker />
 
-    {#if store.chatArtifact}
-      {#if store.designSelected.length}
-        <span class="chip static mono">{t("design.withSelected", { n: store.designSelected.length })}</span>
-      {/if}
-    {:else}
+    {#if !store.chatArtifact}
       <span class="chip static" title={store.currentTrack?.cwd}>
         <Icon name="folder" size={14} />
         <span class="mono path">{shortPath(store.currentTrack?.cwd)}</span>
