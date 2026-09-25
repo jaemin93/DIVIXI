@@ -59,44 +59,44 @@ function render(N) {
     for (let yy = y0; yy < y0 + t; yy++) for (let xx = x0; xx < x1; xx++) put(xx, yy, STAVE);
   }
 
-  // A stroke from (ax, ay) to (bx, by) of width w with square caps, antialiased
-  // by distance to the segment (one pixel of ramp).
-  const stroke = (ax, ay, bx, by, w, c) => {
-    const [px0, py0, px1, py1] = [ax * S, ay * S, bx * S, by * S];
-    const half = Math.max(0.5, (w * S) / 2);
-    const dx = px1 - px0,
-      dy = py1 - py0;
-    const len2 = dx * dx + dy * dy;
-    // Square caps: extend the segment by half the width at both ends.
-    const ext = half / Math.sqrt(len2);
-    const ex0 = px0 - dx * ext,
-      ey0 = py0 - dy * ext,
-      ex1 = px1 + dx * ext,
-      ey1 = py1 + dy * ext;
-    const edx = ex1 - ex0,
-      edy = ey1 - ey0,
-      elen2 = edx * edx + edy * edy;
-    const minX = Math.max(0, Math.floor(Math.min(ex0, ex1) - half - 1));
-    const maxX = Math.min(N - 1, Math.ceil(Math.max(ex0, ex1) + half + 1));
-    const minY = Math.max(0, Math.floor(Math.min(ey0, ey1) - half - 1));
-    const maxY = Math.min(N - 1, Math.ceil(Math.max(ey0, ey1) + half + 1));
-    for (let y = minY; y <= maxY; y++) {
-      for (let x = minX; x <= maxX; x++) {
-        const cx = x + 0.5,
-          cy = y + 0.5;
-        let k = ((cx - ex0) * edx + (cy - ey0) * edy) / elen2;
-        k = Math.max(0, Math.min(1, k));
-        const qx = ex0 + edx * k,
-          qy = ey0 + edy * k;
-        const d = Math.hypot(cx - qx, cy - qy);
-        blend(x, y, c, Math.max(0, Math.min(1, half - d + 0.5)));
+  // The X: the beat across the staves. Two bars with square caps, as the
+  // rail's SVG strokes them. Each pixel's colour is how much of it the bars
+  // cover, measured on a 16×16 grid inside the pixel: smooth edges at every
+  // size, and where the bars cross the pixel is counted once.
+  const bars = [
+    [20, 12, 44, 56],
+    [44, 12, 20, 56],
+  ].map(([ax, ay, bx, by]) => {
+    const dx = bx - ax,
+      dy = by - ay,
+      len = Math.hypot(dx, dy);
+    return { ax, ay, ux: dx / len, uy: dy / len, len };
+  });
+  const HALF = 2; // half the stroke width, in mark units
+  const inside = (mx, my) =>
+    bars.some(({ ax, ay, ux, uy, len }) => {
+      const rx = mx - ax,
+        ry = my - ay;
+      const along = rx * ux + ry * uy;
+      const across = Math.abs(rx * uy - ry * ux);
+      return along >= -HALF && along <= len + HALF && across <= HALF;
+    });
+  const GRID = 16;
+  const lo = Math.max(0, Math.floor(((20 - 2 * HALF) * N) / 64));
+  const hi = Math.min(N - 1, Math.ceil(((44 + 2 * HALF) * N) / 64));
+  const top = Math.max(0, Math.floor(((12 - 2 * HALF) * N) / 64));
+  const bottom = Math.min(N - 1, Math.ceil(((56 + 2 * HALF) * N) / 64));
+  for (let y = top; y <= bottom; y++) {
+    for (let x = lo; x <= hi; x++) {
+      let hits = 0;
+      for (let sy = 0; sy < GRID; sy++) {
+        for (let sx = 0; sx < GRID; sx++) {
+          if (inside(((x + (sx + 0.5) / GRID) * 64) / N, ((y + (sy + 0.5) / GRID) * 64) / N)) hits++;
+        }
       }
+      blend(x, y, ACCENT, hits / (GRID * GRID));
     }
-  };
-
-  // The X: the beat across the staves.
-  stroke(20, 12, 44, 56, 4, ACCENT);
-  stroke(44, 12, 20, 56, 4, ACCENT);
+  }
   return px;
 }
 
@@ -185,6 +185,7 @@ const desktop = {
   "StoreLogo.png": 50,
 };
 for (const [name, n] of Object.entries(desktop)) writeFileSync(`${ICONS}/${name}`, png(n));
-// The taskbar picks from these: every size Windows asks for at common scales.
-writeFileSync(`${ICONS}/icon.ico`, ico([16, 20, 24, 32, 40, 48, 64, 256]));
+// The taskbar picks from these: every size Windows asks for at 100–200% scale,
+// so it never has to shrink a larger one (which blurs).
+writeFileSync(`${ICONS}/icon.ico`, ico([16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 128, 256]));
 console.log(`wrote scripts/out/icon-source.png, ${Object.keys(desktop).length} PNGs and icon.ico in ${ICONS}`);

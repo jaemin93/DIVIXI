@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, untrack } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { invoke } from "@tauri-apps/api/core";
   import { store, type ArtifactInfo, type KbPick, type WsEntry } from "./store.svelte";
@@ -260,6 +260,14 @@
       grow();
     });
   }
+
+  // The lists above the box (/, @, @kb) scroll with the highlighted row.
+  $effect(() => {
+    void kbIndex;
+    void atIndex;
+    void slashIndex;
+    void tick().then(() => box?.parentElement?.querySelector<HTMLElement>(".slash .on")?.scrollIntoView({ block: "nearest" }));
+  });
 
   function toggleKb(r: KbPick | undefined) {
     if (!r) return;
