@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -146,6 +146,10 @@ const MIGRATIONS: &[&str] = &[
     // 11 -> 12: a decision can be an agent's permission question put to the
     // human: which session asked, and its request id, as JSON.
     "ALTER TABLE decisions ADD COLUMN permission TEXT;",
+    // 12 -> 13: worker reports kept from before lanes became workers read
+    // like the ones after, so the timeline shows them as reports.
+    "UPDATE runs SET prompt = '[worker-report] worker=' || substr(prompt, 20) WHERE prompt LIKE '[lane-report] lane=%';
+    UPDATE runs_fts SET prompt = '[worker-report] worker=' || substr(prompt, 20) WHERE prompt LIKE '[lane-report] lane=%';",
 ];
 
 const SCHEMA: &str = r#"
@@ -1259,6 +1263,24 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_lane_reports_read_as_worker_reports() {
+        let path = std::env::temp_dir().join(format!("orchestra-store-reports-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let (old, other) = {
+            let store = Store::open(&path).unwrap();
+            let old = store.begin_run("tr001", "conductor", "claude_code", "[lane-report] lane=scan run=t3 status=done\n\nbody", "/w").unwrap();
+            let other = store.begin_run("tr001", "conductor", "claude_code", "tell me about [lane-report] lane=x", "/w").unwrap();
+            store.set_meta("schema_version", "12").unwrap();
+            (old, other)
+        };
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.run(&old).unwrap().unwrap().prompt, "[worker-report] worker=scan run=t3 status=done\n\nbody");
+        assert_eq!(store.run(&other).unwrap().unwrap().prompt, "tell me about [lane-report] lane=x", "only prompts that start with it");
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
 
     fn tool(id: &str, title: &str) -> AgentEvent {
         AgentEvent::ToolCall {
