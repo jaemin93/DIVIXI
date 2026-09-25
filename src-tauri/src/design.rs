@@ -636,7 +636,131 @@ fn load_doc(state: &AppState, id: &str) -> Result<Doc, String> {
     if raw.trim().is_empty() {
         return Ok(Doc::default());
     }
-    serde_json::from_str(&raw).map_err(|e| format!("design {id} could not be read: {e}"))
+    parse_body(&raw).map_err(|e| format!("design {id} could not be read: {e}"))
+}
+
+/// A design's body as a board. Designs were briefly Excalidraw scenes
+/// (2026-09-25); one saved then is read back into notes, arrows and ink.
+pub fn parse_body(raw: &str) -> Result<Doc, String> {
+    let v: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    if v.get("elements").is_some() && v.get("nodes").is_none() {
+        return Ok(from_scene(&v));
+    }
+    serde_json::from_value(v).map_err(|e| e.to_string())
+}
+
+/// A note's tag from the fill an Excalidraw shape carried.
+fn tag_of_fill(fill: &str) -> &'static str {
+    match fill.to_ascii_lowercase().as_str() {
+        "#b2f2bb" => "goal",
+        "#ffd8a8" => "constraint",
+        "#d0bfff" => "question",
+        "#ffec99" => "idea",
+        _ => "",
+    }
+}
+
+/// An Excalidraw scene as a board: shapes, free text and frames become
+/// notes (a "[tag] " the text starts with, or the shape's fill, gives the
+/// tag), arrows joined at both ends become arrows, freehand ink becomes
+/// sketches. Deleted elements are left out.
+fn from_scene(v: &Value) -> Doc {
+    let empty = Vec::new();
+    let elements: Vec<&Value> = v
+        .get("elements")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|e| !e.get("isDeleted").and_then(Value::as_bool).unwrap_or(false))
+        .collect();
+    let s = |e: &Value, k: &str| e.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+    let f = |e: &Value, k: &str| e.get(k).and_then(Value::as_f64).unwrap_or_default();
+    let label = |id: &str| {
+        elements
+            .iter()
+            .find(|t| t.get("type").and_then(Value::as_str) == Some("text") && t.get("containerId").and_then(Value::as_str) == Some(id))
+            .map(|t| s(t, "text"))
+            .unwrap_or_default()
+    };
+    let mut doc = Doc { version: v.get("version").and_then(Value::as_u64).unwrap_or(0) + 1, ..Default::default() };
+    let mut ids: HashSet<String> = HashSet::new();
+    for e in &elements {
+        let id = s(e, "id");
+        let kind = s(e, "type");
+        let (x, y, w, h) = (f(e, "x"), f(e, "y"), f(e, "width"), f(e, "height"));
+        let text = match kind.as_str() {
+            "rectangle" | "ellipse" | "diamond" => label(&id),
+            "text" if s(e, "containerId").is_empty() => s(e, "text"),
+            "frame" | "magicframe" => s(e, "name"),
+            "freedraw" => {
+                let points: Vec<[f64; 3]> = e
+                    .get("points")
+                    .and_then(Value::as_array)
+                    .map(|pts| {
+                        let pressures = e.get("pressures").and_then(Value::as_array);
+                        pts.iter()
+                            .enumerate()
+                            .filter_map(|(i, p)| {
+                                let p = p.as_array()?;
+                                let pr = pressures.and_then(|a| a.get(i)).and_then(Value::as_f64).unwrap_or(0.5);
+                                Some([p.first()?.as_f64()?, p.get(1)?.as_f64()?, pr])
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if points.is_empty() {
+                    continue;
+                }
+                let color = s(e, "strokeColor");
+                doc.nodes.push(Node {
+                    id: id.clone(),
+                    kind: Kind::Sketch,
+                    x,
+                    y,
+                    w: w.max(1.0),
+                    h: h.max(1.0),
+                    text: String::new(),
+                    tag: String::new(),
+                    strokes: vec![Stroke { points, color, size: (f(e, "strokeWidth") * 2.0).max(1.0) }],
+                    by: "human".to_string(),
+                });
+                ids.insert(id);
+                continue;
+            }
+            _ => continue,
+        };
+        let (tag, text) = match text.strip_prefix('[').and_then(|t| t.split_once("] ")) {
+            Some((t, rest)) if TAGS.contains(&t) => (t.to_string(), rest.to_string()),
+            _ => (tag_of_fill(&s(e, "backgroundColor")).to_string(), text),
+        };
+        let by = e.pointer("/customData/by").and_then(Value::as_str).unwrap_or("human").to_string();
+        doc.nodes.push(Node {
+            id: id.clone(),
+            kind: Kind::Note,
+            x,
+            y,
+            // A note is at least note-sized, whatever box it came from.
+            w: w.max(NOTE_W),
+            h: h.max(NOTE_H),
+            text,
+            tag,
+            strokes: Vec::new(),
+            by,
+        });
+        ids.insert(id);
+    }
+    for e in &elements {
+        if !matches!(e.get("type").and_then(Value::as_str), Some("arrow" | "line")) {
+            continue;
+        }
+        let from = e.pointer("/startBinding/elementId").and_then(Value::as_str).unwrap_or_default();
+        let to = e.pointer("/endBinding/elementId").and_then(Value::as_str).unwrap_or_default();
+        if ids.contains(from) && ids.contains(to) && from != to {
+            let id = s(e, "id");
+            doc.edges.push(Edge { label: label(&id), id, from: from.to_string(), to: to.to_string(), by: "human".to_string() });
+        }
+    }
+    doc
 }
 
 /// The board as it is now.
@@ -864,6 +988,44 @@ pub fn tools(app: AppHandle, id: String) -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excalidraw_scenes_read_back_as_boards() {
+        let scene = json!({
+            "version": 4,
+            "elements": [
+                { "id": "n1", "type": "rectangle", "x": 0, "y": 0, "width": 260, "height": 150, "backgroundColor": "#b2f2bb" },
+                { "id": "t1", "type": "text", "containerId": "n1", "text": "[goal] Ship it", "x": 5, "y": 5, "width": 10, "height": 10 },
+                { "id": "n2", "type": "diamond", "x": 400, "y": 0, "width": 200, "height": 100, "backgroundColor": "#d0bfff" },
+                { "id": "t2", "type": "text", "containerId": "n2", "text": "Offline?", "x": 5, "y": 5, "width": 10, "height": 10 },
+                { "id": "free", "type": "text", "text": "a loose thought", "x": 0, "y": 300, "width": 120, "height": 25 },
+                { "id": "gone", "type": "rectangle", "x": 0, "y": 0, "width": 50, "height": 50, "isDeleted": true },
+                { "id": "a1", "type": "arrow", "x": 260, "y": 75, "width": 140, "height": 0,
+                  "startBinding": { "elementId": "n1" }, "endBinding": { "elementId": "n2" } },
+                { "id": "t3", "type": "text", "containerId": "a1", "text": "then", "x": 0, "y": 0, "width": 1, "height": 1 },
+                { "id": "ink", "type": "freedraw", "x": 10, "y": 400, "width": 30, "height": 20, "strokeColor": "#e03131", "strokeWidth": 2,
+                  "points": [[0, 0], [30, 20]], "pressures": [0.4, 0.6] }
+            ],
+            "files": {}
+        });
+        let d = parse_body(&scene.to_string()).unwrap();
+        assert_eq!(d.version, 5);
+        let note = |id: &str| d.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!((note("n1").text.as_str(), note("n1").tag.as_str()), ("Ship it", "goal"));
+        assert_eq!((note("n2").text.as_str(), note("n2").tag.as_str()), ("Offline?", "question"), "the fill gives the tag");
+        assert_eq!(note("free").text, "a loose thought");
+        assert_eq!(note("free").w, NOTE_W, "a thin text box becomes a note-sized one");
+        assert!(d.nodes.iter().all(|n| n.id != "gone" && n.id != "t1"));
+        assert_eq!(d.edges.len(), 1);
+        assert_eq!((d.edges[0].from.as_str(), d.edges[0].to.as_str(), d.edges[0].label.as_str()), ("n1", "n2", "then"));
+        let ink = note("ink");
+        assert_eq!(ink.kind, Kind::Sketch);
+        assert_eq!(ink.strokes[0].points[1], [30.0, 20.0, 0.6]);
+        assert_eq!(ink.strokes[0].color, "#e03131");
+        // A board reads back as itself.
+        let again = parse_body(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(again, d);
+    }
 
     fn ops(v: Value) -> Vec<Op> {
         serde_json::from_value(v).unwrap()
