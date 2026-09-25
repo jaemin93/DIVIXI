@@ -63,7 +63,8 @@
   <!-- Every design, most recently touched first; folds like the tracks column. -->
   {#if store.designListOpen}
   <div class="sidebox" transition:slide={side}>
-  <aside class="list">
+  <aside class="list" style="width: {store.designListWidth}px">
+    <SplitHandle edge="right" width={store.designListWidth} min={200} max={480} reset={240} label={t("design.listWidth")} onchange={(px, persist) => store.setDesignListWidth(px, persist)} />
     <!-- As the tracks column: the title, then folding the column away. -->
     <div class="head">
       <span class="mlab">{t("design.title")}</span>
@@ -202,7 +203,7 @@
   }
 
   .list {
-    width: 240px;
+    position: relative;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;

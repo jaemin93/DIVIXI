@@ -588,6 +588,21 @@ class Store {
     if (persist) this.persistWidth("rail_width", this.railWidth);
   }
 
+  /** Width of the designs column. Persisted. */
+  designListWidth = $state(240);
+  /** Width of the settings column. Persisted. */
+  settingsNavWidth = $state(232);
+
+  setDesignListWidth(px: number, persist = false) {
+    this.designListWidth = Math.min(480, Math.max(200, Math.round(px)));
+    if (persist) this.persistWidth("designlist_width", this.designListWidth);
+  }
+
+  setSettingsNavWidth(px: number, persist = false) {
+    this.settingsNavWidth = Math.min(420, Math.max(200, Math.round(px)));
+    if (persist) this.persistWidth("settings_nav_width", this.settingsNavWidth);
+  }
+
   setTrackListWidth(px: number, persist = false) {
     this.trackListWidth = Math.min(480, Math.max(200, Math.round(px)));
     if (persist) this.persistWidth("tracklist_width", this.trackListWidth);
@@ -1871,14 +1886,20 @@ class Store {
         this.lastError = String(err);
       }
       try {
-        const [term, termHeight, artifactChat, designList] = await Promise.all([
+        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth] = await Promise.all([
           invoke<string | null>("get_setting", { key: "terminal" }),
           invoke<string | null>("get_setting", { key: "terminal_height" }),
           invoke<string | null>("get_setting", { key: "artifact_chat_width" }),
           invoke<string | null>("get_setting", { key: "designlist" }),
+          invoke<string | null>("get_setting", { key: "designlist_width" }),
+          invoke<string | null>("get_setting", { key: "settings_nav_width" }),
         ]);
         const dc = Number(artifactChat);
         if (Number.isFinite(dc) && dc > 0) this.setArtifactChatWidth(dc);
+        const dl = Number(designListWidth);
+        if (Number.isFinite(dl) && dl > 0) this.setDesignListWidth(dl);
+        const sn = Number(settingsNavWidth);
+        if (Number.isFinite(sn) && sn > 0) this.setSettingsNavWidth(sn);
         this.designListOpen = designList !== "closed";
         const h = Number(termHeight);
         if (Number.isFinite(h) && h > 0) this.setTermHeight(h);

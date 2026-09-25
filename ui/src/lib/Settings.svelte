@@ -21,6 +21,7 @@
   import LangPicker from "./LangPicker.svelte";
   import KnowledgeSettings from "./KnowledgeSettings.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
+  import SplitHandle from "./SplitHandle.svelte";
   import { t } from "./i18n.svelte";
 
   /** The settings column. A group is a label; an entry opens a pane. */
@@ -69,7 +70,8 @@
   });
 </script>
 
-<aside class="col">
+<aside class="col" style="width: {store.settingsNavWidth}px">
+  <SplitHandle edge="right" width={store.settingsNavWidth} min={200} max={420} reset={232} label={t("settings.navWidth")} onchange={(px, persist) => store.setSettingsNavWidth(px, persist)} />
   <div class="head"><span class="title serif">{t("settings.title")}</span></div>
   <div class="nav">
     {#each groups as g (g.label)}
@@ -233,7 +235,7 @@
 
 <style>
   .col {
-    width: 232px;
+    position: relative;
     flex-shrink: 0;
     border-right: 1px solid var(--line);
     background: var(--rail);
