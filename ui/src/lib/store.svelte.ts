@@ -1249,6 +1249,16 @@ class Store {
     }
   }
 
+  /** Undo the human's last board edit, or redo with `again`. */
+  async designUndo(again: boolean) {
+    if (!this.artifact) return;
+    try {
+      await invoke<boolean>("design_undo", { id: this.artifact, again });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
   /** Pick files and put them on the open board at (x, y). */
   async designPickFiles(x: number, y: number) {
     try {

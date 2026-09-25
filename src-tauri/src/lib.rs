@@ -437,6 +437,12 @@ fn design_open_file(state: State<'_, AppState>, id: String, src: String) -> Resu
     cmd.arg(&path).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Undo (or redo, with `again`) the human's last edit on a design's board.
+#[tauri::command(async)]
+fn design_undo(app: AppHandle, id: String, again: bool) -> Result<bool, String> {
+    design::undo(&app, &id, again)
+}
+
 /// Keep or revert the design agent's suggestions.
 #[tauri::command(async)]
 fn design_review(app: AppHandle, id: String, changes: Vec<u64>, keep: bool) -> Result<(), String> {
@@ -973,6 +979,7 @@ pub fn run() {
             design_add_blob,
             open_url,
             design_open_file,
+            design_undo,
             file_stats,
             pick_files,
             save_attachment,

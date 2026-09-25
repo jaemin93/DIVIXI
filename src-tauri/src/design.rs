@@ -147,6 +147,10 @@ pub struct Doc {
     /// Counter for item and change ids.
     #[serde(default)]
     pub next: u64,
+    /// What the human's edit in progress touched, each item as it was
+    /// before; turned into an undo step when the edit is kept. Not saved.
+    #[serde(skip)]
+    journal: Vec<(String, Option<Entity>)>,
 }
 
 /// One edit to the board. The window and the agent speak the same set; the
@@ -422,13 +426,44 @@ impl Doc {
         }
     }
 
+    /// The human's edit just made, as an undo step (none if it touched nothing).
+    fn take_step(&mut self) -> Option<Step> {
+        let touched = std::mem::take(&mut self.journal);
+        (!touched.is_empty()).then(|| {
+            touched
+                .into_iter()
+                .map(|(t, before)| {
+                    let after = self.entity(&t);
+                    (t, before, after)
+                })
+                .collect()
+        })
+    }
+
+    /// Put the items of an undo step back as they were before it (or, with
+    /// `again`, as it left them). Arrows whose ends are gone go too.
+    fn replay(&mut self, step: &Step, again: bool) {
+        for (target, before, after) in step.iter().rev() {
+            self.restore(target, if again { after.as_ref() } else { before.as_ref() });
+        }
+        let nodes: HashSet<String> = self.nodes.iter().map(|n| n.id.clone()).collect();
+        self.edges.retain(|e| nodes.contains(&e.from) && nodes.contains(&e.to));
+        self.journal.clear();
+    }
+
     /// Note what an agent edit did to `target`, folding repeated edits of
     /// one item into a single change from its first state to its last.
     fn record(&mut self, actor: &Actor, target: &str, before: Option<Entity>) {
         let after = self.entity(target);
         match actor {
-            // A human touching an item settles any suggestion on it.
-            Actor::Human => self.changes.retain(|c| c.target != target),
+            // A human touching an item settles any suggestion on it, and
+            // the edit can be undone.
+            Actor::Human => {
+                self.changes.retain(|c| c.target != target);
+                if !self.journal.iter().any(|(t, _)| t == target) {
+                    self.journal.push((target.to_string(), before));
+                }
+            }
             Actor::Agent { run } => {
                 if let Some(c) = self.changes.iter_mut().find(|c| c.target == target) {
                     c.after = after;
@@ -889,10 +924,25 @@ impl Doc {
 
 // ----- the boards, cached from the store -----
 
-/// One board, loaded on first use. Its lock is held for a whole edit
-/// (read, change, save), so a human's edit and the agent's tool call never
-/// start from the same version and overwrite each other.
-type Slot = Arc<parking_lot::Mutex<Option<Doc>>>;
+/// One human edit as undo keeps it: each item it touched, as it was before
+/// and after.
+type Step = Vec<(String, Option<Entity>, Option<Entity>)>;
+
+/// Undo steps kept per board.
+const UNDO_DEPTH: usize = 100;
+
+/// One board, loaded on first use, with the human's undo and redo steps
+/// (in memory only). Its lock is held for a whole edit (read, change,
+/// save), so a human's edit and the agent's tool call never start from the
+/// same version and overwrite each other.
+#[derive(Default)]
+struct BoardSlot {
+    doc: Option<Doc>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
+}
+
+type Slot = Arc<parking_lot::Mutex<BoardSlot>>;
 
 /// Every open design's board.
 #[derive(Default)]
@@ -1055,10 +1105,10 @@ fn from_scene(v: &Value) -> Doc {
 pub fn doc(state: &AppState, id: &str) -> Result<Doc, String> {
     let slot = state.boards.slot(id);
     let mut board = slot.lock();
-    if board.is_none() {
-        *board = Some(load_doc(state, id)?);
+    if board.doc.is_none() {
+        board.doc = Some(load_doc(state, id)?);
     }
-    board.clone().ok_or_else(|| format!("design {id} vanished"))
+    board.doc.clone().ok_or_else(|| format!("design {id} vanished"))
 }
 
 /// What the window hears after every change: only what changed. `base`
@@ -1101,20 +1151,23 @@ impl DesignDelta {
     }
 }
 
-/// Run `f` on the board, save it, and tell the window. The board's lock
-/// is held from reading it to keeping the result; only telling the window
-/// happens after.
-fn edit<R>(app: &AppHandle, id: &str, f: impl FnOnce(&mut Doc) -> R) -> Result<R, String> {
+/// Run `f` on the board (and its undo steps), save it, and tell the
+/// window. The board's lock is held from reading it to keeping the result;
+/// only telling the window happens after.
+fn change<R>(app: &AppHandle, id: &str, f: impl FnOnce(&mut Doc, &mut Vec<Step>, &mut Vec<Step>) -> R) -> Result<R, String> {
     let state = app.state::<AppState>();
     let slot = state.boards.slot(id);
     let (out, delta) = {
-        let mut board = slot.lock();
-        if board.is_none() {
-            *board = Some(load_doc(&state, id)?);
+        let mut guard = slot.lock();
+        let board = &mut *guard;
+        if board.doc.is_none() {
+            board.doc = Some(load_doc(&state, id)?);
         }
-        let old = board.take().ok_or_else(|| format!("design {id} vanished"))?;
+        let old = board.doc.take().ok_or_else(|| format!("design {id} vanished"))?;
         let mut current = old.clone();
-        let out = f(&mut current);
+        current.journal.clear();
+        let (mut undo, mut redo) = (std::mem::take(&mut board.undo), std::mem::take(&mut board.redo));
+        let out = f(&mut current, &mut undo, &mut redo);
         current.version += 1;
         let saved = serde_json::to_string(&current)
             .map_err(|e| e.to_string())
@@ -1125,16 +1178,49 @@ fn edit<R>(app: &AppHandle, id: &str, f: impl FnOnce(&mut Doc) -> R) -> Result<R
                     .map_err(|e| e.to_string())
             });
         if let Err(err) = saved {
-            // Not saved: the board stays as it was.
-            *board = Some(old);
+            // Not saved: the board and its undo steps stay as they were.
+            board.doc = Some(old);
+            board.undo = undo;
+            board.redo = redo;
             return Err(err);
         }
         let delta = DesignDelta::between(id, &old, &current);
-        *board = Some(current);
+        board.doc = Some(current);
+        board.undo = undo;
+        board.redo = redo;
         (out, delta)
     };
     let _ = app.emit("design", &delta);
     Ok(out)
+}
+
+/// `change` for an edit: what the human's part of it touched becomes an
+/// undo step (and a new edit forgets what was undone).
+fn edit<R>(app: &AppHandle, id: &str, f: impl FnOnce(&mut Doc) -> R) -> Result<R, String> {
+    change(app, id, |d, undo, redo| {
+        let out = f(d);
+        if let Some(step) = d.take_step() {
+            undo.push(step);
+            if undo.len() > UNDO_DEPTH {
+                undo.remove(0);
+            }
+            redo.clear();
+        }
+        out
+    })
+}
+
+/// Undo the human's last edit (or, with `again`, redo the last undone):
+/// only the items it touched go back, so what the agent did meanwhile
+/// stays. Returns whether there was a step to take.
+pub fn undo(app: &AppHandle, id: &str, again: bool) -> Result<bool, String> {
+    change(app, id, |d, undo, redo| {
+        let (from, to) = if again { (redo, undo) } else { (undo, redo) };
+        let Some(step) = from.pop() else { return false };
+        d.replay(&step, again);
+        to.push(step);
+        true
+    })
 }
 
 /// Apply edits to a design's board.
@@ -1428,6 +1514,41 @@ pub fn tools(app: AppHandle, id: String) -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_takes_back_the_humans_edits_and_only_those() {
+        let mut d = Doc::default();
+        let stroke = |x: f64| json!({ "op": "add_stroke", "stroke": { "points": [[x, 0.0, 0.5], [x + 10.0, 10.0, 0.5]], "color": "", "size": 4 } });
+        d.apply(ops(json!([stroke(0.0)])), &Actor::Human);
+        let first = d.take_step().unwrap();
+        d.apply(ops(json!([stroke(5.0)])), &Actor::Human);
+        let second = d.take_step().unwrap();
+        assert_eq!(d.nodes.len(), 1, "the two strokes are one sketch");
+        assert_eq!(d.nodes[0].strokes.len(), 2);
+        // Meanwhile the agent adds a note: no undo step for it.
+        d.apply(ops(json!([{ "op": "create_note", "x": 500, "y": 0, "text": "agent's" }])), &Actor::Agent { run: None });
+        assert!(d.take_step().is_none());
+
+        d.replay(&second, false);
+        assert_eq!(d.nodes.iter().find(|n| n.kind == Kind::Sketch).unwrap().strokes.len(), 1, "the last stroke went");
+        assert!(d.nodes.iter().any(|n| n.text == "agent's"), "the agent's note stays");
+        d.replay(&first, false);
+        assert!(d.nodes.iter().all(|n| n.kind != Kind::Sketch), "the sketch is gone with its first stroke");
+        d.replay(&first, true);
+        d.replay(&second, true);
+        assert_eq!(d.nodes.iter().find(|n| n.kind == Kind::Sketch).unwrap().strokes.len(), 2, "redo brings both back");
+
+        // Deleting a note with an arrow, then undoing, brings both back.
+        let res = d.apply(ops(json!([{ "op": "create_note", "x": 0, "y": 300, "text": "a", "ref": "a" }, { "op": "connect", "from": "$a", "to": d.nodes.iter().find(|n| n.text == "agent's").unwrap().id }])), &Actor::Human);
+        let a = res[0]["id"].as_str().unwrap().to_string();
+        d.take_step();
+        d.apply(ops(json!([{ "op": "delete", "ids": [a.clone()] }])), &Actor::Human);
+        let del = d.take_step().unwrap();
+        assert!(d.edges.is_empty());
+        d.replay(&del, false);
+        assert!(d.nodes.iter().any(|n| n.id == a));
+        assert_eq!(d.edges.len(), 1, "its arrow is back too");
+    }
 
     #[test]
     fn frames_links_questions_and_files() {

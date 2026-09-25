@@ -602,7 +602,16 @@
     if (e.defaultPrevented || editing || store.tagDialog || store.view !== "design") return;
     if (target?.closest?.("input, textarea, select, [contenteditable], [role=menu], [role=dialog]")) return;
     if (e.key === " ") spaceHeld = true;
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // Undo and redo of the human's own edits (typing has its own).
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const k = e.key.toLowerCase();
+      if (k === "z" || k === "y") {
+        e.preventDefault();
+        void store.designUndo(k === "y" || e.shiftKey);
+      }
+      return;
+    }
+    if (e.altKey) return;
     const keys: Record<string, Tool> = { v: "select", n: "note", p: "pen", e: "eraser", a: "arrow", f: "frame", q: "question" };
     const k = e.key.toLowerCase();
     if (k === "l" && el) {
@@ -641,7 +650,7 @@
   class:eraser={tool === "eraser"}
   class:note={tool === "note"}
   class:arrow={tool === "arrow"}
-  class:framing={tool === "frame" || tool === "question"}
+  class:placing={tool === "frame" || tool === "question"}
   class:dropover={dropOver}
   bind:this={el}
   onpointerdown={onDown}
@@ -935,7 +944,7 @@
     cursor: cell;
   }
 
-  .board.framing {
+  .board.placing {
     cursor: crosshair;
   }
 
