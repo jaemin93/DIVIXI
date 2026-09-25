@@ -155,6 +155,9 @@ const ko = {
   "design.listWidth": "디자인 목록 폭",
   "settings.navWidth": "설정 목록 폭",
   "composer.kb.title": "지식",
+  "composer.kb.entry": "지식에서 찾기",
+  "composer.kb.menuDesc": "지식 라이브러리에서 찾아 메시지에 붙입니다",
+  "composer.kb.button": "지식에서 찾아 붙이기 (@kb)",
   "composer.kb.hint": "@kb 뒤에 찾을 말을 적으세요",
   "composer.kb.searching": "찾는 중…",
   "composer.kb.none": "찾은 지식이 없습니다",
@@ -356,7 +359,7 @@ const ko = {
   "ws.large": "너무 커서 표시하지 않습니다",
 
   // Composer
-  "composer.placeholder": "지휘자에게 메시지… (/command @file)",
+  "composer.placeholder": "지휘자에게 메시지… (/명령 @파일 @kb 지식)",
   "composer.add": "첨부",
   "composer.upload": "파일 업로드",
   "composer.attachDesign": "디자인 첨부",
@@ -671,6 +674,9 @@ const en: Record<Key, string> = {
   "design.listWidth": "Designs list width",
   "settings.navWidth": "Settings list width",
   "composer.kb.title": "Knowledge",
+  "composer.kb.entry": "Search knowledge",
+  "composer.kb.menuDesc": "Find passages in the knowledge library and attach them",
+  "composer.kb.button": "Search knowledge to attach (@kb)",
   "composer.kb.hint": "Type what to look for after @kb",
   "composer.kb.searching": "Searching…",
   "composer.kb.none": "Nothing found in the library",
@@ -870,7 +876,7 @@ const en: Record<Key, string> = {
   "ws.binary": "Binary file",
   "ws.large": "Too large to show",
 
-  "composer.placeholder": "Message the conductor… (/command @file)",
+  "composer.placeholder": "Message the conductor… (/command @file @kb knowledge)",
   "composer.add": "Attach",
   "composer.upload": "Upload files",
   "composer.attachDesign": "Attach a design",

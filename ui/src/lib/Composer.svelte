@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { invoke } from "@tauri-apps/api/core";
   import { store, type ArtifactInfo, type KbPick, type WsEntry } from "./store.svelte";
@@ -9,7 +9,29 @@
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
 
-  let draft = $state("");
+  // Each conversation keeps its own draft: what is typed in one track stays there.
+  let draftKey = store.chatKey;
+  let draft = $state(store.drafts[draftKey] ?? "");
+  $effect(() => {
+    store.drafts[draftKey] = draft;
+  });
+  $effect(() => {
+    const key = store.chatKey;
+    untrack(() => {
+      if (key === draftKey) return;
+      // A knowledge search left open keeps what was typed before it, not the search.
+      if (kbStash !== null) store.drafts[draftKey] = kbStash;
+      kbStash = null;
+      kbChosen = [];
+      draftKey = key;
+      draft = store.drafts[key] ?? "";
+      atHidden = false;
+      queueMicrotask(grow);
+    });
+  });
+  onDestroy(() => {
+    if (kbStash !== null) store.drafts[draftKey] = kbStash;
+  });
   let contextOpen = $state(false);
   let box = $state<HTMLTextAreaElement>();
   /** Highlighted row in the slash list. */
@@ -99,8 +121,7 @@
       }
       if (e.key === "Escape") {
         e.preventDefault();
-        draft = "";
-        queueMicrotask(grow);
+        endKb();
         return;
       }
     }
@@ -209,6 +230,37 @@
   });
   const kbTokens = $derived(kbResults.filter((r) => kbChosen.includes(r.id)).reduce((n, r) => n + r.tokens, 0));
 
+  /** What was in the box before a knowledge search took it; it comes back when the search closes. */
+  let kbStash: string | null = null;
+
+  /** Turn the box into a knowledge search, keeping what was typed. */
+  function startKb(query = "") {
+    menuOpen = false;
+    if (kbQuery === null) kbStash = draft;
+    draft = `@kb ${query}`;
+    const at = draft.length;
+    queueMicrotask(() => {
+      box?.focus();
+      box?.setSelectionRange(at, at);
+      caret = at;
+      grow();
+    });
+  }
+
+  /** Close the search; the box holds what it held before. */
+  function endKb() {
+    draft = kbStash ?? "";
+    kbStash = null;
+    kbChosen = [];
+    const at = draft.length;
+    queueMicrotask(() => {
+      box?.focus();
+      box?.setSelectionRange(at, at);
+      caret = at;
+      grow();
+    });
+  }
+
   function toggleKb(r: KbPick | undefined) {
     if (!r) return;
     kbChosen = kbChosen.includes(r.id) ? kbChosen.filter((id) => id !== r.id) : [...kbChosen, r.id];
@@ -220,10 +272,7 @@
     const picks = chosen.length ? chosen : kbResults[kbIndex] ? [kbResults[kbIndex]] : [];
     if (!picks.length) return;
     store.pickKnowledge(picks);
-    draft = "";
-    kbChosen = [];
-    box?.focus();
-    queueMicrotask(grow);
+    endKb();
   }
 
   /** The "@word" right before the caret, or null. */
@@ -281,12 +330,17 @@
     return scored.slice(0, 8).map(([, d]) => d);
   });
 
-  /** One list for the keyboard: designs first, then files. */
-  type AtItem = { kind: "design"; design: ArtifactInfo } | { kind: "file"; file: WsEntry };
+  /** "@" (or "@k…") offers the knowledge search at the top of the list. */
+  const kbOffered = $derived(!!atToken && ["kb", "knowledge", "지식"].some((w) => w.startsWith(atToken.query)));
+
+  /** One list for the keyboard: knowledge, designs, then files. */
+  type AtItem = { kind: "kb" } | { kind: "design"; design: ArtifactInfo } | { kind: "file"; file: WsEntry };
   const atItems = $derived<AtItem[]>([
+    ...(kbOffered ? [{ kind: "kb" as const }] : []),
     ...designMatches.map((design) => ({ kind: "design" as const, design })),
     ...atMatches.map((file) => ({ kind: "file" as const, file })),
   ]);
+  const kbOff = $derived(kbOffered ? 1 : 0);
   const atOpen = $derived(atToken !== null && !atHidden && (atItems.length > 0 || store.treeLoading));
 
   $effect(() => {
@@ -295,8 +349,18 @@
   });
 
   function pickAt(item: AtItem) {
-    if (item.kind === "design") pickDesign(item.design);
+    if (item.kind === "kb") pickKb();
+    else if (item.kind === "design") pickDesign(item.design);
     else pickFile(item.file);
+  }
+
+  /** Drop the "@…" typed and search knowledge. */
+  function pickKb() {
+    if (!atToken) return;
+    const before = draft.slice(0, atToken.start);
+    const after = draft.slice(caret);
+    draft = (before + after.replace(/^\s+/, "")).trimEnd();
+    startKb();
   }
 
   /** Put "@name" in place of what was typed and attach the design. */
@@ -496,13 +560,20 @@
           <span class="mono mkey">/</span>
           <span class="mbody"><span class="mtitle">{t("composer.menuCommand")}</span><span class="mdesc">{t("composer.menuCommandDesc")}</span></span>
         </button>
+        <button type="button" class="mitem" role="menuitem" onclick={() => startKb()}>
+          <span class="mkey"><Icon name="book" size={13} /></span>
+          <span class="mbody"><span class="mtitle">{t("composer.kb.title")}</span><span class="mdesc">{t("composer.kb.menuDesc")}</span></span>
+        </button>
         <button type="button" class="mitem" role="menuitem" onclick={() => insertAtCaret("@")}>
           <span class="mono mkey">@</span>
           <span class="mbody"><span class="mtitle">{t("composer.menuFile")}</span><span class="mdesc">{t("composer.menuFileDesc")}</span></span>
         </button>
       </div>
     </Popover>
-    <div class="boxwrap">
+    <div class="boxwrap" class:kbmode={kbQuery !== null}>
+      {#if kbQuery !== null}
+        <span class="kbbadge mono" aria-hidden="true"><Icon name="book" size={11} />{t("composer.kb.title")}</span>
+      {/if}
       {#if kbQuery !== null}
         <!-- Passages from the knowledge library for what follows "@kb". -->
         <div class="slash kb" role="listbox" aria-label={t("composer.kb.title")}>
@@ -545,9 +616,29 @@
       {:else if atOpen}
         <!-- Designs (most recent first), then files in the track's folder, narrowed by what follows the "@". -->
         <div class="slash" role="listbox" aria-label={t("composer.files")}>
+          {#if kbOffered}
+            <div
+              class="frow kbentry"
+              class:on={atIndex === 0}
+              role="option"
+              aria-selected={atIndex === 0}
+              tabindex="-1"
+              onmouseenter={() => (atIndex = 0)}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={pickKb}
+              onkeydown={() => {}}
+            >
+              <span class="ficon"><Icon name="book" size={14} /></span>
+              <span class="fcol">
+                <span class="fn">{t("composer.kb.entry")}</span>
+                <span class="mono fp">@kb</span>
+              </span>
+            </div>
+          {/if}
           {#if designMatches.length}
             <div class="mlab-sm ph">{t("composer.designs")}</div>
-            {#each designMatches as d, i (d.id)}
+            {#each designMatches as d, di (d.id)}
+              {@const i = di + kbOff}
               <div
                 class="frow"
                 class:on={i === atIndex}
@@ -574,7 +665,7 @@
             <div class="mono waiting"><span class="dot pulse"></span>{store.treeLoading ? t("composer.filesLoading") : t("composer.noFiles")}</div>
           {/if}
           {#each atMatches as f, j (f.path)}
-            {@const i = designMatches.length + j}
+            {@const i = kbOff + designMatches.length + j}
             <div
               class="frow"
               class:on={i === atIndex}
@@ -645,7 +736,18 @@
       <!-- While the conductor answers, the send button is a stop button: Ctrl+C. -->
       <button class="btn send stop" type="button" disabled={store.cancelling} onclick={() => store.cancelConductor()} title={t("composer.stopTitle")} aria-label={t("composer.stop")}>■</button>
     {:else}
-      <button class="btn send" type="submit" disabled={(!draft.trim() && !store.attachments.length) || store.attaching > 0} aria-label={t("composer.send")}>→</button>
+      <button
+        type="button"
+        class="btn kbbtn"
+        class:on={kbQuery !== null}
+        onclick={() => (kbQuery === null ? startKb() : endKb())}
+        title={t("composer.kb.button")}
+        aria-label={t("composer.kb.button")}
+        aria-pressed={kbQuery !== null}
+      >
+        <Icon name="book" size={15} />
+      </button>
+      <button class="btn send" type="submit" disabled={(!draft.trim() && !store.attachments.length && !store.kbPicked.length) || store.attaching > 0 || kbQuery !== null} aria-label={t("composer.send")}>→</button>
     {/if}
   </form>
 
@@ -803,6 +905,50 @@
   .fx:hover {
     color: var(--hi);
     background: var(--sel);
+  }
+
+  .kbbtn {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--dim);
+  }
+
+  .kbbtn:hover,
+  .kbbtn.on {
+    color: var(--acc);
+    border-color: var(--acc);
+  }
+
+  .kbbtn.on {
+    background: var(--accbg);
+  }
+
+  /* Searching knowledge: the box says so. */
+  .boxwrap.kbmode textarea {
+    border-color: var(--acc);
+    padding-top: 26px;
+  }
+
+  .kbbadge {
+    position: absolute;
+    top: 6px;
+    left: 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: var(--acc);
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .kbentry .ficon {
+    color: var(--acc);
   }
 
   .plus {
