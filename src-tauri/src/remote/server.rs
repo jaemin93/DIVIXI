@@ -235,7 +235,14 @@ async fn invoke(
     if let Err(r) = device(&ctx, &headers, &peer) {
         return refused(r);
     }
-    let args: Value = if body.is_empty() { json!({}) } else { serde_json::from_slice(&body).unwrap_or(json!({})) };
+    let args: Value = if body.is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": format!("the arguments are not JSON: {e}") }))).into_response(),
+        }
+    };
     if let Err(why) = super::bridge::allowed(&cmd, &args) {
         return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": why }))).into_response();
     }
