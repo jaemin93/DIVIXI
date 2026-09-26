@@ -215,11 +215,7 @@ async fn update_track(state: State<'_, AppState>, id: String, mut patch: TrackPa
             return Err("the track is still working; wait before changing the folder".to_string());
         }
         let workers = track_workers(&state, &id);
-        for w in &workers {
-            if worktree::changes(&state.store, &id, w).is_ok_and(|c| !c.files.is_empty()) {
-                return Err(format!("worker {w} has changes not merged into the track folder; merge or discard them first"));
-            }
-        }
+        worktree::check_nothing_pending(&state.store, &id, &workers)?;
         state.sessions.close_track(&id).await;
         worktree::remove_track(&state.store, &id, &workers);
         state.store.forget_track_sessions(&id).map_err(|e| e.to_string())?;
@@ -234,8 +230,10 @@ async fn delete_track(state: State<'_, AppState>, id: String) -> Result<(), Stri
         return Err("the track is still working; wait for it to finish".to_string());
     }
     state.sessions.close_track(&id).await;
-    // Its workers' checkouts go first; their records go with the track.
+    // Its workers' checkouts go first (not while one holds unmerged work);
+    // their records go with the track.
     let workers = track_workers(&state, &id);
+    worktree::check_nothing_pending(&state.store, &id, &workers)?;
     worktree::remove_track(&state.store, &id, &workers);
     state.store.delete_track(&id).map_err(|e| e.to_string())
 }
@@ -282,8 +280,7 @@ async fn worker_merge(app: AppHandle, track: String, worker: String) -> Result<w
     worker_idle(&app.state::<AppState>(), &track, &worker).await?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let scratch = state.worktrees_dir.join(".merge").join(format!("{track}-{worker}"));
-        worktree::merge(&state.store, &track, &worker, &scratch)
+        worktree::merge(&state.store, &track, &worker, &state.worktrees_dir.join(".merge"))
     })
     .await
     .map_err(|e| e.to_string())?

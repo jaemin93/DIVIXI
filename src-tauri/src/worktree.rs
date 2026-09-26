@@ -81,9 +81,25 @@ pub struct Merged {
     pub conflicts: Vec<String>,
 }
 
+/// One checkout operation at a time: a merge and the next turn's catch-up,
+/// or two reads of the same checkout, must not interleave their git calls.
+static CHECKOUTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    CHECKOUTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    git_env(dir, args, None)
+}
+
+/// A git command, with its own index file when `index` is given.
+fn git_env(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<std::process::Output, String> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(dir);
+    if let Some(index) = index {
+        cmd.env("GIT_INDEX_FILE", index);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -95,7 +111,11 @@ fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output, String> {
 
 /// stdout of a git command that must succeed.
 fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = git(dir, args)?;
+    run_env(dir, args, None)
+}
+
+fn run_env(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
+    let out = git_env(dir, args, index)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let verb = args.iter().find(|a| !a.starts_with('-') && !a.contains('=')).unwrap_or(&"");
@@ -120,15 +140,19 @@ fn key(track: &str, worker: &str) -> String {
     format!("worktree:{track}/{worker}")
 }
 
-/// Letters git and file systems take in a branch or folder name.
+/// A name git and file systems take in a branch or folder: the name itself
+/// when it is plain, else its plain letters and a hash of the whole, so
+/// "Fix Parser" and "fix-parser" never share a checkout and "../x" stays put.
 fn slug(s: &str) -> String {
-    let s: String = s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' }).collect();
-    let s = s.trim_matches('-').to_string();
-    if s.is_empty() {
-        "worker".to_string()
-    } else {
-        s
+    let plain: String = s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' }).collect();
+    let plain = plain.trim_matches('-').to_string();
+    if !plain.is_empty() && plain == s {
+        return plain;
     }
+    // FNV-1a: stable across runs and builds.
+    let hash = s.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    let head = if plain.is_empty() { "worker" } else { &plain };
+    format!("{head}-{:08x}", hash as u32)
 }
 
 pub fn record(store: &Store, track: &str, worker: &str) -> Option<Checkout> {
@@ -160,15 +184,32 @@ fn snapshot_of(top: &Path) -> Result<String, String> {
 }
 
 /// Everything the worker has done, staged, so it can be diffed against `base`.
+/// Only for merging, when the worker is idle: it moves the worker's index.
 fn stage_all(c: &Checkout) -> Result<(), String> {
     run(&c.path, &["add", "-A"]).map(|_| ())
 }
 
+/// A scratch index holding everything in the checkout, for reading what is
+/// pending without touching the worker's own index (it may be mid-turn and
+/// using git itself). Starts from a copy of that index, so it is quick.
+fn scan_index(c: &Checkout) -> Result<PathBuf, String> {
+    let gitdir = PathBuf::from(run(&c.path, &["rev-parse", "--absolute-git-dir"])?.trim());
+    let scan = gitdir.join("divixi-scan-index");
+    match std::fs::copy(gitdir.join("index"), &scan) {
+        Ok(_) => {}
+        Err(_) => {
+            run_env(&c.path, &["read-tree", "HEAD"], Some(&scan))?;
+        }
+    }
+    run_env(&c.path, &["add", "-A"], Some(&scan))?;
+    Ok(scan)
+}
+
 /// The files the worker changed since `base`.
 fn pending_of(c: &Checkout) -> Result<Vec<Pending>, String> {
-    stage_all(c)?;
-    let status = run(&c.path, &["diff", "--cached", "--no-renames", "--name-status", "-z", &c.base])?;
-    let numstat = run(&c.path, &["diff", "--cached", "--no-renames", "--numstat", "-z", &c.base])?;
+    let scan = scan_index(c)?;
+    let status = run_env(&c.path, &["diff", "--cached", "--no-renames", "--name-status", "-z", &c.base], Some(&scan))?;
+    let numstat = run_env(&c.path, &["diff", "--cached", "--no-renames", "--numstat", "-z", &c.base], Some(&scan))?;
     let mut counts = std::collections::HashMap::new();
     for rec in numstat.split('\0').filter(|r| !r.is_empty()) {
         let mut parts = rec.splitn(3, '\t');
@@ -195,6 +236,7 @@ fn pending_of(c: &Checkout) -> Result<Vec<Pending>, String> {
 /// what was merged or edited since.
 pub fn ensure(store: &Store, worktrees_dir: &Path, track: &str, worker: &str, cwd: &Path) -> Result<Option<Checkout>, String> {
     let Some(top) = repository(cwd) else { return Ok(None) };
+    let _one = serial();
     if let Some(mut c) = record(store, track, worker) {
         if c.path.join(".git").exists() {
             if pending_of(&c)?.is_empty() {
@@ -239,6 +281,7 @@ pub fn ensure(store: &Store, worktrees_dir: &Path, track: &str, worker: &str, cw
 
 /// What a worker has waiting.
 pub fn changes(store: &Store, track: &str, worker: &str) -> Result<Changes, String> {
+    let _one = serial();
     let Some(c) = record(store, track, worker).filter(|c| c.path.join(".git").exists()) else {
         return Ok(Changes { isolated: false, branch: String::new(), sub: String::new(), files: Vec::new() });
     };
@@ -247,9 +290,10 @@ pub fn changes(store: &Store, track: &str, worker: &str) -> Result<Changes, Stri
 
 /// One pending file's diff, as the worker changed it.
 pub fn file_diff(store: &Store, track: &str, worker: &str, path: &str) -> Result<String, String> {
+    let _one = serial();
     let c = record(store, track, worker).ok_or("the worker has no checkout")?;
-    stage_all(&c)?;
-    let out = git(&c.path, &["diff", "--cached", "--no-renames", &c.base, "--", path])?;
+    let scan = scan_index(&c)?;
+    let out = git_env(&c.path, &["diff", "--cached", "--no-renames", &c.base, "--", path], Some(&scan))?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -312,8 +356,10 @@ fn merge_text(scratch: &Path, ours: &[u8], base: &[u8], theirs: &[u8]) -> Option
 
 /// Bring the worker's changes into the track folder. All or nothing: when
 /// any file conflicts, nothing is written and the conflicts are named.
-pub fn merge(store: &Store, track: &str, worker: &str, scratch: &Path) -> Result<Merged, String> {
+pub fn merge(store: &Store, track: &str, worker: &str, scratch_root: &Path) -> Result<Merged, String> {
+    let _one = serial();
     let mut c = record(store, track, worker).ok_or("the worker has no checkout")?;
+    let scratch = scratch_root.join(format!("{}-{}", slug(track), slug(worker)));
     stage_all(&c)?;
     // A snapshot commit on the worker's branch: what is merged, by name.
     let staged = git(&c.path, &["diff", "--cached", "--quiet", "HEAD"])?;
@@ -350,7 +396,7 @@ pub fn merge(store: &Store, track: &str, worker: &str, scratch: &Path) -> Result
                 (None, None) => Step::Write(target, theirs),
                 (Some(cur), _) if same(cur, &theirs) => Step::Nothing,
                 (Some(cur), Some(b)) if same(cur, b) => Step::Write(target, theirs),
-                (Some(cur), Some(b)) => match merge_text(&scratch.join("merge"), cur, b, &theirs) {
+                (Some(cur), Some(b)) => match merge_text(&scratch, cur, b, &theirs) {
                     Some(merged) => Step::Write(target, merged),
                     None => {
                         conflicts.push(path.to_string());
@@ -392,14 +438,29 @@ pub fn merge(store: &Store, track: &str, worker: &str, scratch: &Path) -> Result
 
 /// Throw away what the worker has pending: its checkout goes back to `base`.
 pub fn discard(store: &Store, track: &str, worker: &str) -> Result<(), String> {
+    let _one = serial();
     let c = record(store, track, worker).ok_or("the worker has no checkout")?;
     run(&c.path, &["reset", "-q", "--hard", &c.base])?;
     run(&c.path, &["clean", "-fdq"])?;
     Ok(())
 }
 
+/// Refuse when a worker of the track has changes not merged (or they
+/// cannot be read): removing its checkout would lose them.
+pub fn check_nothing_pending(store: &Store, track: &str, workers: &[String]) -> Result<(), String> {
+    for w in workers {
+        match changes(store, track, w) {
+            Ok(c) if c.files.is_empty() => {}
+            Ok(_) => return Err(format!("worker {w} has changes not merged into the track folder; merge or discard them first")),
+            Err(err) => return Err(format!("could not read worker {w}'s changes ({err}); nothing was removed")),
+        }
+    }
+    Ok(())
+}
+
 /// Remove every worker checkout of a track (it is being deleted).
 pub fn remove_track(store: &Store, track: &str, workers: &[String]) {
+    let _one = serial();
     for worker in workers {
         let Some(c) = record(store, track, worker) else { continue };
         if let Err(err) = run(&c.top, &["worktree", "remove", "--force", &c.path.to_string_lossy()]) {
@@ -455,6 +516,8 @@ mod tests {
         let pending = changes(&store, "tr001", "fix").unwrap().files;
         assert_eq!(pending.iter().map(|p| (p.path.as_str(), p.status.as_str())).collect::<Vec<_>>(), [("app/a.txt", "M"), ("app/new.txt", "A")]);
         assert!(file_diff(&store, "tr001", "fix", "app/a.txt").unwrap().contains("+FIVE"));
+        // Reading what is pending left the worker's own index alone.
+        assert!(git(&c.path, &["diff", "--cached", "--quiet"]).unwrap().status.success(), "nothing staged in the worker's index");
 
         let merged = merge(&store, "tr001", "fix", &root.join("scratch")).unwrap();
         assert!(merged.conflicts.is_empty(), "{:?}", merged.conflicts);
@@ -499,8 +562,11 @@ mod tests {
     fn line_endings_do_not_make_a_difference() {
         assert!(same(b"a\r\nb\r\n", b"a\nb\n"));
         assert!(!same(b"a\nb\n", b"a\nc\n"));
-        assert_eq!(slug("Fix Parser!"), "fix-parser");
-        assert_eq!(slug("///"), "worker");
+        assert_eq!(slug("fix-parser"), "fix-parser");
+        assert!(slug("Fix Parser!").starts_with("fix-parser-"));
+        assert_ne!(slug("Fix Parser!"), slug("fix-parser"));
+        assert!(slug("../x").starts_with("x-") && !slug("../x").contains('.'));
+        assert!(slug("///").starts_with("worker-"));
     }
 
     #[test]
