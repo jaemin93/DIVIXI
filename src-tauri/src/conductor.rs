@@ -1258,8 +1258,8 @@ fn edits_seen(state: &AppState, run: &str, cwd: &str) -> (Vec<String>, Vec<Strin
             let p = p.replace('\\', "/");
             // Windows paths differ in case only; the prefix is compared bytewise so slicing stays on a boundary.
             let inside = p.is_char_boundary(root.len()) && p.get(..root.len()).is_some_and(|head| head.eq_ignore_ascii_case(&root));
-            // A relative path is the agent's own, inside its folder.
-            let relative = !p.starts_with('/') && !p.get(1..3).is_some_and(|s| s == ":/");
+            // A relative path is the agent's own, inside its folder, unless it climbs out.
+            let relative = !p.starts_with('/') && !p.get(1..3).is_some_and(|s| s == ":/") && !climbs_out(&p);
             if inside || relative {
                 let p = if inside { p[root.len()..].to_string() } else { p };
                 if !seen.contains(&p) {
@@ -1273,6 +1273,48 @@ fn edits_seen(state: &AppState, run: &str, cwd: &str) -> (Vec<String>, Vec<Strin
     seen.truncate(50);
     outside.truncate(50);
     (seen, outside)
+}
+
+/// Whether a relative path leaves the folder it is relative to ("../x", "a/../../x").
+fn climbs_out(rel: &str) -> bool {
+    let mut depth: i32 = 0;
+    for part in rel.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            _ => depth += 1,
+        }
+    }
+    false
+}
+
+/// A worker's own folder under the track's: the one it was given before,
+/// else one named after it that the track does not have yet (a worker
+/// called "src" must not work in the project's src).
+fn own_dir(state: &AppState, track: &str, track_dir: &str, name: &str) -> Result<std::path::PathBuf, String> {
+    let key = format!("worker_dir:{track}/{name}");
+    let dir = match state.store.get_meta(&key).ok().flatten() {
+        Some(d) => std::path::PathBuf::from(d),
+        None => {
+            let base = worktree::folder_name(name);
+            let root = std::path::Path::new(track_dir);
+            let dir = (1..)
+                .map(|n| root.join(if n == 1 { base.clone() } else { format!("{base}-{n}") }))
+                .find(|d| !d.exists())
+                .expect("some name is free");
+            if let Err(err) = state.store.set_meta(&key, &dir.to_string_lossy()) {
+                tracing::warn!(%err, "could not remember a worker's folder");
+            }
+            dir
+        }
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make the worker's folder {}: {e}", dir.display()))?;
+    Ok(dir)
 }
 
 /// Where a worker works, and what the conductor and the worker are told of it.
@@ -1289,8 +1331,7 @@ struct Place {
 async fn worker_place(app: &AppHandle, info: &TrackInfo, name: &str) -> Result<Place, String> {
     let track_dir = info.cwd.clone();
     let own_folder = |why: Option<String>| -> Result<Place, String> {
-        let dir = std::path::Path::new(&track_dir).join(worktree::folder_name(name));
-        std::fs::create_dir_all(&dir).map_err(|e| format!("could not make the worker's folder {}: {e}", dir.display()))?;
+        let dir = own_dir(&app.state::<AppState>(), &info.id, &track_dir, name)?;
         let dir = dir.to_string_lossy().into_owned();
         Ok(Place {
             for_conductor: format!("its own folder {dir}{}", why.map(|w| format!(" ({w})")).unwrap_or_default()),
@@ -1584,4 +1625,15 @@ pub async fn conductor_turn(
         st.sessions.end_turn(&track);
     }
     outcome
+}
+
+#[cfg(test)]
+mod folder_tests {
+    #[test]
+    fn relative_paths_that_climb_out() {
+        assert!(super::climbs_out("../x.md"));
+        assert!(super::climbs_out("a/../../x"));
+        assert!(!super::climbs_out("a/../b.md"));
+        assert!(!super::climbs_out("./notes/x.md"));
+    }
 }

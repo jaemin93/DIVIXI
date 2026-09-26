@@ -831,7 +831,7 @@ impl Store {
     pub fn forget_track_sessions(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock();
         conn.execute(
-            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%' OR key LIKE 'worktree:' || ?1 || '/%'",
+            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%' OR key LIKE 'worktree:' || ?1 || '/%' OR key LIKE 'worker_dir:' || ?1 || '/%'",
             params![id],
         )?;
         Ok(())
@@ -849,7 +849,7 @@ impl Store {
         tx.execute("DELETE FROM runs WHERE track = ?1", params![id])?;
         tx.execute("DELETE FROM decisions WHERE track = ?1", params![id])?;
         tx.execute(
-            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%' OR key LIKE 'worktree:' || ?1 || '/%'",
+            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%' OR key LIKE 'worktree:' || ?1 || '/%' OR key LIKE 'worker_dir:' || ?1 || '/%'",
             params![id],
         )?;
         let changed = tx.execute("DELETE FROM tracks WHERE id = ?1", params![id])?;
