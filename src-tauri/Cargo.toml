@@ -28,8 +28,9 @@ orchestra-store = { path = "../crates/store" }
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
 ignore = "0.4"
 tokio.workspace = true
 tracing.workspace = true

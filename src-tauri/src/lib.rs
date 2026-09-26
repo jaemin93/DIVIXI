@@ -1096,7 +1096,20 @@ fn open_store(data_dir: &std::path::Path) -> anyhow::Result<(Store, String)> {
 /// Entry point shared by the desktop binary.
 pub fn run() {
     tauri::Builder::default()
+        // Opening Divixi again while it runs (hidden in the tray) shows the
+        // one that runs instead of starting a second. First, as the plugin asks.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_dialog::init())
+        // Closing the window hides it: conductors and workers go on working,
+        // and the tray icon brings it back. Quit (the tray menu) ends the app.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_tracks,
             get_run,
@@ -1250,10 +1263,48 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Divixi");
             }
+            tray(app.handle())?;
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("failed to start Divixi");
+}
+
+/// Bring the main window back: shown, restored if minimised, in front.
+fn show_main(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// The tray icon: a click shows the window; its menu has Show Divixi and Quit.
+fn tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let show = MenuItem::with_id(app, "show", "Show Divixi", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let mut builder = TrayIconBuilder::with_id("divixi")
+        .tooltip("Divixi")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => show_main(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
 }
 
 #[cfg(test)]
