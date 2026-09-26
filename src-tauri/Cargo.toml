@@ -2,6 +2,8 @@
 name = "orchestra-app"
 version.workspace = true
 edition.workspace = true
+# `cargo run` (and so `tauri dev`) runs the desktop app, not divixi-server.
+default-run = "divixi"
 
 # The executable is the product: divixi.exe in the task bar and the task
 # manager. The crate keeps its orchestra-* name.
