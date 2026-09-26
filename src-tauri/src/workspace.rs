@@ -122,6 +122,50 @@ pub fn tree(root: &Path) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
+/// A line of a file that has what was searched for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Found {
+    pub path: String,
+    /// 1-based.
+    pub line: usize,
+    /// The line, trimmed and cut to a readable length.
+    pub text: String,
+}
+
+/// Files larger than this are not searched.
+const MAX_SEARCH_FILE: u64 = 1024 * 1024;
+/// Lines found before the search stops.
+const MAX_FOUND: usize = 300;
+
+/// Lines of the folder's text files that contain `query` (case aside),
+/// `.gitignore` honoured, binary and large files skipped. At most
+/// [`MAX_FOUND`] lines; the second value says whether it stopped there.
+pub fn search(root: &Path, query: &str) -> Result<(Vec<Found>, bool), String> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let mut out = Vec::new();
+    for e in tree(root)?.into_iter().filter(|e| !e.dir && e.size <= MAX_SEARCH_FILE) {
+        let Ok(bytes) = std::fs::read(root.join(&e.path)) else { continue };
+        if bytes.iter().take(8192).any(|b| *b == 0) {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&bytes) else { continue };
+        for (i, line) in text.lines().enumerate() {
+            if line.to_lowercase().contains(&q) {
+                let t = line.trim();
+                let text = if t.chars().count() > 200 { format!("{}…", t.chars().take(200).collect::<String>()) } else { t.to_string() };
+                out.push(Found { path: e.path.clone(), line: i + 1, text });
+                if out.len() >= MAX_FOUND {
+                    return Ok((out, true));
+                }
+            }
+        }
+    }
+    Ok((out, false))
+}
+
 /// A relative path made only of plain components: no parent, root or
 /// drive parts, and no alternate data stream (`:`) on Windows. Names that
 /// merely contain dots (`a..b.txt`) pass.
@@ -453,6 +497,9 @@ mod tests {
         assert_eq!(img.kind, "image");
         assert_eq!(img.data_url.as_deref(), Some("data:image/png;base64,iVBORw=="));
         assert!(read(&root, "../x").is_err());
+        let (found, cut) = search(&root, "HI").unwrap();
+        assert!(!cut);
+        assert_eq!(found, vec![Found { path: "NOTE.md".into(), line: 1, text: "# hi".into() }], "binary skipped, case aside");
         assert!(read(&root, "src/../../x").is_err());
         assert!(read(&root, "C:/x").is_err());
         // Dots inside a name are not a parent reference.

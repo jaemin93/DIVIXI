@@ -7,6 +7,7 @@
   import CodeEditor from "./CodeEditor.svelte";
   import { highlight, languageFor } from "./highlight";
   import { t } from "./i18n.svelte";
+  import { invoke } from "@tauri-apps/api/core";
 
   /**
    * The track's working folder beside the conversation, after Kiro Crew's
@@ -18,6 +19,63 @@
    */
   let filter = $state("");
   let folded = $state<Record<string, boolean>>({});
+  /** The drawer shows the files or the git changes. */
+  let drawerMode = $state<"files" | "changes">("files");
+  /** The filter goes by file name or by what files contain. */
+  let searchBy = $state<"name" | "content">("name");
+
+  // ----- content search -----
+  type Found = { path: string; line: number; text: string };
+  let found = $state<Found[]>([]);
+  let foundCut = $state(false);
+  let searching = $state(false);
+  let searchSeq = 0;
+  $effect(() => {
+    const q = filter.trim();
+    const track = store.track;
+    if (searchBy !== "content" || !q || !track) {
+      found = [];
+      foundCut = false;
+      return;
+    }
+    // A moment after typing stops; only the newest answer lands.
+    const seq = ++searchSeq;
+    const timer = setTimeout(async () => {
+      searching = true;
+      try {
+        const [lines, cut] = await invoke<[Found[], boolean]>("workspace_search", { track, query: q });
+        if (seq === searchSeq) {
+          found = lines;
+          foundCut = cut;
+        }
+      } catch (err) {
+        if (seq === searchSeq) store.lastError = String(err);
+      } finally {
+        if (seq === searchSeq) searching = false;
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  });
+  /** Found lines grouped by file, files in the order found. */
+  const foundByFile = $derived.by(() => {
+    const groups: { path: string; lines: Found[] }[] = [];
+    for (const f of found) {
+      const last = groups.at(-1);
+      if (last && last.path === f.path) last.lines.push(f);
+      else groups.push({ path: f.path, lines: [f] });
+    }
+    return groups;
+  });
+
+  /** The line with what was searched for marked, as safe HTML. */
+  function marked(text: string): string {
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const q = filter.trim();
+    if (!q) return esc(text);
+    const at = text.toLowerCase().indexOf(q.toLowerCase());
+    if (at < 0) return esc(text);
+    return esc(text.slice(0, at)) + "<mark>" + esc(text.slice(at, at + q.length)) + "</mark>" + esc(text.slice(at + q.length));
+  }
 
   const activeFile = $derived(store.files[store.activeFile]);
 
@@ -288,33 +346,124 @@
   {/if}
 </aside>
 
-<!-- The file tree, with its filter. `compact` drops the file sizes. -->
+<!-- The file tree, with its filter. `compact` (the drawer over a file) drops the
+     file sizes and adds a files / changes switch, as in Kiro. -->
 {#snippet tree(compact: boolean)}
   <div class="treewrap">
     <div class="treebar">
-      <input class="filter" type="text" bind:value={filter} placeholder={t("ws.filter")} aria-label={t("ws.filter")} spellcheck="false" />
-    </div>
-    <div class="tree">
-      {#if store.tree.length === 0}
-        <div class="mono empty">{store.treeLoading ? t("ws.loading") : t("ws.emptyDir")}</div>
+      {#if compact}
+        <div class="modes" role="tablist" aria-label={t("ws.files")}>
+          <button class="mode" class:on={drawerMode === "files"} role="tab" aria-selected={drawerMode === "files"} title={t("ws.files")} onclick={() => (drawerMode = "files")}>
+            <Icon name="files" size={13} />
+          </button>
+          <button
+            class="mode"
+            class:on={drawerMode === "changes"}
+            role="tab"
+            aria-selected={drawerMode === "changes"}
+            title={t("ws.changes")}
+            onclick={() => {
+              drawerMode = "changes";
+              if (!store.git) store.loadGit();
+            }}
+          >
+            <span class="mono pm">±</span>
+          </button>
+        </div>
       {/if}
-      {#each rows as r (r.path)}
-        {#if filter.trim() || shown(r)}
-          {#if r.dir}
-            <button class="node" style="padding-left: {10 + r.depth * 14}px" onclick={() => toggle(r.path)}>
-              <span class="mono chev">{isOpen(r.path) ? "▾" : "▸"}</span>
-              <span class="name">{r.name}</span>
-            </button>
-          {:else}
-            <button class="node file" class:on={store.activeFile === r.path && store.panelTab === "file"} style="padding-left: {filter.trim() ? 10 : 24 + r.depth * 14}px" onclick={() => store.openFile(r.path)} title={r.path}>
-              <span class="mono ext">{ext(r.name) || "·"}</span>
-              <span class="name">{filter.trim() ? r.path : r.name}</span>
-              {#if !compact}<span class="mono size">{kb(r.size)}</span>{/if}
-            </button>
-          {/if}
-        {/if}
-      {/each}
+      {#if !compact || drawerMode === "files"}
+        <input
+          class="filter"
+          type="text"
+          bind:value={filter}
+          placeholder={searchBy === "content" ? t("ws.searchContent") : t("ws.filter")}
+          aria-label={t("ws.filter")}
+          spellcheck="false"
+        />
+      {:else}
+        <span class="grow"></span>
+      {/if}
+      {#if compact}
+        <button class="tab icon refresh" title={t("ws.refresh")} disabled={store.treeLoading || store.gitLoading} onclick={() => store.refreshWorkspace()}>
+          <Icon name="refresh" size={13} />
+        </button>
+      {/if}
     </div>
+
+    {#if compact && drawerMode === "changes"}
+      <div class="tree">
+        {#if !store.git}
+          <div class="mono empty">{store.gitLoading ? t("ws.loading") : t("ws.none")}</div>
+        {:else if !store.git.repo}
+          <div class="mono empty">{t("ws.noRepo")}</div>
+        {:else if store.git.changes.length === 0}
+          <div class="mono empty">{t("ws.clean")}</div>
+        {/if}
+        {#each store.git?.changes ?? [] as c (c.path)}
+          <!-- A change opens its diff in the changes view. -->
+          <button
+            class="node file"
+            title={c.from ? `${c.from} → ${c.path}` : c.path}
+            onclick={() => {
+              store.panelTree = false;
+              store.panelTab = "changes";
+              void store.loadDiff(c.path);
+            }}
+          >
+            <span class="mono ext" style="color: {codeTone(c.code)}">{codeLabel(c.code)}</span>
+            <span class="name">{c.path}</span>
+          </button>
+        {/each}
+      </div>
+    {:else}
+      <div class="searchby" role="tablist" aria-label={t("ws.searchBy")}>
+        <button class="sb" class:on={searchBy === "name"} role="tab" aria-selected={searchBy === "name"} onclick={() => (searchBy = "name")}>{t("ws.byName")}</button>
+        <button class="sb" class:on={searchBy === "content"} role="tab" aria-selected={searchBy === "content"} onclick={() => (searchBy = "content")}>{t("ws.byContent")}</button>
+      </div>
+      <div class="tree">
+        {#if searchBy === "content" && filter.trim()}
+          {#if searching && !found.length}
+            <div class="mono empty">{t("ws.searching")}</div>
+          {:else if !found.length}
+            <div class="mono empty">{t("ws.noMatch")}</div>
+          {/if}
+          {#each foundByFile as g (g.path)}
+            <button class="node file" class:on={store.activeFile === g.path && store.panelTab === "file"} onclick={() => store.openFile(g.path)} title={g.path}>
+              <span class="mono ext">{ext(g.path) || "·"}</span>
+              <span class="name">{g.path}</span>
+              <span class="mono size">{g.lines.length}</span>
+            </button>
+            {#each g.lines as f (f.line)}
+              <button class="hit" onclick={() => store.openFile(f.path)} title={`${f.path}:${f.line}`}>
+                <span class="mono ln">{f.line}</span>
+                <span class="mono htext">{@html marked(f.text)}</span>
+              </button>
+            {/each}
+          {/each}
+          {#if foundCut}<div class="mono empty">{t("ws.searchCut")}</div>{/if}
+        {:else}
+          {#if store.tree.length === 0}
+            <div class="mono empty">{store.treeLoading ? t("ws.loading") : t("ws.emptyDir")}</div>
+          {/if}
+          {#each rows as r (r.path)}
+            {#if filter.trim() || shown(r)}
+              {#if r.dir}
+                <button class="node" style="padding-left: {10 + r.depth * 14}px" onclick={() => toggle(r.path)}>
+                  <span class="mono chev">{isOpen(r.path) ? "▾" : "▸"}</span>
+                  <span class="name">{r.name}</span>
+                </button>
+              {:else}
+                <button class="node file" class:on={store.activeFile === r.path && store.panelTab === "file"} style="padding-left: {filter.trim() ? 10 : 24 + r.depth * 14}px" onclick={() => store.openFile(r.path)} title={r.path}>
+                  <span class="mono ext">{ext(r.name) || "·"}</span>
+                  <span class="name">{filter.trim() ? r.path : r.name}</span>
+                  {#if !compact}<span class="mono size">{kb(r.size)}</span>{/if}
+                </button>
+              {/if}
+            {/if}
+          {/each}
+        {/if}
+      </div>
+    {/if}
   </div>
 {/snippet}
 
@@ -658,10 +807,113 @@
 
   .treebar {
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
     padding: 8px 10px 4px;
   }
 
+  /* Files / changes, side by side in one frame. */
+  .modes {
+    display: flex;
+    flex-shrink: 0;
+    border: 1px solid var(--line);
+  }
+
+  .mode {
+    width: 28px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: var(--dim);
+    cursor: pointer;
+  }
+
+  .mode.on {
+    color: var(--acc);
+    background: var(--accbg);
+  }
+
+  .pm {
+    font-size: 13px;
+  }
+
+  .treebar .refresh {
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+  }
+
+  /* Name / content, the filter's two ways. */
+  .searchby {
+    flex-shrink: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    margin: 4px 10px 4px;
+    border: 1px solid var(--line);
+  }
+
+  .sb {
+    height: 24px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    font-size: 11.5px;
+    color: var(--dim);
+    cursor: pointer;
+  }
+
+  .sb.on {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .hit {
+    width: 100%;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 2px 10px 2px 38px;
+    background: transparent;
+    border: none;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .hit:hover {
+    background: var(--sel);
+  }
+
+  .ln {
+    width: 30px;
+    flex-shrink: 0;
+    text-align: right;
+    font-size: 10.5px;
+    color: var(--lab);
+  }
+
+  .htext {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    color: var(--dim);
+  }
+
+  .htext :global(mark) {
+    background: var(--warnbg);
+    color: var(--hi);
+    outline: 1px solid var(--warnln);
+  }
+
   .filter {
+    flex: 1;
+    min-width: 0;
     width: 100%;
     height: 28px;
     background: var(--inp);

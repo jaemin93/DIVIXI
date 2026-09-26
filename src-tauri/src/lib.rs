@@ -794,6 +794,12 @@ fn workspace_tree(state: State<'_, AppState>, track: String) -> Result<Vec<works
     workspace::tree(&track_root(&state, &track)?)
 }
 
+/// Lines of the track's files with `query` in them (the side panel's content search).
+#[tauri::command(async)]
+fn workspace_search(state: State<'_, AppState>, track: String, query: String) -> Result<(Vec<workspace::Found>, bool), String> {
+    workspace::search(&track_root(&state, &track)?, &query)
+}
+
 /// One file's contents for preview. `path` is relative to the folder.
 #[tauri::command(async)]
 fn workspace_read(state: State<'_, AppState>, track: String, path: String) -> Result<workspace::FileContent, String> {
@@ -1058,6 +1064,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_tracks,
             get_run,
+            workspace_search,
             worker_report,
             worker_changes,
             worker_file_diff,
