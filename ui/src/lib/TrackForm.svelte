@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel, type AgentId, type ConfigOption, type OptionConfig, type Track, type TrackPatch } from "./store.svelte";
+  import { store, agentLabel, type AgentId, type ConfigOption, type OptionConfig, type Track, type TrackPatch, WORKER_FOLDERS, type WorkerFolder } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
@@ -37,6 +37,7 @@
   let workerAgent = $state<string>(seed?.worker_agent || (seed?.agent ?? ""));
   let workerConfig = $state<OptionConfig>({ ...(seed?.worker_config ?? {}) });
   let tab = $state<"conductor" | "worker">("conductor");
+  let workerFolder = $state<WorkerFolder>(seed?.worker_folder ?? "subfolder");
 
   function setApart() {
     if (workerApart) return;
@@ -104,6 +105,7 @@
         conductor_config: prune(conductorConfig, conductorOptions),
         worker_agent: workerApart ? shownWorkerAgent : "",
         worker_config: workerApart ? prune(workerConfig, workerOptions) : {},
+        worker_folder: workerFolder,
       };
       const ok = track ? await store.updateTrack(track.id, patch) : await store.createTrack(patch);
       if (ok && track) store.view = "track";
@@ -173,6 +175,19 @@
           <Icon name="folder" size={14} />
           <input class="mono" type="text" bind:value={cwd} spellcheck="false" />
           <button class="btn" type="button" onclick={browse}>{t("newtrack.browse")}</button>
+        </div>
+      </div>
+
+      <!-- Where workers work: a folder each (their results side by side), a git checkout each (code, merged by the human), or all in the track folder. -->
+      <div class="field">
+        <span class="mlab-sm">{t("newtrack.workerFolder")}</span>
+        <div class="wfolders" role="radiogroup" aria-label={t("newtrack.workerFolder")}>
+          {#each WORKER_FOLDERS as f (f)}
+            <button type="button" class="wf" class:on={workerFolder === f} role="radio" aria-checked={workerFolder === f} onclick={() => (workerFolder = f)}>
+              <span class="wft">{t(`newtrack.wf.${f}`)}</span>
+              <span class="wfd">{t(`newtrack.wf.${f}.desc`)}</span>
+            </button>
+          {/each}
         </div>
       </div>
 
@@ -431,6 +446,40 @@
     font-size: 11px;
     line-height: 1.55;
     color: var(--lab);
+  }
+
+  .wfolders {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .wf {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 9px 11px;
+    text-align: left;
+    background: var(--inp);
+    border: 1px solid var(--lines);
+    color: var(--txt);
+    cursor: pointer;
+  }
+
+  .wf.on {
+    border-color: var(--acc);
+    background: var(--accbg);
+  }
+
+  .wft {
+    font-size: 13px;
+    color: var(--hi);
+  }
+
+  .wfd {
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--dim);
   }
 
   .folder {

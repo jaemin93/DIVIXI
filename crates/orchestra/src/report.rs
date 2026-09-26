@@ -109,6 +109,9 @@ pub struct Report {
     /// Files the app saw the worker's edit tools touch, whatever it claims.
     #[serde(default)]
     pub edits_seen: Vec<String>,
+    /// Of those, the ones outside the worker's folder.
+    #[serde(default)]
+    pub outside: Vec<String>,
     /// The run that asked again for the block, when the first reply had none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reminder_run: Option<String>,
@@ -212,6 +215,7 @@ pub fn parse(reply: &str) -> Result<Report, String> {
         structured: true,
         problem: None,
         edits_seen: Vec::new(),
+        outside: Vec::new(),
         reminder_run: None,
     })
 }
@@ -231,6 +235,7 @@ impl Report {
             structured: false,
             problem: Some(problem.to_string()),
             edits_seen: Vec::new(),
+            outside: Vec::new(),
             reminder_run: None,
         }
     }
@@ -288,6 +293,12 @@ impl Report {
         if !unclaimed.is_empty() {
             out.push_str("edits the app saw that the report does not list:\n");
             for e in unclaimed {
+                out.push_str(&format!("- {e}\n"));
+            }
+        }
+        if !self.outside.is_empty() {
+            out.push_str("edits OUTSIDE the worker's folder (it was told to write only inside it):\n");
+            for e in &self.outside {
                 out.push_str(&format!("- {e}\n"));
             }
         }
@@ -397,6 +408,15 @@ mod tests {
         r.risks = vec!["x".repeat(400); 30];
         r.next = vec!["y".repeat(400); 30];
         assert!(r.for_conductor("t1").chars().count() <= MAX_FOR_CONDUCTOR + 1);
+    }
+
+    #[test]
+    fn edits_outside_the_folder_are_named() {
+        let mut r = parse(GOOD).unwrap();
+        r.outside = vec!["C:/w/other/x.md".into()];
+        let text = r.for_conductor("t1");
+        assert!(text.contains("edits OUTSIDE the worker's folder"), "{text}");
+        assert!(text.ends_with("- C:/w/other/x.md"), "{text}");
     }
 
     #[test]

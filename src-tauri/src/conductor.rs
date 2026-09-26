@@ -80,6 +80,9 @@ pub(crate) const BUSY: &str = "conductor is still responding";
 /// One open agent session and what it runs on.
 pub struct Live {
     pub agent: String,
+    /// The folder the session works in; a session in another folder than
+    /// the track now wants is reopened.
+    pub cwd: String,
     /// Shared so a turn can run without holding the sessions lock; the
     /// session ends when the last clone drops.
     pub session: Arc<AgentSession>,
@@ -173,11 +176,22 @@ fn worker_key(track: &str, worker: &str) -> String {
     format!("{track}/{worker}")
 }
 
+/// Where a track's workers work, as the conductor is told.
+enum Folders {
+    Own,
+    Checkout,
+    Shared,
+}
+
 /// What the conductor is told once, at the start of its session, in the
 /// interface language. Only the wording differs; the rules are the same.
 fn preamble(lang: &str, track: &TrackInfo) -> String {
     let intent = track.intent.trim();
-    let isolated = worktree::repository(std::path::Path::new(&track.cwd)).is_some();
+    let folders = match track.worker_folder.as_str() {
+        "shared" => Folders::Shared,
+        "worktree" if worktree::repository(std::path::Path::new(&track.cwd)).is_some() => Folders::Checkout,
+        _ => Folders::Own,
+    };
     if lang.starts_with("ko") {
         let about = if intent.is_empty() {
             String::new()
@@ -205,10 +219,10 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
 "#,
             name = track.name,
             cwd = track.cwd,
-            folders = if isolated {
-                "git 저장소이므로 작업자는 저마다 자기 checkout(git worktree)에서 일합니다. 작업자의 변경은 사람이 보고 카드에서 합치기를 눌러야 이 디렉터리에 들어옵니다. 합치기 전에는 당신도 다른 작업자도 그 변경을 볼 수 없으니, 보고를 전할 때 변경이 아직 합쳐지지 않았다고 말하고, 한 작업자의 결과가 다음 작업의 전제면 사람에게 먼저 합쳐 달라고 한 뒤 맡깁니다. `worker_status`의 unmerged_files가 합쳐지지 않은 파일 수입니다."
-            } else {
-                "git 저장소가 아니므로 작업자는 모두 이 디렉터리를 같이 씁니다. 같은 파일을 두 작업자에게 동시에 맡기지 않습니다."
+            folders = match folders {
+                Folders::Own => "작업자는 저마다 이 디렉터리 아래 자기 이름의 폴더(예: {cwd}/fix-parser)에서 일하고, 결과물도 거기에 생깁니다. 앱이 폴더를 만들고 작업자에게 그 밖에는 쓰지 말라고 알립니다(읽기는 됩니다). 여러 작업자의 결과를 한곳에 모으거나 기존 파일을 고쳐야 하면, 그 일은 한 작업자에게 맡기고 경로를 task에 적습니다. 작업자가 폴더 밖을 편집하면 보고에 따로 표시됩니다.".replace("{cwd}", &track.cwd),
+                Folders::Checkout => "git 저장소이므로 작업자는 저마다 자기 checkout(git worktree)에서 일합니다. 작업자의 변경은 사람이 보고 카드에서 합치기를 눌러야 이 디렉터리에 들어옵니다. 합치기 전에는 당신도 다른 작업자도 그 변경을 볼 수 없으니, 보고를 전할 때 변경이 아직 합쳐지지 않았다고 말하고, 한 작업자의 결과가 다음 작업의 전제면 사람에게 먼저 합쳐 달라고 한 뒤 맡깁니다. 사람이 새로 만들었지만 git에 추가하지 않은 파일은 작업자 checkout에 없으니, 그런 파일은 이 디렉터리의 경로를 task에 적어 줍니다. `worker_status`의 unmerged_files가 합쳐지지 않은 파일 수입니다.".to_string(),
+                Folders::Shared => "작업자는 모두 이 디렉터리를 같이 씁니다. 같은 파일을 두 작업자에게 동시에 맡기지 않습니다.".to_string(),
             },
         );
     }
@@ -238,10 +252,10 @@ The working directory is {cwd}. {folders}
 "#,
         name = track.name,
         cwd = track.cwd,
-        folders = if isolated {
-            "It is a git repository, so each worker works in a checkout of its own (a git worktree). A worker's changes reach this directory only when the human merges them from its report card. Until then neither you nor other workers can see them: when you relay a report, say the changes are not merged yet, and when one worker's result is the ground for the next task, ask the human to merge it first. `worker_status` shows unmerged_files per worker."
-        } else {
-            "It is not a git repository, so all workers share this directory. Never give two workers the same files at the same time."
+        folders = match folders {
+            Folders::Own => "Each worker works in a folder of its own under this directory, named after it (e.g. {cwd}/fix-parser), and its results appear there. The app makes the folder and tells the worker not to write outside it (reading is fine). When results must come together in one place or existing files must change, give that to one worker and put the paths in its task. Edits a worker makes outside its folder are flagged in its report.".replace("{cwd}", &track.cwd),
+            Folders::Checkout => "It is a git repository, so each worker works in a checkout of its own (a git worktree). A worker's changes reach this directory only when the human merges them from its report card. Until then neither you nor other workers can see them: when you relay a report, say the changes are not merged yet, and when one worker's result is the ground for the next task, ask the human to merge it first. Files the human made but has not added to git are not in a worker's checkout: put their path in this directory into the task. `worker_status` shows unmerged_files per worker.".to_string(),
+            Folders::Shared => "All workers share this directory. Never give two workers the same files at the same time.".to_string(),
         },
     )
 }
@@ -873,7 +887,7 @@ async fn worker_list(state: &AppState, track: &str) -> Vec<Value> {
     for item in list.iter_mut() {
         let Some(name) = item["name"].as_str().map(str::to_string) else { continue };
         if let Ok(c) = worktree::changes(&state.store, track, &name) {
-            if c.isolated {
+            if c.isolated && !c.files.is_empty() {
                 item["unmerged_files"] = json!(c.files.len());
             }
         }
@@ -968,27 +982,17 @@ async fn start_worker_turn(
     if let Some(run) = state.sessions.workers.lock().await.get(&key).and_then(|l| l.running.clone()) {
         return Err(format!("worker {name} is still working on run {run}. Wait for its {REPORT_PREFIX} before sending more."));
     }
-    let checkout = {
-        let (app, track, name, cwd) = (app.clone(), track.clone(), name.clone(), info.cwd.clone());
-        tauri::async_runtime::spawn_blocking(move || {
-            let state = app.state::<AppState>();
-            worktree::ensure(&state.store, &state.worktrees_dir, &track, &name, std::path::Path::new(&cwd))
-        })
-        .await
-        .map_err(|e| e.to_string())?
-    };
-    let (worker_cwd, folder) = match checkout {
-        Ok(Some(c)) => (c.cwd().to_string_lossy().into_owned(), format!("its own checkout (branch {}); the human merges its changes into the track folder", c.branch)),
-        Ok(None) => (info.cwd.clone(), "the track folder, shared with other workers (not a git repository)".to_string()),
-        Err(err) => {
-            tracing::warn!(%err, worker = %name, "could not make the worker's checkout; it works in the track folder");
-            (info.cwd.clone(), format!("the track folder, shared (its own checkout failed: {err})"))
-        }
-    };
+    let place = worker_place(&app, &info, &name).await?;
+    let (worker_cwd, folder) = (place.cwd.clone(), place.for_conductor.clone());
 
     // Resolve or open the worker session; refuse a second turn on a busy worker.
     let (agent_id, turns, session, resumed, note, run) = {
         let mut workers = state.sessions.workers.lock().await;
+        // The track now wants the worker elsewhere (its folder setting
+        // changed): the session is reopened there, with its memory if it can.
+        if workers.get(&key).is_some_and(|l| l.cwd != worker_cwd) {
+            workers.remove(&key);
+        }
         let (agent_id, turns, session, resumed, note) = match (workers.get_mut(&key), open) {
             (Some(live), true) => {
                 return Err(format!(
@@ -1056,6 +1060,7 @@ async fn start_worker_turn(
                     key.clone(),
                     Live {
                         agent: agent_id.clone(),
+                        cwd: worker_cwd.clone(),
                         session: session.clone(),
                         turns,
                         running: None,
@@ -1089,7 +1094,7 @@ async fn start_worker_turn(
     // the stored prompt stays what the conductor wrote.
     let app_for_turn = app.clone();
     let (track_t, name_t, run_t, cwd_t, agent_t) = (track.clone(), name.clone(), run.clone(), worker_cwd.clone(), agent_id.clone());
-    let task = format!("{text}\n\n{}", report::instructions());
+    let task = format!("{text}\n\n---\n{}\n\n{}", place.for_worker, report::instructions());
     tauri::async_runtime::spawn(async move {
         let app = app_for_turn;
         drive_worker_turn(&app, &track_t, &name_t, &run_t, &session, task, &cwd_t).await;
@@ -1194,12 +1199,17 @@ fn finish_report(app: &AppHandle, run: &str, reminder: Option<&str>, outcome: Re
         };
         report::Report::unstructured(well, &reply, &problem)
     });
-    report.edits_seen = edits_seen(&state, run, cwd);
     // A worker told to do no more work in the reminder may still have.
-    if let Some(again) = reminder {
-        for p in edits_seen(&state, again, cwd) {
+    for r in std::iter::once(run).chain(reminder) {
+        let (inside, outside) = edits_seen(&state, r, cwd);
+        for p in inside {
             if !report.edits_seen.contains(&p) {
                 report.edits_seen.push(p);
+            }
+        }
+        for p in outside {
+            if !report.outside.contains(&p) {
+                report.outside.push(p);
             }
         }
     }
@@ -1224,11 +1234,12 @@ pub fn stored_report(state: &AppState, run: &str) -> Option<Report> {
     serde_json::from_str(&json).ok()
 }
 
-/// Files a run's edit, delete and move tool calls touched, relative to the
-/// working folder where they are inside it.
-fn edits_seen(state: &AppState, run: &str, cwd: &str) -> Vec<String> {
+/// Files a run's edit, delete and move tool calls touched: inside the
+/// working folder (relative to it), and outside it.
+fn edits_seen(state: &AppState, run: &str, cwd: &str) -> (Vec<String>, Vec<String>) {
     let root = cwd.replace('\\', "/").trim_end_matches('/').to_string() + "/";
     let mut seen: Vec<String> = Vec::new();
+    let mut outside: Vec<String> = Vec::new();
     // Calls that change files; their updates may name the files later.
     let mut editing: HashSet<String> = HashSet::new();
     for e in state.store.events(run).unwrap_or_default() {
@@ -1247,14 +1258,82 @@ fn edits_seen(state: &AppState, run: &str, cwd: &str) -> Vec<String> {
             let p = p.replace('\\', "/");
             // Windows paths differ in case only; the prefix is compared bytewise so slicing stays on a boundary.
             let inside = p.is_char_boundary(root.len()) && p.get(..root.len()).is_some_and(|head| head.eq_ignore_ascii_case(&root));
-            let p = if inside { p[root.len()..].to_string() } else { p };
-            if !seen.contains(&p) {
-                seen.push(p);
+            // A relative path is the agent's own, inside its folder.
+            let relative = !p.starts_with('/') && !p.get(1..3).is_some_and(|s| s == ":/");
+            if inside || relative {
+                let p = if inside { p[root.len()..].to_string() } else { p };
+                if !seen.contains(&p) {
+                    seen.push(p);
+                }
+            } else if !outside.contains(&p) {
+                outside.push(p);
             }
         }
     }
     seen.truncate(50);
-    seen
+    outside.truncate(50);
+    (seen, outside)
+}
+
+/// Where a worker works, and what the conductor and the worker are told of it.
+struct Place {
+    cwd: String,
+    for_conductor: String,
+    for_worker: String,
+}
+
+/// The worker's folder, per the track's choice: its own folder under the
+/// track's (made here), its own git checkout (made or brought up to date;
+/// outside git, or when that fails, its own folder instead), or the track
+/// folder itself.
+async fn worker_place(app: &AppHandle, info: &TrackInfo, name: &str) -> Result<Place, String> {
+    let track_dir = info.cwd.clone();
+    let own_folder = |why: Option<String>| -> Result<Place, String> {
+        let dir = std::path::Path::new(&track_dir).join(worktree::folder_name(name));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("could not make the worker's folder {}: {e}", dir.display()))?;
+        let dir = dir.to_string_lossy().into_owned();
+        Ok(Place {
+            for_conductor: format!("its own folder {dir}{}", why.map(|w| format!(" ({w})")).unwrap_or_default()),
+            for_worker: format!(
+                "Your folder is {dir}. Write everything you make or change inside it. The folder around it, {track_dir}, is shared with the human and other workers: read from it as you need, but do not write outside your folder."
+            ),
+            cwd: dir,
+        })
+    };
+    match info.worker_folder.as_str() {
+        "shared" => Ok(Place {
+            cwd: track_dir.clone(),
+            for_conductor: "the track folder, shared with other workers".to_string(),
+            for_worker: format!("You work in {track_dir}, shared with the human and other workers: change only the files your task is about."),
+        }),
+        "worktree" => {
+            let (app2, track, worker, cwd) = (app.clone(), info.id.clone(), name.to_string(), track_dir.clone());
+            let checkout = tauri::async_runtime::spawn_blocking(move || {
+                let state = app2.state::<AppState>();
+                worktree::ensure(&state.store, &state.worktrees_dir, &track, &worker, std::path::Path::new(&cwd))
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            match checkout {
+                Ok(Some(c)) => {
+                    let dir = c.cwd().to_string_lossy().into_owned();
+                    Ok(Place {
+                        for_conductor: format!("its own git checkout (branch {}); the human merges its changes into the track folder", c.branch),
+                        for_worker: format!(
+                            "You work in your own checkout of the repository at {dir}; the human merges your changes into the track folder {track_dir}. Files the human made there but has not added to git are not in your checkout: when you are told of one, read it from {track_dir}. Write only in your checkout."
+                        ),
+                        cwd: dir,
+                    })
+                }
+                Ok(None) => own_folder(Some("the track is not a git repository, so no checkout".to_string())),
+                Err(err) => {
+                    tracing::warn!(%err, worker = %name, "could not make the worker's checkout; it works in a folder of its own");
+                    own_folder(Some(format!("its checkout failed: {err}")))
+                }
+            }
+        }
+        _ => own_folder(None),
+    }
 }
 
 /// Hand a finished worker run to its track's conductor as a new turn: the
@@ -1318,6 +1397,7 @@ async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_tur
             Conductor {
                 live: Live {
                     agent: agent.clone(),
+                    cwd: info.cwd.clone(),
                     session: Arc::new(session),
                     // A resumed session already had its preamble.
                     turns: if resumed { 1 } else { 0 },

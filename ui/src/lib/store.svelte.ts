@@ -55,6 +55,8 @@ export type Track = {
   /** Agent workers run on; empty means the conductor's. */
   worker_agent: string;
   worker_config: OptionConfig;
+  /** Where workers work: a folder of their own under the track's, a git worktree, or the track folder. */
+  worker_folder: WorkerFolder;
   /** `#rrggbb` for the list, or empty. */
   color: string;
   tags: string[];
@@ -72,9 +74,14 @@ export type TrackPatch = Partial<{
   conductor_config: OptionConfig;
   worker_agent: string;
   worker_config: OptionConfig;
+  worker_folder: WorkerFolder;
   color: string;
   tags: string[];
 }>;
+
+/** orchestra_store::WORKER_FOLDERS. */
+export type WorkerFolder = "subfolder" | "worktree" | "shared";
+export const WORKER_FOLDERS: WorkerFolder[] = ["subfolder", "worktree", "shared"];
 
 /** How the track list is narrowed, ordered and folded. Persisted as the `tracks_filter` setting. */
 export type TrackSort = "recent" | "oldest" | "created-desc" | "created-asc" | "az" | "za";
@@ -342,6 +349,8 @@ export type WorkerReport = {
   structured: boolean;
   problem?: string;
   edits_seen: string[];
+  /** Edits outside the worker's folder. */
+  outside?: string[];
   reminder_run?: string;
 };
 

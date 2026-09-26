@@ -140,6 +140,11 @@ fn key(track: &str, worker: &str) -> String {
     format!("worktree:{track}/{worker}")
 }
 
+/// The folder a worker gets under the track's, named after it.
+pub fn folder_name(worker: &str) -> String {
+    slug(worker)
+}
+
 /// A name git and file systems take in a branch or folder: the name itself
 /// when it is plain, else its plain letters and a hash of the whole, so
 /// "Fix Parser" and "fix-parser" never share a checkout and "../x" stays put.

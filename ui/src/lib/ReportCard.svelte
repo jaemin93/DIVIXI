@@ -37,7 +37,7 @@
   const claimed = $derived(report?.changes.map((c) => c.path) ?? []);
   /** Edits the app saw that the report does not list. */
   const unlisted = $derived((report?.edits_seen ?? []).filter((seen) => !claimed.some((c) => seen.endsWith(c) || c.endsWith(seen))));
-  const hasMore = $derived(!!report && (report.changes.length + report.checks.length + report.risks.length + report.next.length + unlisted.length > 0));
+  const hasMore = $derived(!!report && (report.changes.length + report.checks.length + report.risks.length + report.next.length + unlisted.length + (report.outside?.length ?? 0) > 0));
 </script>
 
 {#if report}
@@ -72,6 +72,7 @@
       {/if}
       {#if report.risks.length}<span class="warnf">{t("report.risks", { n: report.risks.length })}</span>{/if}
       {#if unlisted.length}<span class="warnf" title={unlisted.join("\n")}>{t("report.unlisted", { n: unlisted.length })}</span>{/if}
+      {#if report.outside?.length}<span class="bad" title={report.outside.join("\n")}>{t("report.outside", { n: report.outside.length })}</span>{/if}
       {#if hasMore}
         <button type="button" class="more" onclick={() => (open = !open)} aria-expanded={open}>{open ? t("report.less") : t("report.more")}</button>
       {/if}
@@ -113,6 +114,12 @@
           <div class="mlab-sm">{t("report.unlistedTitle")}</div>
           <ul>
             {#each unlisted as p (p)}<li><button type="button" class="mono path" onclick={() => store.openFile(p)}>{p}</button></li>{/each}
+          </ul>
+        {/if}
+        {#if report.outside?.length}
+          <div class="mlab-sm">{t("report.outsideTitle")}</div>
+          <ul>
+            {#each report.outside as p (p)}<li class="mono">{p}</li>{/each}
           </ul>
         {/if}
         {#if report.next.length}

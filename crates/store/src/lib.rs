@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -150,6 +150,9 @@ const MIGRATIONS: &[&str] = &[
     // like the ones after, so the timeline shows them as reports.
     "UPDATE runs SET prompt = '[worker-report] worker=' || substr(prompt, 20) WHERE prompt LIKE '[lane-report] lane=%';
     UPDATE runs_fts SET prompt = '[worker-report] worker=' || substr(prompt, 20) WHERE prompt LIKE '[lane-report] lane=%';",
+    // 13 -> 14: where a track's workers work: a folder of their own under
+    // the track's (the default), a git worktree, or the track folder itself.
+    "ALTER TABLE tracks ADD COLUMN worker_folder TEXT NOT NULL DEFAULT 'subfolder';",
 ];
 
 const SCHEMA: &str = r#"
@@ -170,7 +173,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     worker_agent     TEXT    NOT NULL DEFAULT '',
     worker_config    TEXT    NOT NULL DEFAULT '{}',
     color            TEXT    NOT NULL DEFAULT '',
-    tags             TEXT    NOT NULL DEFAULT '[]'
+    tags             TEXT    NOT NULL DEFAULT '[]',
+    worker_folder    TEXT    NOT NULL DEFAULT 'subfolder'
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -464,6 +468,10 @@ pub struct TrackInfo {
     pub worker_agent: String,
     /// Workers' session options, like `conductor_config`.
     pub worker_config: BTreeMap<String, String>,
+    /// Where workers work: `subfolder` (a folder of their own under the
+    /// track's), `worktree` (a git checkout of their own; the human merges)
+    /// or `shared` (the track folder itself). See [`WORKER_FOLDERS`].
+    pub worker_folder: String,
     /// A colour for the list, `#rrggbb`; empty means none.
     pub color: String,
     /// Free-form labels for the list and its search.
@@ -508,6 +516,18 @@ pub struct TrackPatch {
     pub worker_config: Option<BTreeMap<String, String>>,
     pub color: Option<String>,
     pub tags: Option<Vec<String>>,
+    pub worker_folder: Option<String>,
+}
+
+/// The ways a track's workers can work, the first the default.
+pub const WORKER_FOLDERS: [&str; 3] = ["subfolder", "worktree", "shared"];
+
+fn worker_folder(patch: &TrackPatch) -> anyhow::Result<Option<&str>> {
+    match patch.worker_folder.as_deref() {
+        None => Ok(None),
+        Some(f) if WORKER_FOLDERS.contains(&f) => Ok(Some(f)),
+        Some(f) => anyhow::bail!("worker_folder must be one of {WORKER_FOLDERS:?}, not {f:?}"),
+    }
 }
 
 /// A session as the record knows it: its runs, whoever ran them last.
@@ -649,8 +669,8 @@ impl Store {
             let now = now_ms();
             conn.execute(
                 "INSERT INTO tracks(id, name, intent, cwd, agent, created_at, updated_at,
-                                    conductor_config, worker_agent, worker_config, color, tags)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                    conductor_config, worker_agent, worker_config, color, tags, worker_folder)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     id,
                     name,
@@ -663,6 +683,7 @@ impl Store {
                     config_json(patch.worker_config.as_ref())?,
                     patch.color.as_deref().unwrap_or(""),
                     tags_json(patch.tags.as_ref())?,
+                    worker_folder(patch)?.unwrap_or(WORKER_FOLDERS[0]),
                 ],
             )?;
             id
@@ -781,7 +802,8 @@ impl Store {
                         conductor_config = COALESCE(?6, conductor_config),
                         worker_agent = COALESCE(?7, worker_agent),
                         worker_config = COALESCE(?8, worker_config),
-                        color = COALESCE(?9, color), tags = COALESCE(?10, tags)
+                        color = COALESCE(?9, color), tags = COALESCE(?10, tags),
+                        worker_folder = COALESCE(?11, worker_folder)
                  WHERE id = ?1",
                 params![
                     id,
@@ -794,6 +816,7 @@ impl Store {
                     patch.worker_config.as_ref().map(|c| config_json(Some(c))).transpose()?,
                     patch.color.as_deref(),
                     patch.tags.as_ref().map(|t| tags_json(Some(t))).transpose()?,
+                    worker_folder(patch)?,
                 ],
             )?;
             if changed == 0 {
@@ -1189,7 +1212,8 @@ const RUN_SELECT: &str = "SELECT id, session, prompt, cwd, status, started_at, d
 /// Columns of a track, in the order `row_to_track` reads them.
 const TRACK_SELECT: &str = "SELECT t.id, t.name, t.intent, t.cwd, t.agent, t.created_at, t.updated_at,
                                    (SELECT COUNT(*) FROM runs r WHERE r.track = t.id),
-                                   t.conductor_config, t.worker_agent, t.worker_config, t.color, t.tags
+                                   t.conductor_config, t.worker_agent, t.worker_config, t.color, t.tags,
+                                   t.worker_folder
                             FROM tracks t";
 
 fn row_to_track(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackInfo> {
@@ -1210,6 +1234,7 @@ fn row_to_track(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackInfo> {
         worker_config: serde_json::from_str(&worker).unwrap_or_default(),
         color: r.get(11)?,
         tags: serde_json::from_str(&tags).unwrap_or_default(),
+        worker_folder: r.get(13)?,
     })
 }
 
@@ -1276,6 +1301,8 @@ mod tests {
             let old = store.begin_run("tr001", "conductor", "claude_code", "[lane-report] lane=scan run=t3 status=done\n\nbody", "/w").unwrap();
             let other = store.begin_run("tr001", "conductor", "claude_code", "tell me about [lane-report] lane=x", "/w").unwrap();
             store.set_meta("schema_version", "12").unwrap();
+            // What v12 did not have yet.
+            store.conn.lock().execute_batch("ALTER TABLE tracks DROP COLUMN worker_folder;").unwrap();
             (old, other)
         };
         let store = Store::open(&path).unwrap();
@@ -1331,6 +1358,11 @@ mod tests {
         assert_eq!(b.id, "tr002");
         assert_eq!(store.tracks().unwrap().len(), 2);
         assert!(a.conductor_config.is_empty() && a.worker_agent.is_empty(), "defaults are empty");
+        assert_eq!(a.worker_folder, "subfolder", "workers get folders of their own by default");
+        assert!(store.update_track(&a.id, &TrackPatch { worker_folder: Some("elsewhere".into()), ..TrackPatch::default() }).is_err());
+        let w = store.update_track(&a.id, &TrackPatch { worker_folder: Some("worktree".into()), ..TrackPatch::default() }).unwrap();
+        assert_eq!(w.worker_folder, "worktree");
+        store.update_track(&a.id, &TrackPatch { worker_folder: Some("subfolder".into()), ..TrackPatch::default() }).unwrap();
         assert_eq!(a.effective_worker_agent(), "claude_code", "workers follow the conductor by default");
         assert!(store.create_track(&TrackPatch { name: Some("  ".into()), ..new_track("x", "", ".", "codex") }).is_err());
 
@@ -1546,6 +1578,7 @@ mod tests {
             conn.execute_batch(
                 "ALTER TABLE runs RENAME COLUMN session TO lane;
                  ALTER TABLE decisions DROP COLUMN permission;
+                 ALTER TABLE tracks DROP COLUMN worker_folder;
                  DROP TABLE artifacts;
                  CREATE TABLE drafts (id TEXT PRIMARY KEY, title TEXT NOT NULL, agent TEXT NOT NULL,
                    doc TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
