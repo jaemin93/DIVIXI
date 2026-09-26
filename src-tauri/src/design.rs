@@ -1136,7 +1136,10 @@ pub fn undo(app: &AppHandle, id: &str, again: bool) -> Result<bool, String> {
 
 /// Apply edits to a design's board.
 pub fn apply(app: &AppHandle, id: &str, ops: Vec<Op>, actor: Actor) -> Result<Vec<Value>, String> {
-    edit(app, id, |d| d.apply(ops, &actor))
+    let out = edit(app, id, |d| d.apply(ops, &actor))?;
+    // New links and files get their text read in the background.
+    crate::extract::schedule(app, id);
+    Ok(out)
 }
 
 /// Keep or revert agent changes.
@@ -1301,18 +1304,29 @@ pub fn file_path(state: &AppState, id: &str, src: &str) -> Result<std::path::Pat
 pub fn reference_files(state: &AppState, id: &str, only: Option<&[String]>) -> Vec<std::path::PathBuf> {
     let Ok(d) = doc(state, id) else { return Vec::new() };
     let Ok(dir) = crate::artifact::workdir(state, id) else { return Vec::new() };
-    d.nodes
-        .iter()
-        .filter(|n| n.kind == Kind::File && only.is_none_or(|o| o.contains(&n.id)))
-        .filter_map(|n| check_src(&n.src).ok().map(|src| dir.join(src)))
-        .filter(|p| p.is_file())
-        .collect()
+    let mut out = Vec::new();
+    for n in d.nodes.iter().filter(|n| only.is_none_or(|o| o.contains(&n.id))) {
+        match n.kind {
+            Kind::File => {
+                if let Some(p) = check_src(&n.src).ok().map(|src| dir.join(src)).filter(|p| p.is_file()) {
+                    out.push(p);
+                }
+            }
+            Kind::Link => {}
+            _ => continue,
+        }
+        // The text read out of a link or a document goes along with it.
+        if let Some(p) = crate::extract::text_file(&dir, &n.id) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 /// What goes with each message: the board as an outline and the items the
 /// human picked on it.
 pub fn context(state: &AppState, id: &str, selected: &[String]) -> Result<String, String> {
-    let mut out = format!("[board]\n{}", doc(state, id)?.outline());
+    let mut out = format!("[board]\n{}", crate::extract::annotate(state, id, doc(state, id)?.outline()));
     if !selected.is_empty() {
         out.push_str(&format!("\nselected: {}", selected.join(", ")));
     }
@@ -1330,7 +1344,7 @@ pub fn preamble(lang: &str, title: &str) -> String {
 보드:
 - 메모(note), 손그림(sketch), 화살표(edge), 레퍼런스 파일(file: 이미지·PDF·문서), 링크(link: 웹 페이지), 틀(frame: 제목 붙은 묶음), 질문(question: 사람이 답을 적는 카드)이 있습니다. 메모에는 태그를 붙일 수 있습니다: goal(목표), constraint(제약), question(미해결 질문), idea(아이디어).
 - 매 메시지마다 보드 개요가 [board] 아래 JSON으로, 손그림이 있으면 보드 전체 그림이 첨부로 옵니다. 사람이 고른 항목은 selected로 오고, 고른 파일은 메시지에 첨부됩니다.
-- 파일 카드의 path(files/…)는 당신의 작업 폴더 안에 있습니다. 이미지와 PDF, 문서는 당신의 파일 읽기 도구로 직접 읽으세요. 레퍼런스를 읽고 핵심을 메모로 정리하고, 관련된 것끼리 화살표로 잇거나 틀로 묶습니다.
+- 파일 카드의 path(files/…)는 당신의 작업 폴더 안에 있습니다. 이미지와 PDF, 문서는 당신의 파일 읽기 도구로 직접 읽으세요. 링크 카드와 문서 카드에 text_file(extracted/…)이 있으면 앱이 그 웹 페이지나 문서(Word·PowerPoint·Excel·PDF)에서 꺼낸 글이니 그것을 읽으세요. text_error는 꺼내지 못한 이유입니다. 레퍼런스를 읽고 핵심을 메모로 정리하고, 관련된 것끼리 화살표로 잇거나 틀로 묶습니다.
 - 사람에게 물어야 할 것은 create_question으로 보드에 올립니다. 사람이 적은 답은 개요의 answer에 옵니다. 답을 대신 적지 않습니다.
 - 보드를 바꿀 때는 `board_write`를 씁니다. 한 번에 여러 명령을 보낼 수 있고, create_note에 ref를 주면 같은 호출 안에서 "$ref"로 가리킬 수 있습니다. 최신 상태가 필요하면 `board_read`.
 - 당신이 바꾼 것은 사람이 유지하거나 되돌리기 전까지 "제안"으로 표시됩니다. 되돌려진 것을 다시 밀어붙이지 마세요.
@@ -1350,7 +1364,7 @@ pub fn preamble(lang: &str, title: &str) -> String {
 The board:
 - Notes, freehand sketches, arrows (edges), reference files (file: images, PDFs, documents), links (link: web pages), frames (a titled group) and questions (a card the human answers). Notes can carry a tag: goal, constraint, question (open question) or idea.
 - Every message brings an outline of the board as JSON under [board], and a picture of the whole board attached when it has sketches. Items the human selected come as selected; selected files are attached to the message.
-- A file card's path (files/…) is in your working folder: read images, PDFs and documents with your own file tools. Read the references, sum up what matters in notes, connect related things with arrows or group them in frames.
+- A file card's path (files/…) is in your working folder: read images, PDFs and documents with your own file tools. A link or document card with a text_file (extracted/…) has the text the app took from that web page or document (Word, PowerPoint, Excel, PDF): read it. text_error says why there is none. Read the references, sum up what matters in notes, connect related things with arrows or group them in frames.
 - Put what you need to ask the human on the board with create_question; their answer comes as the question's answer in the outline. Never write answers yourself.
 - Change the board with `board_write`: several commands per call; give create_note a ref to point at it as "$ref" later in the same call. Call `board_read` for the latest state.
 - What you change shows as a suggestion until the human keeps or reverts it. Do not push back what was reverted.
@@ -1368,7 +1382,7 @@ How to work:
 /// The agent's two board tools, by name and description; the app and the
 /// `design_agent` example build them from the same text.
 pub const BOARD_READ: &str = "board_read";
-pub const BOARD_READ_DESC: &str = "Read the design's board: every note (id, tag, text, position, size, who made it), sketch, reference file (name, media type, path in your working folder), link (url, title), frame (title, what it holds), question (text, the human's answer) and arrow, and which items are suggestions still waiting on the human.";
+pub const BOARD_READ_DESC: &str = "Read the design's board: every note (id, tag, text, position, size, who made it), sketch, reference file (name, media type, path in your working folder), link (url, title), each link or document card's text_file (its text, taken by the app, in your working folder) or text_error, frame (title, what it holds), question (text, the human's answer) and arrow, and which items are suggestions still waiting on the human.";
 pub const BOARD_WRITE: &str = "board_write";
 pub const BOARD_WRITE_DESC: &str = "Change the design's board with a list of commands, applied in order. Each result says ok with the item id, or the error. create_note {x, y, text, tag?, w?, h?, ref?} (tag: goal | constraint | question | idea); create_question {x, y, text, w?, h?, ref?} (a card the human answers); create_link {x, y, url, title?, text?, ref?} (a web page as a reference); create_frame {x, y, w, h, title?, ref?} (a titled area; what lies inside moves with it); update {id, text?, tag?, url?, title?}; move {id, x, y, w?, h?}; delete {ids}; connect {from, to, label?}. Ids may be \"$ref\" for an item made earlier in the same call. Files come only from the human. Your changes show as suggestions the human keeps or reverts.";
 
@@ -1425,7 +1439,8 @@ pub fn tools(app: AppHandle, id: String) -> Vec<Tool> {
                 let (app, id) = read.clone();
                 async move {
                     let state = app.state::<AppState>();
-                    Ok(doc(&state, &id)?.outline())
+                    crate::extract::schedule(&app, &id);
+                    Ok(crate::extract::annotate(&state, &id, doc(&state, &id)?.outline()))
                 }
             },
         ),

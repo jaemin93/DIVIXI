@@ -10,7 +10,7 @@ pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Documents whose text is extracted rather than read.
-const DOCUMENTS: &[&str] = &["pdf", "docx"];
+const DOCUMENTS: &[&str] = &["pdf", "docx", "pptx", "xlsx"];
 
 const MARKDOWN: &[&str] = &["md", "markdown", "mdx"];
 const CODE: &[&str] = &[
@@ -32,9 +32,9 @@ pub fn extension(path: &Path) -> String {
 pub fn shape_of(path: &Path) -> Option<Shape> {
     let ext = extension(path);
     // A Word document's headings come out as markdown headings.
-    if MARKDOWN.contains(&ext.as_str()) || ext == "docx" {
+    if MARKDOWN.contains(&ext.as_str()) || ext == "docx" || ext == "pptx" {
         Some(Shape::Markdown)
-    } else if ext == "pdf" {
+    } else if ext == "pdf" || ext == "xlsx" {
         Some(Shape::Text)
     } else if CODE.contains(&ext.as_str()) {
         Some(Shape::Code)
@@ -102,7 +102,7 @@ pub fn read_file(path: &Path) -> anyhow::Result<FileText> {
             anyhow::bail!("document is larger than {} MB", MAX_DOCUMENT_BYTES / 1024 / 1024);
         }
         let bytes = std::fs::read(path)?;
-        let text = if ext == "pdf" { crate::documents::pdf_text(&bytes)? } else { crate::documents::docx_text(&bytes)? };
+        let text = document_text(&ext, &bytes)?;
         return Ok(FileText { hash: hash(&text), size: meta.len(), mtime_ms: mtime_ms(&meta), text });
     }
     if meta.len() > MAX_FILE_BYTES {
@@ -117,6 +117,22 @@ pub fn read_file(path: &Path) -> anyhow::Result<FileText> {
         text = strip_tags(&text);
     }
     Ok(FileText { hash: hash(&text), size: meta.len(), mtime_ms: mtime_ms(&meta), text })
+}
+
+/// The text of a document by its extension (pdf, docx, pptx, xlsx).
+pub fn document_text(ext: &str, bytes: &[u8]) -> anyhow::Result<String> {
+    match ext {
+        "pdf" => crate::documents::pdf_text(bytes),
+        "docx" => crate::documents::docx_text(bytes),
+        "pptx" => crate::documents::pptx_text(bytes),
+        "xlsx" => crate::documents::xlsx_text(bytes),
+        _ => anyhow::bail!("not a document this can read: .{ext}"),
+    }
+}
+
+/// Text of an HTML page, for reading: tags, scripts and styles dropped.
+pub fn html_text(html: &str) -> String {
+    strip_tags(html)
 }
 
 /// Modification time in ms since the epoch, 0 when unknown.

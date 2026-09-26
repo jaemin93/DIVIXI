@@ -18,6 +18,7 @@ use tauri_plugin_dialog::DialogExt;
 
 mod conductor;
 mod embed;
+mod extract;
 pub mod artifact;
 pub mod design;
 mod knowledge;

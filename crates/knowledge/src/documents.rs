@@ -1,5 +1,6 @@
-//! Text out of documents that are not text: PDF (its text layer) and Word
-//! (.docx, with its headings kept as markdown headings).
+//! Text out of documents that are not text: PDF (its text layer), Word
+//! (.docx, with its headings kept as markdown headings), PowerPoint
+//! (.pptx, slide by slide) and Excel (.xlsx, sheet by sheet, a row a line).
 
 use std::io::Read;
 
@@ -33,6 +34,137 @@ pub fn docx_text(bytes: &[u8]) -> anyhow::Result<String> {
         anyhow::bail!("the document has no text");
     }
     Ok(text)
+}
+
+/// One part of an Office archive as text (at most 64 MB of it).
+fn part(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Option<String> {
+    let mut xml = String::new();
+    let mut p = archive.by_name(name).ok()?;
+    p.by_ref().take(64 * 1024 * 1024).read_to_string(&mut xml).ok()?;
+    Some(xml)
+}
+
+/// Parts named `<prefix><n>.xml`, in the order of n.
+fn numbered(archive: &zip::ZipArchive<std::io::Cursor<&[u8]>>, prefix: &str) -> Vec<(u32, String)> {
+    let mut found: Vec<(u32, String)> = archive
+        .file_names()
+        .filter_map(|n| n.strip_prefix(prefix)?.strip_suffix(".xml")?.parse::<u32>().ok().map(|i| (i, n.to_string())))
+        .collect();
+    found.sort();
+    found
+}
+
+/// The text inside each `<tag>…</tag>` (or `<tag …>…</tag>`) of `s`, unescaped.
+fn tag_texts(s: &str, tag: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let close = format!("</{tag}>");
+    let mut rest = s;
+    while let Some(start) = find_tag(rest, tag) {
+        let after = &rest[start..];
+        let Some(gt) = after.find('>') else { break };
+        if after[..gt].ends_with('/') {
+            rest = &after[gt + 1..];
+            continue;
+        }
+        let body = &after[gt + 1..];
+        let Some(end) = body.find(&close) else { break };
+        out.push(unescape(&body[..end]));
+        rest = &body[end + close.len()..];
+    }
+    out
+}
+
+/// Each `<tag>…</tag>` element of `s` (self-closing ones as they are).
+fn elements<'a>(s: &'a str, tag: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let close = format!("</{tag}>");
+    let mut rest = s;
+    while let Some(start) = find_tag(rest, tag) {
+        let after = &rest[start..];
+        let Some(gt) = after.find('>') else { break };
+        if after[..gt].ends_with('/') {
+            out.push(&after[..gt + 1]);
+            rest = &after[gt + 1..];
+            continue;
+        }
+        let end = after.find(&close).map(|e| e + close.len()).unwrap_or(after.len());
+        out.push(&after[..end]);
+        rest = &after[end..];
+    }
+    out
+}
+
+/// An attribute's value in an element's opening tag.
+fn attr<'a>(element: &'a str, name: &str) -> Option<&'a str> {
+    let open = &element[..element.find('>').unwrap_or(element.len())];
+    let key = format!(" {name}=\"");
+    let at = open.find(&key)? + key.len();
+    let rest = &open[at..];
+    Some(&rest[..rest.find('"')?])
+}
+
+/// The text of a .pptx: each slide's paragraphs under a "Slide n" heading.
+pub fn pptx_text(bytes: &[u8]) -> anyhow::Result<String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| anyhow::anyhow!("not a PowerPoint file: {e}"))?;
+    let slides = numbered(&archive, "ppt/slides/slide");
+    if slides.is_empty() {
+        anyhow::bail!("not a PowerPoint file");
+    }
+    let mut out = String::new();
+    for (n, name) in slides {
+        let Some(xml) = part(&mut archive, &name) else { continue };
+        let lines: Vec<String> = elements(&xml, "a:p").iter().map(|p| tag_texts(p, "a:t").concat()).filter(|l| !l.trim().is_empty()).collect();
+        if lines.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("## Slide {n}\n\n{}\n\n", lines.join("\n")));
+    }
+    if out.trim().is_empty() {
+        anyhow::bail!("the presentation has no text");
+    }
+    Ok(out.trim_end().to_string() + "\n")
+}
+
+/// The text of a .xlsx: each sheet's rows, cells separated by tabs.
+pub fn xlsx_text(bytes: &[u8]) -> anyhow::Result<String> {
+    const MAX_ROWS: usize = 2_000;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| anyhow::anyhow!("not an Excel file: {e}"))?;
+    let shared: Vec<String> = part(&mut archive, "xl/sharedStrings.xml")
+        .map(|xml| elements(&xml, "si").iter().map(|si| tag_texts(si, "t").concat()).collect())
+        .unwrap_or_default();
+    let sheets = numbered(&archive, "xl/worksheets/sheet");
+    if sheets.is_empty() {
+        anyhow::bail!("not an Excel file");
+    }
+    let mut out = String::new();
+    for (n, name) in sheets {
+        let Some(xml) = part(&mut archive, &name) else { continue };
+        let mut rows = Vec::new();
+        for row in elements(&xml, "row").into_iter().take(MAX_ROWS) {
+            let cells: Vec<String> = elements(row, "c")
+                .into_iter()
+                .map(|c| {
+                    let value = tag_texts(c, "v").into_iter().next();
+                    match attr(c, "t") {
+                        Some("s") => value.and_then(|v| v.trim().parse::<usize>().ok()).and_then(|i| shared.get(i).cloned()).unwrap_or_default(),
+                        Some("inlineStr") => tag_texts(c, "t").concat(),
+                        _ => value.unwrap_or_default(),
+                    }
+                })
+                .collect();
+            let line = cells.join("\t");
+            if !line.trim().is_empty() {
+                rows.push(line.trim_end().to_string());
+            }
+        }
+        if !rows.is_empty() {
+            out.push_str(&format!("## Sheet {n}\n\n{}\n\n", rows.join("\n")));
+        }
+    }
+    if out.trim().is_empty() {
+        anyhow::bail!("the workbook has no text");
+    }
+    Ok(out.trim_end().to_string() + "\n")
 }
 
 /// Paragraphs of WordprocessingML, headings marked.
@@ -190,6 +322,42 @@ mod tests {
         assert!(docx_text(b"not a zip").is_err());
         assert!(docx_text(&docx("<w:document><w:body><w:p/></w:body></w:document>")).is_err());
         assert!(pdf_text(b"%PDF-1.4 garbage").is_err());
+    }
+
+    fn zipped(parts: &[(&str, &str)]) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            for (name, body) in parts {
+                z.start_file(*name, opts).unwrap();
+                z.write_all(body.as_bytes()).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    #[test]
+    fn slides_in_order() {
+        let pptx = zipped(&[
+            ("ppt/slides/slide10.xml", r#"<p:sld><a:p><a:r><a:t>Last</a:t></a:r></a:p></p:sld>"#),
+            ("ppt/slides/slide2.xml", r#"<p:sld><a:p><a:r><a:t>로드맵 </a:t></a:r><a:r><a:t>&amp; 일정</a:t></a:r></a:p><a:p/><a:p><a:r><a:t>Q3</a:t></a:r></a:p></p:sld>"#),
+        ]);
+        assert_eq!(pptx_text(&pptx).unwrap(), "## Slide 2\n\n로드맵 & 일정\nQ3\n\n## Slide 10\n\nLast\n");
+    }
+
+    #[test]
+    fn sheets_as_rows() {
+        let xlsx = zipped(&[
+            ("xl/sharedStrings.xml", r#"<sst><si><t>이름</t></si><si><r><t>가</t></r><r><t>격</t></r></si></sst>"#),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet><cols><col min="1"/></cols><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>사과</t></is></c><c r="B2"><v>1200</v></c></row><row r="3"/></sheetData></worksheet>"#,
+            ),
+        ]);
+        assert_eq!(xlsx_text(&xlsx).unwrap(), "## Sheet 1\n\n이름\t가격\n사과\t1200\n");
+        assert!(xlsx_text(b"nope").is_err());
     }
 
     #[test]
