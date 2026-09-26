@@ -25,6 +25,7 @@ mod knowledge;
 mod metrics;
 mod preview;
 mod terminal;
+mod remote;
 mod workspace;
 mod worktree;
 
@@ -68,6 +69,8 @@ pub struct AppState {
     terminals: terminal::Terminals,
     /// The knowledge library and its sync queue.
     pub(crate) library: knowledge::Library,
+    /// Reaching the app from a phone (src/remote).
+    pub(crate) remote: remote::Remote,
 }
 
 impl AppState {
@@ -1113,6 +1116,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_tracks,
             get_run,
+            remote::remote_status,
+            remote::remote_set_enabled,
+            remote::remote_pair,
+            remote::remote_drop,
             workspace_search,
             workspace_save_as,
             design_extracts,
@@ -1237,6 +1244,7 @@ pub fn run() {
                 }
             }
             let library = knowledge::Library::open(&data_dir.join("knowledge"))?;
+            let remote = remote::Remote::open(&data_dir)?;
             app.manage(AppState {
                 store,
                 db_path,
@@ -1251,6 +1259,7 @@ pub fn run() {
                 meter: metrics::Meter::default(),
                 terminals: terminal::Terminals::default(),
                 library,
+                remote,
             });
             // Artifact agents nobody has talked to for an hour are closed.
             artifact::sweep_idle(app.handle().clone());
@@ -1264,6 +1273,8 @@ pub fn run() {
                 let _ = window.set_title("Divixi");
             }
             tray(app.handle())?;
+            // Remote access: events are kept for other devices, and its server comes up if it was on.
+            remote::boot(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())
