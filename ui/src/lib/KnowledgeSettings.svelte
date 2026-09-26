@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke } from "./ipc.svelte";
   import { store, agentLabel } from "./store.svelte";
   import { kb, K_AGENT, K_CONFIG, K_EMBED_DIMS, K_EMBED_ENABLED, K_EMBED_KEY, K_EMBED_MODEL, K_EMBED_RATE, K_EMBED_URL, K_EXTRACT, K_POOL } from "./knowledge.svelte";
   import { t } from "./i18n.svelte";

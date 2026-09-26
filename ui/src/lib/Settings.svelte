@@ -23,7 +23,8 @@
   import Icon, { type IconName } from "./Icon.svelte";
   import SplitHandle from "./SplitHandle.svelte";
   import { t } from "./i18n.svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke, inTauri } from "./ipc.svelte";
+  import RemoteSettings from "./RemoteSettings.svelte";
   import { onMount } from "svelte";
 
   /** Minutes before an unused conductor or worker session is closed (0: never). */
@@ -56,6 +57,8 @@
         { id: "chat", icon: "chat", label: t("settings.chat"), blurb: t("settings.chatBlurb") },
         { id: "agents", icon: "agents", label: t("settings.agents"), blurb: t("settings.agentsBlurb") },
         { id: "knowledge", icon: "book", label: t("settings.knowledge"), blurb: t("settings.knowledgeBlurb") },
+        // Pairing other devices is done at the PC.
+        ...(inTauri ? [{ id: "remote" as SettingsSection, icon: "remote" as IconName, label: t("settings.remote"), blurb: t("settings.remoteBlurb") }] : []),
       ],
     },
     {
@@ -242,6 +245,8 @@
       </label>
       <p class="note">{t("settings.idleNote")}</p>
       <AgentList />
+    {:else if store.settingsSection === "remote"}
+      <RemoteSettings />
     {:else if store.settingsSection === "knowledge"}
       <KnowledgeSettings />
     {:else if store.settingsSection === "about"}

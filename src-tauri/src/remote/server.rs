@@ -46,7 +46,8 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/auth/logout", post(logout))
         .route("/api/health", get(|| async { axum::Json(json!({ "ok": true })) }))
         .route("/api/me", get(me))
-        .route("/api/invoke/{cmd}", post(invoke))
+        // An attachment (up to 50 MB) comes as base64 in a command.
+        .route("/api/invoke/{cmd}", post(invoke).layer(axum::extract::DefaultBodyLimit::max(72 * 1024 * 1024)))
         .route("/api/events", get(events))
         .route("/preview/{*rest}", get(preview))
         .route("/board/{*rest}", get(board))

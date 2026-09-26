@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
+  import { inTauri } from "./ipc.svelte";
   import { store, type DesignNode, type DesignOp, type DesignTag, type Stroke } from "./store.svelte";
   import { strokePath, strokesBox, worldStrokes, localStrokes, overlaps, edgeEnds, TAG_COLORS, type Box } from "./ink";
   import { t } from "./i18n.svelte";
@@ -302,7 +303,8 @@
     // Files dropped from the system onto the board become cards where they land.
     let unlisten: (() => void) | undefined;
     let gone = false;
-    getCurrentWebview()
+    // Files dropped from the system: only in the app's own window.
+    if (inTauri) getCurrentWebview()
       .onDragDropEvent((e) => {
         const p = e.payload;
         if (p.type === "leave") {

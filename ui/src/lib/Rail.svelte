@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { inTauri } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import { kb } from "./knowledge.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
@@ -35,7 +36,8 @@
   ];
 
   const secondary: Item[] = [
-    { id: "terminal", icon: "terminal", label: "rail.terminal", go: () => store.setTerminal(!store.termOpen) },
+    // No PC shell from another device.
+    ...(inTauri ? [{ id: "terminal", icon: "terminal" as IconName, label: "rail.terminal" as Key, go: () => store.setTerminal(!store.termOpen) }] : []),
     { id: "settings", icon: "settings", label: "rail.settings", go: () => store.openSettings("overview") },
   ];
 

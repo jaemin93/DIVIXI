@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick, untrack } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke, inTauri } from "./ipc.svelte";
   import { store, type ArtifactInfo, type KbPick, type WsEntry } from "./store.svelte";
   import AgentPicker from "./AgentPicker.svelte";
   import Icon from "./Icon.svelte";
@@ -470,7 +470,8 @@
   let dropping = $state(false);
   onMount(() => {
     let unlisten: (() => void) | undefined;
-    getCurrentWebview()
+    // Files dropped from the system: only in the app's own window.
+    if (inTauri) getCurrentWebview()
       .onDragDropEvent((e) => {
         if (store.view !== "track" && store.view !== "design") return;
         const p = e.payload;

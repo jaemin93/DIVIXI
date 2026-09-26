@@ -7,7 +7,7 @@
   import CodeEditor from "./CodeEditor.svelte";
   import { highlight, languageFor } from "./highlight";
   import { t } from "./i18n.svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke, previewBase } from "./ipc.svelte";
 
   /**
    * The track's working folder beside the conversation, after Kiro Crew's
@@ -199,7 +199,7 @@
   const raw = $derived(!!store.rawMarkdown[store.activeFile]);
   /** Where the preview protocol serves a file of the current track. */
   function previewUrl(path: string): string {
-    const base = navigator.userAgent.includes("Windows") ? "http://preview.localhost/" : "preview://localhost/";
+    const base = previewBase();
     // The theme picks the scrollbar colours the page is served with.
     return base + [store.track ?? "", ...path.split("/")].map(encodeURIComponent).join("/") + `?theme=${store.theme}`;
   }

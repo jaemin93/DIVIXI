@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen, inTauri, boardBase } from "./ipc.svelte";
 import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Lang, type LangPref } from "./i18n.svelte";
@@ -487,7 +486,7 @@ export const ZOOM_MAX = 200;
 export const ZOOM_STEP = 10;
 
 /** Settings sections, in the settings column. */
-export type SettingsSection = "overview" | "appearance" | "chat" | "agents" | "knowledge" | "about";
+export type SettingsSection = "overview" | "appearance" | "chat" | "agents" | "knowledge" | "remote" | "about";
 
 /** Mirrors `workspace::Entry`: one file or folder, path relative to the track folder. */
 export type WsEntry = { path: string; name: string; dir: boolean; size: number };
@@ -1444,8 +1443,7 @@ class Store {
 
   /** Where a card shows a reference file of the open design. */
   boardFileUrl(src: string): string {
-    const base = navigator.userAgent.includes("Windows") ? "http://board.localhost/" : "board://localhost/";
-    return `${base}${encodeURIComponent(this.artifact)}/${encodeURIComponent(src.replace(/^files\//, ""))}`;
+    return `${boardBase()}${encodeURIComponent(this.artifact)}/${encodeURIComponent(src.replace(/^files\//, ""))}`;
   }
 
   async designOpenFile(src: string) {
@@ -1943,6 +1941,7 @@ class Store {
 
   /** Show or hide the track list column; persisted. */
   async setTerminal(open: boolean) {
+    if (!inTauri) return;
     this.termOpen = open;
     if (open) this.termMounted = true;
     try {
@@ -2085,7 +2084,7 @@ class Store {
       }
       // Setup comes first when nothing has been detected yet, or when the
       // last detection left nothing to run workers on.
-      if (agents === null || this.readyAgents.length === 0) {
+      if (inTauri && (agents === null || this.readyAgents.length === 0)) {
         this.setupStep = 1;
         this.setupOpen = true;
       }

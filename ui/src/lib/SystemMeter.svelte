@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke } from "./ipc.svelte";
   import { onMount } from "svelte";
   import { store } from "./store.svelte";
   import { t } from "./i18n.svelte";

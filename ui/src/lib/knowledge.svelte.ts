@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen } from "./ipc.svelte";
 import { store, type ArtifactInfo } from "./store.svelte";
 
 /** Mirrors `orchestra_knowledge::Source`: a document in the library. */
