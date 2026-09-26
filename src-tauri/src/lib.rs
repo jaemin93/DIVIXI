@@ -296,6 +296,30 @@ async fn worker_discard(app: AppHandle, track: String, worker: String) -> Result
         .map_err(|e| e.to_string())?
 }
 
+/// Save a copy of a track's file where the human picks (the file panel's
+/// "Download"). `None` when they cancel.
+#[tauri::command]
+async fn workspace_save_as(app: AppHandle, track: String, path: String) -> Result<Option<String>, String> {
+    let source = {
+        let state = app.state::<AppState>();
+        workspace::resolve(&track_root(&state, &track)?, &path)?
+    };
+    let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+    let mut dialog = app.dialog().file().set_file_name(&name);
+    if let Some(dir) = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from).map(|h| h.join("Downloads")).filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    dialog.save_file(move |picked| {
+        let _ = tx.send(picked);
+    });
+    let Some(target) = rx.await.map_err(|e| e.to_string())?.and_then(|p| p.into_path().ok()) else {
+        return Ok(None);
+    };
+    tokio::fs::copy(&source, &target).await.map_err(|e| format!("could not save {}: {e}", target.display()))?;
+    Ok(Some(target.display().to_string()))
+}
+
 /// Let the human pick a folder for a track. `None` when they cancel.
 #[tauri::command]
 async fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<String>, String> {
@@ -794,6 +818,18 @@ fn workspace_tree(state: State<'_, AppState>, track: String) -> Result<Vec<works
     workspace::tree(&track_root(&state, &track)?)
 }
 
+/// Where each link or document card's text stands (read, reading, failed).
+#[tauri::command(async)]
+fn design_extracts(app: AppHandle, id: String) -> Vec<extract::State> {
+    extract::states(&app.state::<AppState>(), &id)
+}
+
+/// Read a card's text again after a failure.
+#[tauri::command(async)]
+fn design_extract_retry(app: AppHandle, id: String, card: String) -> Result<(), String> {
+    extract::retry(&app, &id, &card)
+}
+
 /// Lines of the track's files with `query` in them (the side panel's content search).
 #[tauri::command(async)]
 fn workspace_search(state: State<'_, AppState>, track: String, query: String) -> Result<(Vec<workspace::Found>, bool), String> {
@@ -1065,6 +1101,9 @@ pub fn run() {
             list_tracks,
             get_run,
             workspace_search,
+            workspace_save_as,
+            design_extracts,
+            design_extract_retry,
             worker_report,
             worker_changes,
             worker_file_diff,

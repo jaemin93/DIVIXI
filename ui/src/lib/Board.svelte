@@ -800,6 +800,7 @@
             <div class="fhead">
               <span class="mono ext">{extOf(n.name)}</span>
               <span class="fname" title={n.name}>{n.name}</span>
+              {@render readState(n.id)}
               <button type="button" class="fopen" title={t("design.open")} onpointerdown={(ev) => ev.stopPropagation()} onclick={() => store.designOpenFile(n.src ?? "")}>↗</button>
             </div>
             {#if n.mime === "application/pdf"}
@@ -815,6 +816,7 @@
         {:else if n.kind === "link"}
           <div class="lhead">
             <span class="ltitle">{n.name || hostOf(n.url)}</span>
+            {@render readState(n.id)}
             <button type="button" class="fopen" title={t("design.openLink")} onpointerdown={(ev) => ev.stopPropagation()} onclick={() => store.openUrl(n.url ?? "")}>↗</button>
           </div>
           <div class="mono lurl" title={n.url}>{n.url}</div>
@@ -994,7 +996,42 @@
   {/if}
 </div>
 
+<!-- Whether the agent can read a link's page or a document's text. -->
+{#snippet readState(id: string)}
+  {@const x = store.designExtracts[id]}
+  {#if x?.state === "done"}
+    <span class="mono rstate ok" title={t("design.textReady")}>{t("design.textReadyShort")}</span>
+  {:else if x?.state === "reading"}
+    <span class="mono rstate" title={t("design.textReading")}><span class="dot pulse"></span></span>
+  {:else if x?.state === "failed"}
+    <button type="button" class="mono rstate bad" title={`${x.error ?? ""}\n${t("design.textRetry")}`} onpointerdown={(ev) => ev.stopPropagation()} onclick={() => store.retryExtract(id)}>{t("design.textFailedShort")}</button>
+  {/if}
+{/snippet}
+
 <style>
+  .rstate {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 9.5px;
+    letter-spacing: 0.04em;
+    color: var(--lab);
+    background: none;
+    border: 1px solid transparent;
+    padding: 0 4px;
+  }
+
+  .rstate.ok {
+    color: var(--ok);
+  }
+
+  .rstate.bad {
+    color: var(--warn);
+    border-color: var(--warnln);
+    cursor: pointer;
+  }
+
   .board:focus {
     outline: none;
   }

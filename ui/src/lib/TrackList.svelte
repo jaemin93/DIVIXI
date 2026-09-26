@@ -360,7 +360,6 @@
           </span>
           <span class="main">
             <span class="name">{tr.name}</span>
-            <span class="mono count">{tr.runs}</span>
           </span>
         </button>
       </div>
@@ -378,7 +377,6 @@
             <span class="dot" class:pulse={worker.live} style="background: {worker.live ? 'var(--ok)' : 'var(--idle)'}"></span>
             <span class="mono name">{worker.name}</span>
             <span class="mono meta">{agentLabel(worker.agent)}</span>
-            <span class="mono count">{worker.runs}</span>
           </button>
         {/each}
       {/if}

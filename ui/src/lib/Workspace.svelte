@@ -67,6 +67,27 @@
     return groups;
   });
 
+  // ----- a file's right-click menu -----
+  let menu = $state<{ path: string; x: number; y: number } | null>(null);
+  function fileMenu(e: MouseEvent, path: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    // Kept inside the window.
+    menu = { path, x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 90) };
+  }
+  async function download(path: string) {
+    menu = null;
+    try {
+      await invoke<string | null>("workspace_save_as", { track: store.track, path });
+    } catch (err) {
+      store.lastError = String(err);
+    }
+  }
+  function attachToMessage(path: string) {
+    menu = null;
+    void store.attach([store.absoluteInTrack(path)]);
+  }
+
   /** The line with what was searched for marked, as safe HTML. */
   function marked(text: string): string {
     const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -191,9 +212,22 @@
 
 <svelte:window
   onkeydown={(e) => {
-    if (e.key === "Escape" && store.panelTree && store.panelTab === "file") store.panelTree = false;
+    if (e.key === "Escape" && menu) menu = null;
+    else if (e.key === "Escape" && store.panelTree && store.panelTab === "file") store.panelTree = false;
   }}
+  onpointerdown={(e) => {
+    if (menu && !(e.target as HTMLElement | null)?.closest?.(".fmenu")) menu = null;
+  }}
+  onblur={() => (menu = null)}
 />
+
+{#if menu}
+  {@const path = menu.path}
+  <div class="fmenu" role="menu" style="left: {menu.x}px; top: {menu.y}px">
+    <button class="fitem" role="menuitem" onclick={() => attachToMessage(path)}>{t("ws.attachToMessage")}</button>
+    <button class="fitem" role="menuitem" onclick={() => download(path)}>{t("ws.download")}</button>
+  </div>
+{/if}
 
 <aside style="width: {store.panelWidth}px">
   <SplitHandle
@@ -323,6 +357,7 @@
           {/if}
           {#key store.activeFile}
             <CodeEditor
+              goto={store.gotoLine?.path === store.activeFile ? store.gotoLine : null}
               value={store.textOf(store.activeFile)}
               language={languageFor(activeFile.ext)}
               onchange={(text) => store.setDraft(store.activeFile, text)}
@@ -428,13 +463,13 @@
             <div class="mono empty">{t("ws.noMatch")}</div>
           {/if}
           {#each foundByFile as g (g.path)}
-            <button class="node file" class:on={store.activeFile === g.path && store.panelTab === "file"} onclick={() => store.openFile(g.path)} title={g.path}>
+            <button class="node file" class:on={store.activeFile === g.path && store.panelTab === "file"} onclick={() => store.openFile(g.path)} oncontextmenu={(e) => fileMenu(e, g.path)} title={g.path}>
               <span class="mono ext">{ext(g.path) || "·"}</span>
               <span class="name">{g.path}</span>
               <span class="mono size">{g.lines.length}</span>
             </button>
             {#each g.lines as f (f.line)}
-              <button class="hit" onclick={() => store.openFile(f.path)} title={`${f.path}:${f.line}`}>
+              <button class="hit" onclick={() => store.openFile(f.path, f.line)} oncontextmenu={(e) => fileMenu(e, f.path)} title={`${f.path}:${f.line}`}>
                 <span class="mono ln">{f.line}</span>
                 <span class="mono htext">{@html marked(f.text)}</span>
               </button>
@@ -453,7 +488,7 @@
                   <span class="name">{r.name}</span>
                 </button>
               {:else}
-                <button class="node file" class:on={store.activeFile === r.path && store.panelTab === "file"} style="padding-left: {filter.trim() ? 10 : 24 + r.depth * 14}px" onclick={() => store.openFile(r.path)} title={r.path}>
+                <button class="node file" class:on={store.activeFile === r.path && store.panelTab === "file"} style="padding-left: {filter.trim() ? 10 : 24 + r.depth * 14}px" onclick={() => store.openFile(r.path)} oncontextmenu={(e) => fileMenu(e, r.path)} title={r.path}>
                   <span class="mono ext">{ext(r.name) || "·"}</span>
                   <span class="name">{filter.trim() ? r.path : r.name}</span>
                   {#if !compact}<span class="mono size">{kb(r.size)}</span>{/if}
@@ -468,6 +503,33 @@
 {/snippet}
 
 <style>
+  .fmenu {
+    position: fixed;
+    z-index: 60;
+    min-width: 180px;
+    padding: 4px 0;
+    background: var(--card);
+    border: 1px solid var(--lines);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  }
+
+  .fitem {
+    display: block;
+    width: 100%;
+    padding: 7px 14px;
+    background: transparent;
+    border: none;
+    text-align: left;
+    font-size: 12.5px;
+    color: var(--txt);
+    cursor: pointer;
+  }
+
+  .fitem:hover {
+    background: var(--sel);
+    color: var(--hi);
+  }
+
   aside {
     position: relative;
     flex-shrink: 0;

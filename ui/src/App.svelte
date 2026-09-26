@@ -49,7 +49,9 @@
   }
 </script>
 
-<svelte:window onkeydown={onKey} />
+<!-- The webview's own right-click menu (reload, inspect, …) is not the app's:
+     it never opens. The app's menus open where they belong. -->
+<svelte:window onkeydown={onKey} oncontextmenu={(e) => e.preventDefault()} />
 
 <div class="shell">
   <WindowChrome />

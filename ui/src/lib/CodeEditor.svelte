@@ -14,14 +14,40 @@
     language,
     onchange,
     onsave,
+    goto = null,
   }: {
     value: string;
     language: string | null;
     onchange: (text: string) => void;
     onsave: () => void;
+    /** A line to select and bring into view; a new `seq` asks again. */
+    goto?: { line: number; seq: number } | null;
   } = $props();
 
   let area = $state<HTMLTextAreaElement>();
+  let scroller = $state<HTMLDivElement>();
+  let jumped = 0;
+
+  // Select the asked-for line and scroll it to a third of the way down, once the text is in.
+  $effect(() => {
+    const g = goto;
+    const v = value;
+    if (!g || !area || !scroller || g.seq === jumped || !v) return;
+    jumped = g.seq;
+    const el = area;
+    const box = scroller;
+    requestAnimationFrame(() => {
+      const lines = el.value.split("\n");
+      const idx = Math.max(0, Math.min(g.line, lines.length) - 1);
+      let start = 0;
+      for (let i = 0; i < idx; i++) start += lines[i].length + 1;
+      el.focus({ preventScroll: true });
+      el.setSelectionRange(start, start + lines[idx].length);
+      const lh = parseFloat(getComputedStyle(el).lineHeight) || 17.6;
+      box.scrollTop = Math.max(0, 12 + idx * lh - box.clientHeight / 3);
+      box.scrollLeft = 0;
+    });
+  });
   /** What is drawn: follows `value` once a frame, so typing never waits on colouring. */
   let drawn = $state("");
   let pending = 0;
@@ -104,7 +130,7 @@
   }
 </script>
 
-<div class="scroll">
+<div class="scroll" bind:this={scroller}>
   <div class="ed">
     <pre class="hl hljs" aria-hidden="true">{@html html}{"\n"}</pre>
     <textarea

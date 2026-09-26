@@ -588,6 +588,29 @@ class Store {
   artifact = $state("");
   /** Replaced whole by each board the core sends; never changed in place. */
   designDoc = $state.raw<DesignDoc>({ ...EMPTY_DOC });
+  /** Where each link or document card's text stands, for the open board. */
+  designExtracts = $state<Record<string, { state: "done" | "failed" | "reading"; error?: string }>>({});
+
+  async loadExtracts(id = this.artifact) {
+    if (!id) return;
+    try {
+      const list = await invoke<{ card: string; state: "done" | "failed" | "reading"; error?: string }[]>("design_extracts", { id });
+      if (id === this.artifact) this.designExtracts = Object.fromEntries(list.map((x) => [x.card, { state: x.state, error: x.error }]));
+    } catch {
+      // Cosmetic.
+    }
+  }
+
+  async retryExtract(card: string) {
+    const id = this.artifact;
+    if (!id) return;
+    this.designExtracts = { ...this.designExtracts, [card]: { state: "reading" } };
+    try {
+      await invoke("design_extract_retry", { id, card });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
   /** The design whose board `designDoc` holds. */
   designLoaded = $state("");
   /** Width of the conversation beside a design's board. Persisted. */
@@ -827,7 +850,15 @@ class Store {
   }
 
   /** Open a file in its own panel tab and show it. */
-  async openFile(path: string) {
+  /** A line to show in a file once it is open (a content search hit). */
+  gotoLine = $state<{ path: string; line: number; seq: number } | null>(null);
+
+  async openFile(path: string, line?: number) {
+    if (line) {
+      // The line is in the source: a markdown or HTML file shows it, not its preview.
+      this.rawMarkdown = { ...this.rawMarkdown, [path]: true };
+      this.gotoLine = { path, line, seq: (this.gotoLine?.seq ?? 0) + 1 };
+    }
     if (!this.openFiles.includes(path)) this.openFiles = [...this.openFiles, path];
     this.activeFile = path;
     this.panelTab = "file";
@@ -1297,6 +1328,7 @@ class Store {
         this.designDoc = doc;
         this.designLoaded = id;
       }
+      void this.loadExtracts(id);
     } catch (err) {
       this.lastError = String(err);
     }
@@ -1462,6 +1494,8 @@ class Store {
     const d = this.artifacts.find((x) => x.id === id);
     if (d) d.updated_at = Date.now();
     if (id !== this.artifact) return;
+    // A new or changed card may have text to read now.
+    void this.loadExtracts(id);
     if (this.designLoaded === id && delta.base === this.designDoc.version) {
       this.designDoc = withDelta(this.designDoc, delta);
     } else if (!(this.designLoaded === id && delta.version <= this.designDoc.version)) {
@@ -2482,5 +2516,8 @@ export async function connectEvents() {
     listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
     listen<{ track: string; from: string; to: string; writing: boolean }>("conductor_handoff", (e) => store.takeHandoff(e.payload)),
     listen<DesignDelta>("design", (e) => store.takeDesign(e.payload)),
+    listen<string>("design_extract", (e) => {
+      if (e.payload === store.artifact) void store.loadExtracts(e.payload);
+    }),
   ]);
 }

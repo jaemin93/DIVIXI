@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::design::{self, Kind};
 use crate::AppState;
@@ -72,26 +72,71 @@ impl Origin {
     }
 }
 
+/// Where a card's text comes from, when it is a card whose text can be read.
+fn origin_of(state: &AppState, design: &str, n: &design::Node) -> Option<Origin> {
+    match n.kind {
+        Kind::Link if n.url.starts_with("http://") || n.url.starts_with("https://") => Some(Origin::Url(n.url.clone())),
+        Kind::File => {
+            let ext = Path::new(&n.name).extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+            if !READABLE.contains(&ext.as_str()) {
+                return None;
+            }
+            design::file_path(state, design, &n.src).ok().map(|p| Origin::File(p, n.name.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// Where a card's text stands.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct State {
+    pub card: String,
+    /// `done`, `failed` or `reading`.
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Where each readable card's text stands, for the board to show.
+pub fn states(state: &AppState, design: &str) -> Vec<State> {
+    let Ok(doc) = design::doc(state, design) else { return Vec::new() };
+    let Ok(workdir) = crate::artifact::workdir(state, design) else { return Vec::new() };
+    doc.nodes
+        .iter()
+        .filter_map(|n| {
+            let origin = origin_of(state, design, n)?;
+            let head = format!("Source: {}", origin.label());
+            let (md, err) = names(&n.id);
+            let st = if first_line(&workdir.join(&md)).as_deref() == Some(head.as_str()) {
+                State { card: n.id.clone(), state: "done", error: None }
+            } else if let Some(why) = std::fs::read_to_string(workdir.join(&err)).ok().filter(|t| t.lines().next() == Some(head.as_str())) {
+                State { card: n.id.clone(), state: "failed", error: Some(why.lines().skip(1).collect::<Vec<_>>().join(" ")) }
+            } else {
+                State { card: n.id.clone(), state: "reading", error: None }
+            };
+            Some(st)
+        })
+        .collect()
+}
+
+/// Read a card again (after a failure): its old result goes and it is scheduled.
+pub fn retry(app: &AppHandle, design: &str, card: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let workdir = crate::artifact::workdir(&state, design)?;
+    let (md, err) = names(card);
+    let _ = std::fs::remove_file(workdir.join(md));
+    let _ = std::fs::remove_file(workdir.join(err));
+    schedule(app, design);
+    Ok(())
+}
+
 /// Start reading every card of the design that has no text yet.
 pub fn schedule(app: &AppHandle, design: &str) {
     let state = app.state::<AppState>();
     let Ok(doc) = design::doc(&state, design) else { return };
     let Ok(workdir) = crate::artifact::workdir(&state, design) else { return };
     for n in &doc.nodes {
-        let origin = match n.kind {
-            Kind::Link if n.url.starts_with("http://") || n.url.starts_with("https://") => Origin::Url(n.url.clone()),
-            Kind::File => {
-                let ext = Path::new(&n.name).extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-                if !READABLE.contains(&ext.as_str()) {
-                    continue;
-                }
-                match design::file_path(&state, design, &n.src) {
-                    Ok(p) => Origin::File(p, n.name.clone()),
-                    Err(_) => continue,
-                }
-            }
-            _ => continue,
-        };
+        let Some(origin) = origin_of(&state, design, n) else { continue };
         let (md, err) = names(&n.id);
         let head = format!("Source: {}", origin.label());
         // Read already, from this very source (a link may have been changed since).
@@ -102,7 +147,7 @@ pub fn schedule(app: &AppHandle, design: &str) {
         if !claim(&key) {
             continue;
         }
-        let (dir, card) = (workdir.clone(), n.id.clone());
+        let (dir, card, app, design) = (workdir.clone(), n.id.clone(), app.clone(), design.to_string());
         tauri::async_runtime::spawn(async move {
             let key = key;
             let got = match &origin {
@@ -129,6 +174,8 @@ pub fn schedule(app: &AppHandle, design: &str) {
                 }
             }
             release(&key);
+            // The board shows where the card's text stands.
+            let _ = app.emit("design_extract", &design);
         });
     }
 }
