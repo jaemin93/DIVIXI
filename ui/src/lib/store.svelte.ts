@@ -2256,8 +2256,7 @@ class Store {
   /** Fill a worker run's prompt and agent from the store once it exists there. */
   private async refreshRun(id: string) {
     try {
-      const summaries = await invoke<RunSummary[]>("list_runs");
-      const s = summaries.find((x) => x.id === id);
+      const s = await invoke<RunSummary | null>("get_run", { id });
       const run = this.runs.find((r) => r.id === id);
       if (s && run) {
         run.prompt = s.prompt;

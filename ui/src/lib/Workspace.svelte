@@ -240,7 +240,7 @@
         {#if !activeFile}
           <div class="mono empty">{t("ws.loading")}</div>
         {:else if activeFile.kind === "markdown" && !raw}
-          <div class="mdwrap"><Markdown source={store.textOf(store.activeFile)} /></div>
+          <div class="mdwrap"><Markdown source={store.textOf(store.activeFile)} base={store.activeFile.split("/").slice(0, -1).join("/")} /></div>
         {:else if activeFile.kind === "html" && !raw}
           {#if store.isDirty(store.activeFile)}<div class="previewnote">{t("ws.previewSaved")}</div>{/if}
           <!-- Served from its own origin, sandboxed: its scripts run, apart from the app. Reloaded when the file is. -->

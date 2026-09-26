@@ -127,23 +127,19 @@ impl AgentSpec {
 /// Locate a script inside a locally installed npm package.
 ///
 /// `relative` is a path like `node_modules/<pkg>/dist/index.js`. The search
-/// walks up from the working directory and from the executable's directory
-/// looking for a directory that contains it, which covers both `cargo run`
-/// from the repo root and the Tauri dev binary, which lives under `target/`.
+/// walks up from the executable's directory looking for a directory that
+/// contains it, which covers `cargo run`, the examples and the Tauri dev
+/// binary (all under the repo's `target/`).
 pub fn find_local_script(relative: &str) -> Option<PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd);
-    }
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(PathBuf::from))
-    {
-        roots.push(dir);
-    }
-    roots
-        .iter()
-        .flat_map(|root| root.ancestors())
+    // Only beside the executable: a development build (under the repo's
+    // target/) walks up to the repo; a release build looks in its own
+    // folder and the one above, never in whatever folder it was started
+    // from or at a drive's root, where anyone could have put a script.
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let reach = if cfg!(debug_assertions) { usize::MAX } else { 2 };
+    exe_dir
+        .ancestors()
+        .take(reach)
         .map(|dir| dir.join(relative))
         .find(|candidate| candidate.is_file())
 }

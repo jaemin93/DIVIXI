@@ -456,6 +456,14 @@ impl AgentSession {
     }
 
     /// End the session and wait for the agent to go away.
+    /// End the session now, whatever it is doing: the agent process is killed
+    /// (with its tree on Windows) and a turn in flight ends with an error.
+    /// For an agent that does not answer a cancel.
+    pub fn kill(&self) {
+        refuse_all(&self.pending);
+        self.task.abort();
+    }
+
     pub async fn close(self) {
         drop(self.turns);
         let _ = self.task.await;

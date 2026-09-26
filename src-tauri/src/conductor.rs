@@ -114,11 +114,20 @@ pub struct Sessions {
     pub conductors: Mutex<HashMap<String, Conductor>>,
     /// By `track/worker` (see [`worker_key`]).
     pub workers: Mutex<HashMap<String, Live>>,
+    /// Workers whose session is being opened (the lock is not held for it).
+    opening: parking_lot::Mutex<HashSet<String>>,
+    /// One conductor opening per track at a time, without holding
+    /// `conductors` (and so every other track) while an agent starts.
+    conductor_gates: parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Tracks whose conductor has a turn in flight.
     busy: parking_lot::Mutex<HashSet<String>>,
 }
 
 impl Sessions {
+    fn conductor_gate(&self, track: &str) -> Arc<Mutex<()>> {
+        self.conductor_gates.lock().entry(track.to_string()).or_default().clone()
+    }
+
     /// Mark a track's conductor busy; `false` if it already was.
     fn begin_turn(&self, track: &str) -> bool {
         self.busy.lock().insert(track.to_string())
@@ -985,15 +994,27 @@ async fn start_worker_turn(
     let place = worker_place(&app, &info, &name).await?;
     let (worker_cwd, folder) = (place.cwd.clone(), place.for_conductor.clone());
 
-    // Resolve or open the worker session; refuse a second turn on a busy worker.
-    let (agent_id, turns, session, resumed, note, run) = {
+    // Resolve or open the worker session; refuse a second turn on a busy
+    // worker. Opening an agent takes seconds: the sessions lock is not held
+    // for it (other workers and tracks go on); the name is marked as
+    // opening instead, so a second call for it is refused meanwhile.
+    // Made once per call and taken at once: its size does not matter.
+    #[allow(clippy::large_enum_variant)]
+    enum Found {
+        Live { run: String, turns: u32, session: Arc<AgentSession>, agent: String },
+        Open { agent_id: String, spec: AgentSpec, opts: SessionOptions, wanted: bool, past_runs: Option<u32> },
+    }
+    let found = {
         let mut workers = state.sessions.workers.lock().await;
+        if state.sessions.opening.lock().contains(&key) {
+            return Err(format!("worker {name} is still starting; wait for it before sending more."));
+        }
         // The track now wants the worker elsewhere (its folder setting
         // changed): the session is reopened there, with its memory if it can.
         if workers.get(&key).is_some_and(|l| l.cwd != worker_cwd) {
             workers.remove(&key);
         }
-        let (agent_id, turns, session, resumed, note) = match (workers.get_mut(&key), open) {
+        match (workers.get_mut(&key), open) {
             (Some(live), true) => {
                 return Err(format!(
                     "worker {name} is already open (agent {}, {} turns). Send follow-ups with ask_worker(name=\"{name}\", message=...), or spawn_worker with a new name.",
@@ -1006,8 +1027,12 @@ async fn start_worker_turn(
                         "worker {name} is still working on run {run}. Wait for its {REPORT_PREFIX} before sending more."
                     ));
                 }
+                // Claimed under the lock the busy check was made under, so
+                // two parallel asks cannot both pass it.
+                let run = state.store.begin_run(&track, &name, &live.agent, &text, &worker_cwd).map_err(|e| e.to_string())?;
                 live.turns += 1;
-                (live.agent.clone(), live.turns, live.session.clone(), false, None)
+                live.running = Some(run.clone());
+                Found::Live { run, turns: live.turns, session: live.session.clone(), agent: live.agent.clone() }
             }
             (None, _) => {
                 let record = if fresh { None } else { worker_record(&state, &track, &name) };
@@ -1043,51 +1068,57 @@ async fn start_worker_turn(
                 let chosen = if agent_id == info.effective_worker_agent() { info.effective_worker_config() } else { &empty };
                 let mut opts = session_options(&state, &agent_id, &worker_cwd, chosen, None);
                 opts.resume = resume;
-                tracing::info!(%track, worker = %name, agent = %agent_id, resume = ?opts.resume, "opening worker session");
-                let session = Arc::new(AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?);
-                let resumed = session.resumed();
-                remember_worker(
-                    &state,
-                    &track,
-                    &name,
-                    &WorkerRecord {
-                        session_id: session.session_id().to_string(),
-                        agent: agent_id.clone(),
-                    },
-                );
-                let turns = if resumed { past.map(|p| p.runs).unwrap_or(0) + 1 } else { 1 };
-                workers.insert(
-                    key.clone(),
-                    Live {
-                        agent: agent_id.clone(),
-                        cwd: worker_cwd.clone(),
-                        session: session.clone(),
-                        turns,
-                        running: None,
-                    },
-                );
-                let note = if resumed {
-                    Some("Reopened with its earlier conversation.")
-                } else if wanted {
-                    Some("Its earlier conversation could not be restored; the worker starts fresh.")
-                } else if past.is_some() {
-                    Some("Started fresh; earlier runs stay in the record but the worker does not remember them.")
-                } else {
-                    None
-                };
-                (agent_id, turns, session, resumed, note)
+                state.sessions.opening.lock().insert(key.clone());
+                Found::Open { agent_id, spec, opts, wanted, past_runs: past.map(|p| p.runs) }
             }
-        };
-        // Claimed under the same lock as the busy check above, so two
-        // parallel asks cannot both pass it.
-        let run = state
-            .store
-            .begin_run(&track, &name, &agent_id, &text, &worker_cwd)
-            .map_err(|e| e.to_string())?;
-        if let Some(live) = workers.get_mut(&key) {
-            live.running = Some(run.clone());
         }
-        (agent_id, turns, session, resumed, note, run)
+    };
+    let (agent_id, turns, session, resumed, note, run) = match found {
+        Found::Live { run, turns, session, agent } => (agent, turns, session, false, None, run),
+        Found::Open { agent_id, spec, opts, wanted, past_runs } => {
+            // The mark goes however the opening ends.
+            struct Opening<'a>(&'a parking_lot::Mutex<HashSet<String>>, String);
+            impl Drop for Opening<'_> {
+                fn drop(&mut self) {
+                    self.0.lock().remove(&self.1);
+                }
+            }
+            let _opening = Opening(&state.sessions.opening, key.clone());
+            tracing::info!(%track, worker = %name, agent = %agent_id, resume = ?opts.resume, "opening worker session");
+            let session = Arc::new(AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?);
+            let resumed = session.resumed();
+            remember_worker(
+                &state,
+                &track,
+                &name,
+                &WorkerRecord {
+                    session_id: session.session_id().to_string(),
+                    agent: agent_id.clone(),
+                },
+            );
+            let turns = if resumed { past_runs.unwrap_or(0) + 1 } else { 1 };
+            let note = if resumed {
+                Some("Reopened with its earlier conversation.")
+            } else if wanted {
+                Some("Its earlier conversation could not be restored; the worker starts fresh.")
+            } else if past_runs.is_some() {
+                Some("Started fresh; earlier runs stay in the record but the worker does not remember them.")
+            } else {
+                None
+            };
+            let run = state.store.begin_run(&track, &name, &agent_id, &text, &worker_cwd).map_err(|e| e.to_string())?;
+            state.sessions.workers.lock().await.insert(
+                key.clone(),
+                Live {
+                    agent: agent_id.clone(),
+                    cwd: worker_cwd.clone(),
+                    session: session.clone(),
+                    turns,
+                    running: Some(run.clone()),
+                },
+            );
+            (agent_id, turns, session, resumed, note, run)
+        }
     };
 
     // The turn itself, in the background. The task ends with how to report;
@@ -1155,8 +1186,17 @@ async fn drive_worker_turn(app: &AppHandle, track: &str, name: &str, run: &str, 
             let _ = tx.send(AgentEvent::Failed { error: err.to_string() });
         }
         Err(_) => {
+            // A turn an hour long is stuck; a cancel may not reach an agent
+            // that has stopped answering, so the session ends and the worker
+            // reopens (with its memory) on its next task.
             session.cancel();
-            let _ = tx.send(AgentEvent::Failed { error: "worker turn timed out".to_string() });
+            session.kill();
+            let _ = tx.send(AgentEvent::Failed { error: "worker turn timed out; its session was ended".to_string() });
+            let st = app.state::<AppState>();
+            let mut workers = st.sessions.workers.lock().await;
+            if workers.get(&worker_key(track, name)).is_some_and(|l| std::ptr::eq(Arc::as_ptr(&l.session), session)) {
+                workers.remove(&worker_key(track, name));
+            }
         }
     }
     drop(tx);
@@ -1408,16 +1448,23 @@ async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_tur
     let st = app.state::<AppState>();
     let agent = info.agent.clone();
     let wanted = fingerprint(&agent, &info.conductor_config);
-    let mut guard = st.sessions.conductors.lock().await;
-    let needs_open = match guard.get(track) {
-        Some(c) => c.fingerprint != wanted,
-        None => true,
+    let gate = st.sessions.conductor_gate(track);
+    let _one_opener = gate.lock().await;
+    let needs_open = {
+        let mut guard = st.sessions.conductors.lock().await;
+        let needs_open = match guard.get(track) {
+            Some(c) => c.fingerprint != wanted,
+            None => true,
+        };
+        if needs_open {
+            if let Some(old) = guard.remove(track) {
+                tracing::info!(%track, agent = %old.live.agent, "closing conductor session (agent or options changed)");
+                drop(old);
+            }
+        }
+        needs_open
     };
     if needs_open {
-        if let Some(old) = guard.remove(track) {
-            tracing::info!(%track, agent = %old.live.agent, "closing conductor session (agent or options changed)");
-            drop(old);
-        }
         let spec = st.spec_for(&agent)?;
         // This track's tools, on their own server: every call is scoped.
         let mcp = McpServer::start("divixi", tools(app.clone(), track.to_string()))
@@ -1433,7 +1480,7 @@ async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_tur
         if let Err(err) = st.store.set_meta(&key, session.session_id()) {
             tracing::warn!(%err, "could not remember conductor session id");
         }
-        guard.insert(
+        st.sessions.conductors.lock().await.insert(
             track.to_string(),
             Conductor {
                 live: Live {
@@ -1449,7 +1496,9 @@ async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_tur
             },
         );
     }
-    let live = &mut guard.get_mut(track).expect("conductor session just ensured").live;
+    let mut guard = st.sessions.conductors.lock().await;
+    // Closed meanwhile (the track was deleted or moved): nothing to talk to.
+    let live = &mut guard.get_mut(track).ok_or("the conductor session was closed")?.live;
     if take_turn {
         live.turns += 1;
     }
@@ -1518,14 +1567,35 @@ pub async fn conductor_cancel(app: AppHandle, track: String) -> Result<(), Strin
         return Ok(());
     }
     let guard = st.sessions.conductors.lock().await;
-    match guard.get(&track) {
-        Some(c) => {
-            c.live.session.cancel();
-            Ok(())
+    let Some(c) = guard.get(&track) else {
+        return Err("no conductor session".to_string());
+    };
+    c.live.session.cancel();
+    let (turn, session) = (c.live.turns, c.live.session.clone());
+    drop(guard);
+    // An agent that does not end the turn after a cancel is stuck: after a
+    // grace its session is ended, so the track is free again; the next
+    // message reopens it with its memory.
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(CANCEL_GRACE).await;
+        let st = app.state::<AppState>();
+        if !st.sessions.is_busy(&track) {
+            return;
         }
-        None => Err("no conductor session".to_string()),
-    }
+        let mut guard = st.sessions.conductors.lock().await;
+        let same_turn = guard.get(&track).is_some_and(|c| c.live.turns == turn && Arc::ptr_eq(&c.live.session, &session));
+        if same_turn {
+            tracing::warn!(%track, "the conductor did not stop after a cancel; ending its session");
+            if let Some(old) = guard.remove(&track) {
+                old.live.session.kill();
+            }
+        }
+    });
+    Ok(())
 }
+
+/// How long an agent has to end a turn after a cancel before its session is ended.
+const CANCEL_GRACE: Duration = Duration::from_secs(15);
 
 /// Close the track's conductor session. Its memory stays in the store, so
 /// the next open resumes it. Refused while a turn is running.

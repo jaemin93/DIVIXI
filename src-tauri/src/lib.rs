@@ -719,6 +719,12 @@ fn term_close(state: State<'_, AppState>, id: u32) {
     state.terminals.close(id);
 }
 
+/// One run, for a run the webview saw start before it knew its prompt.
+#[tauri::command(async)]
+fn get_run(state: State<'_, AppState>, id: String) -> Result<Option<RunSummary>, String> {
+    state.store.run(&id).map_err(|e| e.to_string())
+}
+
 /// Every run, oldest first: what the timeline is rebuilt from at startup.
 #[tauri::command(async)]
 fn list_runs(state: State<'_, AppState>) -> Result<Vec<RunSummary>, String> {
@@ -896,7 +902,9 @@ async fn download_agent(
     state.update_agent(next)
 }
 
-/// Persist session events and forward them to the webview, coalescing message text.
+/// Persist session events and forward them to the webview, coalescing
+/// message and thought text (each chunk its own write was a transaction
+/// per word or so).
 ///
 /// The store write happens before the emit, so anything the webview has seen
 /// is already durable. A store failure is logged and the event still reaches
@@ -909,7 +917,10 @@ pub(crate) async fn pump(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
 ) {
     let started = std::time::Instant::now();
+    // Text waiting to be written: message or thought chunks, one kind at a time.
     let mut pending = String::new();
+    let mut thinking = false;
+    let text_event = |thinking: bool, text: String| if thinking { AgentEvent::Thought { text } } else { AgentEvent::Message { text } };
     let mut ticker = tokio::time::interval(FLUSH_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -938,11 +949,24 @@ pub(crate) async fn pump(
     loop {
         tokio::select! {
             received = rx.recv() => match received {
-                Some(AgentEvent::Message { text }) => pending.push_str(&text),
+                Some(AgentEvent::Message { text }) => {
+                    if thinking && !pending.is_empty() {
+                        emit(text_event(true, std::mem::take(&mut pending)), started.elapsed().as_millis() as u64);
+                    }
+                    thinking = false;
+                    pending.push_str(&text);
+                }
+                Some(AgentEvent::Thought { text }) => {
+                    if !thinking && !pending.is_empty() {
+                        emit(text_event(false, std::mem::take(&mut pending)), started.elapsed().as_millis() as u64);
+                    }
+                    thinking = true;
+                    pending.push_str(&text);
+                }
                 Some(event) => {
                     let ms = started.elapsed().as_millis() as u64;
                     if !pending.is_empty() {
-                        emit(AgentEvent::Message { text: std::mem::take(&mut pending) }, ms);
+                        emit(text_event(thinking, std::mem::take(&mut pending)), ms);
                     }
                     let terminal = event.is_terminal();
                     // An agent asking before it acts: to whoever answers for it.
@@ -961,17 +985,14 @@ pub(crate) async fn pump(
             _ = ticker.tick() => {
                 if !pending.is_empty() {
                     let ms = started.elapsed().as_millis() as u64;
-                    emit(AgentEvent::Message { text: std::mem::take(&mut pending) }, ms);
+                    emit(text_event(thinking, std::mem::take(&mut pending)), ms);
                 }
             }
         }
     }
 
     if !pending.is_empty() {
-        emit(
-            AgentEvent::Message { text: pending },
-            started.elapsed().as_millis() as u64,
-        );
+        emit(text_event(thinking, pending), started.elapsed().as_millis() as u64);
     }
 }
 
@@ -983,9 +1004,13 @@ pub(crate) async fn pump(
 /// `.git`; without one, the working directory itself.
 pub(crate) fn workspace_root() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Outside a repository (an installed app starts in its own folder, or in
+    // System32) the home folder is the sensible default, not the process's.
+    let home = || std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
     cwd.ancestors()
         .find(|dir| dir.join(".git").exists())
         .map(PathBuf::from)
+        .or_else(home)
         .unwrap_or(cwd)
 }
 
@@ -1031,6 +1056,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             list_tracks,
+            get_run,
             worker_report,
             worker_changes,
             worker_file_diff,
