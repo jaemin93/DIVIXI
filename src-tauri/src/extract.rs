@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{Emitter, Manager};
+
+use crate::AppHandle;
 
 use crate::design::{self, Kind};
 use crate::AppState;

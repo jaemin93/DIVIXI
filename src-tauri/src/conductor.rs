@@ -35,7 +35,9 @@ use orchestra_core::{AgentEvent, RunStatus};
 use orchestra_mcp::{McpServer, Tool};
 use orchestra_store::{Decision, DecisionOption, DecisionStatus, NewDecision, PermissionAsk, TrackInfo};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{Emitter, Manager};
+
+use crate::AppHandle;
 use tokio::sync::Mutex;
 
 use crate::{pump, worktree, AppState};

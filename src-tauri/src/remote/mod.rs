@@ -17,7 +17,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::Manager;
+
+use crate::AppHandle;
 
 use crate::AppState;
 
@@ -115,7 +117,7 @@ pub async fn stop(app: &AppHandle) {
 pub fn boot(app: &AppHandle) {
     let st = app.state::<AppState>();
     events::install(app, st.remote.events.clone());
-    if setting(app, "remote.enabled").as_deref() == Some("true") {
+    if cfg!(feature = "server") || setting(app, "remote.enabled").as_deref() == Some("true") {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(err) = start(&app).await {

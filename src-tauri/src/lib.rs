@@ -13,7 +13,16 @@ use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
 use orchestra_core::{AgentEnvelope, AgentEvent};
 use orchestra_store::{ArtifactInfo, ArtifactPatch, Decision, RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
 use parking_lot::Mutex;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{Emitter, Manager, State};
+
+/// The runtime the app runs on: windows (Wry) on a desktop; Tauri's mock
+/// runtime, which needs no display, for `divixi-server` on a server.
+#[cfg(not(feature = "server"))]
+pub type Rt = tauri::Wry;
+#[cfg(feature = "server")]
+pub type Rt = tauri::test::MockRuntime;
+/// The app, as every part of it holds it.
+pub type AppHandle = tauri::AppHandle<Rt>;
 use tauri_plugin_dialog::DialogExt;
 
 mod conductor;
@@ -1098,7 +1107,8 @@ fn open_store(data_dir: &std::path::Path) -> anyhow::Result<(Store, String)> {
 
 /// Entry point shared by the desktop binary.
 pub fn run() {
-    tauri::Builder::default()
+    #[cfg(not(feature = "server"))]
+    let builder = tauri::Builder::default()
         // Opening Divixi again while it runs (hidden in the tray) shows the
         // one that runs instead of starting a second. First, as the plugin asks.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
@@ -1112,7 +1122,12 @@ pub fn run() {
                     let _ = window.hide();
                 }
             }
-        })
+        });
+    // On a server: no window, no tray; the same commands and state, reached
+    // through remote access only.
+    #[cfg(feature = "server")]
+    let builder = tauri::test::mock_builder().plugin(tauri_plugin_dialog::init());
+    builder
         .invoke_handler(tauri::generate_handler![
             list_tracks,
             get_run,
@@ -1269,10 +1284,19 @@ pub fn run() {
             tauri::async_runtime::spawn(conductor::dismiss_stale_permissions(app.handle().clone(), None));
             // Library sync, and a watch on its files.
             knowledge::start(app.handle().clone());
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_title("Divixi");
+            #[cfg(not(feature = "server"))]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_title("Divixi");
+                }
+                tray(app.handle())?;
             }
-            tray(app.handle())?;
+            // Commands from other devices go through the main window's IPC
+            // entry; on a server that window is the mock runtime's.
+            #[cfg(feature = "server")]
+            if app.get_webview_window("main").is_none() {
+                tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into())).build()?;
+            }
             // Remote access: events are kept for other devices, and its server comes up if it was on.
             remote::boot(app.handle());
             Ok(())
@@ -1281,7 +1305,41 @@ pub fn run() {
         .expect("failed to start Divixi");
 }
 
+/// A pairing link for remote access, made without the running app (the
+/// server's `token` command): signed with the same key, for its port.
+pub fn pair_link() -> anyhow::Result<String> {
+    let data_dir = data_dir_offline()?;
+    let (store, _) = open_store(&data_dir)?;
+    let auth = remote::auth::Auth::open(&data_dir)?;
+    let port = store
+        .get_meta(&format!("{SETTING_PREFIX}remote.port"))?
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        .filter(|p| *p >= 1024)
+        .unwrap_or(remote::DEFAULT_PORT);
+    let (token, _) = auth.pair_token(&store);
+    Ok(format!("http://127.0.0.1:{port}/auth/pair?token={token}"))
+}
+
+/// The app's data folder, as Tauri resolves it (`<data>/app.divixi`), without an app.
+fn data_dir_offline() -> anyhow::Result<PathBuf> {
+    const ID: &str = "app.divixi";
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        home().map(|h| h.join("Library/Application Support"))
+    } else {
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".local/share")))
+    };
+    let dir = base.ok_or_else(|| anyhow::anyhow!("no home folder"))?.join(ID);
+    if !dir.is_dir() {
+        anyhow::bail!("{} does not exist: start divixi-server once first", dir.display());
+    }
+    Ok(dir)
+}
+
 /// Bring the main window back: shown, restored if minimised, in front.
+#[cfg(not(feature = "server"))]
 fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -1291,6 +1349,7 @@ fn show_main(app: &AppHandle) {
 }
 
 /// The tray icon: a click shows the window; its menu has Show Divixi and Quit.
+#[cfg(not(feature = "server"))]
 fn tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};

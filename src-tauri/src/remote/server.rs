@@ -18,7 +18,9 @@ use axum::response::{IntoResponse, Redirect};
 use axum::routing::{any, get, post};
 use axum::Router;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::Manager;
+
+use crate::AppHandle;
 
 use super::auth::Refused;
 use super::events::CatchUp;
@@ -58,11 +60,13 @@ pub fn router(ctx: Ctx) -> Router {
 
 // ----- the checks every request passes -----
 
-/// Hosts this server answers to: itself on loopback, and the PC's name on
-/// the tailnet once serve publishes it.
+/// Hosts this server answers to: loopback on any port (an SSH tunnel from
+/// another machine arrives on its own local port), and the PC's name on the
+/// tailnet once serve publishes it. A rebinding attack needs a name of its
+/// own, which is not among these.
 fn host_ok(ctx: &Ctx, host: &str) -> bool {
-    let local = [format!("127.0.0.1:{}", ctx.port), format!("localhost:{}", ctx.port)];
-    local.iter().any(|h| h == host) || ctx.state().remote.public_host().is_some_and(|h| h == host)
+    let name = host.rsplit_once(':').map(|(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { host }).unwrap_or(host);
+    matches!(name, "127.0.0.1" | "localhost" | "[::1]") || ctx.state().remote.public_host().is_some_and(|h| h == host)
 }
 
 /// Whether the request came through tailscale serve (or any proxy):
@@ -350,13 +354,25 @@ async fn asset(State(ctx): State<Ctx>, uri: Uri) -> Response<Body> {
         Some(a) => a,
         None => return (StatusCode::NOT_FOUND, "no such file").into_response(),
     };
+    // The page says it came from here: in a Divixi window showing another
+    // Divixi, Tauri's IPC is present but is not the way to this app.
+    let bytes = if asset.mime_type.starts_with("text/html") { served(&asset.bytes) } else { asset.bytes };
     Response::builder()
         .header(header::CONTENT_TYPE, asset.mime_type)
         .header(header::CONTENT_SECURITY_POLICY, WEB_CSP)
         .header("X-Content-Type-Options", "nosniff")
         .header("Referrer-Policy", "no-referrer")
-        .body(Body::from(asset.bytes))
+        .body(Body::from(bytes))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// The page with `<meta name="divixi-served">` first in its head.
+fn served(html: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(html);
+    match text.find("<head>") {
+        Some(at) => format!("{}<meta name=\"divixi-served\" content=\"1\">{}", &text[..at + 6], &text[at + 6..]).into_bytes(),
+        None => html.to_vec(),
+    }
 }
 
 /// The app's policy, for a browser: its own origin for everything, the
@@ -380,6 +396,11 @@ mod tests {
         h.insert(header::COOKIE, "x=1; divixi_a=tok.sig; y=2".parse().unwrap());
         assert_eq!(cookie(&h, ACCESS_COOKIE).as_deref(), Some("tok.sig"));
         assert_eq!(cookie(&h, REFRESH_COOKIE), None);
+    }
+
+    #[test]
+    fn served_pages_say_so() {
+        assert_eq!(served(b"<html><head><title>x</title>"), b"<html><head><meta name=\"divixi-served\" content=\"1\"><title>x</title>".to_vec());
     }
 
     #[test]

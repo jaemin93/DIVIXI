@@ -17,7 +17,9 @@ use orchestra_acp::AgentSession;
 use orchestra_core::AgentEvent;
 use orchestra_mcp::McpServer;
 use orchestra_store::ArtifactInfo;
-use tauri::{AppHandle, Manager};
+use tauri::Manager;
+
+use crate::AppHandle;
 use tokio::sync::Mutex;
 
 use crate::conductor::{fingerprint, session_options, with_attachments, Live};

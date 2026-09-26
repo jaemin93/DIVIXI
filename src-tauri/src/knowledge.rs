@@ -24,7 +24,9 @@ use orchestra_knowledge::store::status;
 use orchestra_knowledge::{chunk_document, extract, read, Extraction, FileState, Graph, Item, KnowledgeDb, NewItem, Shape, Source, Stats, ToEmbed};
 use orchestra_store::ArtifactInfo;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{Emitter, Manager, State};
+
+use crate::AppHandle;
 use tokio::sync::mpsc;
 
 use crate::{embed, AppState, SETTING_PREFIX};

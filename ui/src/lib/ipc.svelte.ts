@@ -10,8 +10,13 @@ import { listen as tauriListen } from "@tauri-apps/api/event";
  * `listen` from here, never from @tauri-apps/api.
  */
 
-/** Whether this is the app's own window (Tauri), not a browser elsewhere. */
-export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+/**
+ * Whether this is the app's own window (Tauri IPC to this app). A page the
+ * app's server sent (`<meta name="divixi-served">`) talks to that server,
+ * even inside a Divixi window showing a remote Divixi.
+ */
+export const inTauri =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !document.querySelector('meta[name="divixi-served"]');
 
 /** Where a browser's connection to the app stands. */
 export const remote = $state<{ state: "connecting" | "online" | "reconnecting" | "signed-out" | "dropped" }>({

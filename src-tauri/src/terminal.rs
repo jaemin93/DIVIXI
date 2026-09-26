@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::Emitter;
+
+use crate::AppHandle;
 
 /// One running shell.
 struct Term {

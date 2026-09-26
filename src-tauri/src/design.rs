@@ -18,7 +18,9 @@ use std::sync::Arc;
 use orchestra_mcp::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{Emitter, Manager};
+
+use crate::AppHandle;
 
 use crate::AppState;
 
