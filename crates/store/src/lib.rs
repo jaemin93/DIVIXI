@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -153,6 +153,10 @@ const MIGRATIONS: &[&str] = &[
     // 13 -> 14: where a track's workers work: a folder of their own under
     // the track's (the default), a git worktree, or the track folder itself.
     "ALTER TABLE tracks ADD COLUMN worker_folder TEXT NOT NULL DEFAULT 'subfolder';",
+    // 14 -> 15: workers that had worked in a track were given a new
+    // "<name>-2" folder after a restart; their records go, so each works in
+    // its own folder again.
+    "DELETE FROM meta WHERE key LIKE 'worker_dir:%';",
 ];
 
 const SCHEMA: &str = r#"

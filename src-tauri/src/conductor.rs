@@ -1348,9 +1348,11 @@ fn climbs_out(rel: &str) -> bool {
     false
 }
 
-/// A worker's own folder under the track's: the one it was given before,
-/// else one named after it that the track does not have yet (a worker
-/// called "src" must not work in the project's src).
+/// A worker's own folder under the track's: the one it was given before;
+/// for a worker that has worked in this track already, the folder named
+/// after it (its own from before, even when nothing recorded it); for a new
+/// worker, one named after it that the track does not have yet (a new
+/// worker called "src" must not work in the project's src).
 fn own_dir(state: &AppState, track: &str, track_dir: &str, name: &str) -> Result<std::path::PathBuf, String> {
     let key = format!("worker_dir:{track}/{name}");
     let dir = match state.store.get_meta(&key).ok().flatten() {
@@ -1358,10 +1360,15 @@ fn own_dir(state: &AppState, track: &str, track_dir: &str, name: &str) -> Result
         None => {
             let base = worktree::folder_name(name);
             let root = std::path::Path::new(track_dir);
-            let dir = (1..)
-                .map(|n| root.join(if n == 1 { base.clone() } else { format!("{base}-{n}") }))
-                .find(|d| !d.exists())
-                .expect("some name is free");
+            let worked_here = last_agent(state, track, name).is_some();
+            let dir = if worked_here {
+                root.join(&base)
+            } else {
+                (1..)
+                    .map(|n| root.join(if n == 1 { base.clone() } else { format!("{base}-{n}") }))
+                    .find(|d| !d.exists())
+                    .expect("some name is free")
+            };
             if let Err(err) = state.store.set_meta(&key, &dir.to_string_lossy()) {
                 tracing::warn!(%err, "could not remember a worker's folder");
             }
