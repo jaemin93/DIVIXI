@@ -1004,7 +1004,7 @@ async fn start_worker_turn(
     #[allow(clippy::large_enum_variant)]
     enum Found {
         Live { run: String, turns: u32, session: Arc<AgentSession>, agent: String },
-        Open { agent_id: String, spec: AgentSpec, opts: SessionOptions, wanted: bool, past_runs: Option<u32> },
+        Open { agent_id: String, spec: AgentSpec, opts: SessionOptions, wanted: bool, past_runs: Option<u32>, handoff: Option<String> },
     }
     let found = {
         let mut workers = state.sessions.workers.lock().await;
@@ -1072,13 +1072,19 @@ async fn start_worker_turn(
                 let mut opts = session_options(&state, &agent_id, &worker_cwd, chosen, None);
                 opts.resume = resume;
                 state.sessions.opening.lock().insert(key.clone());
-                Found::Open { agent_id, spec, opts, wanted, past_runs: past.map(|p| p.runs) }
+                // Reopened on another agent than before (not a fresh start):
+                // it reads its earlier turns, as the record has them.
+                let before = if fresh { None } else { worker_record(&state, &track, &name).map(|r| r.agent).or_else(|| past.map(|p| p.agent.clone())) };
+                let handoff = before.filter(|b| *b != agent_id).map(|b| handoff_text(&state, &track, &name, &b, None));
+                Found::Open { agent_id, spec, opts, wanted, past_runs: past.map(|p| p.runs), handoff }
             }
         }
     };
+    let mut handoff_for_worker: Option<String> = None;
     let (agent_id, turns, session, resumed, note, run) = match found {
         Found::Live { run, turns, session, agent } => (agent, turns, session, false, None, run),
-        Found::Open { agent_id, spec, opts, wanted, past_runs } => {
+        Found::Open { agent_id, spec, opts, wanted, past_runs, handoff } => {
+            handoff_for_worker = handoff;
             // The mark goes however the opening ends.
             struct Opening<'a>(&'a parking_lot::Mutex<HashSet<String>>, String);
             impl Drop for Opening<'_> {
@@ -1130,6 +1136,10 @@ async fn start_worker_turn(
     let app_for_turn = app.clone();
     let (track_t, name_t, run_t, cwd_t, agent_t) = (track.clone(), name.clone(), run.clone(), worker_cwd.clone(), agent_id.clone());
     let task = format!("{text}\n\n---\n{}\n\n{}", place.for_worker, report::instructions());
+    let task = match handoff_for_worker {
+        Some(h) => format!("{h}\n\n---\n\n{task}"),
+        None => task,
+    };
     tauri::async_runtime::spawn(async move {
         let app = app_for_turn;
         drive_worker_turn(&app, &track_t, &name_t, &run_t, &session, task, &cwd_t).await;
@@ -1455,21 +1465,34 @@ async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_tur
     let wanted = fingerprint(&agent, &info.conductor_config);
     let gate = st.sessions.conductor_gate(track);
     let _one_opener = gate.lock().await;
-    let needs_open = {
+    let (needs_open, old) = {
         let mut guard = st.sessions.conductors.lock().await;
         let needs_open = match guard.get(track) {
             Some(c) => c.fingerprint != wanted,
             None => true,
         };
-        if needs_open {
-            if let Some(old) = guard.remove(track) {
-                tracing::info!(%track, agent = %old.live.agent, "closing conductor session (agent or options changed)");
-                drop(old);
-            }
-        }
-        needs_open
+        let old = if needs_open { guard.remove(track) } else { None };
+        (needs_open, old)
     };
     if needs_open {
+        // Another agent takes over: the one before leaves a note (when its
+        // session is still open) and the recent conversation, which the new
+        // one reads before its first message.
+        let previous = old.as_ref().map(|c| c.live.agent.clone()).or_else(|| last_agent(&st, track, CONDUCTOR_SESSION));
+        if let Some(previous) = previous.filter(|p| *p != agent) {
+            let note = match &old {
+                Some(c) => write_handoff_note(app, track, &c.live.session, &previous, &agent).await,
+                None => None,
+            };
+            let text = handoff_text(&st, track, CONDUCTOR_SESSION, &previous, note.as_deref());
+            if let Err(err) = st.store.set_meta(&handoff_key(track), &text) {
+                tracing::warn!(%err, "could not keep the handoff");
+            }
+        }
+        if let Some(old) = old {
+            tracing::info!(%track, agent = %old.live.agent, "closing conductor session (agent or options changed)");
+            drop(old);
+        }
         let spec = st.spec_for(&agent)?;
         // This track's tools, on their own server: every call is scoped.
         let mcp = McpServer::start("divixi", tools(app.clone(), track.to_string()))
@@ -1510,6 +1533,114 @@ async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_tur
     }
     live.used = std::time::Instant::now();
     Ok((live.session.clone(), take_turn && live.turns == 1))
+}
+
+fn handoff_key(track: &str) -> String {
+    format!("handoff:{track}")
+}
+
+/// The handoff waiting for a track's new conductor, taken (it is read once).
+fn take_handoff(st: &AppState, track: &str) -> Option<String> {
+    let text = st.store.get_meta(&handoff_key(track)).ok().flatten()?;
+    let _ = st.store.delete_meta(&handoff_key(track));
+    Some(text).filter(|t| !t.trim().is_empty())
+}
+
+/// The agent of a session's latest run in the record.
+fn last_agent(st: &AppState, track: &str, session: &str) -> Option<String> {
+    st.store.sessions(track).ok()?.into_iter().find(|s| s.name == session).map(|s| s.agent)
+}
+
+/// How long the agent being replaced has to write its note.
+const HANDOFF_NOTE_TIME: Duration = Duration::from_secs(90);
+
+/// Ask the conductor being replaced for a note to its successor. Not a run
+/// of the track: nothing of it is stored but the note. `None` when it did
+/// not write one in time.
+async fn write_handoff_note(app: &AppHandle, track: &str, session: &AgentSession, from: &str, to: &str) -> Option<String> {
+    #[derive(Clone, serde::Serialize)]
+    struct Handoff<'a> {
+        track: &'a str,
+        from: &'a str,
+        to: &'a str,
+        writing: bool,
+    }
+    let _ = app.emit("conductor_handoff", Handoff { track, from, to, writing: true });
+    let ask = format!(
+        "The human is switching this track's conductor from you to another agent ({to}). Write a handoff note for your successor, in the language of your conversation with the human: what the track is for, what has been decided and why, what is in progress or delegated (which workers, doing what, where their results are), what waits on the human, open questions, and anything you would tell a colleague taking over. Markdown, at most about 400 words. Do not call tools and do no other work: only the note."
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let collect = async {
+        let mut text = String::new();
+        while let Some(ev) = rx.recv().await {
+            if let AgentEvent::Message { text: t } = ev {
+                text.push_str(&t);
+            }
+        }
+        text
+    };
+    let turn = async {
+        let out = tokio::time::timeout(HANDOFF_NOTE_TIME, session.prompt(ask, tx)).await;
+        if out.is_err() {
+            session.cancel();
+        }
+    };
+    let ((), note) = tokio::join!(turn, collect);
+    let _ = app.emit("conductor_handoff", Handoff { track, from, to, writing: false });
+    let note = note.trim().to_string();
+    tracing::info!(%track, %from, %to, chars = note.chars().count(), "handoff note written");
+    (!note.is_empty()).then_some(note)
+}
+
+/// What a session's successor on another agent reads first: the note, if
+/// any, and the session's recent turns from the record (about 8k chars,
+/// newest kept).
+fn handoff_text(st: &AppState, track: &str, session: &str, from: &str, note: Option<&str>) -> String {
+    const BUDGET: usize = 8_000;
+    const PER_TURN: usize = 1_500;
+    let clip = |s: &str| {
+        let s = s.trim();
+        if s.chars().count() > PER_TURN {
+            format!("{}…", s.chars().take(PER_TURN).collect::<String>())
+        } else {
+            s.to_string()
+        }
+    };
+    let runs: Vec<_> = st
+        .store
+        .runs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.track == track && r.session == session)
+        .collect();
+    let mut turns: Vec<String> = Vec::new();
+    let mut used = 0;
+    for r in runs.iter().rev().take(20) {
+        let who = if r.prompt.starts_with(REPORT_PREFIX) || r.prompt.starts_with(DECISION_PREFIX) || r.prompt.starts_with(PERMISSION_PREFIX) {
+            "app"
+        } else if session == CONDUCTOR_SESSION {
+            "human"
+        } else {
+            "conductor"
+        };
+        let mut turn = format!("### {who}\n{}\n", clip(&r.prompt));
+        if !r.output.trim().is_empty() {
+            turn.push_str(&format!("### {} ({})\n{}\n", if session == CONDUCTOR_SESSION { "conductor" } else { "worker" }, r.agent, clip(&r.output)));
+        }
+        if used + turn.len() > BUDGET && !turns.is_empty() {
+            break;
+        }
+        used += turn.len();
+        turns.push(turn);
+    }
+    turns.reverse();
+    let role = if session == CONDUCTOR_SESSION { "this track's conductor" } else { "this worker" };
+    format!(
+        "[handoff]\nYou take over as {role} from {from}: the human switched agents. You do not have its memory; below is {} and the recent conversation, oldest first. Read it, then answer the message after it.\n\n## Its note\n{}\n\n## Recent turns\n{}[/handoff]",
+        if note.is_some() { "the note it left" } else { "what the record has (it left no note)" },
+        note.unwrap_or("(none)"),
+        if turns.is_empty() { "(none)\n".to_string() } else { turns.join("\n") },
+    )
 }
 
 /// What the UI shows about a track's conductor session.
@@ -1709,7 +1840,11 @@ pub async fn conductor_turn(
             c.live.running = Some(run.clone());
         }
 
-        let text = if first { format!("{}\n\n---\n\n{prompt}", preamble(&lang, &info)) } else { prompt };
+        let text = match take_handoff(&st, &track) {
+            Some(handoff) => format!("{handoff}\n\n---\n\n{prompt}"),
+            None => prompt,
+        };
+        let text = if first { format!("{}\n\n---\n\n{text}", preamble(&lang, &info)) } else { text };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tauri::async_runtime::spawn(pump(app.clone(), track.clone(), CONDUCTOR_SESSION.to_string(), run.clone(), rx));
         let _ = tx.send(AgentEvent::Started {

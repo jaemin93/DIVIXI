@@ -623,6 +623,12 @@ impl Store {
             .optional()?)
     }
 
+    /// Remove a free-form setting.
+    pub fn delete_meta(&self, key: &str) -> anyhow::Result<()> {
+        self.conn.lock().execute("DELETE FROM meta WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     /// Write a free-form setting.
     pub fn set_meta(&self, key: &str, value: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock();
@@ -831,7 +837,7 @@ impl Store {
     pub fn forget_track_sessions(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock();
         conn.execute(
-            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%' OR key LIKE 'worktree:' || ?1 || '/%' OR key LIKE 'worker_dir:' || ?1 || '/%'",
+            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%' OR key LIKE 'worktree:' || ?1 || '/%' OR key LIKE 'worker_dir:' || ?1 || '/%' OR key = 'handoff:' || ?1",
             params![id],
         )?;
         Ok(())
@@ -849,7 +855,7 @@ impl Store {
         tx.execute("DELETE FROM runs WHERE track = ?1", params![id])?;
         tx.execute("DELETE FROM decisions WHERE track = ?1", params![id])?;
         tx.execute(
-            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%' OR key LIKE 'worktree:' || ?1 || '/%' OR key LIKE 'worker_dir:' || ?1 || '/%'",
+            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%' OR key LIKE 'worktree:' || ?1 || '/%' OR key LIKE 'worker_dir:' || ?1 || '/%' OR key = 'handoff:' || ?1",
             params![id],
         )?;
         let changed = tx.execute("DELETE FROM tracks WHERE id = ?1", params![id])?;

@@ -211,6 +211,10 @@
   {#each decisionsByRun.orphans as d (d.id)}
     <DecisionCard decision={d} />
   {/each}
+  {#if !store.chatArtifact && store.handoffs[store.track]}
+    {@const h = store.handoffs[store.track]}
+    <div class="sys mono"><span class="dot pulse"></span> {t("timeline.handoff", { from: agentLabel(h.from), to: agentLabel(h.to) })}</div>
+  {/if}
 </div>
 
 <style>

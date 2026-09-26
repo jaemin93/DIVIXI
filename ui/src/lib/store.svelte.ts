@@ -2269,6 +2269,14 @@ class Store {
     }
   }
 
+  /** A conductor handing over to another agent, by track, while its note is written. */
+  handoffs = $state<Record<string, { from: string; to: string }>>({});
+
+  takeHandoff(h: { track: string; from: string; to: string; writing: boolean }) {
+    const { [h.track]: _gone, ...rest } = this.handoffs;
+    this.handoffs = h.writing ? { ...rest, [h.track]: { from: h.from, to: h.to } } : rest;
+  }
+
   /** Worker reports by run id, as far as they have been read. */
   reports = $state<Record<string, WorkerReport>>({});
   /** Moves when a report reaches a conductor, so cards still waiting ask again. */
@@ -2472,6 +2480,7 @@ export async function connectEvents() {
     listen<Envelope>("agent", (e) => store.apply(e.payload)),
     listen<DownloadProgress>("agent_download", (e) => store.progress(e.payload)),
     listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
+    listen<{ track: string; from: string; to: string; writing: boolean }>("conductor_handoff", (e) => store.takeHandoff(e.payload)),
     listen<DesignDelta>("design", (e) => store.takeDesign(e.payload)),
   ]);
 }
