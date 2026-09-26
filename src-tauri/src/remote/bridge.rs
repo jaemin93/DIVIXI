@@ -75,6 +75,37 @@ pub const ALLOWED: &[&str] = &[
     "set_setting",
 ];
 
+/// On a server (divixi-server) there is no PC in front of it: whoever
+/// paired is its owner, and does there what the PC's window does. Still
+/// closed: anything that opens a window or a browser on the machine
+/// (pickers, save dialogs, the file manager, agent sign-in), the terminal,
+/// and the remote-access controls.
+#[cfg(feature = "server")]
+const SERVER_ALLOWED: &[&str] = &[
+    "create_track",
+    "update_track",
+    "delete_track",
+    "detect_agents",
+    "download_agent",
+    "workspace_write",
+    "create_artifact",
+    "update_artifact",
+    "delete_artifact",
+    "export_artifact",
+    "design_apply",
+    "design_review",
+    "design_undo",
+    "design_add_blob",
+    "design_extract_retry",
+    "knowledge_add",
+    "knowledge_sync",
+    "knowledge_embed_test",
+    "knowledge_embed_now",
+    "knowledge_default_config",
+];
+#[cfg(not(feature = "server"))]
+const SERVER_ALLOWED: &[&str] = &[];
+
 /// Settings another device may not read or write: secrets and the remote
 /// access switches.
 fn setting_closed(key: &str) -> bool {
@@ -83,7 +114,7 @@ fn setting_closed(key: &str) -> bool {
 
 /// Whether a remote caller may make this call.
 pub fn allowed(cmd: &str, args: &Value) -> Result<(), String> {
-    if !ALLOWED.contains(&cmd) {
+    if !ALLOWED.contains(&cmd) && !SERVER_ALLOWED.contains(&cmd) {
         return Err(format!("{cmd} is not available from another device"));
     }
     if cmd == "get_setting" || cmd == "set_setting" {

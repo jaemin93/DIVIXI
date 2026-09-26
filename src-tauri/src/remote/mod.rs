@@ -9,6 +9,7 @@
 
 pub mod auth;
 pub mod bridge;
+pub mod client;
 pub mod events;
 pub mod server;
 
@@ -87,7 +88,7 @@ pub async fn start(app: &AppHandle) -> Result<u16, String> {
         let _ = old.stop.send(());
     }
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", want)).await.map_err(|e| format!("port {want}: {e}"))?;
-    let router = server::router(server::Ctx { app: app.clone(), port: want });
+    let router = server::router(server::Ctx { app: app.clone() });
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     tauri::async_runtime::spawn(async move {
         let serve = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())

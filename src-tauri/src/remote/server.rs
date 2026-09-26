@@ -29,10 +29,19 @@ use crate::AppState;
 const ACCESS_COOKIE: &str = "divixi_a";
 const REFRESH_COOKIE: &str = "divixi_r";
 
+/// A cookie's name for this request: browsers share cookies across ports of
+/// one host, so two Divixis a browser reaches on 127.0.0.1 (this one, and a
+/// remote one through a tunnel) must not overwrite each other's (as Kiro's
+/// `mc_token_<port>`). The port is the one the browser used.
+fn named(base: &str, headers: &HeaderMap) -> String {
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or_default();
+    let port = host.rsplit_once(':').map(|(_, p)| p).filter(|p| p.chars().all(|c| c.is_ascii_digit())).unwrap_or("0");
+    format!("{base}_{port}")
+}
+
 #[derive(Clone)]
 pub struct Ctx {
     pub app: AppHandle,
-    pub port: u16,
 }
 
 impl Ctx {
@@ -117,7 +126,7 @@ fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 
 /// The requesting device, or why not.
 fn device(ctx: &Ctx, headers: &HeaderMap, peer: &SocketAddr) -> Result<super::auth::Device, Refused> {
-    let token = cookie(headers, ACCESS_COOKIE).ok_or(Refused::SignIn)?;
+    let token = cookie(headers, &named(ACCESS_COOKIE, headers)).ok_or(Refused::SignIn)?;
     let st = ctx.state();
     st.remote.auth.check(&st.store, &token, login(headers, peer).as_deref())
 }
@@ -137,8 +146,8 @@ fn secure(headers: &HeaderMap) -> bool {
 fn set_cookies(headers: &HeaderMap, access: &str, refresh: &str) -> [(header::HeaderName, String); 2] {
     let s = if secure(headers) { "; Secure" } else { "" };
     [
-        (header::SET_COOKIE, format!("{ACCESS_COOKIE}={access}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{s}", super::auth::ACCESS_SECS)),
-        (header::SET_COOKIE, format!("{REFRESH_COOKIE}={refresh}; Path=/auth; HttpOnly; SameSite=Strict; Max-Age={}{s}", super::auth::REFRESH_SECS)),
+        (header::SET_COOKIE, format!("{}={access}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{s}", named(ACCESS_COOKIE, headers), super::auth::ACCESS_SECS)),
+        (header::SET_COOKIE, format!("{}={refresh}; Path=/auth; HttpOnly; SameSite=Strict; Max-Age={}{s}", named(REFRESH_COOKIE, headers), super::auth::REFRESH_SECS)),
     ]
 }
 
@@ -181,7 +190,7 @@ fn device_name(ua: &str) -> String {
 }
 
 async fn refresh(State(ctx): State<Ctx>, headers: HeaderMap) -> Response<Body> {
-    let Some(token) = cookie(&headers, REFRESH_COOKIE) else { return refused(Refused::SignIn) };
+    let Some(token) = cookie(&headers, &named(REFRESH_COOKIE, &headers)) else { return refused(Refused::SignIn) };
     let st = ctx.state();
     match st.remote.auth.refresh(&st.store, &token) {
         Ok((access, refresh)) => {
@@ -201,7 +210,7 @@ async fn logout(State(ctx): State<Ctx>, ConnectInfo(peer): ConnectInfo<SocketAdd
         st.remote.auth.drop_device(&st.store, &d.id);
     }
     let mut res = StatusCode::NO_CONTENT.into_response();
-    for c in [format!("{ACCESS_COOKIE}=; Path=/; Max-Age=0"), format!("{REFRESH_COOKIE}=; Path=/auth; Max-Age=0")] {
+    for c in [format!("{}=; Path=/; Max-Age=0", named(ACCESS_COOKIE, &headers)), format!("{}=; Path=/auth; Max-Age=0", named(REFRESH_COOKIE, &headers))] {
         res.headers_mut().append(header::SET_COOKIE, c.parse().expect("ascii"));
     }
     res
@@ -393,9 +402,11 @@ mod tests {
     #[test]
     fn cookies_are_read_by_name() {
         let mut h = HeaderMap::new();
-        h.insert(header::COOKIE, "x=1; divixi_a=tok.sig; y=2".parse().unwrap());
-        assert_eq!(cookie(&h, ACCESS_COOKIE).as_deref(), Some("tok.sig"));
-        assert_eq!(cookie(&h, REFRESH_COOKIE), None);
+        h.insert(header::HOST, "127.0.0.1:7488".parse().unwrap());
+        h.insert(header::COOKIE, "x=1; divixi_a_7489=other; divixi_a_7488=tok.sig; y=2".parse().unwrap());
+        assert_eq!(named(ACCESS_COOKIE, &h), "divixi_a_7488");
+        assert_eq!(cookie(&h, &named(ACCESS_COOKIE, &h)).as_deref(), Some("tok.sig"), "each port has its own");
+        assert_eq!(cookie(&h, &named(REFRESH_COOKIE, &h)), None);
     }
 
     #[test]

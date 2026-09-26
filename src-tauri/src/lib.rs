@@ -80,6 +80,8 @@ pub struct AppState {
     pub(crate) library: knowledge::Library,
     /// Reaching the app from a phone (src/remote).
     pub(crate) remote: remote::Remote,
+    /// Tunnels to Divixis on other machines, opened from this one.
+    pub(crate) tunnels: remote::client::Tunnels,
 }
 
 impl AppState {
@@ -1135,6 +1137,11 @@ pub fn run() {
             remote::remote_set_enabled,
             remote::remote_pair,
             remote::remote_drop,
+            remote::client::remote_hosts,
+            remote::client::remote_host_save,
+            remote::client::remote_host_delete,
+            remote::client::remote_host_connect,
+            remote::client::remote_host_disconnect,
             workspace_search,
             workspace_save_as,
             design_extracts,
@@ -1275,6 +1282,7 @@ pub fn run() {
                 terminals: terminal::Terminals::default(),
                 library,
                 remote,
+                tunnels: remote::client::Tunnels::default(),
             });
             // Artifact agents nobody has talked to for an hour are closed.
             artifact::sweep_idle(app.handle().clone());
@@ -1299,6 +1307,21 @@ pub fn run() {
             }
             // Remote access: events are kept for other devices, and its server comes up if it was on.
             remote::boot(app.handle());
+            // A server has nobody to run setup: it looks for its agents itself, once.
+            #[cfg(feature = "server")]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = handle.state::<AppState>();
+                    if matches!(state.load_agents(), Ok(None)) {
+                        tracing::info!("detecting agents");
+                        let statuses = orchestra_agents::detect_all(&state.detect_options()).await;
+                        if let Err(err) = state.save_agents(statuses) {
+                            tracing::warn!(%err, "could not keep the detected agents");
+                        }
+                    }
+                });
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -1362,7 +1385,11 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main(app),
-            "quit" => app.exit(0),
+            "quit" => {
+                // Tunnels to other machines' Divixis end with the app.
+                remote::client::close_all(app);
+                app.exit(0)
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

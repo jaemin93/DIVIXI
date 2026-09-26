@@ -25,6 +25,7 @@
   import { t } from "./i18n.svelte";
   import { invoke, inTauri } from "./ipc.svelte";
   import RemoteSettings from "./RemoteSettings.svelte";
+  import RemoteHosts from "./RemoteHosts.svelte";
   import { onMount } from "svelte";
 
   /** Minutes before an unused conductor or worker session is closed (0: never). */
@@ -247,6 +248,7 @@
       <AgentList />
     {:else if store.settingsSection === "remote"}
       <RemoteSettings />
+      <RemoteHosts />
     {:else if store.settingsSection === "knowledge"}
       <KnowledgeSettings />
     {:else if store.settingsSection === "about"}
