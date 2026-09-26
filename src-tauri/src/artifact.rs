@@ -166,7 +166,7 @@ async fn open(app: &AppHandle, a: &ArtifactInfo) -> Result<(Arc<AgentSession>, b
         state.artifacts.sessions.lock().await.insert(
             a.id.clone(),
             Agent {
-                live: Live { agent: a.agent.clone(), cwd: String::new(), session: session.clone(), turns, running: None },
+                live: Live { agent: a.agent.clone(), cwd: String::new(), session: session.clone(), turns, running: None, used: Instant::now() },
                 fingerprint: wanted,
                 used: Instant::now(),
                 _mcp: mcp,

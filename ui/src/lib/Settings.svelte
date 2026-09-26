@@ -23,6 +23,24 @@
   import Icon, { type IconName } from "./Icon.svelte";
   import SplitHandle from "./SplitHandle.svelte";
   import { t } from "./i18n.svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { onMount } from "svelte";
+
+  /** Minutes before an unused conductor or worker session is closed (0: never). */
+  let idleMinutes = $state(30);
+  onMount(() => {
+    invoke<string | null>("get_setting", { key: "sessions.idle_minutes" })
+      .then((v) => {
+        const n = Number(v);
+        if (v !== null && Number.isFinite(n)) idleMinutes = n;
+      })
+      .catch(() => {});
+  });
+  function saveIdle() {
+    const n = Math.max(0, Math.min(1440, Math.round(Number(idleMinutes) || 0)));
+    idleMinutes = n;
+    invoke("set_setting", { key: "sessions.idle_minutes", value: String(n) }).catch((err) => (store.lastError = String(err)));
+  }
 
   /** The settings column. A group is a label; an entry opens a pane. */
   type Entry = { id: SettingsSection; icon: IconName; label: string; blurb: string };
@@ -217,6 +235,12 @@
       <p class="note">
         {t("settings.agentsNote")}
       </p>
+      <label class="idle">
+        <span class="mlab-sm">{t("settings.idle")}</span>
+        <input class="mono" type="number" min="0" max="1440" step="5" bind:value={idleMinutes} onchange={saveIdle} />
+        <span class="dim">{t("settings.idleUnit")}</span>
+      </label>
+      <p class="note">{t("settings.idleNote")}</p>
       <AgentList />
     {:else if store.settingsSection === "knowledge"}
       <KnowledgeSettings />
@@ -234,6 +258,27 @@
 </section>
 
 <style>
+  .idle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 18px;
+  }
+
+  .idle input {
+    width: 80px;
+    height: 30px;
+    padding: 0 8px;
+    background: var(--inp);
+    border: 1px solid var(--lines);
+    color: var(--txt);
+  }
+
+  .idle .dim {
+    font-size: 12px;
+    color: var(--dim);
+  }
+
   .col {
     position: relative;
     flex-shrink: 0;

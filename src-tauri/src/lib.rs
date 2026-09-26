@@ -1193,6 +1193,8 @@ pub fn run() {
             });
             // Artifact agents nobody has talked to for an hour are closed.
             artifact::sweep_idle(app.handle().clone());
+            // Conductors and workers nobody has used for a while are closed too.
+            conductor::sweep_idle(app.handle().clone());
             // Permission cards left from an earlier run of the app: their agents are gone.
             tauri::async_runtime::spawn(conductor::dismiss_stale_permissions(app.handle().clone(), None));
             // Library sync, and a watch on its files.

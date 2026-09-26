@@ -89,6 +89,8 @@ pub struct Live {
     pub turns: u32,
     /// Run id of the turn in flight, if any.
     pub running: Option<String>,
+    /// When a turn last started or ended: an idle session is closed after a while.
+    pub used: std::time::Instant,
 }
 
 /// A track's conductor: its session and the MCP server that is its hands.
@@ -1032,6 +1034,7 @@ async fn start_worker_turn(
                 let run = state.store.begin_run(&track, &name, &live.agent, &text, &worker_cwd).map_err(|e| e.to_string())?;
                 live.turns += 1;
                 live.running = Some(run.clone());
+                live.used = std::time::Instant::now();
                 Found::Live { run, turns: live.turns, session: live.session.clone(), agent: live.agent.clone() }
             }
             (None, _) => {
@@ -1115,6 +1118,7 @@ async fn start_worker_turn(
                     session: session.clone(),
                     turns,
                     running: Some(run.clone()),
+                    used: std::time::Instant::now(),
                 },
             );
             (agent_id, turns, session, resumed, note, run)
@@ -1210,6 +1214,7 @@ async fn hand_running(app: &AppHandle, track: &str, name: &str, from: &str, to: 
     if let Some(live) = workers.get_mut(&worker_key(track, name)) {
         if live.running.as_deref() == Some(from) {
             live.running = to;
+            live.used = std::time::Instant::now();
         }
     }
 }
@@ -1490,6 +1495,7 @@ async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_tur
                     // A resumed session already had its preamble.
                     turns: if resumed { 1 } else { 0 },
                     running: None,
+                    used: std::time::Instant::now(),
                 },
                 fingerprint: wanted,
                 _mcp: mcp,
@@ -1502,6 +1508,7 @@ async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_tur
     if take_turn {
         live.turns += 1;
     }
+    live.used = std::time::Instant::now();
     Ok((live.session.clone(), take_turn && live.turns == 1))
 }
 
@@ -1594,6 +1601,55 @@ pub async fn conductor_cancel(app: AppHandle, track: String) -> Result<(), Strin
     Ok(())
 }
 
+/// Close conductor and worker sessions nobody has used for a while (the
+/// `sessions.idle_minutes` setting, 30 by default, 0 for never): each is an
+/// agent process holding memory. Their conversations stay in the store and
+/// the agent's own record, so the next message reopens them with memory.
+pub fn sweep_idle(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let state = app.state::<AppState>();
+            let minutes = state
+                .store
+                .get_meta(&format!("{}sessions.idle_minutes", crate::SETTING_PREFIX))
+                .ok()
+                .flatten()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(DEFAULT_IDLE_MINUTES);
+            if minutes == 0 {
+                continue;
+            }
+            let limit = Duration::from_secs(minutes * 60);
+            {
+                let mut conductors = state.sessions.conductors.lock().await;
+                let idle: Vec<String> = conductors
+                    .iter()
+                    .filter(|(track, c)| !state.sessions.is_busy(track) && c.live.running.is_none() && c.live.used.elapsed() > limit)
+                    .map(|(track, _)| track.clone())
+                    .collect();
+                for track in idle {
+                    tracing::info!(%track, minutes, "closing an idle conductor session");
+                    conductors.remove(&track);
+                }
+            }
+            let mut workers = state.sessions.workers.lock().await;
+            let idle: Vec<String> = workers
+                .iter()
+                .filter(|(_, l)| l.running.is_none() && l.used.elapsed() > limit)
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in idle {
+                tracing::info!(worker = %key, minutes, "closing an idle worker session");
+                workers.remove(&key);
+            }
+        }
+    });
+}
+
+/// Minutes a session may sit unused before it is closed, when not set.
+const DEFAULT_IDLE_MINUTES: u64 = 30;
+
 /// How long an agent has to end a turn after a cancel before its session is ended.
 const CANCEL_GRACE: Duration = Duration::from_secs(15);
 
@@ -1682,6 +1738,7 @@ pub async fn conductor_turn(
                     if c.live.running.as_deref() == Some(run_for_turn.as_str()) {
                         c.live.running = None;
                     }
+                    c.live.used = std::time::Instant::now();
                 }
             }
             st.sessions.end_turn(&track_for_turn);
