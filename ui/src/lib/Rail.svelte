@@ -32,7 +32,6 @@
     },
     { id: "design", icon: "draft", label: "rail.design", go: () => void store.showDesigns() },
     { id: "knowledge", icon: "book", label: "rail.knowledge", go: () => void kb.show() },
-    { id: "wrapup", icon: "wrapup", label: "rail.wrapup", soon: true },
   ];
 
   const secondary: Item[] = [

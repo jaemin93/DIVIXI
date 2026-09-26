@@ -4,7 +4,6 @@
     | "tracks"
     | "workers"
     | "draft"
-    | "wrapup"
     | "agents"
     | "settings"
     | "collapse"
@@ -46,8 +45,6 @@
     <path d="M4 2v12M8 2v12M12 2v8" />
   {:else if name === "draft"}
     <path d="M3 13l1-4 7-7 3 3-7 7-4 1z" /><path d="M9.5 4.5l2 2" />
-  {:else if name === "wrapup"}
-    <path d="M3 3h10v10H3z" /><path d="M3 8h10M8 8v5" />
   {:else if name === "agents"}
     <rect x="2.5" y="2.5" width="4" height="4" /><rect x="9.5" y="2.5" width="4" height="4" />
     <rect x="2.5" y="9.5" width="4" height="4" /><rect x="9.5" y="9.5" width="4" height="4" />
