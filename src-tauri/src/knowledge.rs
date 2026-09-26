@@ -744,6 +744,13 @@ pub fn knowledge_entity_items(state: State<'_, AppState>, id: i64) -> Result<Vec
     state.library.db.entity_items(id).map_err(|e| e.to_string())
 }
 
+/// Sources sharing at least half their passages with another: likely
+/// copies or versions of one document, for the human to tidy up.
+#[tauri::command(async)]
+pub fn knowledge_overlaps(state: State<'_, AppState>) -> Result<Vec<orchestra_knowledge::store::Overlap>, String> {
+    state.library.db.overlaps(50).map_err(|e| e.to_string())
+}
+
 #[tauri::command(async)]
 pub fn knowledge_stats(state: State<'_, AppState>) -> Result<Stats, String> {
     state.library.db.stats().map_err(|e| e.to_string())

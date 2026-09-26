@@ -222,6 +222,11 @@
             {#if s.topic}<div class="stopic">{s.topic}</div>{/if}
             {#if s.error}<div class="serr" class:warn={s.status === "synced"}>{s.error}</div>{/if}
             <div class="chips">
+              {#if kb.overlaps[s.id]}
+                {@const o = kb.overlaps[s.id]}
+                {@const other = kb.sources.find((x) => x.id === o.other)}
+                <span class="overlap" title={t("kb.overlapTitle", { n: o.shared })}>{t("kb.overlap", { pct: o.percent, name: other ? kb.nameOf(other) : o.other })}</span>
+              {/if}
               {#each s.themes as theme (theme)}<span class="theme">{theme}</span>{/each}
               {#each art?.tags ?? [] as tag (tag)}<span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>{/each}
             </div>
@@ -638,6 +643,14 @@
     flex-wrap: wrap;
     gap: 6px;
     margin-top: 7px;
+  }
+
+  .overlap {
+    font-size: 11px;
+    color: var(--warn);
+    border: 1px solid var(--warnln);
+    background: var(--warnbg);
+    padding: 1px 7px;
   }
 
   .theme {

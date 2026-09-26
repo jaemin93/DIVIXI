@@ -71,6 +71,8 @@ export const K_EMBED_RATE = "knowledge.embed.rate";
 class Knowledge {
   tab = $state<KTab>("list");
   sources = $state<KSource[]>([]);
+  /** Sources that share most of their passages with another, by source id. */
+  overlaps = $state<Record<string, { other: string; shared: number; percent: number }>>({});
   items = $state<KItem[]>([]);
   graph = $state<KGraph>({ nodes: [], edges: [] });
   stats = $state<KStats>({ sources: 0, items: 0, entities: 0, relations: 0 });
@@ -113,6 +115,15 @@ class Knowledge {
     await this.load();
   }
 
+  async loadOverlaps() {
+    try {
+      const list = await invoke<{ source: string; other: string; shared: number; percent: number }[]>("knowledge_overlaps");
+      this.overlaps = Object.fromEntries(list.map((o) => [o.source, { other: o.other, shared: o.shared, percent: o.percent }]));
+    } catch {
+      // Cosmetic.
+    }
+  }
+
   async load() {
     try {
       const [sources, stats, formats] = await Promise.all([
@@ -123,6 +134,7 @@ class Knowledge {
       this.sources = sources;
       this.stats = stats;
       this.formats = formats;
+      void this.loadOverlaps();
       this.loaded = true;
       await this.loadEmbedding();
       await this.refreshTab();
@@ -291,6 +303,8 @@ class Knowledge {
         /* counts can wait */
       }
       await this.loadEmbedding();
+      // A source synced or removed changes what the others share.
+      if (changed) await this.loadOverlaps();
       if (changed && store.view === "knowledge") await this.refreshTab();
     }, 500);
   }

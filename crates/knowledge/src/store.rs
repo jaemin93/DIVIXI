@@ -14,7 +14,7 @@ use crate::chunk::Chunk;
 use crate::extract::Extraction;
 use crate::fts;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Upgrades from each version to the next; `MIGRATIONS[v - 1]` takes v to v + 1.
 const MIGRATIONS: &[&str] = &[
@@ -23,6 +23,9 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE items ADD COLUMN embedding_sig TEXT NOT NULL DEFAULT '';",
     // 2 -> 3: finding whether a space has vectors without scanning every item.
     "CREATE INDEX IF NOT EXISTS items_by_sig ON items(embedding_sig);",
+    // 3 -> 4: the same passage in two documents is one passage (filled in on open).
+    "ALTER TABLE items ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';
+     CREATE INDEX IF NOT EXISTS items_by_hash ON items(content_hash);",
 ];
 
 const SCHEMA: &str = r#"
@@ -57,10 +60,12 @@ CREATE TABLE items (
     line_end     INTEGER NOT NULL,
     created_at   INTEGER NOT NULL,
     embedding    BLOB,
-    embedding_sig TEXT NOT NULL DEFAULT ''
+    embedding_sig TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX items_by_source ON items(source_id, chunk_index);
 CREATE INDEX items_by_sig ON items(embedding_sig);
+CREATE INDEX items_by_hash ON items(content_hash);
 CREATE VIRTUAL TABLE items_fts USING fts5(title, content, tags);
 CREATE TABLE entities (
     id           INTEGER PRIMARY KEY,
@@ -149,6 +154,17 @@ pub struct Item {
 }
 
 /// A search result.
+/// A source that shares passages with another (see [`KnowledgeDb::overlaps`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Overlap {
+    pub source: String,
+    pub other: String,
+    /// Passages of `source` also in `other`.
+    pub shared: u32,
+    /// That, as a share of `source`'s passages.
+    pub percent: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hit {
     pub item: Item,
@@ -306,6 +322,7 @@ impl KnowledgeDb {
             }
             Some(v) => anyhow::bail!("knowledge schema version {v} is not supported by this build ({SCHEMA_VERSION})"),
         }
+        backfill_hashes(&mut conn)?;
         // A sync cut short by a quit resumes from the start next time.
         conn.execute(
             "UPDATE sources SET status = ?1 WHERE status = ?2",
@@ -399,8 +416,8 @@ impl KnowledgeDb {
             let category = if x.category.is_empty() { crate::extract::DEFAULT_CATEGORY.to_string() } else { x.category.clone() };
             let tags = serde_json::to_string(&new.tags)?;
             tx.execute(
-                "INSERT INTO items(source_id, chunk_index, title, content, summary, category, tags, section, line_start, line_end, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO items(source_id, chunk_index, title, content, summary, category, tags, section, line_start, line_end, created_at, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     id,
                     new.chunk.index as i64,
@@ -412,7 +429,8 @@ impl KnowledgeDb {
                     new.chunk.section,
                     new.chunk.line_start as i64,
                     new.chunk.line_end as i64,
-                    now
+                    now,
+                    passage_hash(&new.chunk.content)
                 ],
             )?;
             let item = tx.last_insert_rowid();
@@ -481,6 +499,47 @@ impl KnowledgeDb {
         ))?;
         let rows = stmt.query_map(params![source, limit as i64], row_to_item)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    fn hash_of(&self, id: i64) -> Option<String> {
+        self.conn.lock().query_row("SELECT content_hash FROM items WHERE id = ?1", params![id], |r| r.get(0)).ok()
+    }
+
+    /// Sources that share passages: for each source, the other source it
+    /// shares the most with and what share of its own passages that is.
+    /// Only shares of at least `min_percent`.
+    pub fn overlaps(&self, min_percent: u32) -> anyhow::Result<Vec<Overlap>> {
+        let conn = self.conn.lock();
+        let mut totals: HashMap<String, i64> = HashMap::new();
+        {
+            let mut stmt = conn.prepare("SELECT source_id, COUNT(DISTINCT content_hash) FROM items WHERE content_hash != '' GROUP BY source_id")?;
+            for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+                let (s, n) = row?;
+                totals.insert(s, n);
+            }
+        }
+        let mut stmt = conn.prepare(
+            "SELECT a.source_id, b.source_id, COUNT(DISTINCT a.content_hash)
+             FROM items a JOIN items b ON a.content_hash = b.content_hash AND a.source_id != b.source_id
+             WHERE a.content_hash != ''
+             GROUP BY a.source_id, b.source_id",
+        )?;
+        let mut best: HashMap<String, Overlap> = HashMap::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))? {
+            let (source, other, shared) = row?;
+            let total = totals.get(&source).copied().unwrap_or(0).max(1);
+            let percent = ((shared * 100) / total) as u32;
+            if percent < min_percent {
+                continue;
+            }
+            let better = best.get(&source).is_none_or(|o| percent > o.percent);
+            if better {
+                best.insert(source.clone(), Overlap { source, other, shared: shared as u32, percent });
+            }
+        }
+        let mut out: Vec<Overlap> = best.into_values().collect();
+        out.sort_by(|a, b| b.percent.cmp(&a.percent).then(a.source.cmp(&b.source)));
+        Ok(out)
     }
 
     pub fn item(&self, id: i64) -> anyhow::Result<Option<Item>> {
@@ -554,11 +613,30 @@ impl KnowledgeDb {
         }
         let mut ranked: Vec<(i64, f64, String)> = scores.into_iter().map(|(id, (s, legs))| (id, s, legs.join("+"))).collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(b.0.cmp(&a.0)));
-        let mut keep: Vec<(i64, f64, String)> = ranked.iter().take(limit).cloned().collect();
+        // The same passage in several documents (a copy, another version)
+        // takes one place, its best-ranked copy's.
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut first_copy = |id: i64| -> bool {
+            match self.hash_of(id) {
+                Some(h) if !h.is_empty() => seen.insert(h),
+                _ => true,
+            }
+        };
+        let mut keep: Vec<(i64, f64, String)> = Vec::new();
+        for k in &ranked {
+            if keep.len() >= limit {
+                break;
+            }
+            if first_copy(k.0) {
+                keep.push(k.clone());
+            }
+        }
         if let Some(top) = keyword.first() {
             if !keep.iter().any(|k| k.0 == *top) {
                 if let Some(k) = ranked.iter().find(|k| k.0 == *top) {
-                    keep.push(k.clone());
+                    if first_copy(k.0) {
+                        keep.push(k.clone());
+                    }
                 }
             }
         }
@@ -741,6 +819,31 @@ fn from_blob(b: &[u8]) -> Vec<f32> {
     b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
 }
 
+/// A passage's identity for finding copies: its words, whitespace and case aside.
+fn passage_hash(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let words = content.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    Sha256::digest(words.as_bytes()).iter().take(12).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Items from before passages had hashes get theirs.
+fn backfill_hashes(conn: &mut Connection) -> anyhow::Result<()> {
+    let missing: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id, content FROM items WHERE content_hash = ''")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    for (id, content) in &missing {
+        tx.execute("UPDATE items SET content_hash = ?2 WHERE id = ?1", params![id, passage_hash(content)])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 fn clear_items(tx: &rusqlite::Transaction<'_>, source: &str) -> anyhow::Result<()> {
     tx.execute("DELETE FROM items_fts WHERE rowid IN (SELECT id FROM items WHERE source_id = ?1)", params![source])?;
     tx.execute("DELETE FROM items WHERE source_id = ?1", params![source])?;
@@ -806,6 +909,31 @@ mod tests {
         )
         .unwrap();
         db
+    }
+
+    #[test]
+    fn a_copied_passage_is_found_once() {
+        let db = seeded();
+        // A second version of store.md: the same passage (spacing aside) and one new one.
+        db.add_source("ar003", "local_file", "/docs/store-v2.md").unwrap();
+        db.replace_items(
+            "ar003",
+            &[
+                NewItem { chunk: chunk(0, "The store  keeps\nevents in SQLite."), extraction: None, tags: vec![] },
+                NewItem { chunk: chunk(1, "## Restore\nfrom the nightly copy"), extraction: None, tags: vec![] },
+            ],
+            false,
+            &file("h3"),
+        )
+        .unwrap();
+        let hits = db.search("events SQLite", 5, None, None).unwrap();
+        let copies = hits.iter().filter(|h| h.item.content.contains("keeps")).count();
+        assert_eq!(copies, 1, "{:?}", hits.iter().map(|h| &h.item.content).collect::<Vec<_>>());
+
+        let overlaps = db.overlaps(30).unwrap();
+        let v2 = overlaps.iter().find(|o| o.source == "ar003").expect("v2 shares with store.md");
+        assert_eq!((v2.other.as_str(), v2.shared, v2.percent), ("ar002", 1, 50));
+        assert!(!overlaps.iter().any(|o| o.source == "ar001"), "rust.md shares nothing");
     }
 
     #[test]
@@ -892,8 +1020,9 @@ mod tests {
         {
             let conn = Connection::open(&path).unwrap();
             let v1 = SCHEMA
-                .replace(",\n    embedding    BLOB,\n    embedding_sig TEXT NOT NULL DEFAULT ''", "")
-                .replace("CREATE INDEX items_by_sig ON items(embedding_sig);\n", "");
+                .replace(",\n    embedding    BLOB,\n    embedding_sig TEXT NOT NULL DEFAULT '',\n    content_hash TEXT NOT NULL DEFAULT ''", "")
+                .replace("CREATE INDEX items_by_sig ON items(embedding_sig);\n", "")
+                .replace("CREATE INDEX items_by_hash ON items(content_hash);\n", "");
             conn.execute_batch(&v1).unwrap();
             conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema_version', '1');").unwrap();
             let cols: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('items') WHERE name = 'embedding'", [], |r| r.get(0)).unwrap();
