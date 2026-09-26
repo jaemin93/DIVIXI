@@ -679,8 +679,8 @@ class Store {
   /** Open file tabs, relative paths, in opening order; `activeFile` is the one shown. */
   openFiles = $state<string[]>([]);
   activeFile = $state("");
-  /** Show the tree beside an open file, as Kiro does. */
-  panelTree = $state(true);
+  /** The tree as a drawer over an open file, as Kiro has it; closed until asked for. */
+  panelTree = $state(false);
   tree = $state<WsEntry[]>([]);
   treeLoading = $state(false);
   git = $state<WsGit | null>(null);

@@ -12,8 +12,9 @@
    * The track's working folder beside the conversation, after Kiro Crew's
    * right panel: a tab strip (changes, files, then each open file), the
    * git changes with a diff, the file tree with a filter, and an open file
-   * shown as a markdown preview, coloured code or an image, with the tree
-   * kept beside it.
+   * shown as a markdown preview, coloured code or an image. Over an open
+   * file the tree opens as a drawer from the right, as in Kiro: the file
+   * stays where it is underneath; a click beside the drawer or Esc closes it.
    */
   let filter = $state("");
   let folded = $state<Record<string, boolean>>({});
@@ -129,6 +130,12 @@
   /** Code and text open straight in the editor; markdown and HTML when shown as source. */
   const editing = $derived(!!activeFile?.editable && (activeFile.kind === "text" || (previewable && raw)));
 </script>
+
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && store.panelTree && store.panelTab === "file") store.panelTree = false;
+  }}
+/>
 
 <aside style="width: {store.panelWidth}px">
   <SplitHandle
@@ -273,7 +280,9 @@
         {/if}
       </div>
       {#if store.panelTree}
-        <div class="side">{@render tree(true)}</div>
+        <!-- A click on the file beside the drawer closes it (and goes no further). -->
+        <button class="scrim" type="button" aria-label={t("ws.closeTree")} onclick={() => (store.panelTree = false)}></button>
+        <div class="drawer" role="dialog" aria-label={t("ws.files")}>{@render tree(true)}</div>
       {/if}
     </div>
   {/if}
@@ -557,6 +566,7 @@
   }
 
   .split {
+    position: relative;
     flex: 1;
     min-height: 0;
     display: flex;
@@ -571,14 +581,39 @@
     overflow: auto;
   }
 
-  .side {
-    width: 42%;
-    min-width: 180px;
-    flex-shrink: 0;
-    border-left: 1px solid var(--line);
+  /* The tree over the file: a drawer from the right, the file under it. */
+  .scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    padding: 0;
+    border: none;
+    background: transparent;
+    cursor: default;
+  }
+
+  .drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 5;
+    width: min(420px, 68%);
+    min-width: 220px;
     display: flex;
     flex-direction: column;
     min-height: 0;
+    background: var(--rail);
+    border-left: 1px solid var(--line);
+    box-shadow: -10px 0 24px rgba(0, 0, 0, 0.18);
+    animation: slidein 0.14s ease-out;
+  }
+
+  @keyframes slidein {
+    from {
+      transform: translateX(24px);
+      opacity: 0;
+    }
   }
 
   .mdwrap {
