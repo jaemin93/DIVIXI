@@ -9,13 +9,27 @@
 
   let scroller = $state<HTMLDivElement>();
 
-  // Follow the tail while a run is live.
+  /** Whether the view keeps to the newest: only while it is at (or near) the
+   *  bottom, so reading back is never pulled down by something arriving. */
+  let pinned = true;
+  function onScroll() {
+    if (scroller) pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+  }
+
+  // Another conversation opens at its newest.
+  $effect(() => {
+    void store.chatKey;
+    pinned = true;
+  });
+
+  // Follow the tail while it is in view; the human's own message brings it back.
   $effect(() => {
     void store.chatRuns.length;
     void store.activeRun?.message.length;
     void store.activeRun?.toolCount;
     void store.chatDecisions.length;
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    if (store.chatRuns.at(-1)?.id.startsWith("pending-")) pinned = true;
+    if (scroller && pinned) scroller.scrollTop = scroller.scrollHeight;
   });
 
   /** Hook chatter (devterm memory and the like) arrives as message text; hide it. */
@@ -96,7 +110,7 @@
 
 </script>
 
-<div class="scroll" bind:this={scroller}>
+<div class="scroll" bind:this={scroller} onscroll={onScroll}>
   {#if conductorRuns.length === 0}
     <div class="empty">
       <div class="emptymark"><Mark size={56} /></div>

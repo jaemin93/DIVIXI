@@ -15,11 +15,21 @@
   const live = $derived(runs.some((r) => r.status === "running" || r.status === "connecting"));
 
   let scroller = $state<HTMLDivElement>();
+  /** Keep to the newest only while at (or near) the bottom: reading back stays put. */
+  let pinned = true;
+  function onScroll() {
+    if (scroller) pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+  }
+  // Another worker opens at its newest.
+  $effect(() => {
+    void store.openWorker;
+    pinned = true;
+  });
   $effect(() => {
     void runs.length;
     void runs.at(-1)?.message.length;
     void runs.at(-1)?.toolCount;
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    if (scroller && pinned) scroller.scrollTop = scroller.scrollHeight;
   });
 
   function cleanText(text: string): string {
@@ -69,7 +79,7 @@
     </div>
   </header>
 
-  <div class="scroll" bind:this={scroller}>
+  <div class="scroll" bind:this={scroller} onscroll={onScroll}>
     {#if runs.length === 0}
       <div class="mono empty">{t("worker.empty")}</div>
     {/if}
