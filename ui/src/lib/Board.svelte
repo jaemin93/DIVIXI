@@ -366,7 +366,37 @@
   let selectedEdge = $state("");
 
   // ----- pointer -----
-  let spaceHeld = false;
+  /** Space is down: a press on the board pans it (as in Huabu and Figma). */
+  let spaceHeld = $state(false);
+  /** A pan in progress, for the closed hand. */
+  let panning = $state(false);
+
+  /** Space down or up, wherever the focus is: after typing in the chat, the
+   *  space still reaches here, so space + click pans at once. It is only
+   *  kept from typing when the board itself has the focus. */
+  function onSpace(e: KeyboardEvent, down: boolean) {
+    if (e.key !== " ") return;
+    if (!down) {
+      spaceHeld = false;
+      return;
+    }
+    if (store.view !== "design" || editing) return;
+    spaceHeld = true;
+    // On the board (not in a text box) a space would press the focused button or scroll.
+    const target = e.target as HTMLElement | null;
+    if (el && target && (target === el || el.contains(target) || target === document.body) && !target.closest?.("input, textarea, [contenteditable]")) {
+      e.preventDefault();
+    }
+  }
+
+  /** A press on the board takes the focus from the chat box or a card's
+   *  viewer, so keys (space, tools, undo) are the board's; not while a card
+   *  is being typed in. */
+  function takeFocus(e: PointerEvent) {
+    const target = e.target as HTMLElement | null;
+    if (!el || editing || target?.closest?.("input, textarea, [contenteditable]")) return;
+    if (document.activeElement !== el) el.focus({ preventScroll: true });
+  }
 
   function onDown(e: PointerEvent) {
     if (!el || editing) return;
@@ -379,11 +409,14 @@
 
     // Pan: the middle button, or space held (a touchpad pans with two fingers).
     if (e.button === 1 || spaceHeld) {
+      e.preventDefault();
       const start = { cx: e.clientX, cy: e.clientY, x: view.x, y: view.y };
+      panning = true;
       follow(
         e,
         (ev) => (view = { ...view, x: start.x + ev.clientX - start.cx, y: start.y + ev.clientY - start.cy }),
-        () => {},
+        () => (panning = false),
+        () => (panning = false),
       );
       return;
     }
@@ -627,7 +660,6 @@
     const target = e.target as HTMLElement | null;
     if (e.defaultPrevented || editing || store.tagDialog || store.view !== "design") return;
     if (target?.closest?.("input, textarea, select, [contenteditable], [role=menu], [role=dialog]")) return;
-    if (e.key === " ") spaceHeld = true;
     // Undo and redo of the human's own edits (typing has its own).
     if ((e.ctrlKey || e.metaKey) && !e.altKey) {
       const k = e.key.toLowerCase();
@@ -670,7 +702,15 @@
   }
 </script>
 
-<svelte:window onkeydown={onKey} onkeyup={(e) => e.key === " " && (spaceHeld = false)} onblur={() => (spaceHeld = false)} />
+<svelte:window
+  onkeydowncapture={(e) => onSpace(e, true)}
+  onkeyupcapture={(e) => onSpace(e, false)}
+  onkeydown={onKey}
+  onblur={() => {
+    spaceHeld = false;
+    panning = false;
+  }}
+/>
 
 <div
   class="board"
@@ -681,6 +721,10 @@
   class:placing={tool === "frame" || tool === "question"}
   class:dropover={dropOver}
   bind:this={el}
+  class:grab={spaceHeld}
+  class:grabbing={panning}
+  tabindex="-1"
+  onpointerdowncapture={takeFocus}
   onpointerdown={onDown}
   role="application"
   aria-label={t("design.board")}
@@ -951,6 +995,27 @@
 </div>
 
 <style>
+  .board:focus {
+    outline: none;
+  }
+
+  /* Space held: the board is a sheet to drag; cards' viewers let go of the press. */
+  .board.grab,
+  .board.grab :global(*) {
+    cursor: grab !important;
+  }
+
+  .board.grabbing,
+  .board.grabbing :global(*) {
+    cursor: grabbing !important;
+  }
+
+  .board.grab :global(iframe),
+  .board.grab :global(embed),
+  .board.grab :global(object) {
+    pointer-events: none;
+  }
+
   .board {
     position: relative;
     flex: 1;
