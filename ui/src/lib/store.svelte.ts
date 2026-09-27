@@ -8,11 +8,13 @@ import {
   liveQueued,
   liveQueuedFor,
   nextQueued,
+  notNow,
   parseQueued,
   pushQueued,
   queuedFor,
   queuedKeys,
   releaseQueued as released,
+  stillWaiting,
   unshiftQueued,
   wasStopped,
   type Queued,
@@ -79,6 +81,8 @@ export type WorkerState = {
 
 /** Mirrors `conductor::WaitingItem`: one turn a conductor has not taken yet. */
 export type WaitingItem = {
+  /** Unique among what is waiting; the conversation keys its list on it. */
+  id: string;
   track: string;
   /** What it is, in one phrase, e.g. "report of ui run t042". */
   what: string;
@@ -285,6 +289,18 @@ export type Run = {
   toolCount: number;
   stopReason?: string;
   error?: string;
+  /**
+   * The queued message this turn was made for, when the app made it.
+   *
+   * A run's `id` is not a handle: it starts as `pending-…` and is swapped
+   * for the core's id the moment either the send comes back or an event
+   * arrives first — and `apply` will hand a pending run to whichever
+   * conductor turn speaks first, which is not always ours. This does not
+   * change, so cleaning up after a refused send removes the right run,
+   * and the conversation can tell that a waiting message already has a
+   * turn on screen. Not persisted: it only matters while both could show.
+   */
+  fromQueued?: string;
   /** Latest context accounting; live runs update it, restored runs get it on hydrate. */
   usage?: Usage;
   /**
@@ -1158,7 +1174,6 @@ class Store {
   async openConductor(track = this.track) {
     if (!track || this.conductorOpening) return;
     this.conductorOpening = track;
-    this.lastError = "";
     try {
       const state = await invoke<ConductorState>("conductor_open", { track });
       this.takeConductorState(track, state);
@@ -1316,7 +1331,6 @@ class Store {
   /** Close a track's conductor session (deactivate); it resumes with its memory next time. */
   async closeConductor(track = this.track) {
     if (!track) return;
-    this.lastError = "";
     try {
       const state = await invoke<ConductorState>("conductor_close", { track });
       this.takeConductorState(track, state);
@@ -1398,17 +1412,30 @@ class Store {
   // means "forget the last failure", as the handful of sites that do that
   // intend. The rules are in `errors.ts`; `ErrorToasts` shows the list.
 
-  /** Errors on screen now, oldest first. */
+  /** Errors on screen now, oldest first, newest last. */
   errors = $state<AppError[]>([]);
   private errorSeq = 0;
+  /**
+   * How many stay on screen. `addError` folds a repeat into the one
+   * before it, but two faults taking turns (A, B, A, B) never fold, and
+   * the stack has nowhere to go but up the screen. The oldest give way;
+   * the log keeps all of them.
+   */
+  private static readonly SHOWN = 8;
 
   /** Raise an error for the human. Empty text raises nothing. */
   raise(text: string) {
     if (!text.trim()) return;
-    // The webview console keeps what the toast lets go. Nothing from the
-    // UI reaches the app's log file yet; see the handover.
-    console.error(`[divixi] ${text.trim()}`);
-    this.errors = addError(this.errors, text, ++this.errorSeq, Date.now());
+    const said = text.trim();
+    // Two places, for two readers. The console is for whoever has it open
+    // now; the app's log is for the bug report afterwards, since a toast is
+    // gone in twenty seconds at the outside. Both get every occurrence,
+    // including the repeats `addError` folds into a count.
+    console.error(`[divixi] ${said}`);
+    // Dropped on the floor if it fails, always. An error raised because an
+    // error could not be recorded is a loop with nothing in it for anyone.
+    void invoke("ui_log", { level: "error", message: said }).catch(() => {});
+    this.errors = addError(this.errors, text, ++this.errorSeq, Date.now()).slice(-Store.SHOWN);
   }
 
   /** Take one error off the screen (the human read it, or closed it). */
@@ -1427,10 +1454,13 @@ class Store {
   }
 
   set lastError(text: string) {
-    if (!text.trim()) {
-      this.errors = [];
-      return;
-    }
+    // Raising only. Clearing used to live here too — `lastError = ""` at
+    // the head of an operation, meaning "forget the last failure" — and
+    // it threw away *every* error, including ones raised on screens the
+    // caller knows nothing about. An error has its own life now (it
+    // expires, it can be dismissed, hovering it stops the clock), so no
+    // operation needs to reach in and end it early. Blank raises nothing:
+    // `raise` ignores it.
     this.raise(text);
   }
 
@@ -1790,41 +1820,43 @@ class Store {
   /** One message to the artifact's agent: the composer's text and files, the
    *  picture of the board when it has ink, and the items picked on it. */
   private async dispatchArtifact(out: Queued): Promise<boolean> {
-    const { key, target: id, agent, text: typed, files, picks, selected } = out;
-    this.lastError = "";
-    const typedWithKb = withKnowledge(typed, picks);
-    // The board as it stands now, but only if it is still the one on screen:
-    // a message queued here must not carry another artifact's picture.
-    const image = this.artifact === id ? boardPng(this.designDoc) : null;
-    const text = withAttachments(typedWithKb, files);
-    const pending: Run = {
-      id: `pending-${Date.now()}`,
-      track: artifactKey(id),
-      session: ARTIFACT_SESSION,
-      agent,
-      prompt: text,
-      status: "connecting",
-      startedAt: Date.now(),
-      message: "",
-      plan: [],
-      toolCount: 0,
-      loaded: true,
-      thought: "",
-      tools: [],
-      transcript: [],
-      segments: [],
-    };
-    const pendingId = pending.id;
-    this.runs.push(pending);
+    const { target: id, agent, text: typed, files, picks, selected } = out;
+    // As in `dispatchTrack`: the whole thing, text-building included, is
+    // inside the try. `withKnowledge` and `boardPng` both reach into data
+    // that may have come back from a setting.
     try {
+      const typedWithKb = withKnowledge(typed, picks);
+      // The board as it stands now, but only if it is still the one on
+      // screen: a message queued here must not carry another's picture.
+      const image = this.artifact === id ? boardPng(this.designDoc) : null;
+      const text = withAttachments(typedWithKb, files);
+      this.runs.push({
+        id: `pending-${Date.now()}`,
+        fromQueued: out.id,
+        track: artifactKey(id),
+        session: ARTIFACT_SESSION,
+        agent,
+        prompt: text,
+        status: "connecting",
+        startedAt: Date.now(),
+        message: "",
+        plan: [],
+        toolCount: 0,
+        loaded: true,
+        thought: "",
+        tools: [],
+        transcript: [],
+        segments: [],
+      });
       const run = await invoke<string>("artifact_prompt", { id, text: typedWithKb, image, selected, lang: i18n.lang, files });
-      const r = this.runs.find((x) => x.id === pendingId || x.id === run);
+      const r = this.runs.find((x) => x.fromQueued === out.id);
       if (r) r.id = run;
+      this.setQueued(dropQueued(this.queued, out.id));
       void this.refreshArtifactSession();
       return true;
     } catch (err) {
-      this.runs = this.runs.filter((x) => x.id !== pendingId);
-      if (this.stillAnswering(err)) return false;
+      this.forgetRun(out.id);
+      if (notNow(err)) return false;
       this.returnToComposer(out, err);
       return true;
     }
@@ -1926,7 +1958,6 @@ class Store {
 
   /** Create a track and open it. */
   async createTrack(patch: TrackPatch): Promise<boolean> {
-    this.lastError = "";
     try {
       const track = await invoke<Track>("create_track", { patch });
       this.tracks.push(track);
@@ -1961,7 +1992,6 @@ class Store {
 
   /** Change a track's fields; the conductor picks up agent and option changes at its next message. */
   async updateTrack(id: string, patch: TrackPatch): Promise<boolean> {
-    this.lastError = "";
     try {
       const next = await invoke<Track>("update_track", { id, patch });
       this.tracks = this.tracks.map((t) => (t.id === id ? next : t));
@@ -1982,7 +2012,6 @@ class Store {
   /** Delete a track with its runs and memory; the app moves to a neighbour or to creation. */
   /** Delete a track. Returns why the core refused, or "" when it is gone. */
   async deleteTrack(id: string): Promise<string> {
-    this.lastError = "";
     try {
       await invoke("delete_track", { id });
     } catch (err) {
@@ -2408,7 +2437,6 @@ class Store {
   async detect() {
     if (this.detecting) return;
     this.detecting = true;
-    this.lastError = "";
     try {
       this.agents = await invoke<AgentStatus[]>("detect_agents");
       this.pickDefaultAgent();
@@ -2444,7 +2472,6 @@ class Store {
   private async workOn(agent: AgentId, label: string, op: () => Promise<AgentStatus>) {
     if (this.working[agent]) return;
     this.working = { ...this.working, [agent]: label };
-    this.lastError = "";
     try {
       const next = await op();
       this.agents = (this.agents ?? []).map((a) => (a.kind === agent ? next : a));
@@ -2501,7 +2528,14 @@ class Store {
       this.startPump();
       return;
     }
-    await this.dispatch(out);
+    try {
+      await this.dispatch(out);
+    } catch (err) {
+      // Same reasoning as the pump's catch, for the path that never
+      // reached the line: the composer is already empty by now.
+      this.setQueued(pushQueued(this.queued, { ...out, held: true }));
+      this.raise(String(err));
+    }
   }
 
   // ----- the waiting line: messages sent while a turn was in flight -----
@@ -2518,7 +2552,8 @@ class Store {
 
   /** The waiting messages of the conversation on screen. */
   get chatQueue(): Queued[] {
-    return queuedFor(this.queued, this.chatKey);
+    const sent = this.chatRuns.map((r) => r.fromQueued).filter((x): x is string => !!x);
+    return stillWaiting(this.queued, this.chatKey, sent);
   }
 
   /**
@@ -2655,13 +2690,16 @@ class Store {
             this.startPump();
           }
         })
+        .catch((err) => {
+          // Nothing should reach here — `dispatch` catches its own — but a
+          // message out of the line and out of the store is a sentence the
+          // human wrote and will never see again. Held, so it waits on
+          // them rather than retrying straight back into the same fault.
+          this.setQueued(unshiftQueued(this.queued, { ...next, held: true }));
+          this.raise(String(err));
+        })
         .finally(() => this.handing.delete(key));
     }
-  }
-
-  /** Whether an error from the core means "not now" rather than "no". */
-  private stillAnswering(err: unknown): boolean {
-    return /still responding/i.test(String(err));
   }
 
   /** Put one message on its way. `false` means the core was busy: try again. */
@@ -2677,38 +2715,41 @@ class Store {
   }
 
   private async dispatchTrack(out: Queued): Promise<boolean> {
-    const { key, target: track, agent, text: typed, files, picks } = out;
-    this.lastError = "";
-    const typedWithKb = withKnowledge(typed, picks);
-    const text = withAttachments(typedWithKb, files);
-
-    // Show the message the moment Enter is pressed. The run gets its real id
-    // when the core answers; until then it carries a pending id, and events
-    // that arrive for the real id first are routed to it by `apply`.
-    const pending: Run = {
-      id: `pending-${Date.now()}`,
-      track,
-      session: "conductor",
-      agent,
-      prompt: text,
-      status: "connecting",
-      startedAt: Date.now(),
-      message: "",
-      plan: [],
-      toolCount: 0,
-      loaded: true,
-      thought: "",
-      tools: [],
-      transcript: [],
-      segments: [],
-    };
-    // The array hands back proxies, never the object pushed; match by id.
-    const pendingId = pending.id;
-    this.runs.push(pending);
-
+    const { target: track, agent, text: typed, files, picks } = out;
+    // Everything is inside the try, including building the text. A saved
+    // message can come back with a passage the app cannot read, and
+    // `withKnowledge` reaching into it would throw out here, past every
+    // catch, taking what the human wrote with it.
     try {
+      const typedWithKb = withKnowledge(typed, picks);
+      const text = withAttachments(typedWithKb, files);
+
+      // Show the message the moment Enter is pressed. The run gets its real
+      // id when the core answers; until then it carries a pending one, and
+      // events that arrive first are routed to it by `apply`.
+      this.runs.push({
+        id: `pending-${Date.now()}`,
+        fromQueued: out.id,
+        track,
+        session: "conductor",
+        agent,
+        prompt: text,
+        status: "connecting",
+        startedAt: Date.now(),
+        message: "",
+        plan: [],
+        toolCount: 0,
+        loaded: true,
+        thought: "",
+        tools: [],
+        transcript: [],
+        segments: [],
+      });
+
       const id = await invoke<string>("conductor_prompt", { track, prompt: typedWithKb, agent, lang: i18n.lang, files });
-      const run = this.runs.find((r) => r.id === pendingId || r.id === id);
+      // By `fromQueued`, never by the id we set: `apply` may have handed
+      // this run to another turn while we waited.
+      const run = this.runs.find((r) => r.fromQueued === out.id);
       if (run) {
         run.id = id;
         run.track = track;
@@ -2716,16 +2757,23 @@ class Store {
         run.agent = agent;
         run.prompt = text;
       }
+      // On its way: out of the line for good, however it got back in.
+      this.setQueued(dropQueued(this.queued, out.id));
       // The conductor now runs on this agent; keep the track's record in step.
       const tr = this.tracks.find((t) => t.id === track);
       if (tr && tr.agent !== agent) tr.agent = agent;
       return true;
     } catch (err) {
-      this.runs = this.runs.filter((r) => r.id !== pendingId);
-      if (this.stillAnswering(err)) return false;
+      this.forgetRun(out.id);
+      if (notNow(err)) return false;
       this.returnToComposer(out, err);
       return true;
     }
+  }
+
+  /** Take back the turn we made for a message that did not go. */
+  private forgetRun(queued: string) {
+    this.runs = this.runs.filter((r) => r.fromQueued !== queued);
   }
 
   /** Fold one live agent event into the run it belongs to, creating worker runs on first sight. */
