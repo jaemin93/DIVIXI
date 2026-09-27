@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn ssh_targets_and_paths_are_checked() {
-        assert!(check_ssh("user@example-host").is_ok());
+        assert!(check_ssh("user@build-host").is_ok());
         assert!(check_ssh("my-alias").is_ok());
         assert!(check_ssh("-oProxyCommand=evil").is_err());
         assert!(check_ssh("user@-oevil").is_err());

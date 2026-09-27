@@ -1355,17 +1355,6 @@ pub fn run() {
         })
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
-            // The app was Orchestra before it was Divixi; its data folder moves along.
-            if !data_dir.exists() {
-                if let Some(old) = data_dir.parent().map(|p| p.join("app.orchestra")) {
-                    if old.is_dir() {
-                        match std::fs::rename(&old, &data_dir) {
-                            Ok(()) => tracing::info!(from = %old.display(), to = %data_dir.display(), "moved the data folder"),
-                            Err(err) => tracing::warn!(%err, "could not move the old data folder; starting empty"),
-                        }
-                    }
-                }
-            }
             std::fs::create_dir_all(&data_dir)?;
             let (store, db_path) = open_store(&data_dir)?;
             let adapters_dir = data_dir.join("adapters");
