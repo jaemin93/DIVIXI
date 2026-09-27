@@ -33,13 +33,48 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where vectors come from.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct Endpoint {
     pub url: String,
     pub model: String,
     pub key: String,
     /// Requested dimensions, for models that can shorten their vectors.
     pub dims: Option<u32>,
+}
+
+/// Everything but the key, which is the user's API key for the endpoint.
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("url", &redact_url(&self.url))
+            .field("model", &self.model)
+            .field("key", &if self.key.is_empty() { "unset" } else { "hidden" })
+            .field("dims", &self.dims)
+            .finish()
+    }
+}
+
+/// An endpoint address as it may be logged or shown in an error: without
+/// the query string, where some providers want the key (`?api-key=…`),
+/// and without any `user:password@` in front of the host.
+pub fn redact_url(url: &str) -> String {
+    let (rest, query) = url.split_once('?').map_or((url, false), |(rest, _)| (rest, true));
+    let mut out = match rest.split_once("://") {
+        Some((scheme, after)) => {
+            let (authority, path) = after.split_once('/').map_or((after, ""), |(a, p)| (a, p));
+            // Only the authority: a path may hold an `@` of its own.
+            match authority.rsplit_once('@') {
+                Some((_, host)) => format!("{scheme}://…@{host}/{path}"),
+                None => rest.to_string(),
+            }
+        }
+        None => rest.to_string(),
+    };
+    if query {
+        out.push('?');
+        out.push('…');
+    }
+    out
 }
 
 impl Endpoint {
@@ -112,6 +147,8 @@ pub async fn embed(ep: &Endpoint, texts: &[String]) -> Result<Vec<Vec<f32>>, Emb
         body["dimensions"] = json!(d);
     }
     let url = format!("{}/embeddings", ep.url.trim_end_matches('/'));
+    // What the failures below name. `url` itself may carry the key.
+    let shown = redact_url(&url);
     let mut req = reqwest::Client::new()
         .post(&url)
         .header("content-type", "application/json")
@@ -120,15 +157,15 @@ pub async fn embed(ep: &Endpoint, texts: &[String]) -> Result<Vec<Vec<f32>>, Emb
     if !ep.key.is_empty() {
         req = req.header("authorization", format!("Bearer {}", ep.key));
     }
-    let res = req.send().await.map_err(|e| EmbedError::passing(format!("{url}: {e}")))?;
+    let res = req.send().await.map_err(|e| EmbedError::passing(format!("{shown}: {e}")))?;
     let status = res.status();
     let text = res.text().await.map_err(|e| EmbedError::passing(e.to_string()))?;
     if !status.is_success() {
         let detail: String = text.chars().take(300).collect();
         let refused = matches!(status.as_u16(), 400 | 413 | 422);
-        return Err(EmbedError { message: format!("{url}: {status} {detail}"), permanent: refused });
+        return Err(EmbedError { message: format!("{shown}: {status} {detail}"), permanent: refused });
     }
-    parse(&text, texts.len()).map_err(|message| EmbedError::passing(format!("{url}: {message}")))
+    parse(&text, texts.len()).map_err(|message| EmbedError::passing(format!("{shown}: {message}")))
 }
 
 /// Read `{data: [{index, embedding}]}`, putting vectors back in input order.
@@ -173,6 +210,21 @@ mod tests {
         assert_eq!(spacing(120), Duration::from_millis(500));
         assert_eq!(spacing(0), Duration::ZERO);
         assert_eq!(spacing(1), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn nothing_secret_is_printable() {
+        let ep = Endpoint { url: "https://me:pw@api.example.com/v1?api-key=sk-secret".into(), model: "m".into(), key: "sk-secret".into(), dims: Some(256) };
+        let shown = format!("{ep:?}");
+        assert!(!shown.contains("sk-secret"), "neither the key nor one in the address: {shown}");
+        assert!(!shown.contains("pw@"), "nor a password in the address: {shown}");
+        assert!(shown.contains("hidden") && shown.contains("api.example.com"), "{shown}");
+        assert!(format!("{:?}", Endpoint::default()).contains("unset"), "no key set is worth saying");
+
+        assert_eq!(redact_url("https://api.example.com/v1/embeddings"), "https://api.example.com/v1/embeddings", "a plain address is left alone");
+        assert_eq!(redact_url("https://api.example.com/v1/embeddings?api-key=sk"), "https://api.example.com/v1/embeddings?…");
+        assert_eq!(redact_url("https://me:pw@api.example.com/v1"), "https://…@api.example.com/v1");
+        assert_eq!(redact_url("http://localhost:1234/v1/@scope/x"), "http://localhost:1234/v1/@scope/x", "an @ in the path is not a password");
     }
 
     #[test]

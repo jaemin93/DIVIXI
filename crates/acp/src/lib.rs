@@ -31,7 +31,7 @@ pub use process::{spawn as spawn_agent, AgentProcess};
 pub use session::{AgentSession, McpHttp, SessionOptions};
 
 /// How to launch an agent subprocess.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSpec {
     /// Executable to run.
     pub program: String,
@@ -39,6 +39,19 @@ pub struct AgentSpec {
     pub args: Vec<String>,
     /// Extra environment variables.
     pub env: Vec<(String, String)>,
+}
+
+/// The environment's names but none of its values: a spec is printed in a
+/// log line and by everything holding one ([`PromptSpec`]), and an agent's
+/// API key or token is exactly what [`AgentSpec::env`] is for.
+impl std::fmt::Debug for AgentSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentSpec")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("env", &self.env.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// The maintained Claude Code ACP adapter.
@@ -758,5 +771,22 @@ mod mode_tests {
             Some("yolo".into())
         );
         assert_eq!(pick_autonomous_mode(&modes(&[("plan", "Plan")])), None);
+    }
+}
+
+#[cfg(test)]
+mod spec_tests {
+    use super::AgentSpec;
+
+    /// The log keeps a file now, so a spec's environment must not print its
+    /// values: that is where an agent's API key or token would be.
+    #[test]
+    fn a_spec_prints_its_environments_names_only() {
+        let mut spec = AgentSpec::binary("claude", &["--acp"]);
+        spec.env.push(("ANTHROPIC_API_KEY".into(), "sk-secret".into()));
+        let shown = format!("{spec:?}");
+        assert!(shown.contains("ANTHROPIC_API_KEY"), "the name says enough to debug with: {shown}");
+        assert!(!shown.contains("sk-secret"), "the value never goes in a log: {shown}");
+        assert!(shown.contains("claude") && shown.contains("--acp"), "{shown}");
     }
 }

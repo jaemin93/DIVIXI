@@ -19,7 +19,7 @@ const ACCOUNT_KEY: &str = "github:account";
 /// This instance's owner when it serves: a GitHub login.
 pub const OWNER_KEY: &str = "remote:owner";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Account {
     #[serde(default)]
     pub client_id: String,
@@ -27,6 +27,17 @@ pub struct Account {
     pub token: String,
     #[serde(default)]
     pub login: String,
+}
+
+/// Never the token, which is the GitHub account itself.
+impl std::fmt::Debug for Account {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Account")
+            .field("client_id", &self.client_id)
+            .field("token", &if self.token.is_empty() { "unset" } else { "hidden" })
+            .field("login", &self.login)
+            .finish()
+    }
 }
 
 /// What the settings page sees (never the token).

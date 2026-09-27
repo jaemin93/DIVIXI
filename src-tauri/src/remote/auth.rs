@@ -1,6 +1,6 @@
 //! Who may use this Divixi as a remote instance: devices and their tokens.
 //!
-//! As in Kiro Crew (docs/system-specs/modules/dashboard-token-auth.md):
+//! As in Kiro Crew (https://github.com/kirodotdev/KiroCrew):
 //! a token is `base64url(claims).base64url(HMAC-SHA256)` under a key kept
 //! in the app's data folder, so a restart signs nobody out. A device comes
 //! in one of two ways: with a pairing token minted on this machine
@@ -51,7 +51,7 @@ pub enum Kind {
 }
 
 /// What a token says.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub k: Kind,
     /// Expiry, unix seconds.
@@ -66,7 +66,7 @@ pub struct Claims {
 }
 
 /// A device paired with this Divixi.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Device {
     pub id: String,
     /// From its browser, for the list.
@@ -79,6 +79,27 @@ pub struct Device {
     /// The refresh token's current link; an older one coming back is a copy.
     #[serde(default)]
     refresh: String,
+}
+
+/// Without `n`: it is the one-time value a pairing link is good for and
+/// the link in the refresh chain, so it does not go in a log.
+impl std::fmt::Debug for Claims {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Claims").field("k", &self.k).field("exp", &self.exp).field("d", &self.d).field("g", &self.g).finish_non_exhaustive()
+    }
+}
+
+/// Without the refresh token it holds; the rest is for the device list.
+impl std::fmt::Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Device")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("created", &self.created)
+            .field("last_seen", &self.last_seen)
+            .field("login", &self.login)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Why a request is not let in.
