@@ -17,7 +17,7 @@
    */
   let { selected = $bindable<string[]>([]) }: { selected?: string[] } = $props();
 
-  type Tool = "select" | "note" | "pen" | "eraser" | "arrow" | "frame" | "question";
+  type Tool = "select" | "lasso" | "note" | "pen" | "eraser" | "arrow" | "frame" | "question";
   let tool = $state<Tool>("select");
   let penColor = $state("");
   const PEN_COLORS = ["", "#e03127", "#3b82f6", "#46c46a"];
@@ -121,6 +121,39 @@
   function taken(m: Box): string[] {
     const touches = (b: Box) => b.x < m.x + m.w && m.x < b.x + b.w && b.y < m.y + m.h && m.y < b.y + b.h;
     const within = (b: Box) => b.x >= m.x && b.y >= m.y && b.x + b.w <= m.x + m.w && b.y + b.h <= m.y + m.h;
+    return doc.nodes.filter((n) => (n.kind === "frame" || n.kind === "sketch" ? within(n) : touches(n))).map((n) => n.id);
+  }
+
+  /** The loop being drawn to pick with (the lasso), in board coordinates. */
+  let lasso = $state<{ x: number; y: number }[] | null>(null);
+
+  /** Whether a point is inside a closed loop (even-odd rule). */
+  function inLoop(px: number, py: number, loop: { x: number; y: number }[]): boolean {
+    let inside = false;
+    for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+      const a = loop[i];
+      const b = loop[j];
+      if (a.y > py !== b.y > py && px < ((b.x - a.x) * (py - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+    }
+    return inside;
+  }
+
+  /** What a loop takes, by the box's rule: a card it reaches into (a corner
+   *  or the middle inside, or the loop passing through the card); frames and
+   *  ink only when wholly inside. */
+  function looped(loop: { x: number; y: number }[]): string[] {
+    if (loop.length < 3) return [];
+    const corners = (b: Box) => [
+      [b.x, b.y],
+      [b.x + b.w, b.y],
+      [b.x, b.y + b.h],
+      [b.x + b.w, b.y + b.h],
+    ];
+    const within = (b: Box) => corners(b).every(([x, y]) => inLoop(x, y, loop));
+    const touches = (b: Box) =>
+      inLoop(b.x + b.w / 2, b.y + b.h / 2, loop) ||
+      corners(b).some(([x, y]) => inLoop(x, y, loop)) ||
+      loop.some((p) => p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h);
     return doc.nodes.filter((n) => (n.kind === "frame" || n.kind === "sketch" ? within(n) : touches(n))).map((n) => n.id);
   }
 
@@ -426,6 +459,36 @@
     }
     if (e.button !== 0) return;
 
+    // The lasso (O, or Alt with the select tool on the empty board): draw a
+    // loop around what to pick (Shift adds to what is picked). Over cards
+    // too; the select tool comes back once it is drawn, to move them.
+    if (tool === "lasso" || (tool === "select" && !id && e.altKey)) {
+      e.preventDefault();
+      const keep = e.shiftKey ? [...selected] : [];
+      if (!e.shiftKey) {
+        selected = [];
+        selectedEdge = "";
+      }
+      lasso = [p];
+      follow(
+        e,
+        (ev) => {
+          const q = toWorld(ev);
+          const last = lasso?.at(-1);
+          // A point every few pixels on screen is plenty.
+          if (!lasso || (last && Math.hypot(q.x - last.x, q.y - last.y) * view.k < 3)) return;
+          lasso = [...lasso, q];
+          selected = [...new Set([...keep, ...looped(lasso)])];
+        },
+        () => {
+          lasso = null;
+          tool = "select";
+        },
+        () => (lasso = null),
+      );
+      return;
+    }
+
     // The empty board with the select tool: drag a box to pick what it
     // takes in (Shift adds to what is picked); a click clears.
     if (tool === "select" && !id) {
@@ -674,7 +737,7 @@
       return;
     }
     if (e.altKey) return;
-    const keys: Record<string, Tool> = { v: "select", n: "note", p: "pen", e: "eraser", a: "arrow", f: "frame", q: "question" };
+    const keys: Record<string, Tool> = { v: "select", o: "lasso", n: "note", p: "pen", e: "eraser", a: "arrow", f: "frame", q: "question" };
     const k = e.key.toLowerCase();
     if (k === "l" && el) {
       e.preventDefault();
@@ -912,6 +975,11 @@
       />
     {/if}
 
+    {#if lasso && lasso.length > 1}
+      <svg class="live" style="left: 0; top: 0" width="1" height="1" aria-hidden="true">
+        <path class="lassoline" d={`M${lasso.map((q) => `${q.x} ${q.y}`).join(" L")} Z`} vector-effect="non-scaling-stroke" />
+      </svg>
+    {/if}
     {#if ink}
       <svg class="live" style="left: 0; top: 0" width="1" height="1">
         <path d={strokePath(ink)} fill={ink.color || "var(--txt)"} />
@@ -919,9 +987,9 @@
     {/if}
   </div>
 
-  <!-- Tools, like a sketchbook's: V select · N note · P pen · E eraser · A arrow. -->
+  <!-- Tools, like a sketchbook's: V select · O lasso · N note · P pen · E eraser · A arrow. -->
   <div class="tools" role="toolbar" aria-label={t("design.tools")} tabindex="-1" onpointerdown={(e) => e.stopPropagation()}>
-    {#each [["select", "V"], ["note", "N"], ["question", "Q"], ["frame", "F"], ["pen", "P"], ["eraser", "E"], ["arrow", "A"]] as [id, key] (id)}
+    {#each [["select", "V"], ["lasso", "O"], ["note", "N"], ["question", "Q"], ["frame", "F"], ["pen", "P"], ["eraser", "E"], ["arrow", "A"]] as [id, key] (id)}
       <button
         type="button"
         class="tool"
@@ -935,6 +1003,7 @@
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
           {#if id === "select"}<path d="M3 2l9 5-4 1-2 4z" />
+          {:else if id === "lasso"}<path d="M8 3c3.3 0 5.5 1.6 5.5 3.6S11.3 10 8 10 2.5 8.6 2.5 6.6 4.7 3 8 3z" stroke-dasharray="2 1.6" /><path d="M5 9.5c-.6 1-.6 2.2.2 3" />
           {:else if id === "note"}<rect x="2.5" y="2.5" width="11" height="11" /><path d="M5 6h6M5 9h4" />
           {:else if id === "pen"}<path d="M3 13l1-3 7-7 2 2-7 7z" /><path d="M9.5 4.5l2 2" />
           {:else if id === "eraser"}<path d="M6 13h7M2.5 9.5l5-5 4 4-4 4H5z" />
@@ -1140,6 +1209,13 @@
     padding: 1px 6px;
     outline: none;
     user-select: text;
+  }
+
+  .lassoline {
+    fill: color-mix(in srgb, var(--acc) 10%, transparent);
+    stroke: var(--acc);
+    stroke-width: 1;
+    stroke-dasharray: 4 3;
   }
 
   .marquee {
