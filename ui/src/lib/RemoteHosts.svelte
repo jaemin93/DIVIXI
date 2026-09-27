@@ -468,7 +468,6 @@
     border: 1px solid var(--lines);
     color: var(--txt);
     font-size: 14px;
-    outline: none;
   }
 
   input:focus {

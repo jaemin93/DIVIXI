@@ -192,7 +192,6 @@
     border: 1px solid var(--lines);
     color: var(--txt);
     font-size: 12px;
-    outline: none;
   }
 
   .path input:focus {
@@ -242,7 +241,6 @@
     border: 1px solid var(--acc);
     color: var(--txt);
     font-size: 12px;
-    outline: none;
   }
 
   .name,

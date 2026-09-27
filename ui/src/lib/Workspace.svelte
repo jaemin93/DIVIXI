@@ -984,7 +984,6 @@
     font-family: var(--sans);
     font-size: 11px;
     padding: 0 9px;
-    outline: none;
   }
 
   .filter:focus {

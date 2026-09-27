@@ -111,7 +111,11 @@
     opacity: 0.6;
   }
 
+  /* One pixel, not the global two: the strip is six wide and sits over a
+     hairline, so a thicker ring would straddle both columns. The colour is
+     the shared one, so a focused splitter reads as focus and not as an
+     accent edge. */
   .handle:focus-visible {
-    outline: 1px solid var(--acc);
+    outline: 1px solid var(--focus);
   }
 </style>

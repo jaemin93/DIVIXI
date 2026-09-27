@@ -308,6 +308,30 @@
     return { x: (r.width / 2 - view.x) / view.k, y: (r.height / 2 - view.y) / view.k };
   }
 
+  /**
+   * Bring a card to the middle of the board without changing the zoom.
+   *
+   * The keyboard needs this: a card picked with the arrow keys, or an
+   * answer reached with Tab, would otherwise be focused somewhere off the
+   * edge of the sheet. The world is moved by a transform, not by
+   * scrolling, so the browser cannot do it for us.
+   */
+  function reveal(n: DesignNode) {
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    view = { ...view, x: r.width / 2 - (n.x + n.w / 2) * view.k, y: r.height / 2 - (n.y + n.h / 2) * view.k };
+  }
+
+  /** Pick the card before or after the selected one, and show it. */
+  function step(by: 1 | -1) {
+    if (!doc.nodes.length) return;
+    const at = selected.length === 1 ? doc.nodes.findIndex((n) => n.id === selected[0]) : -1;
+    const next = doc.nodes[(at + by + doc.nodes.length) % doc.nodes.length];
+    selected = [next.id];
+    selectedEdge = "";
+    reveal(next);
+  }
+
   async function addLink() {
     const url = linkDraft.trim();
     const at = linkAt;
@@ -737,6 +761,29 @@
       return;
     }
     if (e.altKey) return;
+    // Working the board itself from the keyboard. Only while the board has
+    // focus: the design list and the chat beside it use the same keys for
+    // their own purposes, and the tool letters below are deliberately
+    // wider than that.
+    if (el && document.activeElement === el) {
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+        e.preventDefault();
+        step(1);
+        return;
+      }
+      if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+        e.preventDefault();
+        step(-1);
+        return;
+      }
+      // What a double-click does, for one picked card.
+      if ((e.key === "Enter" || e.key === "F2") && single) {
+        e.preventDefault();
+        if (e.shiftKey && single.kind === "question") startAnswer(single);
+        else startEdit(single);
+        return;
+      }
+    }
     const keys: Record<string, Tool> = { v: "select", o: "lasso", n: "note", p: "pen", e: "eraser", a: "arrow", f: "frame", q: "question" };
     const k = e.key.toLowerCase();
     if (k === "l" && el) {
@@ -779,6 +826,10 @@
   }}
 />
 
+<!-- A focusable `application` is how a canvas-like widget is exposed: it
+     takes the keyboard for itself and says so. Svelte's generic check
+     does not know the role. -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div
   class="board"
   class:pen={tool === "pen"}
@@ -790,13 +841,17 @@
   bind:this={el}
   class:grab={spaceHeld}
   class:grabbing={panning}
-  tabindex="-1"
+  tabindex="0"
   onpointerdowncapture={takeFocus}
   onpointerdown={onDown}
   role="application"
   aria-label={t("design.board")}
+  aria-describedby="board-keys"
   style="background-position: {view.x}px {view.y}px; background-size: {22 * view.k}px {22 * view.k}px"
 >
+  <!-- Said once, when focus lands on the board, so the keys are not a
+       secret to anyone who cannot find them by pointing. -->
+  <p id="board-keys" class="offscreen">{t("design.boardKeys")}</p>
   <div class="world" style="transform: translate({view.x}px, {view.y}px) scale({view.k})">
     <!-- Arrows under the items. -->
     <svg class="edges" style="left: {edgeFrame.x}px; top: {edgeFrame.y}px" width={edgeFrame.w} height={edgeFrame.h}>
@@ -899,7 +954,30 @@
           {:else}
             <div class="text" class:empty={!n.text}>{n.text || t("design.emptyNote")}</div>
           {/if}
-          <div class="answer" role="presentation" onpointerdown={(ev) => ev.stopPropagation()} ondblclick={(ev) => ev.stopPropagation()} onclick={() => answering !== n.id && startAnswer(n)}>
+          <!-- Its own tab stop: the only way to reach an answer without a
+               pointer. Reaching it with Tab brings the card into view (a
+               transformed world will not scroll itself into one), but
+               clicking it must not move the board under the pointer, so
+               only keyboard focus pans.
+               Enter opens it, not Space: space is held to drag the sheet,
+               and that is not a habit to break here. -->
+          <div
+            class="answer"
+            role={answering === n.id ? "presentation" : "button"}
+            tabindex={answering === n.id ? -1 : 0}
+            aria-label={t("design.answerThis")}
+            aria-keyshortcuts="Enter"
+            onpointerdown={(ev) => ev.stopPropagation()}
+            ondblclick={(ev) => ev.stopPropagation()}
+            onfocus={(ev) => ev.currentTarget.matches(":focus-visible") && reveal(n)}
+            onkeydown={(ev) => {
+              if (ev.key !== "Enter") return;
+              ev.preventDefault();
+              ev.stopPropagation();
+              if (answering !== n.id) startAnswer(n);
+            }}
+            onclick={() => answering !== n.id && startAnswer(n)}
+          >
             {#if answering === n.id}
               <textarea
                 class="edit"
@@ -1105,10 +1183,6 @@
     cursor: pointer;
   }
 
-  .board:focus {
-    outline: none;
-  }
-
   /* Space held: the board is a sheet to drag; cards' viewers let go of the press. */
   .board.grab,
   .board.grab :global(*) {
@@ -1207,7 +1281,6 @@
     color: var(--txt);
     font-size: 13px;
     padding: 1px 6px;
-    outline: none;
     user-select: text;
   }
 
@@ -1397,7 +1470,6 @@
     color: var(--txt);
     font-family: var(--mono);
     font-size: 12px;
-    outline: none;
     user-select: text;
   }
 
@@ -1505,7 +1577,6 @@
     resize: none;
     background: transparent;
     border: 0;
-    outline: none;
     color: var(--txt);
     font-family: var(--sans);
     font-size: 14px;

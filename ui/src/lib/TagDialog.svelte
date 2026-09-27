@@ -275,7 +275,6 @@
     font-family: var(--sans);
     font-size: 12px;
     padding: 0 9px;
-    outline: none;
   }
 
   .new input:focus {

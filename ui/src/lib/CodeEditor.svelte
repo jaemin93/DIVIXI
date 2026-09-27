@@ -198,7 +198,6 @@
     background: transparent;
     color: transparent;
     caret-color: var(--hi);
-    outline: none;
   }
 
   textarea::selection {

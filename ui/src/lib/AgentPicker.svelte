@@ -278,7 +278,6 @@
     color: var(--txt);
     font-family: var(--sans);
     padding: 0 10px;
-    outline: none;
   }
 
   .filter:focus {

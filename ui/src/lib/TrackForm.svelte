@@ -440,7 +440,6 @@
     font-family: var(--sans);
     font-size: 13px;
     padding: 0 12px;
-    outline: none;
   }
 
   select {

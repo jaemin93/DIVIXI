@@ -145,7 +145,21 @@
               autofocus
             />
           {:else}
-            <button class="serif title" ondblclick={rename} title={t("design.renameHint")}>{d.title}</button>
+            <!-- A double-click for the pointer, as before; Enter or Space
+                 for the keyboard, which had no way in at all. A single
+                 click still does nothing, deliberately: the title is read
+                 far more often than it is changed. -->
+            <button
+              class="serif title"
+              ondblclick={rename}
+              onkeydown={(e) => {
+                if (e.key !== "Enter" && e.key !== " ") return;
+                e.preventDefault();
+                rename();
+              }}
+              title={t("design.renameHint")}
+              aria-label={t("design.renameTitle", { title: d.title })}>{d.title}</button
+            >
           {/if}
           <span class="grow"></span>
           <!-- What the design has become. -->
@@ -252,7 +266,6 @@
     border: 1px solid var(--line);
     color: var(--txt);
     font-size: 12px;
-    outline: none;
   }
 
   .new input:focus {
@@ -406,7 +419,6 @@
 
   .rename {
     border-bottom: 1px solid var(--acc);
-    outline: none;
     font-family: var(--serif);
   }
 

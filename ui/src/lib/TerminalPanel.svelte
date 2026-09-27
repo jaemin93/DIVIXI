@@ -223,6 +223,25 @@
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", stop);
   }
+
+  /** What the store clamps the panel to; the splitter says so out loud. */
+  const TERM_MIN = 120;
+  const TERM_RESET = 280;
+  /** The ceiling the store clamps to, read when the splitter renders. */
+  const termMax = () => Math.max(160, window.innerHeight - 220);
+
+  /**
+   * The same resize from the keyboard: the panel grows upward, so Up makes
+   * it taller. Home takes it back to the height double-clicking gives.
+   */
+  function onGripKey(e: KeyboardEvent) {
+    const step = e.shiftKey ? 80 : 24;
+    if (e.key === "ArrowUp") store.setTermHeight(store.termHeight + step, true);
+    else if (e.key === "ArrowDown") store.setTermHeight(store.termHeight - step, true);
+    else if (e.key === "Home") store.setTermHeight(TERM_RESET, true);
+    else return;
+    e.preventDefault();
+  }
 </script>
 
 <section
@@ -236,8 +255,23 @@
   aria-hidden={!store.termOpen}
 >
   <div class="inner" style="height: {store.termHeight}px">
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="grip" onpointerdown={startDrag} ondblclick={() => store.setTermHeight(280, true)} title={t("term.resize")}></div>
+  <!-- A focusable splitter is a recognised ARIA pattern (as SplitHandle
+       does for the columns); Svelte's generic checks do not know it. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+  <div
+    class="grip"
+    role="separator"
+    aria-orientation="horizontal"
+    aria-label={t("term.resize")}
+    aria-valuenow={store.termHeight}
+    aria-valuemin={TERM_MIN}
+    aria-valuemax={termMax()}
+    tabindex="0"
+    onpointerdown={startDrag}
+    onkeydown={onGripKey}
+    ondblclick={() => store.setTermHeight(TERM_RESET, true)}
+    title={t("term.resize")}
+  ></div>
   <div class="bar">
     <div class="tabs">
       {#each tabs as tab (tab.key)}
