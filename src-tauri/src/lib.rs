@@ -42,6 +42,7 @@ mod metrics;
 mod preview;
 mod terminal;
 mod remote;
+mod update;
 mod workspace;
 mod worktree;
 
@@ -344,24 +345,12 @@ async fn worker_sessions(app: AppHandle) -> Result<Vec<(String, Vec<conductor::W
     Ok(conductor::worker_states(&app).await)
 }
 
-/// Delete a worker's record: its runs with their events and kept reports,
-/// and the agent session the app would have resumed. Its session is closed
-/// first. Returns how many runs went.
-///
-/// What this never touches: the worker's folder and every file in it, and
-/// its checkout. Those hold what the human asked for; the app does not
-/// delete their results. Refused while the worker is in a turn, and while
-/// it holds changes nobody has merged — deleting the record would leave no
-/// way back to them.
+/// Delete a worker's record, leaving its folder and files alone. Returns
+/// how many runs went. The work is in `conductor::worker_delete`, which
+/// holds the worker's name against new turns for the length of it.
 #[tauri::command]
 async fn worker_delete(app: AppHandle, track: String, worker: String) -> Result<u32, String> {
-    worker_idle(&app.state::<AppState>(), &track, &worker).await?;
-    conductor::worker_close(app.clone(), track.clone(), worker.clone()).await?;
-    let state = app.state::<AppState>();
-    worktree::check_nothing_pending(&state.store, &track, std::slice::from_ref(&worker))?;
-    let gone = state.store.delete_worker(&track, &worker).map_err(|e| e.to_string())?;
-    tracing::info!(%track, %worker, runs = gone, "deleted a worker's record; its folder and files stay");
-    Ok(gone)
+    conductor::worker_delete(app, track, worker).await
 }
 
 /// Everything waiting for a track's conductor (worker reports and decision
@@ -1076,6 +1065,32 @@ fn set_setting(state: State<'_, AppState>, key: String, value: String) -> Result
         .map_err(|e| e.to_string())
 }
 
+/// A line from the interface, for the log file.
+///
+/// Everything that goes wrong in the UI is shown to the human as a toast
+/// and then expires. Without this the app's own log — and the bug report
+/// built out of it (`diagnostics::report`, which reads WARN and ERROR
+/// lines back with `logging::recent_errors`) — would never hear about
+/// any of it, and "what did it say before it went?" would have no answer.
+///
+/// The `ui` target keeps these apart from the core's own lines. Called
+/// for every occurrence, including the repeats the toast folds into one:
+/// the screen is for reading, the log is for working it out afterwards.
+///
+/// Nothing is returned and nothing can fail here on purpose. A failure to
+/// record an error must never become another error to record; the caller
+/// (`raise` in store.svelte.ts) drops it on the floor for the same reason.
+#[tauri::command]
+fn ui_log(level: String, message: String) {
+    // A message from a process can be enormous; the log keeps the useful end.
+    let message: String = message.chars().take(2000).collect();
+    if level == "warn" {
+        tracing::warn!(target: "ui", "{message}");
+    } else {
+        tracing::error!(target: "ui", "{message}");
+    }
+}
+
 /// Detect every agent now and remember the result. Takes several seconds:
 /// each agent is launched and probed over ACP.
 #[tauri::command]
@@ -1328,6 +1343,99 @@ fn open_store(data_dir: &std::path::Path) -> anyhow::Result<(Store, String)> {
 }
 
 /// Entry point shared by the desktop binary.
+/// How long the agents get to stop when Divixi is leaving, before it goes
+/// anyway.
+///
+/// Sessions tear down in parallel -- each is its own task -- so this is one
+/// agent's teardown plus margin, not one per session. An agent that ignores
+/// SIGTERM is given `TERM_GRACE` (500ms in `crates/acp`) and then SIGKILLed, so
+/// three seconds is several times what the slow path needs.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Close every agent session on the way out, and leave a trace of why the exit
+/// took a moment.
+///
+/// Both exits need this, and neither can lean on destructors: `process::exit`
+/// and `AppHandle::exit` do not unwind the tasks that own the agents. Closing
+/// the sessions is what makes those tasks run `process.shutdown()`, and that is
+/// where an agent's process group is taken down.
+///
+/// Nothing open means no wait at all, which is the ordinary case -- quitting
+/// should not feel like it has stalled.
+async fn close_sessions_for_exit(app: &AppHandle, why: &str) {
+    let closed = app.state::<AppState>().sessions.shutdown_all().await;
+    if closed == 0 {
+        tracing::info!(why, "stopping: no agent sessions were open");
+        return;
+    }
+    // Logged before the wait, not after: this is the moment someone is looking
+    // at the window that has not closed yet, or the terminal that has not come
+    // back, and wondering whether it is stuck.
+    tracing::info!(
+        why,
+        sessions = closed,
+        grace_ms = SHUTDOWN_GRACE.as_millis() as u64,
+        "stopping: closing agent sessions, waiting for their process groups"
+    );
+    tokio::time::sleep(SHUTDOWN_GRACE).await;
+    tracing::info!(sessions = closed, "agent sessions closed");
+}
+
+/// Whichever signal asks the server to stop, by the name to put in the log.
+///
+/// SIGTERM is what a service manager sends (`systemctl stop`, a container
+/// stopping); Ctrl-C in a terminal is SIGINT. Windows has no SIGTERM, so it
+/// waits on Ctrl-C alone -- `divixi-server` is a Linux binary in practice, but
+/// the workspace has to compile on Windows.
+#[cfg(feature = "server")]
+async fn shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => "SIGINT (Ctrl-C)",
+                    _ = term.recv() => "SIGTERM",
+                }
+            }
+            // Registering the handler failed: still honour Ctrl-C rather than
+            // give up on shutting down cleanly at all.
+            Err(err) => {
+                tracing::warn!(%err, "could not listen for SIGTERM; Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+                "SIGINT (Ctrl-C)"
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl-C"
+    }
+}
+
+/// Close the agent sessions when the server is asked to stop.
+///
+/// Why this exists at all: `crates/acp` puts each agent in a process group of
+/// its own, which is what lets a session take its whole tree down -- but it also
+/// takes the agent out of the terminal's foreground group, so Ctrl-C no longer
+/// reaches it. Without this handler the server died on the first SIGINT with no
+/// destructor run, and every agent it had started stayed alive. The next run
+/// then met its own orphans.
+///
+/// The exit is `process::exit`, deliberately: by then the session tasks have
+/// already taken their agents down, and there is nothing further to unwind that
+/// is worth blocking on.
+#[cfg(feature = "server")]
+fn install_signal_shutdown(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let signal = shutdown_signal().await;
+        close_sessions_for_exit(&app, signal).await;
+        std::process::exit(0);
+    });
+}
+
 pub fn run() {
     #[cfg(not(feature = "server"))]
     let builder = tauri::Builder::default()
@@ -1433,9 +1541,12 @@ pub fn run() {
             download_agent,
             get_setting,
             set_setting,
+            ui_log,
             app_info,
             logs_open,
             diagnostics_report,
+            update::update_release,
+            update::update_check,
             log_level,
             log_level_set,
             last_crash,
@@ -1551,6 +1662,10 @@ pub fn run() {
             tauri::async_runtime::spawn(conductor::dismiss_stale_permissions(app.handle().clone(), None));
             // Library sync, and a watch on its files.
             knowledge::start(app.handle().clone());
+            // A server is quit with a signal, not a window, so it has to be
+            // told to clean up after itself.
+            #[cfg(feature = "server")]
+            install_signal_shutdown(app.handle().clone());
             #[cfg(not(feature = "server"))]
             {
                 if let Some(window) = app.get_window("main") {
@@ -1686,7 +1801,21 @@ fn tray(app: &AppHandle) -> tauri::Result<()> {
             "quit" => {
                 // Tunnels to other machines' Divixis end with the app.
                 remote::client::close_all(app);
-                app.exit(0)
+                // The agents do not, unless they are told. `app.exit` does not
+                // unwind the tasks holding them, so without this the window
+                // disappears and the agent trees keep running -- the user has no
+                // way to know, and the next launch meets its own orphans.
+                // Windows would be covered by the job objects; Unix would not.
+                //
+                // Spawned rather than awaited because a menu handler cannot
+                // await, and the exit moves inside it: quitting takes as long as
+                // closing the sessions takes, which is nothing at all when none
+                // are open.
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    close_sessions_for_exit(&app, "tray Quit").await;
+                    app.exit(0);
+                });
             }
             _ => {}
         })
