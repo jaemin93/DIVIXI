@@ -33,7 +33,7 @@ use orchestra_acp::{AgentSession, AgentSpec, McpHttp, SessionOptions};
 use orchestra_core::report::{self, Report};
 use orchestra_core::{AgentEvent, RunStatus};
 use orchestra_mcp::{McpServer, Tool};
-use orchestra_store::{Decision, DecisionOption, DecisionStatus, NewDecision, PermissionAsk, TrackInfo};
+use orchestra_store::{Decision, DecisionOption, DecisionStatus, NewDecision, PermissionAsk, RunSummary, TrackInfo};
 use serde_json::{json, Value};
 use tauri::{Emitter, Manager};
 
@@ -71,11 +71,44 @@ pub const DECISION_PREFIX: &str = "[decision]";
 /// question, for it to answer with `answer_worker` (or put to the human).
 pub const PERMISSION_PREFIX: &str = "[worker-permission]";
 
-/// A worker run waits at most this long for the agent to finish a turn.
-const WORKER_TURN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// A worker run waits at most this long for the agent to finish a turn,
+/// however busy it looks.
+///
+/// This is the last defence, not the usual one: [`WORKER_QUIET_LIMIT`]
+/// catches a worker that has stopped answering, and it catches it in
+/// twenty minutes. What it cannot catch is an agent that started a tool
+/// call and never reported its end — nothing outstanding ever clears, so
+/// the quiet clock never runs. That is what this is for.
+///
+/// It was an hour, and an hour was too close to the work. Two workers in
+/// one session here took 58 and 57 minutes: a task slightly larger than
+/// those would have had a worker killed in the middle of doing its job
+/// properly. Four hours leaves that room. Cutting a working worker off is
+/// worse than taking its report late, and with the quiet clock in front
+/// of it this cap only ever fires on a turn nothing else could see was
+/// wrong.
+const WORKER_TURN_TIMEOUT: Duration = Duration::from_secs(4 * 60 * 60);
 
-/// How long a worker report waits for the conductor to become free.
-const REPORT_WAIT: Duration = Duration::from_secs(30 * 60);
+/// How long a worker may say nothing at all before its turn is taken as
+/// stuck — but only while it has no tool call running and no permission
+/// question waiting, so a long build or test says nothing and is left alone
+/// (a release build here takes six minutes, `cargo test` far longer).
+///
+/// Twenty minutes is for the other silence: the agent between its own steps,
+/// thinking or waiting on its model. Minutes there, not tens of minutes.
+/// Killing a worker that is working is worse than taking its report late,
+/// so this errs long and only ever fires on a worker that is doing nothing
+/// the app can see.
+const WORKER_QUIET_LIMIT: Duration = Duration::from_secs(20 * 60);
+
+/// How often a worker turn is looked at while it runs.
+const WORKER_QUIET_CHECK: Duration = Duration::from_secs(30);
+
+/// How long a turn for the conductor spins waiting for it to be free before
+/// it is written down instead (see [`park`]) and handed on by one of the
+/// flush triggers. Short: spinning costs a wake-up twice a second and buys
+/// nothing that parking does not, now that parking outlives the app.
+const REPORT_WAIT: Duration = Duration::from_secs(60);
 /// What `conductor_turn` returns while an earlier turn is still running.
 pub(crate) const BUSY: &str = "conductor is still responding";
 
@@ -125,6 +158,9 @@ pub struct Sessions {
     conductor_gates: parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Tracks whose conductor has a turn in flight.
     busy: parking_lot::Mutex<HashSet<String>>,
+    /// Runs the human stopped by hand, so the record and the report say
+    /// "stopped" and not "failed". Forgotten once the run has reported.
+    stopped: parking_lot::Mutex<HashSet<String>>,
 }
 
 impl Sessions {
@@ -143,6 +179,19 @@ impl Sessions {
 
     pub fn is_busy(&self, track: &str) -> bool {
         self.busy.lock().contains(track)
+    }
+
+    fn mark_stopped(&self, run: &str) {
+        self.stopped.lock().insert(run.to_string());
+    }
+
+    /// Whether the human stopped this run by hand.
+    pub fn was_stopped(&self, run: &str) -> bool {
+        self.stopped.lock().contains(run)
+    }
+
+    fn forget_stopped(&self, run: &str) {
+        self.stopped.lock().remove(run);
     }
 
     /// Open agent sessions across tracks, and how many are mid-turn.
@@ -222,6 +271,7 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
 - 같은 작업자에게 이어서 시킬 일은 `ask_worker`로 보냅니다. 작업자는 이전 대화를 기억합니다.
 - 작업자 목록은 열린 것과 닫힌 것 모두 `worker_status`로 봅니다. 터미널이나 파일을 뒤져 작업자를 찾지 않습니다.
 - 닫힌 작업자는 같은 이름으로 `spawn_worker`나 `ask_worker`를 부르면 이전 대화를 기억한 채 다시 열립니다. 기억을 버리고 처음부터 시작하려면 `spawn_worker`에 fresh=true를 줍니다. `close_worker`는 세션만 닫고 기록은 남깁니다.
+- 끝난 작업자 세션이 쌓이면(`worker_status`의 idle_sessions) 사람에게 정리를 제안하고, 사람이 그러라고 한 것만 `close_worker`로 닫습니다. 기록을 지우는 일은 당신이 하지 않습니다 — 사람이 작업자 목록에서 직접 합니다. 어떤 경우에도 작업자의 작업 폴더와 그 안의 파일은 지워지지 않습니다.
 - 도구가 오류를 돌려주면 오류 문구에 적힌 대로 한 번만 다시 시도하고, 그래도 안 되면 사람에게 무엇이 막혔는지 말합니다. 같은 도구를 반복해서 부르지 않습니다.
 - 사람이 골라야 할 일(여러 갈래 중 선택, 되돌리기 어려운 변경, 취향이나 우선순위)은 스스로 정하지 않습니다. 선택지를 본문에 A/B/C로 늘어놓지 말고 `request_decision`을 부르세요. 앱이 선택지를 버튼이 있는 결정 카드로 보여 줍니다. 부른 뒤에는 무엇을 물었는지 한 문장만 말하고 턴을 끝냅니다. 사람의 답은 `{DECISION_PREFIX}`로 시작하는 메시지로 옵니다. 작업자 보고에 사람이 정해야 할 질문이 있으면 그것도 `request_decision`으로 올립니다. 사람이 대화 중에 직접 정한 것은 `record_decision`으로 남깁니다.
 - 사람은 작업자와 직접 이야기하지 않습니다. 작업자가 무언가를 해도 되는지 물으면 `{PERMISSION_PREFIX}`로 시작하는 메시지로 당신에게 옵니다. 사람의 지시와 맡긴 일의 범위 안이면 당신이 직접 골라 `answer_worker`로 답합니다(허용할 때는 보통 이번만 허용). 되돌리기 어렵거나 맡긴 범위를 벗어나거나 사람이 정해야 할 일이면 `request_decision`으로 사람에게 묻고, 답이 오면 그대로 `answer_worker`로 전합니다. 작업자는 답을 받을 때까지 기다리므로 미루지 않습니다.
@@ -255,6 +305,7 @@ Rules:
 - Follow-ups for the same worker go through `ask_worker`; the worker remembers its earlier turns.
 - `worker_status` lists every worker, open and closed. Never hunt for workers through the terminal or files.
 - A closed worker reopens with its earlier conversation when you call `spawn_worker` or `ask_worker` with its name. To drop that memory and start over, pass fresh=true to `spawn_worker`. `close_worker` only closes the session; the record stays.
+- When finished worker sessions pile up (`worker_status` lists them under idle_sessions), offer the human to tidy them away and call `close_worker` only for the ones they agree to. Deleting a record is never yours to do: the human does that from the worker list. No deletion ever touches a worker's folder or the files in it.
 - If a tool returns an error, retry once as the message suggests; if that fails, tell the human what is blocked. Never call the same tool repeatedly.
 - Choices that belong to the human (a choice between directions, hard-to-undo changes, taste or priorities) are not yours to make. Do not list options as A/B/C in prose: call `request_decision`, and the app shows them as a decision card with buttons. After calling it, say in one sentence what you asked and end your turn. The human's answer arrives as a message starting with `{DECISION_PREFIX}`. If a worker report raises a question only the human can answer, put that to them with `request_decision` too. Decisions the human makes in conversation are recorded with `record_decision`.
 - The human does not talk to workers. When a worker asks whether it may do something, the question reaches you as a message starting with `{PERMISSION_PREFIX}`. If it is within the human's instructions and the task you gave, choose yourself and answer with `answer_worker` (usually allow once). If it is hard to undo, outside the task, or the human's call, ask them with `request_decision` and pass their answer on with `answer_worker`. The worker waits until answered, so do not leave it.
@@ -335,13 +386,32 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
         ),
         Tool::new(
             "worker_status",
-            "List every worker of this track, open or closed: agent, whether its session is open, whether a turn is in flight (with its run id), how many runs it has, and its last run with status. A closed worker marked resumable reopens with its memory when you call spawn_worker or ask_worker with its name.",
+            "Every worker of this track, open or closed, under `workers`: agent, whether its session is open, whether a turn is in flight (with its run id), how many runs it has, its last run with status, and how long its open session has been idle. A closed worker marked resumable reopens with its memory when you call spawn_worker or ask_worker with its name. `working` names the ones in a turn, `idle_sessions` the open sessions with nothing to do, and `note` says what to do about a long list.",
             json!({ "type": "object", "properties": {}, "additionalProperties": false }),
             move |_args| {
                 let (app, track) = status.clone();
                 async move {
                     let state = app.state::<AppState>();
-                    Ok(Value::Array(worker_list(&state, &track).await))
+                    let workers = worker_list(&state, &track).await;
+                    let named = |open: bool, running: bool| -> Vec<String> {
+                        workers
+                            .iter()
+                            .filter(|w| w["open"].as_bool().unwrap_or(false) == open && w["running"].as_bool().unwrap_or(false) == running)
+                            .filter_map(|w| w["name"].as_str().map(str::to_string))
+                            .collect()
+                    };
+                    let working = named(true, true);
+                    let idle = named(true, false);
+                    let note = if idle.is_empty() {
+                        "Nothing to tidy up.".to_string()
+                    } else {
+                        format!(
+                            "{} worker session(s) are open with nothing to do: {}. An open session is an agent process holding memory. When the list has grown long, say so to the human and offer to close the ones they are done with, then call close_worker for those; the record and the memory stay, so the worker reopens by name. You cannot delete a worker's record — only the human can, by right-clicking it in the worker list — and no deletion ever touches a worker's folder or the files in it.",
+                            idle.len(),
+                            idle.join(", ")
+                        )
+                    };
+                    Ok(json!({ "workers": workers, "working": working, "idle_sessions": idle, "note": note }))
                 }
             },
         ),
@@ -665,7 +735,18 @@ pub fn route_permission(app: &AppHandle, track: &str, session: &str, run: &str, 
     ));
     let (app, track, worker, request) = (app.clone(), track.to_string(), session.to_string(), request.clone());
     tauri::async_runtime::spawn(async move {
-        if deliver(app.clone(), track.clone(), text, true, format!("permission {request} of {worker}")).await {
+        let hand = Hand {
+            track: track.clone(),
+            text,
+            open: true,
+            what: format!("permission {request} of {worker}"),
+            // Refused right below when it cannot go through: keeping it
+            // would answer a worker that has long stopped waiting.
+            keep: false,
+            worker: Some(worker.clone()),
+            run: None,
+        };
+        if deliver(app.clone(), hand).await {
             return;
         }
         // Nobody will answer it: refuse, so the worker carries on (or reports) instead of waiting out its turn.
@@ -786,39 +867,293 @@ pub async fn answer_decision(
     let _ = app.emit("decision", &decision);
     let text = decision_text(&decision);
     let track = decision.track.clone();
-    tauri::async_runtime::spawn(deliver(app.clone(), track, text, true, format!("decision #{id}")));
+    let hand = Hand { track, text, open: true, what: format!("decision #{id}"), keep: true, worker: None, run: None };
+    tauri::async_runtime::spawn(deliver(app.clone(), hand));
     Ok(decision)
 }
 
-/// Run `text` as a conductor turn once the conductor is free. The turn
-/// itself claims the busy mark, so a refusal is retried rather than
+/// One thing to hand a track's conductor as a turn.
+struct Hand {
+    track: String,
+    text: String,
+    /// May start a closed conductor. A worker report does not.
+    open: bool,
+    /// What it is, for the log and for the human.
+    what: String,
+    /// Kept and handed on later when it cannot go through now, instead of
+    /// being dropped. False only for a question whose asker is told
+    /// straight after that nobody answered it.
+    keep: bool,
+    /// The worker and run behind it, when it is a report.
+    worker: Option<String>,
+    run: Option<String>,
+}
+
+/// Run a hand's text as a conductor turn once the conductor is free. The
+/// turn itself claims the busy mark, so a refusal is retried rather than
 /// trusting an earlier free check that another turn may have overtaken.
-/// `open` lets it start a closed conductor; a worker report does not.
-/// Returns whether the turn started.
-async fn deliver(app: AppHandle, track: String, text: String, open: bool, what: String) -> bool {
-    let state = app.state::<AppState>();
+/// Returns whether the turn started; a `keep` hand that did not start is
+/// parked (see [`park`]) and never lost.
+async fn deliver(app: AppHandle, hand: Hand) -> bool {
+    let Hand { track, text, open, what, keep, worker, run } = hand;
     let deadline = std::time::Instant::now() + REPORT_WAIT;
-    let lang = state.store.get_meta("setting:language").ok().flatten().unwrap_or_default();
-    loop {
-        if !open && !state.sessions.conductors.lock().await.contains_key(&track) {
-            tracing::warn!(%track, %what, "no conductor session to deliver to");
-            return false;
+    let lang = {
+        let state = app.state::<AppState>();
+        state.store.get_meta("setting:language").ok().flatten().unwrap_or_default()
+    };
+    let why = loop {
+        if !open && !app.state::<AppState>().sessions.conductors.lock().await.contains_key(&track) {
+            break "the conductor session is closed".to_string();
         }
         match conductor_turn(app.clone(), track.clone(), text.clone(), None, lang.clone(), Vec::new()).await {
             Ok(_) => return true,
             Err(err) if err == BUSY => {
                 if std::time::Instant::now() > deadline {
-                    tracing::warn!(%track, %what, "conductor stayed busy; dropped");
-                    return false;
+                    break "the conductor stayed busy".to_string();
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
+            Err(err) => break err,
+        }
+    };
+    if keep {
+        park(&app, &track, Parked { text, open, what, worker, run, at: now_ms(), why, tries: 1 }).await;
+    } else {
+        tracing::warn!(%track, %what, %why, "could not hand this to the conductor");
+    }
+    false
+}
+
+/// A turn the conductor could not take, kept in the record until it can.
+///
+/// A worker can run for an hour and its report is the only thing that
+/// crosses the membrane. Losing it to a closed or busy conductor would lose
+/// the work, so it waits here instead, and the human is told it is waiting.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Parked {
+    text: String,
+    #[serde(default)]
+    open: bool,
+    what: String,
+    #[serde(default)]
+    worker: Option<String>,
+    #[serde(default)]
+    run: Option<String>,
+    /// Unix milliseconds it was first tried.
+    at: i64,
+    /// Why it could not go through last time.
+    #[serde(default)]
+    why: String,
+    #[serde(default)]
+    tries: u32,
+}
+
+/// What the UI hears when a track's waiting list changes.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Waiting {
+    pub track: String,
+    /// Turns waiting for this conductor now.
+    pub pending: usize,
+    /// Set when one was just put aside: what it is.
+    pub added: Option<String>,
+    pub worker: Option<String>,
+    pub run: Option<String>,
+    pub why: String,
+}
+
+fn parked_key(track: &str) -> String {
+    format!("parked:{track}")
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// What is waiting for a track's conductor, oldest first.
+fn parked_list(store: &orchestra_store::Store, track: &str) -> Vec<Parked> {
+    store
+        .get_meta(&parked_key(track))
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+fn keep_parked(store: &orchestra_store::Store, track: &str, list: &[Parked]) {
+    if list.is_empty() {
+        if let Err(err) = store.delete_meta(&parked_key(track)) {
+            tracing::error!(%track, %err, "could not clear the conductor's waiting list");
+        }
+        return;
+    }
+    match serde_json::to_string(list) {
+        Ok(json) => {
+            if let Err(err) = store.set_meta(&parked_key(track), &json) {
+                tracing::error!(%track, %err, "could not keep what the conductor has not taken");
+            }
+        }
+        Err(err) => tracing::error!(%track, %err, "could not encode the conductor's waiting list"),
+    }
+}
+
+/// One waiting list is read and written at a time, so two reports parked
+/// at once cannot overwrite each other.
+static PARKED: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Put a turn aside for later and tell the human it is waiting.
+async fn park(app: &AppHandle, track: &str, item: Parked) {
+    let _one = PARKED.lock().await;
+    let state = app.state::<AppState>();
+    let mut list = parked_list(&state.store, track);
+    list.push(item.clone());
+    keep_parked(&state.store, track, &list);
+    tracing::warn!(%track, what = %item.what, why = %item.why, pending = list.len(), "the conductor could not take this; it waits");
+    let _ = app.emit(
+        "parked",
+        Waiting {
+            track: track.to_string(),
+            pending: list.len(),
+            added: Some(item.what),
+            worker: item.worker,
+            run: item.run,
+            why: item.why,
+        },
+    );
+}
+
+/// One turn waiting for a conductor, as the UI shows it.
+///
+/// `run` is what makes the wait bearable: the report is already kept
+/// (`meta report:<run>`), so the conversation can show the card itself
+/// while the conductor is still out of reach.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WaitingItem {
+    pub track: String,
+    /// What it is, in one phrase.
+    pub what: String,
+    /// The worker it came from, when it is a report.
+    pub worker: Option<String>,
+    /// The worker run it reports on.
+    pub run: Option<String>,
+    /// Unix milliseconds it was first tried.
+    pub at: i64,
+    /// Why it has not gone through yet.
+    pub why: String,
+    /// How many times it has been offered to the conductor.
+    pub tries: u32,
+}
+
+/// Everything waiting for a conductor, across tracks, oldest first within
+/// each. The UI reads this rather than counting the `parked` events: an
+/// event can be missed (the app was closed), the record cannot.
+pub fn parked_all(state: &AppState) -> Vec<WaitingItem> {
+    let mut out = Vec::new();
+    for track in state.store.tracks().unwrap_or_default() {
+        for item in parked_list(&state.store, &track.id) {
+            out.push(WaitingItem {
+                track: track.id.clone(),
+                what: item.what,
+                worker: item.worker,
+                run: item.run,
+                at: item.at,
+                why: item.why,
+                tries: item.tries,
+            });
+        }
+    }
+    out
+}
+
+/// Hand the conductor what has been waiting for it, oldest first, until one
+/// cannot go through either. Called when a conductor turn ends, when a
+/// conductor is opened, and once a minute.
+///
+/// Boxed rather than a plain `async fn`: a conductor turn ends by flushing,
+/// and a flush starts a conductor turn, so the compiler cannot work out on
+/// its own whether either future is `Send`. Saying so here cuts the circle.
+pub fn flush_parked(app: AppHandle, track: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+    loop {
+        let next = {
+            let _one = PARKED.lock().await;
+            let state = app.state::<AppState>();
+            match parked_list(&state.store, &track).first() {
+                Some(first) => first.clone(),
+                None => return,
+            }
+        };
+        let lang = {
+            let st = app.state::<AppState>();
+            if st.sessions.is_busy(&track) {
+                return;
+            }
+            // A report still does not open a closed conductor; it waits for
+            // the human to talk to it, and the bell already says it is there.
+            if !next.open && !st.sessions.conductors.lock().await.contains_key(&track) {
+                return;
+            }
+            st.store.get_meta("setting:language").ok().flatten().unwrap_or_default()
+        };
+        match conductor_turn(app.clone(), track.clone(), next.text.clone(), None, lang, Vec::new()).await {
+            Ok(_) => {
+                let _one = PARKED.lock().await;
+                let state = app.state::<AppState>();
+                let mut list = parked_list(&state.store, &track);
+                if !list.is_empty() {
+                    list.remove(0);
+                }
+                keep_parked(&state.store, &track, &list);
+                tracing::info!(%track, what = %next.what, left = list.len(), "handed the conductor what was waiting");
+                let _ = app.emit(
+                    "parked",
+                    Waiting { track: track.clone(), pending: list.len(), added: None, worker: None, run: None, why: String::new() },
+                );
+                // The turn it just started holds the conductor; the next
+                // round sees that and comes back when the turn ends.
+            }
             Err(err) => {
-                tracing::warn!(%track, %what, %err, "could not deliver to the conductor");
-                return false;
+                if err != BUSY {
+                    let _one = PARKED.lock().await;
+                    let state = app.state::<AppState>();
+                    let mut list = parked_list(&state.store, &track);
+                    if let Some(first) = list.first_mut() {
+                        first.tries += 1;
+                        first.why = err.clone();
+                    }
+                    keep_parked(&state.store, &track, &list);
+                    tracing::warn!(%track, what = %next.what, %err, "what was waiting still cannot go through");
+                }
+                return;
             }
         }
     }
+    })
+}
+
+/// Try every track's waiting list once a minute, so nothing sits there
+/// because no other trigger happened to fire.
+pub fn sweep_parked(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let waiting: Vec<String> = {
+                let state = app.state::<AppState>();
+                let mut tracks: Vec<String> = Vec::new();
+                for item in parked_all(&state) {
+                    if !tracks.contains(&item.track) {
+                        tracks.push(item.track);
+                    }
+                }
+                tracks
+            };
+            for track in waiting {
+                flush_parked(app.clone(), track).await;
+            }
+        }
+    });
 }
 
 /// What the store remembers about a worker's last agent session, so the worker
@@ -877,6 +1212,7 @@ async fn worker_list(state: &AppState, track: &str) -> Vec<Value> {
                 "last_status": info.last_status.as_str(),
                 "last_at": info.last_at,
                 "resumable": live.is_none() && worker_record(state, track, &info.name).is_some(),
+                "idle_minutes": live.filter(|l| l.running.is_none()).map(|l| l.used.elapsed().as_secs() / 60),
             })
         })
         .collect();
@@ -1188,7 +1524,69 @@ async fn start_worker_turn(
     Ok(result)
 }
 
-/// One worker turn: the prompt in flight, its events stored and shown.
+/// How a worker turn is going, read off its own event stream: when the
+/// agent last said anything, and which of its tool calls have not reported
+/// an end.
+///
+/// This is what tells silence from work. An agent running `cargo test`
+/// sends one `ToolCall` and then nothing for as long as the test takes, so
+/// time since the last event says nothing on its own; time since the last
+/// event *with no call outstanding* does.
+#[derive(Default)]
+struct Pulse {
+    inner: parking_lot::Mutex<PulseInner>,
+}
+
+struct PulseInner {
+    last: std::time::Instant,
+    /// Tool call ids the agent started and has not ended.
+    running: HashSet<String>,
+}
+
+impl Default for PulseInner {
+    fn default() -> Self {
+        Self { last: std::time::Instant::now(), running: HashSet::new() }
+    }
+}
+
+impl Pulse {
+    fn note(&self, event: &AgentEvent) {
+        let ended = |status: &str| matches!(status, "completed" | "failed");
+        let mut inner = self.inner.lock();
+        inner.last = std::time::Instant::now();
+        match event {
+            AgentEvent::ToolCall { id, status, .. } => {
+                if ended(status) {
+                    inner.running.remove(id);
+                } else {
+                    inner.running.insert(id.clone());
+                }
+            }
+            // An update with no status only names files; it does not end the call.
+            AgentEvent::ToolUpdate { id, status, .. } if !status.is_empty() => {
+                if ended(status) {
+                    inner.running.remove(id);
+                } else {
+                    inner.running.insert(id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// How long since the agent last said anything.
+    fn quiet_for(&self) -> Duration {
+        self.inner.lock().last.elapsed()
+    }
+
+    /// Whether every tool call it started has reported an end.
+    fn nothing_running(&self) -> bool {
+        self.inner.lock().running.is_empty()
+    }
+}
+
+/// One worker turn: the prompt in flight, its events stored and shown, and a
+/// watchdog over both clocks (see [`WORKER_QUIET_LIMIT`]).
 async fn drive_worker_turn(app: &AppHandle, track: &str, name: &str, run: &str, session: &AgentSession, text: String, cwd: &str) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let pump_task = tauri::async_runtime::spawn(pump(app.clone(), track.to_string(), name.to_string(), run.to_string(), rx));
@@ -1196,18 +1594,66 @@ async fn drive_worker_turn(app: &AppHandle, track: &str, name: &str, run: &str, 
         session_id: session.session_id().to_string(),
         cwd: cwd.to_string(),
     });
-    match tokio::time::timeout(WORKER_TURN_TIMEOUT, session.prompt(text, tx.clone())).await {
+
+    // The agent's events go through a relay that keeps the pulse. Everything
+    // is forwarded unchanged and in order; the relay ends when the turn
+    // drops the agent's sender.
+    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::unbounded_channel();
+    let pulse = Arc::new(Pulse::default());
+    let relay = {
+        let (out, pulse) = (tx.clone(), pulse.clone());
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = agent_rx.recv().await {
+                pulse.note(&event);
+                if out.send(event).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+
+    let started = std::time::Instant::now();
+    let outcome = {
+        let turn = session.prompt(text, agent_tx);
+        tokio::pin!(turn);
+        loop {
+            tokio::select! {
+                done = &mut turn => break Ok(done),
+                _ = tokio::time::sleep(WORKER_QUIET_CHECK) => {
+                    if started.elapsed() > WORKER_TURN_TIMEOUT {
+                        break Err(format!("worker turn timed out after {} hours", WORKER_TURN_TIMEOUT.as_secs() / 3600));
+                    }
+                    let quiet = pulse.quiet_for();
+                    // Quiet is only stuck when there is nothing to be quiet
+                    // for: no tool call running (a build, a test suite) and
+                    // no permission question it is waiting on an answer to.
+                    if quiet > WORKER_QUIET_LIMIT && pulse.nothing_running() && session.waiting_questions().is_empty() {
+                        break Err(format!("worker said nothing for {} minutes with nothing running", quiet.as_secs() / 60));
+                    }
+                }
+            }
+        }
+    };
+    // The turn is dropped with the block above, and with it the agent's
+    // sender: the relay ends on its own.
+
+    match outcome {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
-            let _ = tx.send(AgentEvent::Failed { error: err.to_string() });
+            // Ended because the human stopped it (its session was killed
+            // after the grace): say so, so the record is not read as a crash.
+            let stopped = app.state::<AppState>().sessions.was_stopped(run);
+            let error = if stopped { "stopped by the human".to_string() } else { err.to_string() };
+            let _ = tx.send(AgentEvent::Failed { error });
         }
-        Err(_) => {
-            // A turn an hour long is stuck; a cancel may not reach an agent
-            // that has stopped answering, so the session ends and the worker
-            // reopens (with its memory) on its next task.
+        Err(why) => {
+            // Stuck; a cancel may not reach an agent that has stopped
+            // answering, so the session ends and the worker reopens (with
+            // its memory) on its next task.
+            tracing::warn!(%track, worker = %name, %run, %why, "ending a stuck worker turn");
             session.cancel();
             session.kill();
-            let _ = tx.send(AgentEvent::Failed { error: "worker turn timed out; its session was ended".to_string() });
+            let _ = tx.send(AgentEvent::Failed { error: format!("{why}; its session was ended") });
             let st = app.state::<AppState>();
             let mut workers = st.sessions.workers.lock().await;
             if workers.get(&worker_key(track, name)).is_some_and(|l| std::ptr::eq(Arc::as_ptr(&l.session), session)) {
@@ -1216,6 +1662,7 @@ async fn drive_worker_turn(app: &AppHandle, track: &str, name: &str, run: &str, 
         }
     }
     drop(tx);
+    let _ = relay.await;
     let _ = pump_task.await;
 }
 
@@ -1231,19 +1678,81 @@ async fn hand_running(app: &AppHandle, track: &str, name: &str, from: &str, to: 
     }
 }
 
-/// Whether a run ended normally (not failed, cancelled or timed out).
+/// Whether a run ended normally (not failed, stopped or timed out). A
+/// worker the human stopped is never asked again for its report block.
 fn ended_well(app: &AppHandle, run: &str) -> bool {
-    matches!(app.state::<AppState>().store.run(run), Ok(Some(s)) if s.status == RunStatus::Done && !s.stop_reason.as_deref().is_some_and(|r| r.eq_ignore_ascii_case("cancelled")))
+    let state = app.state::<AppState>();
+    if state.sessions.was_stopped(run) {
+        return false;
+    }
+    matches!(state.store.run(run), Ok(Some(s)) if s.status == RunStatus::Done && !s.stop_reason.as_deref().is_some_and(|r| r.eq_ignore_ascii_case("cancelled")))
 }
 
 /// The report block of a run's reply, checked.
+///
+/// Read whatever the turn did. A worker can do the whole job, write its
+/// block, and only then lose its session — to the hour cap, to an agent
+/// that died, to the human stopping it. The words are already in the
+/// record; refusing to look at them because the turn ended badly threw
+/// away a finished report and handed the conductor an empty one. (That is
+/// exactly what used to happen: parsing sat inside the `Done` arm alone,
+/// so every other ending skipped it and fell straight to an error.)
+///
+/// How the turn ended is not lost either — it rides along on the report as
+/// [`Report::interrupted`], because "the worker says done" and "the turn
+/// ended by itself" are two different facts.
 fn checked_report(app: &AppHandle, run: &str) -> Result<Report, String> {
-    match app.state::<AppState>().store.run(run) {
-        Ok(Some(s)) if s.status == RunStatus::Done => report::parse(&s.output),
-        Ok(Some(s)) => Err(format!("the turn {}{}", s.status.as_str(), s.error.map(|e| format!(": {e}")).unwrap_or_default())),
-        _ => Err("the run is gone".to_string()),
+    let state = app.state::<AppState>();
+    let stopped = state.sessions.was_stopped(run);
+    let Ok(Some(summary)) = state.store.run(run) else {
+        return Err("the run is gone".to_string());
+    };
+    read_reply(&summary.output, ended_badly(&summary, stopped))
+}
+
+/// Take the block out of a reply. `cut` is how the turn ended when it did
+/// not end on its own, and it only ever adds to what is known: a block that
+/// parses keeps it as a note, and a block that does not is still refused —
+/// half a JSON object is not a report, and guessing at one would be worse
+/// than saying there is none.
+fn read_reply(output: &str, cut: Option<String>) -> Result<Report, String> {
+    match report::parse(output) {
+        Ok(mut parsed) => {
+            parsed.interrupted = cut;
+            Ok(parsed)
+        }
+        // No usable block. When the turn was cut short, that is the better
+        // explanation of why — and the fallback report says in so many
+        // words that the whole output is in read_report.
+        Err(err) => Err(match cut {
+            Some(why) => format!("{why}, and what it had said holds no usable report block ({err})"),
+            None => err,
+        }),
     }
 }
+
+/// How a run ended, when it did not end on its own. `None` means it did.
+fn ended_badly(summary: &RunSummary, stopped: bool) -> Option<String> {
+    if stopped {
+        return Some(STOPPED_BY_HUMAN.to_string());
+    }
+    if summary.status == RunStatus::Done {
+        // The agent ended the turn itself; only a cancel makes that abnormal.
+        return summary
+            .stop_reason
+            .as_deref()
+            .filter(|reason| reason.eq_ignore_ascii_case("cancelled"))
+            .map(|_| STOPPED_BY_HUMAN.to_string());
+    }
+    Some(format!(
+        "the turn {}{}",
+        summary.status.as_str(),
+        summary.error.as_deref().map(|e| format!(": {e}")).unwrap_or_default()
+    ))
+}
+
+/// Why a stopped worker has no report block of its own.
+const STOPPED_BY_HUMAN: &str = "the human stopped this worker mid-turn";
 
 /// The report as kept: the worker's, or one made from its reply; with the
 /// files the app saw its edit tools touch. Stored for the timeline's card.
@@ -1452,16 +1961,35 @@ async fn report_to_conductor(app: AppHandle, track: String, worker: String, run:
             return;
         }
     };
+    let stopped = state.sessions.was_stopped(&run) || summary.stop_reason.as_deref().is_some_and(|r| r.eq_ignore_ascii_case("cancelled"));
     let text = format!(
-        "{REPORT_PREFIX} worker={worker} run={run} status={} tools={} duration_ms={}{}\n\n{}",
-        summary.status.as_str(),
+        "{REPORT_PREFIX} worker={worker} run={run} status={} tools={} duration_ms={}{}\n\n{}{}",
+        if stopped { "stopped" } else { summary.status.as_str() },
         summary.tool_count,
         summary.duration_ms.unwrap_or(0),
         summary.error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default(),
         report.for_conductor(&run),
+        // A report with a block says this itself, on its NOTE line; this
+        // is for when there was no block to carry it.
+        if stopped && report.interrupted.is_none() {
+            "\n(The human stopped this worker by hand. Nothing of it is running now. Tell them what it had got done and ask what they want next; do not start it again on your own.)"
+        } else {
+            ""
+        },
     );
+    state.sessions.forget_stopped(&run);
 
-    deliver(app.clone(), track, text, false, format!("report of {worker} run {run}")).await;
+    let hand = Hand {
+        track,
+        text,
+        open: false,
+        what: format!("report of {worker} run {run}"),
+        // An hour of work: it waits for the conductor rather than going.
+        keep: true,
+        worker: Some(worker),
+        run: Some(run),
+    };
+    deliver(app.clone(), hand).await;
 }
 
 /// The track's conductor session, opened (or reopened after its agent or
@@ -1703,11 +2231,21 @@ pub async fn conductor_open(app: AppHandle, track: String) -> Result<ConductorSt
         let info = track_info(&st, &track)?;
         open_conductor(&app, &track, &info, false).await?;
     }
-    Ok(conductor_state(&app, &track).await)
+    let state = conductor_state(&app, &track).await;
+    // Reports that waited for this conductor go in now.
+    tauri::async_runtime::spawn(flush_parked(app.clone(), track));
+    Ok(state)
 }
 
 /// Stop the conductor's turn in flight (Ctrl+C). The session stays open;
 /// the run ends with the agent's `cancelled` stop reason.
+///
+/// Workers keep working. Each agent session is its own process in its own
+/// job object (see `orchestra_acp::process`), and a worker's turn runs in a
+/// task of its own, detached from the conductor turn that opened it: only
+/// the conductor's session is touched here, never `sessions.workers`. Their
+/// reports reach the conductor as usual once it is free. (Ending every
+/// session of a track is `Sessions::close_track`, a different thing.)
 pub async fn conductor_cancel(app: AppHandle, track: String) -> Result<(), String> {
     let st = app.state::<AppState>();
     if !st.sessions.is_busy(&track) {
@@ -1739,6 +2277,126 @@ pub async fn conductor_cancel(app: AppHandle, track: String) -> Result<(), Strin
         }
     });
     Ok(())
+}
+
+/// Stop a worker's turn in flight, as [`conductor_cancel`] does for the
+/// conductor. The agent is asked to stop as Ctrl+C would; its session stays
+/// open, the run ends and stays in the record marked stopped (nothing is
+/// erased), and its report — whatever it had got to — still reaches the
+/// conductor.
+///
+/// An agent that does not stop is not left running behind a screen that
+/// says it stopped: after the same grace the conductor gets, its session is
+/// ended, which kills the agent process with its tree (each session is its
+/// own job object, see [`orchestra_acp::process`]). The worker reopens with
+/// its memory on its next task.
+pub async fn worker_cancel(app: AppHandle, track: String, worker: String) -> Result<(), String> {
+    let key = worker_key(&track, &worker);
+    let found = {
+        let st = app.state::<AppState>();
+        let workers = st.sessions.workers.lock().await;
+        let live = workers.get(&key).ok_or_else(|| format!("no open worker {worker}"))?;
+        live.running.clone().map(|run| (run, live.session.clone()))
+    };
+    // Not in a turn: nothing to stop, and nothing to report as stopped.
+    let Some((run, session)) = found else { return Ok(()) };
+    app.state::<AppState>().sessions.mark_stopped(&run);
+    tracing::info!(%track, %worker, %run, "stopping a worker turn");
+    session.cancel();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(CANCEL_GRACE).await;
+        let st = app.state::<AppState>();
+        let mut workers = st.sessions.workers.lock().await;
+        let stuck = workers
+            .get(&key)
+            .is_some_and(|l| l.running.as_deref() == Some(run.as_str()) && Arc::ptr_eq(&l.session, &session));
+        if stuck {
+            tracing::warn!(%track, %worker, %run, "the worker did not stop after a cancel; ending its session");
+            if let Some(old) = workers.remove(&key) {
+                old.session.kill();
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Close a worker's agent session. Its runs and its memory stay in the
+/// record, so the same name reopens with its conversation. Refused while it
+/// is in a turn: stop it first. `false` when it had no open session.
+pub async fn worker_close(app: AppHandle, track: String, worker: String) -> Result<bool, String> {
+    let st = app.state::<AppState>();
+    let mut workers = st.sessions.workers.lock().await;
+    let key = worker_key(&track, &worker);
+    match workers.get(&key) {
+        Some(live) if live.running.is_some() => Err(format!(
+            "{worker} is still working on run {}; stop it or wait for its report first",
+            live.running.as_deref().unwrap_or_default()
+        )),
+        Some(_) => {
+            tracing::info!(%track, %worker, "closing a worker session (asked)");
+            workers.remove(&key);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// Close every worker session of a track that has nothing to do, in one go:
+/// the list stops being a pile of idle agent processes. Workers in a turn
+/// are left alone, and no record is touched. Returns the names closed.
+pub async fn workers_tidy(app: AppHandle, track: String) -> Result<Vec<String>, String> {
+    let st = app.state::<AppState>();
+    let mut workers = st.sessions.workers.lock().await;
+    let prefix = worker_key(&track, "");
+    let idle: Vec<String> = workers
+        .iter()
+        .filter(|(key, live)| key.starts_with(&prefix) && live.running.is_none())
+        .map(|(key, _)| key.clone())
+        .collect();
+    let mut closed = Vec::new();
+    for key in idle {
+        if workers.remove(&key).is_some() {
+            closed.push(key.strip_prefix(&prefix).unwrap_or(&key).to_string());
+        }
+    }
+    closed.sort();
+    tracing::info!(%track, closed = closed.len(), "closed the worker sessions that had nothing to do");
+    Ok(closed)
+}
+
+/// What the UI shows about one worker's agent session.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkerState {
+    pub name: String,
+    /// Its agent session is open (an agent process is alive).
+    pub open: bool,
+    /// A turn is in flight.
+    pub running: bool,
+    /// The run of that turn.
+    pub run: Option<String>,
+    pub agent: String,
+}
+
+/// Every open worker session, by track (as [`conductor_states`] does for
+/// conductors). Workers with no open session are not listed: the UI has
+/// them from the record, which outlives sessions.
+pub async fn worker_states(app: &AppHandle) -> Vec<(String, Vec<WorkerState>)> {
+    let st = app.state::<AppState>();
+    let mut by_track: BTreeMap<String, Vec<WorkerState>> = BTreeMap::new();
+    for (key, live) in st.sessions.workers.lock().await.iter() {
+        let Some((track, name)) = key.split_once('/') else { continue };
+        by_track.entry(track.to_string()).or_default().push(WorkerState {
+            name: name.to_string(),
+            open: true,
+            running: live.running.is_some(),
+            run: live.running.clone(),
+            agent: live.agent.clone(),
+        });
+    }
+    for list in by_track.values_mut() {
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    by_track.into_iter().collect()
 }
 
 /// Close conductor and worker sessions nobody has used for a while (the
@@ -1886,6 +2544,8 @@ pub async fn conductor_turn(
                 }
             }
             st.sessions.end_turn(&track_for_turn);
+            // Free again: whatever could not reach it earlier goes in now.
+            tauri::async_runtime::spawn(flush_parked(app_for_turn.clone(), track_for_turn));
         });
 
         Ok(run)
@@ -1896,6 +2556,283 @@ pub async fn conductor_turn(
         st.sessions.end_turn(&track);
     }
     outcome
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+    use orchestra_core::report::{Outcome, Standing};
+
+    /// A finished report, as a worker writes it.
+    const FULL: &str = r#"I fixed the parser and checked it.
+
+```divixi-report
+{
+  "status": "done",
+  "summary": "Empty input no longer panics.",
+  "changes": [{ "path": "src/parser.rs", "what": "handles empty input" }],
+  "checks": [{ "what": "cargo test -p parser", "result": "pass", "detail": "12 tests" }],
+  "risks": [],
+  "questions": [],
+  "next": []
+}
+```
+"#;
+
+    /// The same reply with the session cut mid-block: no closing fence.
+    const TRUNCATED: &str = r#"I fixed the parser and checked it.
+
+```divixi-report
+{
+  "status": "done",
+  "summary": "Empty input no long"#;
+
+    fn summary(status: RunStatus, error: Option<&str>, stop_reason: Option<&str>) -> RunSummary {
+        RunSummary {
+            id: "t042".to_string(),
+            track: "tr001".to_string(),
+            session: "fix-parser".to_string(),
+            agent: "claude_code".to_string(),
+            prompt: "fix the parser".to_string(),
+            cwd: ".".to_string(),
+            status,
+            started_at: 0,
+            duration_ms: Some(3_600_000),
+            session_id: Some("s1".to_string()),
+            stop_reason: stop_reason.map(str::to_string),
+            error: error.map(str::to_string),
+            output: String::new(),
+            plan: Vec::new(),
+            tool_count: 40,
+        }
+    }
+
+    // ----- what the record says about how a turn ended -----
+
+    #[test]
+    fn a_turn_that_ended_on_its_own_was_not_cut_short() {
+        assert_eq!(ended_badly(&summary(RunStatus::Done, None, Some("end_turn")), false), None);
+    }
+
+    #[test]
+    fn a_timeout_a_death_and_a_stop_are_all_cut_short() {
+        let timed_out = ended_badly(&summary(RunStatus::Failed, Some("worker turn timed out after 4 hours; its session was ended"), None), false);
+        assert!(timed_out.unwrap().contains("timed out"), "the reason the turn ended is carried, not just that it did");
+
+        let died = ended_badly(&summary(RunStatus::Failed, Some("agent session ended during the turn"), None), false);
+        assert!(died.unwrap().contains("agent session ended"));
+
+        // Stopped by the human, both ways it can land: the agent took the
+        // cancel and ended the turn, or its session was killed after the grace.
+        assert_eq!(ended_badly(&summary(RunStatus::Done, None, Some("cancelled")), false).as_deref(), Some(STOPPED_BY_HUMAN));
+        assert_eq!(ended_badly(&summary(RunStatus::Failed, Some("stopped by the human"), None), true).as_deref(), Some(STOPPED_BY_HUMAN));
+    }
+
+    // ----- reading the reply -----
+
+    #[test]
+    fn a_finished_report_survives_a_turn_that_was_cut_short() {
+        // The bug this is here for: a worker did the whole job and wrote its
+        // block, then hit the turn cap. The app read none of it and handed
+        // the conductor status=failed with every list empty.
+        let cut = Some("the turn failed: worker turn timed out after 4 hours; its session was ended".to_string());
+        let read = read_reply(FULL, cut.clone()).expect("a complete block is read whatever the turn did");
+
+        assert_eq!(read.status, Standing::Done, "the worker's own word on its work stands");
+        assert!(read.structured);
+        assert_eq!(read.changes.len(), 1);
+        assert_eq!(read.changes[0].path, "src/parser.rs");
+        assert_eq!(read.checks.len(), 1);
+        assert_eq!(read.checks[0].result, Outcome::Pass);
+
+        // …and the other fact is not lost with it.
+        assert_eq!(read.interrupted, cut, "the turn did not end on its own, and the report says so");
+        let told = read.for_conductor("t042");
+        assert!(told.contains("did not end on its own"), "the conductor is told, not left to infer it from the header");
+        assert!(told.contains("timed out"));
+        assert!(told.contains("read_report(\"t042\")"));
+    }
+
+    #[test]
+    fn a_report_from_a_turn_that_ended_well_carries_no_such_note() {
+        let read = read_reply(FULL, None).expect("a complete block is read");
+        assert_eq!(read.interrupted, None);
+        assert!(!read.for_conductor("t042").contains("did not end on its own"));
+    }
+
+    #[test]
+    fn a_truncated_block_is_refused_rather_than_guessed_at() {
+        // Half a JSON object is not a report. Refusing sends it down the
+        // unstructured path, which keeps the reply as the summary and points
+        // at read_report — better than inventing fields nobody wrote.
+        let cut = Some("the turn failed: agent session ended during the turn".to_string());
+        let err = read_reply(TRUNCATED, cut).expect_err("a block that was cut off is not a report");
+        assert!(err.contains("agent session ended"), "why the turn ended explains why the block is half there");
+        assert!(err.contains("no usable report block"));
+
+        // What the conductor ends up with still reaches the whole output.
+        let made = Report::unstructured(false, TRUNCATED, &err);
+        assert!(!made.structured);
+        assert_eq!(made.status, Standing::Failed);
+        let told = made.for_conductor("t042");
+        assert!(told.contains("read_report(\"t042\")"), "the way to the full output is always given");
+        assert!(told.contains("agent session ended"));
+    }
+
+    #[test]
+    fn a_reply_with_no_block_at_all_says_so() {
+        let plain = "I had a look but ran out of time.";
+
+        let cut = read_reply(plain, Some("the turn failed: killed".to_string())).expect_err("no block, no report");
+        assert!(cut.contains("killed"));
+        assert!(cut.contains("no usable report block"));
+
+        // A turn that ended on its own gets the parser's own words, which say
+        // what is missing; that is what the reminder run is written from.
+        let clean = read_reply(plain, None).expect_err("no block, no report");
+        assert!(!clean.contains("no usable report block"), "nothing was cut short, so nothing about the turn is added: {clean}");
+    }
+
+    #[test]
+    fn a_stopped_worker_that_managed_a_block_keeps_it() {
+        // Stopping usually lands before the block is written, but when it
+        // does not there is nothing to gain by throwing the block away.
+        let read = read_reply(FULL, Some(STOPPED_BY_HUMAN.to_string())).expect("its own words, written before the stop");
+        assert_eq!(read.status, Standing::Done);
+        assert_eq!(read.interrupted.as_deref(), Some(STOPPED_BY_HUMAN));
+    }
+}
+
+#[cfg(test)]
+mod pulse_tests {
+    use super::*;
+
+    fn call(id: &str, status: &str) -> AgentEvent {
+        AgentEvent::ToolCall {
+            id: id.to_string(),
+            title: "cargo test".to_string(),
+            tool_kind: "execute".to_string(),
+            status: status.to_string(),
+            paths: Vec::new(),
+        }
+    }
+
+    fn update(id: &str, status: &str) -> AgentEvent {
+        AgentEvent::ToolUpdate { id: id.to_string(), status: status.to_string(), paths: Vec::new() }
+    }
+
+    #[test]
+    fn a_long_running_tool_call_is_not_silence() {
+        let pulse = Pulse::default();
+        assert!(pulse.nothing_running(), "a turn starts with nothing outstanding");
+
+        // The agent starts a test run and then says nothing for as long as
+        // it takes. That is the case the watchdog must not kill.
+        pulse.note(&call("c1", "pending"));
+        assert!(!pulse.nothing_running());
+        pulse.note(&update("c1", "inprogress"));
+        assert!(!pulse.nothing_running());
+        // Files named mid-call, no status: the call has not ended.
+        pulse.note(&AgentEvent::ToolUpdate { id: "c1".to_string(), status: String::new(), paths: vec!["a.rs".to_string()] });
+        assert!(!pulse.nothing_running());
+
+        pulse.note(&update("c1", "completed"));
+        assert!(pulse.nothing_running(), "once it ends, quiet is quiet again");
+    }
+
+    #[test]
+    fn calls_are_counted_one_by_one_and_a_failure_ends_one_too() {
+        let pulse = Pulse::default();
+        pulse.note(&call("c1", "pending"));
+        pulse.note(&call("c2", "pending"));
+        pulse.note(&update("c1", "completed"));
+        assert!(!pulse.nothing_running(), "the other one is still going");
+        pulse.note(&update("c2", "failed"));
+        assert!(pulse.nothing_running());
+    }
+
+    #[test]
+    fn a_call_that_arrives_already_finished_leaves_nothing_outstanding() {
+        let pulse = Pulse::default();
+        pulse.note(&call("c1", "completed"));
+        assert!(pulse.nothing_running());
+    }
+
+    #[test]
+    fn prose_and_thinking_keep_the_pulse_without_touching_what_runs() {
+        let pulse = Pulse::default();
+        pulse.note(&call("c1", "pending"));
+        pulse.note(&AgentEvent::Message { text: "working on it".to_string() });
+        pulse.note(&AgentEvent::Thought { text: "hmm".to_string() });
+        assert!(!pulse.nothing_running());
+        assert!(pulse.quiet_for() < Duration::from_secs(5), "it just said something");
+    }
+}
+
+#[cfg(test)]
+mod parked_tests {
+    use super::*;
+
+    #[test]
+    fn what_the_conductor_could_not_take_is_kept_in_order_and_cleared() {
+        let store = orchestra_store::Store::in_memory().unwrap();
+        assert!(parked_list(&store, "tr001").is_empty(), "nothing waits to begin with");
+
+        let report = Parked {
+            text: format!("{REPORT_PREFIX} worker=ui run=t002 status=done"),
+            open: false,
+            what: "report of ui run t002".to_string(),
+            worker: Some("ui".to_string()),
+            run: Some("t002".to_string()),
+            at: 1,
+            why: "the conductor session is closed".to_string(),
+            tries: 1,
+        };
+        let answer = Parked {
+            text: format!("{DECISION_PREFIX} #3"),
+            open: true,
+            what: "decision #3".to_string(),
+            worker: None,
+            run: None,
+            at: 2,
+            why: "the conductor stayed busy".to_string(),
+            tries: 1,
+        };
+        keep_parked(&store, "tr001", &[report, answer]);
+
+        let waiting = parked_list(&store, "tr001");
+        assert_eq!(waiting.len(), 2);
+        assert_eq!(waiting[0].run.as_deref(), Some("t002"), "oldest first: the report goes in before what came after it");
+        assert_eq!(waiting[1].what, "decision #3");
+        assert!(!waiting[0].open, "a report still does not open a closed conductor");
+
+        // One handed on: the rest stays.
+        keep_parked(&store, "tr001", &waiting[1..]);
+        assert_eq!(parked_list(&store, "tr001").len(), 1);
+
+        keep_parked(&store, "tr001", &[]);
+        assert!(parked_list(&store, "tr001").is_empty());
+        assert_eq!(store.get_meta(&parked_key("tr001")).unwrap(), None, "an emptied list leaves nothing behind");
+    }
+
+    #[test]
+    fn a_waiting_list_that_cannot_be_read_is_not_taken_for_an_empty_one_being_written() {
+        let store = orchestra_store::Store::in_memory().unwrap();
+        store.set_meta(&parked_key("tr001"), "not json").unwrap();
+        assert!(parked_list(&store, "tr001").is_empty(), "unreadable reads as nothing to hand on");
+        // and writing over it works, so the track is not stuck.
+        keep_parked(&store, "tr001", &[Parked {
+            text: "x".to_string(),
+            open: false,
+            what: "report of ui run t009".to_string(),
+            worker: Some("ui".to_string()),
+            run: Some("t009".to_string()),
+            at: 3,
+            why: String::new(),
+            tries: 1,
+        }]);
+        assert_eq!(parked_list(&store, "tr001").len(), 1);
+    }
 }
 
 #[cfg(test)]

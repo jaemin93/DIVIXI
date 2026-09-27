@@ -13,6 +13,10 @@
    */
   let query = $state("");
   let folded = $state<Record<string, boolean>>({});
+  /** Whether a track's finished workers are shown; see `doneOpen`. */
+  let doneFolded = $state<Record<string, boolean>>({});
+  /** What the last tidy-up did, under the track it was done on. */
+  let tidied = $state<Record<string, string>>({});
 
   const live = (r: { status: string }) => r.status === "running" || r.status === "connecting";
 
@@ -33,12 +37,17 @@
           live: runs.some(live),
           busy: runs.some((r) => r.session === "conductor" && live(r)),
           lastAt: Math.max(tr.updated_at, ...runs.map((r) => r.startedAt)),
+          parked: store.parked[tr.id] ?? 0,
           workers: store.workerNamesIn(tr.id).map((name) => {
             const workerRuns = runs.filter((r) => r.session === name);
+            const session = store.workerSession(tr.id, name);
             return {
               name,
+              track: tr.id,
               agent: workerRuns.at(-1)?.agent ?? tr.agent,
-              live: workerRuns.some(live),
+              live: workerRuns.some(live) || !!session?.running,
+              // Its agent process is alive, whether or not it has work.
+              open: !!session?.open,
               runs: workerRuns.length,
             };
           }),
@@ -99,21 +108,57 @@
   type Row = (typeof tracks)[number];
   function dotColor(tr: Row): string {
     if (tr.live || store.conductorOpening === tr.id) return "var(--ok)";
-    if (store.openDecisions(tr.id) > 0) return "var(--warn)";
+    if (store.openDecisions(tr.id) > 0 || tr.parked > 0) return "var(--warn)";
     return store.isActive(tr.id) ? "var(--ok)" : "var(--idle)";
   }
   function dotTitle(tr: Row): string {
     const waiting = store.openDecisions(tr.id);
     const session = store.isActive(tr.id) ? t("track.active") : t("track.inactive");
-    return waiting > 0 ? `${t("tracks.decisionsOpen", { n: waiting })} · ${session}` : session;
+    const lines = [waiting > 0 ? t("tracks.decisionsOpen", { n: waiting }) : "", tr.parked > 0 ? t("tracks.parked", { n: tr.parked }) : "", session];
+    return lines.filter(Boolean).join(" · ");
   }
 
   function toggle(id: string) {
     folded = { ...folded, [id]: isOpen(id) };
   }
 
+  type Worker = Row["workers"][number];
+
+  /** Workers in a turn right now; these are never folded away. */
+  const working = (tr: Row): Worker[] => tr.workers.filter((w) => w.live);
+  /** Workers that have stopped. They are what piles up. */
+  const done = (tr: Row): Worker[] => tr.workers.filter((w) => !w.live);
+
+  /** A short list of finished workers stays open; a long one folds itself. */
+  function doneOpen(tr: Row): boolean {
+    return tr.id in doneFolded ? !doneFolded[tr.id] : done(tr).length <= 3;
+  }
+
+  function toggleDone(tr: Row) {
+    doneFolded = { ...doneFolded, [tr.id]: doneOpen(tr) };
+  }
+
+  /** Finished workers whose agent session is still open: what tidying closes. */
+  const tidyable = (tr: Row): number => done(tr).filter((w) => w.open).length;
+
+  async function tidy(tr: Row) {
+    const { closed, error } = await store.tidyWorkers(tr.id);
+    tidied = { ...tidied, [tr.id]: error || (closed.length ? t("tracks.tidied", { n: closed.length }) : t("tracks.tidiedNone")) };
+    setTimeout(() => {
+      const { [tr.id]: _gone, ...rest } = tidied;
+      tidied = rest;
+    }, 4000);
+  }
+
+  /** The whole of a worker row, for the tooltip: name, agent, how it is doing. */
+  function workerTitle(w: Worker): string {
+    const state = w.live ? t("worker.working") : w.open ? t("worker.sessionOpen") : t("worker.sessionClosed");
+    return `${w.name} · ${agentLabel(w.agent)} · ${state}`;
+  }
+
   // ----- context menu -----
-  type Menu = { id: string; x: number; y: number };
+  /** A right click on a track, or on one of its workers. */
+  type Menu = { id: string; worker?: string; x: number; y: number };
   let menu = $state<Menu | null>(null);
   let mode = $state<"" | "rename" | "confirm">("");
   let draft = $state("");
@@ -127,12 +172,45 @@
     return m ? tracks.find((x) => x.id === m.id) : undefined;
   });
 
-  function openMenu(e: MouseEvent, id: string) {
+  function openMenu(e: MouseEvent, id: string, worker?: string) {
     e.preventDefault();
+    e.stopPropagation();
     mode = "";
     deleteError = "";
     draft = "";
-    menu = { id, x: e.clientX, y: e.clientY };
+    menu = { id, worker, x: e.clientX, y: e.clientY };
+  }
+
+  const menuWorker = $derived.by(() => {
+    const m = menu;
+    return m?.worker ? menuTrack?.workers.find((w) => w.name === m.worker) : undefined;
+  });
+
+  async function stopWorker() {
+    const w = menuWorker;
+    if (!w) return;
+    deleteError = "";
+    const refused = await store.cancelWorker(w.track, w.name);
+    if (refused) deleteError = refused;
+    else closeMenu();
+  }
+
+  async function closeWorkerSession() {
+    const w = menuWorker;
+    if (!w) return;
+    deleteError = "";
+    const refused = await store.closeWorker(w.track, w.name);
+    if (refused) deleteError = refused;
+    else closeMenu();
+  }
+
+  async function removeWorker() {
+    const w = menuWorker;
+    if (!w) return;
+    deleteError = "";
+    const refused = await store.deleteWorker(w.track, w.name);
+    if (refused) deleteError = refused;
+    else closeMenu();
   }
 
   function closeMenu() {
@@ -356,6 +434,9 @@
                 <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
               {/each}
             </span>
+            <!-- Reports the conductor could not take. They are kept and go in
+                 as soon as it can; until then this is what says they exist. -->
+            {#if tr.parked > 0}<span class="mono parked" title={t("tracks.parked", { n: tr.parked })}>⏳{tr.parked}</span>{/if}
             <span class="mono when" title={whenFull(tr.lastAt, store.lang)}>{whenLabel(tr.lastAt, store.now, store.lang)}</span>
           </span>
           <span class="main">
@@ -365,24 +446,77 @@
       </div>
 
       {#if isOpen(tr.id)}
-        {#each tr.workers as worker (worker.name)}
-          <button
-            class="worker"
-            class:on={store.view === "worker" && store.track === tr.id && store.openWorker === worker.name}
-            onclick={async () => {
-              if (store.track !== tr.id) await store.selectTrack(tr.id);
-              store.openWorkerView(worker.name);
-            }}
-          >
-            <span class="dot" class:pulse={worker.live} style="background: {worker.live ? 'var(--ok)' : 'var(--idle)'}"></span>
-            <span class="mono name">{worker.name}</span>
-            <span class="mono meta">{agentLabel(worker.agent)}</span>
-          </button>
+        <!-- Workers at work stay in sight; the ones that finished fold away
+             under a header, so a track that has run twenty of them still reads. -->
+        {#each working(tr) as worker (worker.name)}
+          {@render workerRow(tr, worker)}
         {/each}
+        {#if done(tr).length}
+          <div class="wgroup">
+            <button class="ghead" onclick={() => toggleDone(tr)} aria-expanded={doneOpen(tr)} aria-label={doneOpen(tr) ? t("tracks.foldDone") : t("tracks.unfoldDone")}>
+              <span class="mono chev">{doneOpen(tr) ? "▾" : "▸"}</span>
+              <span>{t("tracks.workersDone")}</span>
+              <span class="mono count">{done(tr).length}</span>
+            </button>
+            {#if tidyable(tr) > 0}
+              <button class="tidy" onclick={() => tidy(tr)} title={t("tracks.tidyTitle")}>{t("tracks.tidy")}<span class="mono count">{tidyable(tr)}</span></button>
+            {/if}
+          </div>
+          {#if tidied[tr.id]}
+            <div class="mono tidied">{tidied[tr.id]}</div>
+          {/if}
+          {#if doneOpen(tr)}
+            {#each done(tr) as worker (worker.name)}
+              {@render workerRow(tr, worker)}
+            {/each}
+          {/if}
+        {/if}
       {/if}
 {/snippet}
 
-{#if menu && menuTrack}
+<!-- One worker: a dot for its session, its name, its agent. Right click opens its menu. -->
+{#snippet workerRow(tr: (typeof tracks)[number], worker: Worker)}
+  <button
+    class="worker"
+    class:on={store.view === "worker" && store.track === tr.id && store.openWorker === worker.name}
+    class:menued={menu?.id === tr.id && menu?.worker === worker.name}
+    oncontextmenu={(e) => openMenu(e, tr.id, worker.name)}
+    title={workerTitle(worker)}
+    onclick={async () => {
+      if (store.track !== tr.id) await store.selectTrack(tr.id);
+      store.openWorkerView(worker.name);
+    }}
+  >
+    <span class="dot" class:pulse={worker.live} class:hollow={!worker.open && !worker.live} style="background: {worker.live || worker.open ? 'var(--ok)' : 'var(--idle)'}"></span>
+    <span class="mono name">{worker.name}</span>
+  </button>
+{/snippet}
+
+{#if menu && menuWorker}
+  <!-- The worker menu: stop it, close its session, or delete its record.
+       Deleting is the only one that cannot be undone, so it sits under a
+       rule, in the danger colour, behind a confirm step that says what goes
+       and what stays. -->
+  <div class="menu" bind:this={menuEl} style="left: {menu.x}px; top: {menu.y}px" role="menu" aria-label={t("worker.menu")}>
+    <div class="mono whead">{menuWorker.name}<span class="wagent">{agentLabel(menuWorker.agent)}</span></div>
+    <button class="item" role="menuitem" disabled={!menuWorker.live} title={t("worker.stopNote")} onclick={stopWorker}>{t("worker.stop")}</button>
+    <button class="item" role="menuitem" disabled={!menuWorker.open || menuWorker.live} title={t("worker.closeNote")} onclick={closeWorkerSession}>{t("worker.closeSession")}</button>
+    <div class="rule"></div>
+    {#if mode === "confirm"}
+      <div class="mono note">{menuWorker.live ? t("worker.busyNote") : t("worker.deleteNote")}</div>
+      {#if !menuWorker.live}<div class="mono note keeps">{t("worker.deleteKeeps")}</div>{/if}
+      {#if deleteError}<div class="mono note err">{deleteError}</div>{/if}
+      <div class="acts pad">
+        <button class="btn sm" type="button" onclick={() => (mode = "")}>{t("track.cancel")}</button>
+        <span class="grow"></span>
+        <button class="btn sm danger" type="button" disabled={menuWorker.live} onclick={removeWorker}>{t("worker.confirmDelete")}</button>
+      </div>
+    {:else}
+      {#if deleteError}<div class="mono note err">{deleteError}</div>{/if}
+      <button class="item danger" role="menuitem" onclick={() => (mode = "confirm")}>{t("worker.delete")}</button>
+    {/if}
+  </div>
+{:else if menu && menuTrack}
   <div class="menu" bind:this={menuEl} style="left: {menu.x}px; top: {menu.y}px" role="menu" aria-label={t("track.menu")}>
     {#if mode === "rename"}
       <form class="inline" onsubmit={commit}>
@@ -642,7 +776,6 @@
     font-family: var(--sans);
     font-size: 12px;
     padding: 0 10px;
-    outline: none;
   }
 
   .search:focus {
@@ -742,9 +875,70 @@
     color: var(--dim);
   }
 
-  .worker:hover {
+  .worker:hover,
+  .worker.menued {
     color: var(--hi);
     background: var(--sel);
+  }
+
+  /* Finished workers, under a header that folds them away and offers to
+     close their sessions in one go. */
+  .wgroup {
+    display: flex;
+    align-items: center;
+    padding-right: 10px;
+  }
+
+  .ghead {
+    flex: 1;
+    min-width: 0;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 8px 0 30px;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    font-size: 10px;
+    color: var(--lab);
+  }
+
+  .ghead:hover,
+  .tidy:hover {
+    color: var(--hi);
+  }
+
+  .ghead .chev {
+    width: auto;
+    height: auto;
+    margin: 0;
+    font-size: 10px;
+  }
+
+  .tidy {
+    height: 20px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 6px;
+    background: transparent;
+    border: 1px solid var(--lineq);
+    color: var(--lab);
+    font-size: 10px;
+  }
+
+  .tidied {
+    padding: 2px 16px 4px 44px;
+    font-size: 10px;
+    color: var(--lab);
+  }
+
+  /* A worker whose session has been closed: the record is still there, the
+     agent process is not. */
+  .dot.hollow {
+    background: transparent !important;
+    border: 1px solid var(--idle);
   }
 
   .worker.on {
@@ -794,6 +988,13 @@
     line-height: 1.3;
   }
 
+  .parked {
+    font-size: 9px;
+    letter-spacing: 0.04em;
+    color: var(--warn);
+    flex-shrink: 0;
+  }
+
   .when {
     font-size: 9px;
     letter-spacing: 0.04em;
@@ -820,11 +1021,6 @@
 
   .chip + .chip {
     margin-left: 8px;
-  }
-
-  .meta {
-    font-size: 10px;
-    color: var(--lab);
   }
 
   .count {
@@ -868,6 +1064,25 @@
 
   .item.danger {
     color: var(--acct);
+  }
+
+  /* The worker the menu is about, so the pointer's target stays named once
+     the menu covers the row. */
+  .whead {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 6px 14px 4px;
+    font-size: 10px;
+    color: var(--lab);
+  }
+
+  /* Which agent this worker runs on: not in the list line, but here. */
+  .wagent {
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    color: var(--lab);
+    opacity: 0.8;
   }
 
   .item:disabled {
@@ -916,6 +1131,11 @@
     color: var(--acct);
   }
 
+  /* What a delete leaves alone, said as plainly as what it takes. */
+  .note.keeps {
+    color: var(--lab);
+  }
+
   .inline {
     display: flex;
     flex-direction: column;
@@ -932,7 +1152,6 @@
     font-family: var(--sans);
     font-size: 12px;
     padding: 0 9px;
-    outline: none;
   }
 
   .inline input:focus {

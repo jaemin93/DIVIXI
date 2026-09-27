@@ -115,6 +115,17 @@ pub struct Report {
     /// The run that asked again for the block, when the first reply had none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reminder_run: Option<String>,
+    /// How the turn ended, when it did not end on its own: a timeout, a
+    /// dead agent, a stop by the human.
+    ///
+    /// A worker can finish its work, write its block, and only then have
+    /// the session cut from under it. The block is its own words either
+    /// way and is kept — but "the worker says done" and "the turn ended by
+    /// itself" are two different facts, and losing the second would hide
+    /// that it may have meant to do more after writing. Set only when a
+    /// block was parsed; without one the reason is in `problem`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupted: Option<String>,
 }
 
 const MAX_SUMMARY: usize = 800;
@@ -217,6 +228,7 @@ pub fn parse(reply: &str) -> Result<Report, String> {
         edits_seen: Vec::new(),
         outside: Vec::new(),
         reminder_run: None,
+        interrupted: None,
     })
 }
 
@@ -237,12 +249,23 @@ impl Report {
             edits_seen: Vec::new(),
             outside: Vec::new(),
             reminder_run: None,
+            // No block was read, so there is nothing for this to qualify;
+            // `problem` already says how the turn went.
+            interrupted: None,
         }
     }
 
     /// The report as the conductor reads it: short, every section named.
     pub fn for_conductor(&self, run: &str) -> String {
         let mut out = format!("status: {}\nsummary: {}\n", self.status.as_str(), self.summary);
+        // The worker's own status is about its work; this is about its turn.
+        // Both are true at once and the conductor must not read the first
+        // as covering the second.
+        if let Some(why) = &self.interrupted {
+            out.push_str(&format!(
+                "NOTE: the status above is the worker's own, but its turn did not end on its own: {why}. It had written this report by then, so what it says of the work stands — but it may have meant to do more afterwards, and nothing of it is running now. Its whole output is in read_report(\"{run}\"). Say this to the human; do not quietly start it again.\n"
+            ));
+        }
         if !self.structured {
             out.push_str(&format!(
                 "(The worker gave no report block: {}. The summary above is the start of its reply; read_report(\"{run}\") has it all.)\n",

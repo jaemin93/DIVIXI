@@ -257,6 +257,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS runs_fts USING fts5(
 /// Error text recorded on runs that were live when the app last closed.
 pub const INTERRUPTED: &str = "interrupted: the app closed while the run was live";
 
+/// Meta key holding the highest run number ever handed out (see [`Store::begin_run`]).
+const RUN_HIGH_WATER: &str = "run_high_water";
+
 /// One run, as the Track timeline sees it.
 ///
 /// Everything here is above the membrane or a fold of what is below it
@@ -870,12 +873,56 @@ impl Store {
         Ok(())
     }
 
+    /// Delete one worker's record in a track: its runs with their events,
+    /// full-text rows and kept reports, and the agent session the app
+    /// remembers for it. Returns how many runs went.
+    ///
+    /// What is deliberately left: the worker's folder (`worker_dir:`) and its
+    /// checkout (`worktree:`), on disk and in the record. Those hold work the
+    /// human made and asked for; forgetting the mapping would strand them or
+    /// send the next worker of that name somewhere else.
+    pub fn delete_worker(&self, track: &str, worker: &str) -> anyhow::Result<u32> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM runs_fts WHERE run_id IN (SELECT id FROM runs WHERE track = ?1 AND session = ?2)",
+            params![track, worker],
+        )?;
+        tx.execute(
+            "DELETE FROM meta WHERE key IN (SELECT 'report:' || id FROM runs WHERE track = ?1 AND session = ?2)",
+            params![track, worker],
+        )?;
+        tx.execute(
+            "DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE track = ?1 AND session = ?2)",
+            params![track, worker],
+        )?;
+        let gone = tx.execute("DELETE FROM runs WHERE track = ?1 AND session = ?2", params![track, worker])?;
+        tx.execute("DELETE FROM meta WHERE key = 'worker_session:' || ?1 || '/' || ?2", params![track, worker])?;
+        tx.commit()?;
+        Ok(gone as u32)
+    }
+
     /// Register a new run in a track and return its id.
     ///
     /// Ids are `t001`, `t002`, … in creation order, durable across restarts.
+    ///
+    /// The counter is the high-water mark of every run there has ever been,
+    /// not of the rows left: deleting a track's or a worker's runs must not
+    /// hand their ids to later runs, or what still points at an id (a kept
+    /// report, a decision) would point at a stranger.
     pub fn begin_run(&self, track: &str, session: &str, agent: &str, prompt: &str, cwd: &str) -> anyhow::Result<RunId> {
         let conn = self.conn.lock();
-        let next: i64 = conn.query_row("SELECT COALESCE(MAX(n), 0) + 1 FROM runs", [], |r| r.get(0))?;
+        let highest: i64 = conn.query_row("SELECT COALESCE(MAX(n), 0) FROM runs", [], |r| r.get(0))?;
+        let ever: i64 = conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![RUN_HIGH_WATER], |r| r.get::<_, String>(0))
+            .optional()?
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        let next = highest.max(ever) + 1;
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![RUN_HIGH_WATER, next.to_string()],
+        )?;
         let id = format!("t{next:03}");
         let now = now_ms();
         conn.execute(
@@ -1427,6 +1474,43 @@ mod tests {
         assert!(store.delete_track("tr001").is_err());
         // Ids never reuse a deleted number.
         assert_eq!(store.create_track(&new_track("Again", "", ".", "codex")).unwrap().id, "tr003");
+    }
+
+    #[test]
+    fn deleting_a_worker_takes_its_runs_but_not_its_folder() {
+        let store = Store::in_memory().unwrap();
+        let track = store.create_track(&new_track("T", "", ".", "claude_code")).unwrap().id;
+        let conductor = store.begin_run(&track, "conductor", "claude_code", "hi", ".").unwrap();
+        let first = store.begin_run(&track, "ui", "claude_code", "do it", ".").unwrap();
+        store.append(&first, 1, &AgentEvent::Message { text: "done".into() }).unwrap();
+        store.append(&first, 2, &AgentEvent::Finished { stop_reason: "end_turn".into() }).unwrap();
+        let second = store.begin_run(&track, "api", "claude_code", "and this", ".").unwrap();
+        store.set_meta(&format!("report:{first}"), "{}").unwrap();
+        store.set_meta(&format!("report:{second}"), "{}").unwrap();
+        store.set_meta(&format!("worker_session:{track}/ui"), "{}").unwrap();
+        store.set_meta(&format!("worker_dir:{track}/ui"), "C:/work/ui").unwrap();
+        store.set_meta(&format!("worktree:{track}/ui"), "{}").unwrap();
+
+        assert_eq!(store.delete_worker(&track, "ui").unwrap(), 1);
+        assert!(store.run(&first).unwrap().is_none(), "its runs go");
+        assert!(store.events(&first).unwrap().is_empty(), "with their events");
+        assert_eq!(store.get_meta(&format!("report:{first}")).unwrap(), None, "and their kept reports");
+        assert_eq!(store.get_meta(&format!("worker_session:{track}/ui")).unwrap(), None, "and the session it would resume");
+        assert_eq!(
+            store.get_meta(&format!("worker_dir:{track}/ui")).unwrap().as_deref(),
+            Some("C:/work/ui"),
+            "the folder it worked in stays, files and all"
+        );
+        assert!(store.get_meta(&format!("worktree:{track}/ui")).unwrap().is_some(), "so does its checkout");
+        assert!(store.run(&conductor).unwrap().is_some(), "other sessions are untouched");
+        assert!(store.run(&second).unwrap().is_some());
+        assert_eq!(store.get_meta(&format!("report:{second}")).unwrap().as_deref(), Some("{}"));
+        assert!(!store.sessions(&track).unwrap().iter().any(|s| s.name == "ui"));
+
+        // A new run never takes a deleted run's id.
+        let next = store.begin_run(&track, "ui", "claude_code", "again", ".").unwrap();
+        assert_ne!(next, first);
+        assert_ne!(next, second);
     }
 
     fn new_track(name: &str, intent: &str, cwd: &str, agent: &str) -> TrackPatch {

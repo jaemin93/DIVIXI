@@ -46,6 +46,10 @@
       <span class="mlab kind">{t("report.label")}{worker ? ` · ${worker}` : ""}</span>
       <span class="mono state">{t(`report.status.${report.status}`)}</span>
       {#if !report.structured}<span class="mono state loose" title={report.problem ?? ""}>{t("report.unstructured")}</span>{/if}
+      <!-- The worker's own status is about its work; this is about its turn.
+           Both can be true, and a "done" that was cut off mid-session is not
+           the same thing as a "done" that ended by itself. -->
+      {#if report.interrupted}<span class="mono state cut" title={report.interrupted}>{t("report.interrupted")}</span>{/if}
       <span class="grow"></span>
       <button class="mono runid" type="button" onclick={() => worker && store.openWorkerView(worker)} disabled={!worker} title={t("report.openWorker")}>{run}</button>
     </div>
@@ -177,16 +181,21 @@
     color: var(--lab);
   }
 
-  .s-done .state:not(.loose) {
-    color: var(--ok);
-  }
-
-  .s-partial .state:not(.loose),
-  .s-blocked .state:not(.loose) {
+  /* Not an error of the worker's: its turn was ended under it. */
+  .state.cut {
     color: var(--warn);
   }
 
-  .s-failed .state:not(.loose) {
+  .s-done .state:not(.loose):not(.cut) {
+    color: var(--ok);
+  }
+
+  .s-partial .state:not(.loose):not(.cut),
+  .s-blocked .state:not(.loose):not(.cut) {
+    color: var(--warn);
+  }
+
+  .s-failed .state:not(.loose):not(.cut) {
     color: var(--deltx);
   }
 

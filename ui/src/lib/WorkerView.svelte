@@ -61,6 +61,17 @@
     return title.replace(/^mcp__[a-z0-9_-]+__/i, "").replace(/^mcp\.[a-z0-9_-]+\./i, "");
   }
 
+  /**
+   * A turn the human stopped by hand, either way it can end: the agent took
+   * the cancel and ended the turn with ACP's `cancelled`, or it did not and
+   * its session was killed after the grace. Either way the run stays in the
+   * record — stopped, not failed.
+   */
+  function stopped(run: Run): boolean {
+    if (run.status === "done") return (run.stopReason ?? "").toLowerCase() === "cancelled";
+    return run.status === "failed" && run.error === "stopped by the human";
+  }
+
   function secs(ms?: number) {
     if (ms === undefined) return "";
     return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
@@ -102,6 +113,7 @@
         <div class="head">
           <span class="mlab">{t("worker.worker")}</span>
           <span class="mono meta">{run.id} · {t("worker.tools", { n: run.toolCount })}{run.durationMs !== undefined && run.durationMs !== null ? ` · ${secs(run.durationMs)}` : ""}</span>
+          {#if stopped(run)}<span class="mono stopmark">{t("worker.stopped")}</span>{/if}
           {#if run.status === "running" || run.status === "connecting"}<Working />{/if}
         </div>
         {#each collapse(run.segments) as seg, i (i)}
@@ -128,7 +140,7 @@
         {#if run.status === "done" || run.status === "failed"}
           <ReportCard run={run.id} compact />
         {/if}
-        {#if run.status === "failed" && run.error}
+        {#if run.status === "failed" && run.error && !stopped(run)}
           <p class="ctext bad">{run.error}</p>
         {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
           <p class="ctext dim">{t("worker.starting")}</p>
@@ -180,6 +192,13 @@
     font-size: 11px;
     letter-spacing: 0.1em;
     color: var(--lab);
+  }
+
+  /* A turn the human stopped: said once, on the turn itself. */
+  .stopmark {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--warn);
   }
 
   .grow {
