@@ -193,7 +193,11 @@ pub async fn turn(
     let state = app.state::<AppState>();
     let a = info(&state, &id)?;
     if !state.artifacts.busy.lock().insert(id.clone()) {
-        return Err("the agent is still responding".to_string());
+        // `busy:` as `conductor::BUSY` has it: the UI's `stillAnswering`
+        // (store.svelte.ts) reads the prefix to tell "not now" from
+        // "cannot", and waits for the turn instead of handing a queued
+        // message back to the human. Keep the prefix if you edit the words.
+        return Err("busy: the agent is still responding".to_string());
     }
     let outcome: Result<String, String> = async {
         let (session, first) = open(&app, &a).await?;

@@ -4,6 +4,7 @@
   import ReportCard from "./ReportCard.svelte";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
+  import { FOLLOWING, followed, resized, scrolled, type Stick } from "./scroll";
 
   /**
    * A worker worker's session, read like a conversation: what the conductor
@@ -14,22 +15,48 @@
   const agent = $derived(runs.at(-1)?.agent ?? "");
   const live = $derived(runs.some((r) => r.status === "running" || r.status === "connecting"));
 
+  // Sticking to the foot, the same way the conversation does it: one
+  // observer over the content, every decision in scroll.ts. Watching the
+  // height rather than a list of fields is what lets a report card count
+  // -- it arrives, and then fills in once its report has been read, and
+  // neither step is a change in `runs.length` or `message.length`.
   let scroller = $state<HTMLDivElement>();
-  /** Keep to the newest only while at (or near) the bottom: reading back stays put. */
-  let pinned = true;
-  function onScroll() {
-    if (scroller) pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+  let content = $state<HTMLDivElement>();
+  let stick = $state<Stick>({ ...FOLLOWING });
+
+  /** Put the view at the foot, and remember that it was us who did it. */
+  function follow() {
+    if (!scroller) return;
+    scroller.scrollTop = scroller.scrollHeight;
+    stick = followed(stick, scroller.scrollTop);
   }
+
+  function onScroll() {
+    if (scroller) stick = scrolled(stick, scroller);
+  }
+
+  $effect(() => {
+    const inner = content;
+    const box = scroller;
+    if (!inner || !box) return;
+    let tall = inner.offsetHeight;
+    const observer = new ResizeObserver(() => {
+      const grew = inner.offsetHeight > tall;
+      tall = inner.offsetHeight;
+      const { next, follow: chase } = resized(stick, grew);
+      stick = next;
+      if (chase) follow();
+    });
+    observer.observe(inner);
+    observer.observe(box);
+    return () => observer.disconnect();
+  });
+
   // Another worker opens at its newest.
   $effect(() => {
     void store.openWorker;
-    pinned = true;
-  });
-  $effect(() => {
-    void runs.length;
-    void runs.at(-1)?.message.length;
-    void runs.at(-1)?.toolCount;
-    if (scroller && pinned) scroller.scrollTop = scroller.scrollHeight;
+    stick = { ...FOLLOWING };
+    follow();
   });
 
   function cleanText(text: string): string {
@@ -91,62 +118,64 @@
   </header>
 
   <div class="scroll" bind:this={scroller} onscroll={onScroll}>
-    {#if runs.length === 0}
-      <div class="mono empty">{t("worker.empty")}</div>
-    {/if}
-    {#each runs as run (run.id)}
-      {#if run.prompt.startsWith(REPORT_REMINDER)}
-        <!-- The app, not the conductor, asked again for the report. -->
-        <div class="sys mono">{t("report.reminded")}</div>
-      {:else}
-        <!-- What the conductor sent this worker: on the right, as the human's words are on the track. -->
-        <div class="from">
-          <div class="mlab">{t("worker.conductor")}</div>
-          <div class="turn bubble">
-            <div class="ctext"><Markdown source={run.prompt} /></div>
-          </div>
-        </div>
+    <div class="content" bind:this={content}>
+      {#if runs.length === 0}
+        <div class="mono empty">{t("worker.empty")}</div>
       {/if}
-
-      <!-- How the worker answered, as it happened. -->
-      <div class="turn to" class:live={run.status === "running" || run.status === "connecting"} class:failed={run.status === "failed"}>
-        <div class="head">
-          <span class="mlab">{t("worker.worker")}</span>
-          <span class="mono meta">{run.id} · {t("worker.tools", { n: run.toolCount })}{run.durationMs !== undefined && run.durationMs !== null ? ` · ${secs(run.durationMs)}` : ""}</span>
-          {#if stopped(run)}<span class="mono stopmark">{t("worker.stopped")}</span>{/if}
-          {#if run.status === "running" || run.status === "connecting"}<Working />{/if}
-        </div>
-        {#each collapse(run.segments) as seg, i (i)}
-          {#if seg.kind === "text"}
-            <div class="ctext"><Markdown source={cleanText(seg.text)} /></div>
-          {:else if seg.kind === "thought"}
-            {#if cleanText(seg.text).trim()}<p class="ctext thought">{cleanText(seg.text).trim()}</p>{/if}
-          {:else}
-            {@const tool = seg.tools[seg.tools.length - 1]}
-            {@const running = tool.status !== "completed" && tool.status !== "failed"}
-            <div class="toolline mono" class:running>
-              <span class="tdot" class:pulse={running}></span>
-              <span class="tk">{tool.toolKind}</span>
-              <span class="tt">{toolLabel(tool.title)}</span>
-              {#if seg.tools.length > 1}<span class="tcount">+{seg.tools.length - 1}</span>{/if}
-              <span class="grow"></span>
-              <span class="tst" class:bad={tool.status === "failed"}>{tool.status}</span>
+      {#each runs as run (run.id)}
+        {#if run.prompt.startsWith(REPORT_REMINDER)}
+          <!-- The app, not the conductor, asked again for the report. -->
+          <div class="sys mono">{t("report.reminded")}</div>
+        {:else}
+          <!-- What the conductor sent this worker: on the right, as the human's words are on the track. -->
+          <div class="from">
+            <div class="mlab">{t("worker.conductor")}</div>
+            <div class="turn bubble">
+              <div class="ctext"><Markdown source={run.prompt} /></div>
             </div>
+          </div>
+        {/if}
+
+        <!-- How the worker answered, as it happened. -->
+        <div class="turn to" class:live={run.status === "running" || run.status === "connecting"} class:failed={run.status === "failed"}>
+          <div class="head">
+            <span class="mlab">{t("worker.worker")}</span>
+            <span class="mono meta">{run.id} · {t("worker.tools", { n: run.toolCount })}{run.durationMs !== undefined && run.durationMs !== null ? ` · ${secs(run.durationMs)}` : ""}</span>
+            {#if stopped(run)}<span class="mono stopmark">{t("worker.stopped")}</span>{/if}
+            {#if run.status === "running" || run.status === "connecting"}<Working />{/if}
+          </div>
+          {#each collapse(run.segments) as seg, i (i)}
+            {#if seg.kind === "text"}
+              <div class="ctext"><Markdown source={cleanText(seg.text)} /></div>
+            {:else if seg.kind === "thought"}
+              {#if cleanText(seg.text).trim()}<p class="ctext thought">{cleanText(seg.text).trim()}</p>{/if}
+            {:else}
+              {@const tool = seg.tools[seg.tools.length - 1]}
+              {@const running = tool.status !== "completed" && tool.status !== "failed"}
+              <div class="toolline mono" class:running>
+                <span class="tdot" class:pulse={running}></span>
+                <span class="tk">{tool.toolKind}</span>
+                <span class="tt">{toolLabel(tool.title)}</span>
+                {#if seg.tools.length > 1}<span class="tcount">+{seg.tools.length - 1}</span>{/if}
+                <span class="grow"></span>
+                <span class="tst" class:bad={tool.status === "failed"}>{tool.status}</span>
+              </div>
+            {/if}
+          {/each}
+          {#if run.segments.length === 0 && run.message.trim()}
+            <div class="ctext"><Markdown source={cleanText(run.message)} /></div>
           {/if}
-        {/each}
-        {#if run.segments.length === 0 && run.message.trim()}
-          <div class="ctext"><Markdown source={cleanText(run.message)} /></div>
-        {/if}
-        {#if run.status === "done" || run.status === "failed"}
-          <ReportCard run={run.id} compact />
-        {/if}
-        {#if run.status === "failed" && run.error && !stopped(run)}
-          <p class="ctext bad">{run.error}</p>
-        {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
-          <p class="ctext dim">{t("worker.starting")}</p>
-        {/if}
-      </div>
-    {/each}
+          {#if run.status === "done" || run.status === "failed"}
+            <ReportCard run={run.id} compact />
+          {/if}
+          {#if run.status === "failed" && run.error && !stopped(run)}
+            <p class="ctext bad">{run.error}</p>
+          {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
+            <p class="ctext dim">{t("worker.starting")}</p>
+          {/if}
+        </div>
+      {/each}
+    </div>
   </div>
 </main>
 

@@ -66,7 +66,6 @@
           <AgentList />
         </div>
         <div class="foot">
-          {#if store.lastError}<span class="mono err">{store.lastError}</span>{/if}
           <span class="grow"></span>
           <button class="btn" disabled={store.detecting} onclick={finish}>{t("setup.later")}</button>
           <button class="btn btn-acc" disabled={readyCount === 0 || store.detecting} onclick={() => (store.setupStep = 2)}>
@@ -214,15 +213,6 @@
     display: flex;
     align-items: center;
     gap: 10px;
-  }
-
-  .err {
-    font-size: 10px;
-    color: var(--acct);
-    max-width: 360px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .btn-acc {

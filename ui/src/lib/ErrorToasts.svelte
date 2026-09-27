@@ -72,9 +72,10 @@
 </div>
 
 <style>
-  /* Over everything, out of the way of the composer and the rail. The
-     stack itself takes no pointer events; its children take their own, so
-     a toast never swallows a click meant for the app behind it. */
+  /* Over everything, out of the way of the composer and the rail. The box
+     is only ever as tall as the toasts in it, so what it covers is what
+     they cover; it takes pointer events because past its ceiling it has
+     to be scrollable. */
   .stack {
     position: fixed;
     right: 18px;
@@ -85,7 +86,12 @@
     align-items: flex-end;
     gap: 8px;
     max-width: min(440px, calc(100vw - 36px));
-    pointer-events: none;
+    /* Never more than half the screen, however fast they arrive. The
+       stack scrolls once it is full, so it takes its own pointer events
+       back — the toasts inside already have theirs. */
+    max-height: 50vh;
+    overflow-y: auto;
+    pointer-events: auto;
   }
 
   /* Nothing to show, but the live region stays in the page. */

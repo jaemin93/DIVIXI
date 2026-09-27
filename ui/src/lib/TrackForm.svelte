@@ -238,7 +238,6 @@
       {/if}
 
       <div class="foot">
-        {#if store.lastError}<span class="mono err">{store.lastError}</span>{/if}
         <span class="grow"></span>
         {#if editing || !first}
           <button class="btn" type="button" onclick={cancel}>{t("newtrack.cancel")}</button>
@@ -575,14 +574,5 @@
 
   .grow {
     flex: 1;
-  }
-
-  .err {
-    font-size: 11px;
-    color: var(--acct);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 360px;
   }
 </style>

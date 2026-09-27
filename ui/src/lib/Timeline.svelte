@@ -6,28 +6,39 @@
   import Working from "./Working.svelte";
   import Markdown from "./Markdown.svelte";
   import { t } from "./i18n.svelte";
-  import { atBottom } from "./scroll";
+  import { FOLLOWING, followed, resized, scrolled, type Stick } from "./scroll";
 
   // ----- sticking to the bottom -----
   //
-  // All of the scrolling lives here, in one place. The rule is the one
-  // people expect of a conversation: while the view is at the bottom it
-  // follows whatever arrives, and the moment it is scrolled up it holds
-  // still. Nothing else in this file touches scrollTop.
+  // All of the scrolling lives here, in one place, and the decisions live
+  // in scroll.ts. The rule is the one people expect of a conversation:
+  // while the view is at the bottom it follows whatever arrives, and the
+  // moment it is scrolled up it holds still. Nothing else in this file
+  // touches scrollTop.
   //
   // What moves the content is watched with a ResizeObserver rather than by
-  // listing reactive dependencies: streamed text, a tool line, a report
-  // card, an image that finished loading, the track header folding — they
-  // all change the same thing, the height, and the observer sees all of
-  // them. A dependency list only ever sees the ones it was told about.
+  // listing reactive dependencies: streamed text, a tool line, a decision
+  // card, a waiting-report line, the report card that replaces it, an
+  // image that finished loading, the track header folding — they all
+  // change the same thing, the height of `.content`, and the observer sees
+  // all of them. A dependency list only ever sees the ones it was told
+  // about, and this conversation grows down several paths that have
+  // nothing to do with each other.
 
   let scroller = $state<HTMLDivElement>();
   let content = $state<HTMLDivElement>();
 
-  /** Following the newest. The human's own scrolling decides this. */
-  let stuck = $state(true);
-  /** Something arrived below while they were reading back. */
-  let missed = $state(false);
+  /** Where the human is reading; see scroll.ts for what moves it. */
+  let stick = $state<Stick>({ ...FOLLOWING });
+
+  /** Put the view at the foot, and remember that it was us who did it. */
+  function follow() {
+    if (!scroller) return;
+    scroller.scrollTop = scroller.scrollHeight;
+    // Read back rather than assume: the browser clamps, and under page
+    // zoom it clamps to a fraction.
+    stick = followed(stick, scroller.scrollTop);
+  }
 
   /**
    * Go to the newest and follow it again. Instantly, on purpose: a smooth
@@ -36,16 +47,11 @@
    * touch the wheel. There is nothing to read between here and the foot.
    */
   function toBottom() {
-    if (!scroller) return;
-    scroller.scrollTop = scroller.scrollHeight;
-    stuck = true;
-    missed = false;
+    follow();
   }
 
   function onScroll() {
-    if (!scroller) return;
-    stuck = atBottom(scroller);
-    if (stuck) missed = false;
+    if (scroller) stick = scrolled(stick, scroller);
   }
 
   // The content growing (or the box around it changing size) is the only
@@ -59,8 +65,9 @@
     const observer = new ResizeObserver(() => {
       const grew = inner.offsetHeight > tall;
       tall = inner.offsetHeight;
-      if (stuck) box.scrollTop = box.scrollHeight;
-      else if (grew) missed = true;
+      const { next, follow: chase } = resized(stick, grew);
+      stick = next;
+      if (chase) follow();
     });
     observer.observe(inner);
     // The box itself resizes when the track header folds or the window
@@ -72,9 +79,8 @@
   // Another conversation opens at its newest.
   $effect(() => {
     void store.chatKey;
-    stuck = true;
-    missed = false;
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    stick = { ...FOLLOWING };
+    follow();
   });
 
   /** The human's own additions: a message just sent, or one put in the line. */
@@ -108,7 +114,8 @@
 
   /**
    * Consecutive tool calls fold into one line that overwrites itself, the way
-   * a terminal does with : the latest tool shows, earlier ones become a count.
+   * a terminal does with 
+: the latest tool shows, earlier ones become a count.
    */
   type Shown = Exclude<Segment, { kind: "tool" }> | { kind: "tools"; tools: Tool[] };
   function collapse(segments: Segment[]): Shown[] {
@@ -332,7 +339,9 @@
             {#if q.text.trim()}<p>{q.text}</p>{/if}
             {#if q.picks.length}
               <div class="files" aria-label={t("composer.kb.attached")}>
-                {#each q.picks as p (p.id)}
+                <!-- By position: the list never reorders, and an index
+                     cannot collide the way a saved id can. -->
+                {#each q.picks as p, i (i)}
                   <span class="file kbchip" title={p.title}><span aria-hidden="true">📚</span><span>{p.title}</span></span>
                 {/each}
               </div>
@@ -356,7 +365,10 @@
            failed here, and a report going in is not worth interrupting for.
            Same shape as the error stack (ErrorToasts.svelte). -->
       <div class="parked" class:empty={waiting.length === 0} role="status" aria-live="polite" aria-atomic="false" aria-relevant="additions">
-        {#each waiting as w (w.what)}
+        <!-- Keyed on the core's id. `what` is a human sentence and not
+           unique by construction, and Svelte throws on a duplicate key
+           in release builds too, taking the conversation with it. -->
+      {#each waiting as w (w.id)}
           <div class="sys mono pline">
             <span class="dot pulse" aria-hidden="true"></span>
             <span title={t("timeline.parkedNote")}>
@@ -388,7 +400,7 @@
     </div>
   </div>
 
-  {#if missed}
+  {#if stick.missed}
     <!-- Reading back while the agent answered: the way down, and back to
          following it. -->
     <button class="jump mono" type="button" onclick={() => toBottom()}>
