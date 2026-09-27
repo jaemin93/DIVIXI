@@ -53,7 +53,7 @@ jobs:
     # Node only; a minute in practice.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # No Rust in a Node-only job: skip the toolchain, the cache and the
       # Linux packages, and this finishes in about a minute.
@@ -106,7 +106,7 @@ jobs:
             os: ubuntu-22.04
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # clippy is not in rustup's minimal profile, which is what the toolchain
       # action installs; ask for it or `cargo clippy` is "no such command".
@@ -205,7 +205,7 @@ jobs:
             bundles: deb
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-build
         with:
@@ -231,7 +231,7 @@ jobs:
           plutil -p "$app/Contents/Info.plist" | grep -E 'CFBundleShortVersionString|CFBundleVersion|CFBundleIdentifier'
 
       - name: Upload bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: divixi-${{ matrix.name }}-unsigned
           if-no-files-found: error

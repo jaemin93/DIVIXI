@@ -113,7 +113,7 @@ jobs:
       # fetch-depth: 0 for the whole history and every tag: `git rev-list
       # <last tag>..HEAD` has to be able to reach back to the previous release,
       # and the tag search below needs the tags to be present.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -277,7 +277,7 @@ jobs:
     steps:
       - name: Create or reuse the draft
         id: draft
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           RELEASE_TITLE: ${{ needs.prepare.outputs.title }}
@@ -400,7 +400,7 @@ jobs:
     timeout-minutes: 60
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-build
         with:
@@ -513,7 +513,7 @@ jobs:
       # The Apple secrets are handed over unconditionally; unset ones arrive as
       # empty strings, which tauri-action treats as absent. The guard step above
       # is what makes a half-filled set impossible to reach.
-      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0, 2026-03-14
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2, 2026-03-14
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -551,7 +551,7 @@ jobs:
     timeout-minutes: 30
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-build
         with:
@@ -579,7 +579,7 @@ jobs:
       # the release by tag, which cannot work here: the release is a draft and a
       # draft has no git tag, so they would create a second one.
       - name: Upload to the draft release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         with:
@@ -641,7 +641,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Un-draft the release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
