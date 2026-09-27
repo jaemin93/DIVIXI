@@ -76,10 +76,10 @@ pub const ALLOWED: &[&str] = &[
 ];
 
 /// Whoever comes in is this Divixi's owner (over SSH, or as its GitHub
-/// account), and does there what its own window does. Still closed:
-/// anything that opens a window or a browser on the machine (pickers, save
-/// dialogs, the file manager, agent sign-in), the terminal, and the
-/// remote-instance and GitHub controls.
+/// account), and does there what its own window does, its terminal
+/// included. Still closed: anything that opens a window or a browser on
+/// the machine (pickers, save dialogs, the file manager, agent sign-in),
+/// and the remote-instance and GitHub controls.
 const SERVER_ALLOWED: &[&str] = &[
     "create_track",
     "update_track",
@@ -97,6 +97,13 @@ const SERVER_ALLOWED: &[&str] = &[
     "design_add_blob",
     // Files the Divixi app brought over first (instance_upload).
     "design_add_files",
+    // A shell on this machine, drawn on the app's PC (as VS Code Remote).
+    "term_open",
+    "term_write",
+    "term_resize",
+    "term_close",
+    // This machine's folders, for picking a track's.
+    "browse_dirs",
     "design_extract_retry",
     "knowledge_add",
     "knowledge_sync",
@@ -193,7 +200,8 @@ mod tests {
     fn only_listed_commands_and_open_settings() {
         assert!(allowed("list_tracks", &json!({})).is_ok());
         assert!(allowed("pick_folder", &json!({})).is_err());
-        assert!(allowed("term_open", &json!({})).is_err());
+        assert!(allowed("term_open", &json!({})).is_ok(), "the owner's shell");
+        assert!(allowed("workspace_reveal", &json!({})).is_err());
         assert!(allowed("delete_track", &json!({})).is_ok(), "the owner may");
         assert!(allowed("remote_server_set", &json!({})).is_err());
         assert!(allowed("github_login_start", &json!({})).is_err());

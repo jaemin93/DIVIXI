@@ -119,6 +119,12 @@ export async function listen<T>(event: string, handler: (e: Event<T>) => void): 
   };
 }
 
+/** Save a track's file on this PC (a save dialog here, whichever Divixi is shown). */
+export function saveAs(track: string, path: string): Promise<string | null> {
+  if (!instanceId) return tauriInvoke<string | null>("workspace_save_as", { track, path });
+  return tauriInvoke<string | null>("instance_save_as", { id: instanceId, track, path });
+}
+
 /** Why the chosen instance could not be reached, if it could not. */
 export const instance = $state<{ error: string }>({ error: "" });
 

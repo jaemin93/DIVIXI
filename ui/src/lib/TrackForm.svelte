@@ -1,5 +1,6 @@
 <script lang="ts">
   import { local } from "./ipc.svelte";
+  import FolderPicker from "./FolderPicker.svelte";
   import { store, agentLabel, type AgentId, type ConfigOption, type OptionConfig, type Track, type TrackPatch, WORKER_FOLDERS, type WorkerFolder } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import Icon from "./Icon.svelte";
@@ -78,7 +79,14 @@
     nameInput?.focus();
   });
 
+  /** On a remote instance, its own folders in a picker the app draws. */
+  let remotePick = $state(false);
+
   async function browse() {
+    if (!local) {
+      remotePick = true;
+      return;
+    }
     const picked = await store.pickFolder(cwd);
     if (picked) cwd = picked;
   }
@@ -175,7 +183,7 @@
         <div class="folder">
           <Icon name="folder" size={14} />
           <input class="mono" type="text" bind:value={cwd} spellcheck="false" />
-          {#if local}<button class="btn" type="button" onclick={browse}>{t("newtrack.browse")}</button>{/if}
+          <button class="btn" type="button" onclick={browse}>{t("newtrack.browse")}</button>
         </div>
       </div>
 
@@ -295,6 +303,17 @@
     {/each}
   </section>
 {/snippet}
+
+{#if remotePick}
+  <FolderPicker
+    start={cwd}
+    onpick={(p) => {
+      cwd = p;
+      remotePick = false;
+    }}
+    onclose={() => (remotePick = false)}
+  />
+{/if}
 
 <style>
   main {

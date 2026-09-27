@@ -93,6 +93,8 @@ struct Conn {
     tokens: parking_lot::Mutex<Tokens>,
     http: reqwest::Client,
     events: parking_lot::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// Shells this app opened there, closed with the connection.
+    terms: parking_lot::Mutex<Vec<u64>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -106,9 +108,14 @@ impl Conn {
         self.tunnel.try_lock().map(|mut c| c.as_mut().is_none_or(|c| matches!(c.try_wait(), Ok(None)))).unwrap_or(true)
     }
 
-    async fn close(&self) {
+    async fn close(&self, app: &AppHandle) {
         if let Some(h) = self.events.lock().take() {
             h.abort();
+        }
+        // Our shells there go with us (a moment each, at most).
+        let terms = std::mem::take(&mut *self.terms.lock());
+        for id in terms {
+            let _ = tokio::time::timeout(Duration::from_secs(2), call(app, self, "term_close", &json!({ "id": id }))).await;
         }
         if let Some(c) = self.tunnel.lock().await.as_mut() {
             let _ = c.kill().await;
@@ -284,7 +291,7 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
         }
         // Its ssh has ended: the connection is gone.
         if let Some(c) = open.remove(id) {
-            c.close().await;
+            c.close(app).await;
         }
     }
     let host = hosts(app).into_iter().find(|h| h.id == id).ok_or("no such remote instance")?;
@@ -327,6 +334,7 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
         tokens: parking_lot::Mutex::new(tokens),
         http,
         events: parking_lot::Mutex::new(None),
+        terms: parking_lot::Mutex::new(Vec::new()),
     });
     let pump = tauri::async_runtime::spawn(pump_events(app.clone(), conn.clone()));
     *conn.events.lock() = Some(pump);
@@ -449,7 +457,7 @@ pub async fn proxy(app: &AppHandle, id: &str, kind: &str, rest: &str) -> tauri::
 async fn disconnect(app: &AppHandle, id: &str) {
     let conn = app.state::<AppState>().tunnels.open.lock().await.remove(id);
     if let Some(c) = conn {
-        c.close().await;
+        c.close(app).await;
     }
 }
 
@@ -525,7 +533,54 @@ pub async fn instance_invoke(app: AppHandle, id: String, cmd: String, args: Valu
         return Err("not a command name".into());
     }
     let conn = connect(&app, &id).await?;
-    call(&app, &conn, &cmd, &args).await
+    let out = call(&app, &conn, &cmd, &args).await?;
+    // Shells opened there are ours to close when we go.
+    match cmd.as_str() {
+        "term_open" => conn.terms.lock().extend(out.as_u64()),
+        "term_close" => {
+            let gone = args.get("id").and_then(Value::as_u64);
+            conn.terms.lock().retain(|t| Some(*t) != gone);
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
+/// A track's file on the instance, saved on this PC where the user says.
+#[tauri::command]
+pub async fn instance_save_as(app: AppHandle, id: String, track: String, path: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let conn = connect(&app, &id).await?;
+    let enc = |s: &str| s.split('/').map(|p| p.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>()).collect::<Vec<_>>().join("/");
+    let url = format!("{}/raw/{}/{}", conn.base, enc(&track), enc(&path));
+    let mut renewed = false;
+    let bytes = loop {
+        let access = conn.tokens.lock().access.clone();
+        let res = conn.http.get(&url).bearer_auth(access).send().await.map_err(|e| format!("the remote instance did not answer: {e}"))?;
+        if res.status() == reqwest::StatusCode::UNAUTHORIZED && !renewed {
+            renew(&app, &conn).await?;
+            renewed = true;
+            continue;
+        }
+        if !res.status().is_success() {
+            return Err(format!("{path}: {}", res.status()));
+        }
+        break res.bytes().await.map_err(|e| e.to_string())?;
+    };
+    let name = path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("file").to_string();
+    let mut dialog = app.dialog().file().set_file_name(&name);
+    if let Some(dir) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(std::path::PathBuf::from).map(|h| h.join("Downloads")).filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    dialog.save_file(move |picked| {
+        let _ = tx.send(picked);
+    });
+    let Some(target) = rx.await.map_err(|e| e.to_string())?.and_then(|p| p.into_path().ok()) else {
+        return Ok(None);
+    };
+    tokio::fs::write(&target, &bytes).await.map_err(|e| format!("could not save {}: {e}", target.display()))?;
+    Ok(Some(target.display().to_string()))
 }
 
 /// Files of this PC (picked or dropped) taken to the instance: each is kept
@@ -558,19 +613,20 @@ pub async fn instance_upload(app: AppHandle, id: String, paths: Vec<String>) -> 
 #[cfg_attr(feature = "server", allow(dead_code))]
 pub fn close_all(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let guard = state.tunnels.open.try_lock();
-    if let Ok(mut open) = guard {
-        for (_, c) in open.drain() {
-            if let Some(h) = c.events.lock().take() {
-                h.abort();
+    let conns: Vec<Arc<Conn>> = match state.tunnels.open.try_lock() {
+        Ok(mut open) => open.drain().map(|(_, c)| c).collect(),
+        Err(_) => return,
+    };
+    // Shells opened there are closed first; the whole goodbye is kept short.
+    let app2 = app.clone();
+    let _ = tauri::async_runtime::block_on(async move {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            for c in &conns {
+                c.close(&app2).await;
             }
-            if let Ok(mut t) = c.tunnel.try_lock() {
-                if let Some(t) = t.as_mut() {
-                    let _ = t.start_kill();
-                }
-            }
-        }
-    }
+        })
+        .await
+    });
 }
 
 #[cfg(test)]

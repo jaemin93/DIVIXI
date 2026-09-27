@@ -2,8 +2,9 @@
 //!
 //! Every event the UI listens to is numbered and kept in a ring; a device
 //! that reconnects asks for what came after the last number it saw, and is
-//! told to reload when the ring no longer reaches back that far. The PC's
-//! terminal output is not among them.
+//! told to reload when the ring no longer reaches back that far. Terminal
+//! output is live only ([`LIVE`]): unnumbered, never kept, and dropped
+//! rather than waited for when a device falls behind (a shell redraws).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Listener, Runtime};
 use tokio::sync::broadcast;
 
-/// Events the UI listens to, the terminal's left out.
+/// Events the UI listens to, kept for catching up.
 pub const EVENTS: &[&str] = &[
     "agent",
     "agent_download",
@@ -24,6 +25,9 @@ pub const EVENTS: &[&str] = &[
     "knowledge-removed",
     "knowledge-embedding",
 ];
+
+/// The terminal's events: sent as they come, not kept.
+pub const LIVE: &[&str] = &["term", "term_exit"];
 
 /// Frames kept for catching up.
 const RING: usize = 4000;
@@ -40,12 +44,14 @@ pub struct Hub {
     pub on: AtomicBool,
     ring: parking_lot::Mutex<(u64, VecDeque<Frame>)>,
     tx: broadcast::Sender<Frame>,
+    live: broadcast::Sender<Arc<str>>,
 }
 
 impl Default for Hub {
     fn default() -> Self {
         let (tx, _) = broadcast::channel(1024);
-        Self { on: AtomicBool::new(false), ring: parking_lot::Mutex::new((0, VecDeque::new())), tx }
+        let (live, _) = broadcast::channel(4096);
+        Self { on: AtomicBool::new(false), ring: parking_lot::Mutex::new((0, VecDeque::new())), tx, live }
     }
 }
 
@@ -78,6 +84,19 @@ impl Hub {
         let _ = self.tx.send(frame);
     }
 
+    /// A live event: `{"event":"…","payload":…}`, to whoever listens now.
+    pub fn push_live(&self, event: &str, payload: &str) {
+        if !self.on.load(Ordering::Relaxed) || self.live.receiver_count() == 0 {
+            return;
+        }
+        let payload = if payload.is_empty() { "null" } else { payload };
+        let _ = self.live.send(format!("{{\"event\":{},\"payload\":{payload}}}", serde_json::Value::String(event.into())).into());
+    }
+
+    pub fn subscribe_live(&self) -> broadcast::Receiver<Arc<str>> {
+        self.live.subscribe()
+    }
+
     /// The newest number.
     #[cfg(test)]
     pub fn last(&self) -> u64 {
@@ -105,6 +124,10 @@ pub fn install<R: Runtime>(app: &AppHandle<R>, hub: Arc<Hub>) {
         let hub = hub.clone();
         app.listen_any(name, move |event| hub.push(name, event.payload()));
     }
+    for &name in LIVE {
+        let hub = hub.clone();
+        app.listen_any(name, move |event| hub.push_live(name, event.payload()));
+    }
 }
 
 #[cfg(test)]
@@ -128,5 +151,16 @@ mod tests {
         }
         assert!(matches!(hub.subscribe(1).1, CatchUp::Reset), "fell out of the ring");
         assert!(matches!(hub.subscribe(0).1, CatchUp::Frames(f) if f.is_empty()), "a fresh device starts now");
+    }
+
+    #[test]
+    fn live_events_are_sent_not_kept() {
+        let hub = Hub::default();
+        hub.on.store(true, Ordering::Relaxed);
+        let before = hub.last();
+        let mut rx = hub.subscribe_live();
+        hub.push_live("term", "{\"id\":1,\"data\":\"hi\"}");
+        assert_eq!(&*rx.try_recv().unwrap(), "{\"event\":\"term\",\"payload\":{\"id\":1,\"data\":\"hi\"}}");
+        assert_eq!(hub.last(), before, "not numbered, not kept");
     }
 }

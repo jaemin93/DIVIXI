@@ -7,7 +7,7 @@
   import CodeEditor from "./CodeEditor.svelte";
   import { highlight, languageFor } from "./highlight";
   import { t } from "./i18n.svelte";
-  import { invoke, previewBase } from "./ipc.svelte";
+  import { invoke, previewBase, saveAs, local } from "./ipc.svelte";
 
   /**
    * The track's working folder beside the conversation, after Kiro Crew's
@@ -78,7 +78,7 @@
   async function download(path: string) {
     menu = null;
     try {
-      await invoke<string | null>("workspace_save_as", { track: store.track, path });
+      await saveAs(store.track, path);
     } catch (err) {
       store.lastError = String(err);
     }
@@ -329,7 +329,7 @@
           <Icon name="book" size={14} />
         </button>
       {/if}
-      <button class="btn sm" onclick={() => store.revealFile(store.activeFile)}>{t("ws.reveal")}</button>
+      {#if local}<button class="btn sm" onclick={() => store.revealFile(store.activeFile)}>{t("ws.reveal")}</button>{/if}
       <button class="tab icon" class:on={store.panelTree} title={t("ws.toggleTree")} onclick={() => (store.panelTree = !store.panelTree)}>
         <Icon name="files" size={14} />
       </button>

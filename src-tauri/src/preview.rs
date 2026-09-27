@@ -80,7 +80,7 @@ fn with_style(html: &[u8], style: &str) -> Vec<u8> {
 }
 
 /// `%XX` escapes decoded; invalid ones are kept as they are.
-fn decode(s: &str) -> String {
+pub(crate) fn decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

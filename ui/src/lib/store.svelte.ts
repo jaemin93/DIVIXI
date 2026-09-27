@@ -1,4 +1,4 @@
-import { invoke, listen, local, bring, boardBase } from "./ipc.svelte";
+import { invoke, listen, inTauri, local, bring, boardBase } from "./ipc.svelte";
 import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Lang, type LangPref } from "./i18n.svelte";
@@ -1941,8 +1941,7 @@ class Store {
 
   /** Show or hide the track list column; persisted. */
   async setTerminal(open: boolean) {
-    // A terminal is this PC's.
-    if (!local) return;
+    if (!inTauri) return;
     this.termOpen = open;
     if (open) this.termMounted = true;
     try {

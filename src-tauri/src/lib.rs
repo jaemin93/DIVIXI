@@ -336,6 +336,44 @@ async fn workspace_save_as(app: AppHandle, track: String, path: String) -> Resul
     Ok(Some(target.display().to_string()))
 }
 
+/// A folder's subfolders, for picking a track's folder on a remote
+/// instance (the app draws the picker; this machine has no one at it).
+/// No path: the home folder. Hidden folders are left out.
+#[derive(serde::Serialize)]
+struct Dirs {
+    path: String,
+    parent: Option<String>,
+    home: String,
+    dirs: Vec<String>,
+}
+
+#[tauri::command(async)]
+fn browse_dirs(path: Option<String>) -> Result<Dirs, String> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_else(workspace_root);
+    let asked = path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    let asked = match asked {
+        Some(p) if p == "~" => home.clone(),
+        Some(p) if p.starts_with("~/") => home.join(&p[2..]),
+        Some(p) => PathBuf::from(p),
+        None => home.clone(),
+    };
+    let dir = asked.canonicalize().map_err(|e| format!("{}: {e}", asked.display()))?;
+    if !dir.is_dir() {
+        return Err(format!("{} is not a folder", dir.display()));
+    }
+    let mut dirs: Vec<String> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .take(5000)
+        .collect();
+    dirs.sort_by_key(|n| n.to_lowercase());
+    let show = |p: &std::path::Path| p.display().to_string().trim_start_matches(r"\?").to_string();
+    Ok(Dirs { path: show(&dir), parent: dir.parent().map(show), home: show(&home), dirs })
+}
+
 /// Let the human pick a folder for a track. `None` when they cancel.
 #[tauri::command]
 async fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<String>, String> {
@@ -1142,6 +1180,8 @@ pub fn run() {
             remote::client::remote_host_disconnect,
             remote::client::instance_invoke,
             remote::client::instance_upload,
+            remote::client::instance_save_as,
+            browse_dirs,
             remote::remote_server_status,
             remote::remote_server_set,
             remote::remote_server_drop,

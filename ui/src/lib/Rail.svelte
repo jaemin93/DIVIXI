@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { local } from "./ipc.svelte";
+  import { inTauri } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import { kb } from "./knowledge.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
@@ -37,7 +37,8 @@
 
   const secondary: Item[] = [
     // No PC shell from another device.
-    ...(local ? [{ id: "terminal", icon: "terminal" as IconName, label: "rail.terminal" as Key, go: () => store.setTerminal(!store.termOpen) }] : []),
+    // A shell on the Divixi shown: this PC, or the remote instance (as VS Code Remote).
+    ...(inTauri ? [{ id: "terminal", icon: "terminal" as IconName, label: "rail.terminal" as Key, go: () => store.setTerminal(!store.termOpen) }] : []),
     { id: "settings", icon: "settings", label: "rail.settings", go: () => store.openSettings("overview") },
   ];
 

@@ -49,6 +49,7 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/api/events", get(events))
         .route("/preview/{*rest}", get(preview))
         .route("/board/{*rest}", get(board))
+        .route("/raw/{*rest}", get(raw))
         .fallback(|| async { (StatusCode::NOT_FOUND, "no such thing") })
         .layer(axum::middleware::from_fn(guard))
         .with_state(ctx)
@@ -193,6 +194,7 @@ async fn events(State(ctx): State<Ctx>, headers: HeaderMap, Query(q): Query<Sinc
 }
 
 async fn pump(mut socket: WebSocket, hub: Arc<super::events::Hub>, since: u64) {
+    let mut live = hub.subscribe_live();
     let (mut rx, catch) = hub.subscribe(since);
     let mut last = since;
     match catch {
@@ -225,6 +227,16 @@ async fn pump(mut socket: WebSocket, hub: Arc<super::events::Hub>, since: u64) {
                     let _ = socket.send(Message::Text("{\"reset\":true}".into())).await;
                     return;
                 }
+                Err(_) => return,
+            },
+            got = live.recv() => match got {
+                Ok(text) => {
+                    if socket.send(Message::Text(text.to_string().into())).await.is_err() {
+                        return;
+                    }
+                }
+                // Behind on a terminal's output: that much is skipped.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(_) => return,
             },
             msg = socket.recv() => match msg {
@@ -277,6 +289,31 @@ async fn board(State(ctx): State<Ctx>, headers: HeaderMap, uri: Uri) -> Response
     match tauri::async_runtime::spawn_blocking(move || crate::preview::handle_board(&app, req)).await {
         Ok(res) => from_protocol(res, false),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// A track's file as it is (`/raw/<track>/<path>`), for saving it on the
+/// app's PC.
+async fn raw(State(ctx): State<Ctx>, headers: HeaderMap, uri: Uri) -> Response<Body> {
+    if let Err(r) = device(&ctx, &headers) {
+        return refused(r);
+    }
+    let path = uri.path().strip_prefix("/raw/").unwrap_or_default();
+    let (track, rel) = path.split_once('/').unwrap_or((path, ""));
+    let (track, rel) = (crate::preview::decode(track), crate::preview::decode(rel));
+    let full = {
+        let st = ctx.state();
+        match crate::track_root(&st, &track).and_then(|root| crate::workspace::resolve(&root, &rel)) {
+            Ok(f) if f.is_file() => f,
+            _ => return (StatusCode::NOT_FOUND, "no such file").into_response(),
+        }
+    };
+    match tokio::fs::read(&full).await {
+        Ok(bytes) => Response::builder()
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
