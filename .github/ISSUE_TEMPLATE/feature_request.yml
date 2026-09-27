@@ -1,0 +1,73 @@
+name: 🚀 Feature request
+description: Propose something Divixi should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Lead with the problem rather than the design. What you were trying to do and what
+        got in the way tells us more than a proposed solution, and it leaves room for an
+        answer nobody had thought of.
+
+        If your idea touches the conductor, the timeline, or what workers do,
+        [docs/development.md](https://github.com/jaemin93/divixi/blob/main/docs/development.md)
+        is worth a look first — its **Principles** section says which decisions are
+        deliberate, and a proposal that knows what it is arguing with gets a better answer.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What are you trying to get done, and where does Divixi get in the way today?
+        Describe the situation before the solution.
+      placeholder: |
+        I run four workers on one Track and I cannot tell at a glance which of them is
+        waiting on me. I end up opening each one to find the one that asked a question.
+    validations:
+      required: true
+
+  - type: textarea
+    id: pitch
+    attributes:
+      label: What should happen instead
+      description: >
+        Concrete beats abstract — a keybinding, a menu item, a specific behaviour in a
+        specific pane.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives, and what you do today
+      description: >
+        Other shapes this could take, or the workaround you are using now. If another tool
+        already does it well, name it.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of Divixi
+      description: Your best guess is fine.
+      multiple: true
+      options:
+        - The conductor and how it delegates
+        - Workers and their sessions
+        - The timeline
+        - Tracks and folders
+        - The design board
+        - The knowledge library
+        - Agents, detection and login
+        - Remote instances and divixi-server
+        - Notifications
+        - Settings
+        - Something else / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Mockups, links, related issues.

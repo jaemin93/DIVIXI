@@ -1,0 +1,143 @@
+name: 🐛 Bug report
+description: Something in Divixi is broken or behaves unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Start with the diagnostics
+
+        Open **Settings → About → Diagnostics** and press **Copy diagnostics**. That gives
+        you the version, your OS and webview, the agent CLIs it found and their versions,
+        where the log and the store live, and the last warnings and errors — one Markdown
+        block, ready for the **Diagnostics** field below. It is shown on screen before it
+        is copied, so read it first: no API key or token goes in it, but the paths on your
+        machine do.
+
+        Without that block a report is usually not actionable. Divixi is developed on
+        Windows, so a macOS or Linux report without it is guesswork.
+
+        Please search [the open issues](https://github.com/jaemin93/divixi/issues) before
+        filing. **Not a bug but a vulnerability?** Do not file it here — see
+        [SECURITY.md](https://github.com/jaemin93/divixi/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+      placeholder: |
+        A worker finished and posted its report, but the conductor never picked it up —
+        the timeline still shows the worker as running. Expected the report to appear in
+        the timeline and the worker to go idle.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: >
+        Numbered steps, starting from a freshly launched Divixi. If it only happens
+        sometimes, say how often — "twice out of ten runs" is a useful fact. If it depends
+        on which agent is running, say which.
+      placeholder: |
+        1. Open a Track on a git repository
+        2. Ask the conductor to split a two-file change across two workers
+        3. Wait for the first worker to finish
+        4. The report never reaches the timeline
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: >
+        Tick every one you could reproduce it on. macOS has no real-machine verification
+        yet, so a macOS report is especially welcome.
+      multiple: true
+      options:
+        - Windows
+        - Linux
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where it happened
+      options:
+        - The desktop app, on this machine
+        - The desktop app, switched to a remote instance
+        - divixi-server (headless)
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: version
+    attributes:
+      label: Which build
+      options:
+        - Latest release
+        - An older release
+        - main (built from source)
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: >
+        Paste what **Settings → About → Diagnostics → Copy diagnostics** put on your
+        clipboard. If the app will not start far enough to reach that pane, say so and
+        fill in the version, your OS and architecture by hand.
+      value: |
+        ```
+        # Paste the diagnostics block here
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log
+      description: |
+        The diagnostics block already carries the last warnings and errors. If more is
+        needed, *Open log folder* in the same pane opens `logs/` in the app's data
+        folder:
+
+        | OS | Log folder |
+        |---|---|
+        | Windows | `%APPDATA%\app.divixi\logs` |
+        | Linux | `~/.local/share/app.divixi/logs` |
+        | macOS | `~/Library/Application Support/app.divixi/logs` |
+
+        One file a day, the last seven kept, and a panic in `crash.log` beside them.
+
+        To catch more, turn **How much is logged** up in the same pane — it takes effect
+        with no restart, so what you were reproducing is still on screen. `DIVIXI_LOG`
+        sets the level the app *starts* at and takes the same filters as `RUST_LOG`
+        (`DIVIXI_LOG=debug`). Debug and above also record what the agents write to
+        stderr, so turn it back down afterwards.
+
+        **Read what you paste.** Masking hides what looks like a key or a token, but it
+        cannot know what else is sensitive to you.
+      value: |
+        ```
+        # Relevant lines from the log, if any
+        ```
+
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: >
+        A screenshot or a short recording, when it started, whether an earlier version
+        worked, what you already tried. Which agent CLI was involved, if one was.

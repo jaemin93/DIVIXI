@@ -1,0 +1,52 @@
+# How GitHub groups pull requests in generated release notes.
+#
+# The release workflow creates the release with `generate_release_notes: true`
+# (.github/workflows/release.yml), which makes GitHub read this file and sort the merged
+# pull requests since the previous release into the categories below. Without it the notes
+# are one flat list.
+#
+# Whether that release is published by the workflow or left for a person to publish is the
+# workflow's business, not this file's: the grouping is applied when the notes are
+# generated, either way.
+#
+# Grouping is by LABEL, not by commit message. Divixi's commit subjects are sentences
+# rather than `feat:` / `fix:` prefixes, so nothing can infer the category from the title —
+# a pull request has to be labelled for it to land anywhere but "Everything else". The
+# issue forms label their own issues (`bug`, `enhancement`); a pull request needs the label
+# put on it by hand, or by whatever automation gets added later.
+#
+# `*` must stay last: it is the catch-all, and a category above it wins over it.
+
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+      - duplicate
+      - invalid
+      - question
+  categories:
+    - title: ✨ New
+      labels:
+        - enhancement
+        - feature
+    - title: 🐛 Fixed
+      labels:
+        - bug
+        - regression
+    - title: 🔒 Security
+      labels:
+        - security
+    - title: 💥 Breaking changes
+      labels:
+        - breaking
+    - title: 📖 Docs
+      labels:
+        - documentation
+    - title: 🧱 Build, CI and dependencies
+      labels:
+        - build
+        - ci
+        - dependencies
+    - title: 🧹 Everything else
+      labels:
+        - "*"
