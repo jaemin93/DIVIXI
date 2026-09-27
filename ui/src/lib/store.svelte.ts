@@ -2286,8 +2286,11 @@ class Store {
       void this.refreshConductor();
     }
     fold(run, env.at_ms, env.event);
-    // The conductor answered, or its turn failed.
-    if (env.session === "conductor" && (env.event.kind === "finished" || env.event.kind === "failed")) {
+    // The conductor answered, or its turn failed. A turn the human stopped
+    // themselves (ACP's "cancelled", `Cancelled` as the core writes it) is
+    // no news to them.
+    const stopped = env.event.kind === "finished" && env.event.stop_reason.toLowerCase() === "cancelled";
+    if (env.session === "conductor" && !stopped && (env.event.kind === "finished" || env.event.kind === "failed")) {
       const track = this.tracks.find((x) => x.id === env.track)?.name ?? "";
       if (env.event.kind === "finished") notify("reply", t("notify.reply", { track }), run.message.trim() || t("notify.replyEmpty"), env.track);
       else notify("failed", t("notify.failed", { track }), env.event.error, env.track);
