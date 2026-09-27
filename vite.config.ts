@@ -11,6 +11,9 @@ export default defineConfig({
     outDir: "../dist",
     emptyOutDir: true,
     target: "esnext",
+    // A desktop app reads its UI from disk, not over a network: a chunk of
+    // half a megabyte costs nothing noticeable. Past 1 MB is worth a look.
+    chunkSizeWarningLimit: 1000,
   },
   server: {
     port: 5183,
