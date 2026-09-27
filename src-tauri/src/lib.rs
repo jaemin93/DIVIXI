@@ -1372,7 +1372,7 @@ pub fn run() {
             knowledge::start(app.handle().clone());
             #[cfg(not(feature = "server"))]
             {
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = app.get_window("main") {
                     let _ = window.set_title("Divixi");
                 }
                 tray(app.handle())?;
@@ -1473,9 +1473,11 @@ fn data_dir_offline() -> anyhow::Result<PathBuf> {
 }
 
 /// Bring the main window back: shown, restored if minimised, in front.
+/// The window, not the webview window: once a remote instance has a webview
+/// in it, Tauri no longer counts it as one (`get_webview_window` is None).
 #[cfg(not(feature = "server"))]
 fn show_main(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();

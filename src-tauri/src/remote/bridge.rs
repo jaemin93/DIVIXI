@@ -136,8 +136,9 @@ pub fn allowed(cmd: &str, args: &Value) -> Result<(), String> {
 /// Run a command as the main window would, and take its answer.
 /// `Ok` carries what the command returned, `Err` what it rejected with.
 pub async fn invoke<R: Runtime>(app: &AppHandle<R>, cmd: &str, args: Value) -> Result<Value, Value> {
-    let window = app.get_webview_window("main").ok_or_else(|| Value::String("the app has no window".into()))?;
-    let webview = window.as_ref().clone();
+    // The main window's own webview (Local): with remote instances shown in
+    // the same window, it is no longer a "webview window" to Tauri.
+    let webview = app.get_webview("main").ok_or_else(|| Value::String("the app has no window".into()))?;
     let url = webview.url().map_err(|e| Value::String(e.to_string()))?;
     let request = InvokeRequest {
         cmd: cmd.to_string(),
