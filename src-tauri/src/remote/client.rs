@@ -82,6 +82,15 @@ pub struct HostView {
 #[derive(Default)]
 pub struct Tunnels {
     open: tokio::sync::Mutex<HashMap<String, Arc<Conn>>>,
+    /// One connect at a time per host; the map is only held for a moment,
+    /// so a slow SSH never holds up the others (or the list).
+    gates: parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl Tunnels {
+    fn gate(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.gates.lock().entry(id.to_string()).or_default().clone()
+    }
 }
 
 struct Conn {
@@ -95,6 +104,8 @@ struct Conn {
     events: parking_lot::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     /// Shells this app opened there, closed with the connection.
     terms: parking_lot::Mutex<Vec<u64>>,
+    /// Renewals one at a time: a refresh token used twice drops the device.
+    renewing: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -270,8 +281,14 @@ async fn sign_in(app: &AppHandle, http: &reqwest::Client, base: &str, host: &Hos
     serde_json::from_slice(&body).map_err(|e| e.to_string())
 }
 
-/// New tokens: from the refresh token, or (refused) a fresh sign-in.
-async fn renew(app: &AppHandle, conn: &Conn) -> Result<(), String> {
+/// New tokens, after `stale` (the access token) was refused: from the
+/// refresh token, or (refused too) a fresh sign-in. Callers that were
+/// refused together renew once; the others find new tokens already there.
+async fn renew(app: &AppHandle, conn: &Conn, stale: &str) -> Result<(), String> {
+    let _one = conn.renewing.lock().await;
+    if conn.tokens.lock().access != stale {
+        return Ok(());
+    }
     let refresh = conn.tokens.lock().refresh.clone();
     let res = conn.http.post(format!("{}/auth/refresh", conn.base)).header("X-Divixi", "1").bearer_auth(refresh).send().await;
     let tokens = match res {
@@ -282,17 +299,30 @@ async fn renew(app: &AppHandle, conn: &Conn) -> Result<(), String> {
     Ok(())
 }
 
+/// The open connection, if it is still alive.
+async fn live(app: &AppHandle, id: &str) -> Option<Arc<Conn>> {
+    app.state::<AppState>().tunnels.open.lock().await.get(id).filter(|c| c.alive()).cloned()
+}
+
 async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
+    if let Some(c) = live(app, id).await {
+        return Ok(c);
+    }
     let tunnels = &app.state::<AppState>().tunnels;
-    let mut open = tunnels.open.lock().await;
-    if let Some(c) = open.get(id) {
-        if c.alive() {
-            return Ok(c.clone());
+    let gate = tunnels.gate(id);
+    let _one = gate.lock().await;
+    // Another call may have connected while this one waited.
+    let dead = {
+        let mut open = tunnels.open.lock().await;
+        match open.get(id) {
+            Some(c) if c.alive() => return Ok(c.clone()),
+            // Its ssh has ended: the connection is gone.
+            Some(_) => open.remove(id),
+            None => None,
         }
-        // Its ssh has ended: the connection is gone.
-        if let Some(c) = open.remove(id) {
-            c.close(app).await;
-        }
+    };
+    if let Some(c) = dead {
+        c.close(app).await;
     }
     let host = hosts(app).into_iter().find(|h| h.id == id).ok_or("no such remote instance")?;
     let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
@@ -335,10 +365,11 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
         http,
         events: parking_lot::Mutex::new(None),
         terms: parking_lot::Mutex::new(Vec::new()),
+        renewing: tokio::sync::Mutex::new(()),
     });
     let pump = tauri::async_runtime::spawn(pump_events(app.clone(), conn.clone()));
     *conn.events.lock() = Some(pump);
-    open.insert(id.to_string(), conn.clone());
+    tunnels.open.lock().await.insert(id.to_string(), conn.clone());
     Ok(conn)
 }
 
@@ -354,14 +385,14 @@ async fn call(app: &AppHandle, conn: &Conn, cmd: &str, args: &Value) -> Result<V
             .post(&url)
             .header("X-Divixi", "1")
             .header("Content-Type", "application/json")
-            .bearer_auth(access)
+            .bearer_auth(&access)
             .body(body.clone())
             .send()
             .await
             .map_err(|e| format!("the remote instance did not answer: {e}"))?;
         let status = res.status();
         if status == reqwest::StatusCode::UNAUTHORIZED && !renewed {
-            renew(app, conn).await?;
+            renew(app, conn, &access).await?;
             renewed = true;
             continue;
         }
@@ -372,6 +403,9 @@ async fn call(app: &AppHandle, conn: &Conn, cmd: &str, args: &Value) -> Result<V
         };
     }
 }
+
+/// How long the event socket may stay silent (the server pings every 30 s).
+const SILENCE: Duration = Duration::from_secs(75);
 
 /// The instance's events, re-sent to the page as `instance-event`
 /// (`{id, frame}`), picking up where it left off after a drop.
@@ -390,7 +424,9 @@ async fn pump_events(app: AppHandle, conn: Arc<Conn>) {
         match tokio_tungstenite::connect_async(req).await {
             Ok((mut ws, _)) => {
                 backoff = Duration::from_secs(1);
-                while let Some(Ok(msg)) = ws.next().await {
+                // The server pings every 30 s: this long without a word, the
+                // link is gone even if no one said so (an address, a sleep).
+                while let Ok(Some(Ok(msg))) = tokio::time::timeout(SILENCE, ws.next()).await {
                     let Message::Text(text) = msg else { continue };
                     let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };
                     if let Some(seq) = frame.get("seq").and_then(Value::as_u64) {
@@ -400,10 +436,10 @@ async fn pump_events(app: AppHandle, conn: Arc<Conn>) {
                 }
             }
             Err(tokio_tungstenite::tungstenite::Error::Http(res)) if res.status() == 401 => {
-                if renew(&app, &conn).await.is_err() {
-                    tokio::time::sleep(backoff).await;
+                if renew(&app, &conn, &access).await.is_ok() {
+                    continue;
                 }
-                continue;
+                // Not let in again (each try may be an SSH sign-in): wait longer each time.
             }
             Err(_) => {}
         }
@@ -411,7 +447,7 @@ async fn pump_events(app: AppHandle, conn: Arc<Conn>) {
             return;
         }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(10));
+        backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
 
@@ -438,8 +474,8 @@ pub async fn proxy(app: &AppHandle, id: &str, kind: &str, rest: &str) -> tauri::
     let mut renewed = false;
     loop {
         let access = conn.tokens.lock().access.clone();
-        let Ok(res) = conn.http.get(&url).bearer_auth(access).send().await else { return reply(502, "the remote instance did not answer") };
-        if res.status() == reqwest::StatusCode::UNAUTHORIZED && !renewed && renew(app, &conn).await.is_ok() {
+        let Ok(res) = conn.http.get(&url).bearer_auth(&access).send().await else { return reply(502, "the remote instance did not answer") };
+        if res.status() == reqwest::StatusCode::UNAUTHORIZED && !renewed && renew(app, &conn, &access).await.is_ok() {
             renewed = true;
             continue;
         }
@@ -556,9 +592,9 @@ pub async fn instance_save_as(app: AppHandle, id: String, track: String, path: S
     let mut renewed = false;
     let bytes = loop {
         let access = conn.tokens.lock().access.clone();
-        let res = conn.http.get(&url).bearer_auth(access).send().await.map_err(|e| format!("the remote instance did not answer: {e}"))?;
+        let res = conn.http.get(&url).bearer_auth(&access).send().await.map_err(|e| format!("the remote instance did not answer: {e}"))?;
         if res.status() == reqwest::StatusCode::UNAUTHORIZED && !renewed {
-            renew(&app, &conn).await?;
+            renew(&app, &conn, &access).await?;
             renewed = true;
             continue;
         }

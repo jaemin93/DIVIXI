@@ -202,6 +202,9 @@ impl Auth {
         let _one = self.lock.lock();
         let mut devices = self.devices(store);
         let t = now();
+        // Each app start signs in anew: devices whose refresh token has run
+        // out can never come back, and would only pile up.
+        devices.retain(|d| d.last_seen > t - REFRESH_SECS);
         devices.push(Device {
             id: nonce()[..12].to_string(),
             name: name.chars().take(80).collect(),
@@ -339,6 +342,18 @@ mod tests {
         assert_eq!(a.check(&s, &access, None).unwrap_err(), Refused::Dropped, "no owner, no GitHub devices");
         let (paired, _) = a.redeem(&s, &a.pair_token(&s).0, "SSH").unwrap();
         assert!(a.check(&s, &paired, None).is_ok(), "a device paired over SSH has no login to match");
+    }
+
+    #[test]
+    fn devices_past_their_refresh_are_let_go() {
+        let (a, s) = auth();
+        a.admit(&s, "Old", None);
+        let mut devices = a.devices(&s);
+        devices[0].last_seen -= REFRESH_SECS + 1;
+        a.save_devices(&s, &devices);
+        a.admit(&s, "New", None);
+        let names: Vec<_> = a.devices(&s).into_iter().map(|d| d.name).collect();
+        assert_eq!(names, vec!["New"]);
     }
 
     #[test]

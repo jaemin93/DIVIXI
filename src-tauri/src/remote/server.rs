@@ -194,6 +194,9 @@ async fn events(State(ctx): State<Ctx>, headers: HeaderMap, Query(q): Query<Sinc
 }
 
 async fn pump(mut socket: WebSocket, hub: Arc<super::events::Hub>, since: u64) {
+    // A word every 30 s, so the app can tell a quiet link from a dead one.
+    let mut ping = tokio::time::interval(std::time::Duration::from_secs(30));
+    ping.tick().await;
     let mut live = hub.subscribe_live();
     let (mut rx, catch) = hub.subscribe(since);
     let mut last = since;
@@ -239,6 +242,11 @@ async fn pump(mut socket: WebSocket, hub: Arc<super::events::Hub>, since: u64) {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(_) => return,
             },
+            _ = ping.tick() => {
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    return;
+                }
+            }
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
                 _ => {}
