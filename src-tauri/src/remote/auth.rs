@@ -83,21 +83,28 @@ pub struct Device {
 
 /// Without `n`: it is the one-time value a pairing link is good for and
 /// the link in the refresh chain, so it does not go in a log.
+///
+/// Both impls below destructure `Self`, and the field they will not print
+/// is bound to `_` rather than skipped: a field added to either struct then
+/// fails to compile here, so whoever adds it decides whether it may be
+/// logged. `finish_non_exhaustive()` is what says a field was left out.
 impl std::fmt::Debug for Claims {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Claims").field("k", &self.k).field("exp", &self.exp).field("d", &self.d).field("g", &self.g).finish_non_exhaustive()
+        let Self { k, exp, n: _, d, g } = self;
+        f.debug_struct("Claims").field("k", k).field("exp", exp).field("d", d).field("g", g).finish_non_exhaustive()
     }
 }
 
 /// Without the refresh token it holds; the rest is for the device list.
 impl std::fmt::Debug for Device {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { id, name, created, last_seen, login, refresh: _ } = self;
         f.debug_struct("Device")
-            .field("id", &self.id)
-            .field("name", &self.name)
-            .field("created", &self.created)
-            .field("last_seen", &self.last_seen)
-            .field("login", &self.login)
+            .field("id", id)
+            .field("name", name)
+            .field("created", created)
+            .field("last_seen", last_seen)
+            .field("login", login)
             .finish_non_exhaustive()
     }
 }

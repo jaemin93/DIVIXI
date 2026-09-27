@@ -55,6 +55,10 @@ const OWN = new Set([
   "github_logout",
   "pick_files",
   "open_url",
+  // A fault in this webview happened on this PC, so it belongs in this
+  // PC's log and in the report made from it — not in the log of whatever
+  // Divixi the webview happens to be showing.
+  "ui_log",
 ]);
 
 /** Call a command of the Divixi shown. */

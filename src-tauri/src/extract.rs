@@ -199,7 +199,9 @@ async fn fetch(url: &str) -> Result<String, String> {
         .user_agent("Mozilla/5.0 (Divixi; reading a reference for its user)")
         .build()
         .map_err(|e| e.to_string())?;
-    let mut res = client.get(url).send().await.map_err(|e| format!("could not fetch: {e}"))?;
+    // Without the URL: a reference may be behind basic auth, and reqwest
+    // prints the address it was given in full, credentials and all.
+    let mut res = client.get(url).send().await.map_err(|e| format!("could not fetch: {}", e.without_url()))?;
     if !res.status().is_success() {
         return Err(format!("the page answered {}", res.status()));
     }
@@ -210,7 +212,7 @@ async fn fetch(url: &str) -> Result<String, String> {
         .unwrap_or("")
         .to_ascii_lowercase();
     let mut body = Vec::new();
-    while let Some(chunk) = res.chunk().await.map_err(|e| format!("could not read the page: {e}"))? {
+    while let Some(chunk) = res.chunk().await.map_err(|e| format!("could not read the page: {}", e.without_url()))? {
         body.extend_from_slice(&chunk);
         if body.len() > MAX_PAGE {
             return Err("the page is larger than 5 MB".to_string());

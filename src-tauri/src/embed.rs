@@ -43,13 +43,21 @@ pub struct Endpoint {
 }
 
 /// Everything but the key, which is the user's API key for the endpoint.
+///
+/// Destructured on purpose, as the other hand-written `Debug` impls in this
+/// workspace are (remote/auth.rs, remote/github.rs, orchestra-acp): a field
+/// added to `Endpoint` then stops here with a compile error instead of
+/// quietly staying out of the log, or going into it. `finish()` because
+/// every field is accounted for even where the value is replaced; the impls
+/// that leave a field out altogether say `finish_non_exhaustive()`.
 impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { url, model, key, dims } = self;
         f.debug_struct("Endpoint")
-            .field("url", &redact_url(&self.url))
-            .field("model", &self.model)
-            .field("key", &if self.key.is_empty() { "unset" } else { "hidden" })
-            .field("dims", &self.dims)
+            .field("url", &redact_url(url))
+            .field("model", model)
+            .field("key", &if key.is_empty() { "unset" } else { "hidden" })
+            .field("dims", dims)
             .finish()
     }
 }
@@ -147,7 +155,11 @@ pub async fn embed(ep: &Endpoint, texts: &[String]) -> Result<Vec<Vec<f32>>, Emb
         body["dimensions"] = json!(d);
     }
     let url = format!("{}/embeddings", ep.url.trim_end_matches('/'));
-    // What the failures below name. `url` itself may carry the key.
+    // What the failures below name. `url` itself may carry the key, and a
+    // reqwest error's own `Display` ends with " for url (…)" — measured: it
+    // strips the userinfo (reqwest moves basic auth into a header) and keeps
+    // the **query string** in full, which is where a provider that wants
+    // `?api-key=` puts it. Hence `without_url()` on every one of them.
     let shown = redact_url(&url);
     let mut req = reqwest::Client::new()
         .post(&url)
@@ -157,9 +169,9 @@ pub async fn embed(ep: &Endpoint, texts: &[String]) -> Result<Vec<Vec<f32>>, Emb
     if !ep.key.is_empty() {
         req = req.header("authorization", format!("Bearer {}", ep.key));
     }
-    let res = req.send().await.map_err(|e| EmbedError::passing(format!("{shown}: {e}")))?;
+    let res = req.send().await.map_err(|e| EmbedError::passing(format!("{shown}: {}", e.without_url())))?;
     let status = res.status();
-    let text = res.text().await.map_err(|e| EmbedError::passing(e.to_string()))?;
+    let text = res.text().await.map_err(|e| EmbedError::passing(format!("{shown}: {}", e.without_url())))?;
     if !status.is_success() {
         let detail: String = text.chars().take(300).collect();
         let refused = matches!(status.as_u16(), 400 | 413 | 422);
@@ -225,6 +237,25 @@ mod tests {
         assert_eq!(redact_url("https://api.example.com/v1/embeddings?api-key=sk"), "https://api.example.com/v1/embeddings?…");
         assert_eq!(redact_url("https://me:pw@api.example.com/v1"), "https://…@api.example.com/v1");
         assert_eq!(redact_url("http://localhost:1234/v1/@scope/x"), "http://localhost:1234/v1/@scope/x", "an @ in the path is not a password");
+    }
+
+    /// A failure must not put back the address the message just redacted.
+    ///
+    /// reqwest's `Display` ends with " for url (…)". Measured on 0.13.5: the
+    /// userinfo is gone by then (reqwest moves basic auth into a header) but
+    /// the query string is printed in full — `?api-key=` is a real way to
+    /// hand an endpoint a key, so that is the leak `without_url()` closes.
+    ///
+    /// Port 1 on loopback refuses at once, so this needs no network, no
+    /// timeout and nothing listening.
+    #[tokio::test]
+    async fn a_failure_does_not_name_the_address_it_was_handed() {
+        let ep = Endpoint { url: "http://me:pw@127.0.0.1:1/v1?api-key=hunter2".into(), model: "m".into(), key: "sk-secret".into(), dims: None };
+        let err = embed(&ep, &["one text".to_string()]).await.expect_err("nothing listens on port 1");
+        assert!(!err.message.contains("hunter2"), "the key in the query string is in the failure: {}", err.message);
+        assert!(!err.message.contains("sk-secret"), "and the one in the header: {}", err.message);
+        assert!(!err.message.contains("pw@"), "and whatever reqwest did with the userinfo: {}", err.message);
+        assert!(err.message.starts_with("http://…@127.0.0.1:1/v1?…:"), "the redacted address is what names it: {}", err.message);
     }
 
     #[test]

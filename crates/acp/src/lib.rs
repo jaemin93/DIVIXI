@@ -44,12 +44,17 @@ pub struct AgentSpec {
 /// The environment's names but none of its values: a spec is printed in a
 /// log line and by everything holding one ([`PromptSpec`]), and an agent's
 /// API key or token is exactly what [`AgentSpec::env`] is for.
+///
+/// Destructured so that a field added to `AgentSpec` stops here with a
+/// compile error, rather than being left out of every log line by accident
+/// or printed in full by a derive somebody reached for.
 impl std::fmt::Debug for AgentSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { program, args, env } = self;
         f.debug_struct("AgentSpec")
-            .field("program", &self.program)
-            .field("args", &self.args)
-            .field("env", &self.env.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>())
+            .field("program", program)
+            .field("args", args)
+            .field("env", &env.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>())
             .finish()
     }
 }

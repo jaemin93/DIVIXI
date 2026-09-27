@@ -249,6 +249,17 @@ struct Health {
 }
 
 /// The instance's /api/health, if it answers.
+/// A transport failure as it can be shown or logged: without the URL.
+///
+/// reqwest's `Display` appends the address it was given, query string and
+/// all (it strips only the userinfo, which it moves into a header). None of
+/// these addresses carries a credential today — the tokens go in headers —
+/// so this is a floor, not a fix: what is useful in a message here is the
+/// failure, and the address is one the settings page already shows.
+fn why(e: reqwest::Error) -> String {
+    e.without_url().to_string()
+}
+
 async fn health(http: &reqwest::Client, base: &str) -> Option<Health> {
     let r = http.get(format!("{base}/api/health")).send().await.ok().filter(|r| r.status().is_success())?;
     // An older instance says only {"ok":true}: no build to compare.
@@ -315,9 +326,9 @@ async fn sign_in(app: &AppHandle, http: &reqwest::Client, base: &str, host: &Hos
         .body(json!({ "token": token, "name": device_name() }).to_string())
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(why)?;
     let status = res.status();
-    let body = res.bytes().await.map_err(|e| e.to_string())?;
+    let body = res.bytes().await.map_err(why)?;
     if !status.is_success() {
         let why = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
         return Err(format!("the remote instance refused the sign-in ({status}){}", why.map(|w| format!(": {w}")).unwrap_or_default()));
@@ -336,7 +347,7 @@ async fn renew(app: &AppHandle, conn: &Conn, stale: &str) -> Result<(), String> 
     let refresh = conn.tokens.lock().refresh.clone();
     let res = conn.http.post(format!("{}/auth/refresh", conn.base)).header("X-Divixi", "1").bearer_auth(refresh).send().await;
     let tokens = match res {
-        Ok(r) if r.status().is_success() => serde_json::from_slice(&r.bytes().await.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?,
+        Ok(r) if r.status().is_success() => serde_json::from_slice(&r.bytes().await.map_err(why)?).map_err(|e| e.to_string())?,
         _ => sign_in(app, &conn.http, &conn.base, &conn.host).await?,
     };
     *conn.tokens.lock() = tokens;
@@ -435,14 +446,14 @@ async fn call(app: &AppHandle, conn: &Conn, cmd: &str, args: &Value) -> Result<V
             .body(body.clone())
             .send()
             .await
-            .map_err(|e| format!("the remote instance did not answer: {e}"))?;
+            .map_err(|e| format!("the remote instance did not answer: {}", why(e)))?;
         let status = res.status();
         if status == reqwest::StatusCode::UNAUTHORIZED && !renewed {
             renew(app, conn, &access).await?;
             renewed = true;
             continue;
         }
-        let v: Value = serde_json::from_slice(&res.bytes().await.map_err(|e| e.to_string())?).unwrap_or_else(|_| json!({ "error": format!("{status}") }));
+        let v: Value = serde_json::from_slice(&res.bytes().await.map_err(why)?).unwrap_or_else(|_| json!({ "error": format!("{status}") }));
         return match v.get("error") {
             Some(e) => Err(e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string())),
             None => Ok(v.get("ok").cloned().unwrap_or(Value::Null)),
@@ -745,7 +756,7 @@ pub async fn instance_save_as(app: AppHandle, id: String, track: String, path: S
     let mut renewed = false;
     let bytes = loop {
         let access = conn.tokens.lock().access.clone();
-        let res = conn.http.get(&url).bearer_auth(&access).send().await.map_err(|e| format!("the remote instance did not answer: {e}"))?;
+        let res = conn.http.get(&url).bearer_auth(&access).send().await.map_err(|e| format!("the remote instance did not answer: {}", why(e)))?;
         if res.status() == reqwest::StatusCode::UNAUTHORIZED && !renewed {
             renew(&app, &conn, &access).await?;
             renewed = true;
@@ -754,7 +765,7 @@ pub async fn instance_save_as(app: AppHandle, id: String, track: String, path: S
         if !res.status().is_success() {
             return Err(format!("{path}: {}", res.status()));
         }
-        break res.bytes().await.map_err(|e| e.to_string())?;
+        break res.bytes().await.map_err(why)?;
     };
     let name = path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("file").to_string();
     let mut dialog = app.dialog().file().set_file_name(&name);

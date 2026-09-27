@@ -283,27 +283,48 @@ pub fn current_file(logs: &Path) -> Option<PathBuf> {
 /// How many log lines a diagnostics report carries.
 pub const RECENT_ERRORS: usize = 20;
 
+/// How much of one log line a bug report carries. A line is one event, but
+/// an event can be a page of an agent's stderr.
+const LINE_CAP: usize = 500;
+
 /// The last warnings and errors logged, oldest first, for a bug report.
 ///
 /// Read from the newest files backwards until there are `limit` of them, so
 /// a report made the morning after a crash still shows it.
+///
+/// Streamed a line at a time, and never more than `limit` lines are held:
+/// the button that calls this is pressed when something is wrong, which is
+/// exactly when a day's file may be enormous (at `debug` it carries every
+/// line the agents print, and rotation is by day, not by size). Reading such
+/// a file into a `String` to keep twenty lines of it is the wrong shape.
 pub fn recent_errors(logs: &Path, limit: usize) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+    use std::collections::VecDeque;
+    use std::io::BufRead;
+
+    let mut out: VecDeque<String> = VecDeque::with_capacity(limit);
     for path in files(logs) {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let mut found: Vec<String> = text.lines().filter(|l| is_problem(l)).map(|l| l.trim_end().to_string()).collect();
-        // This file's last lines come before the ones already found.
-        let keep = limit.saturating_sub(out.len());
-        found.reverse();
-        found.truncate(keep);
-        found.reverse();
-        found.append(&mut out);
-        out = found;
-        if out.len() >= limit {
+        let keep = limit - out.len();
+        if keep == 0 {
             break;
         }
+        let Ok(file) = std::fs::File::open(&path) else { continue };
+        // This file's own last `keep` problems, and no more of it than that.
+        let mut tail: VecDeque<String> = VecDeque::with_capacity(keep);
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            if !is_problem(&line) {
+                continue;
+            }
+            if tail.len() == keep {
+                tail.pop_front();
+            }
+            tail.push_back(line.trim_end().chars().take(LINE_CAP).collect());
+        }
+        // An older file's lines come before everything found so far.
+        for line in tail.into_iter().rev() {
+            out.push_front(line);
+        }
     }
-    out
+    out.into()
 }
 
 /// A log line worth putting in a bug report: the level is `WARN` or `ERROR`.
@@ -452,6 +473,16 @@ mod tests {
         );
         // A tight limit keeps the newest, and stops before older days.
         assert_eq!(recent_errors(&logs, 1), vec!["2026-09-27T00:00:02Z ERROR a: it broke".to_string()]);
+        assert!(recent_errors(&logs, 0).is_empty(), "nothing asked for, nothing read");
+
+        // One event can be a page of an agent's stderr. The report takes the
+        // front of such a line, not the whole of it — and the file it came
+        // from was never held in memory to find it.
+        std::fs::write(logs.join("divixi.2026-09-28.log"), format!("2026-09-28T00:00:00Z  WARN a: {}\n", "x".repeat(20_000))).unwrap();
+        let newest = recent_errors(&logs, 1);
+        assert_eq!(newest.len(), 1);
+        assert_eq!(newest[0].chars().count(), LINE_CAP, "cut to the cap");
+        assert!(newest[0].starts_with("2026-09-28T00:00:00Z  WARN a: xxx"), "from the front: {}", &newest[0][..40]);
         std::fs::remove_dir_all(&logs).ok();
     }
 }

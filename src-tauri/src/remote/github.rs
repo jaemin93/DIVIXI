@@ -30,12 +30,16 @@ pub struct Account {
 }
 
 /// Never the token, which is the GitHub account itself.
+///
+/// Destructured so that a field added to `Account` fails to compile here
+/// rather than deciding by default whether it reaches the log.
 impl std::fmt::Debug for Account {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { client_id, token, login } = self;
         f.debug_struct("Account")
-            .field("client_id", &self.client_id)
-            .field("token", &if self.token.is_empty() { "unset" } else { "hidden" })
-            .field("login", &self.login)
+            .field("client_id", client_id)
+            .field("token", &if token.is_empty() { "unset" } else { "hidden" })
+            .field("login", login)
             .finish()
     }
 }

@@ -11,7 +11,10 @@
 //! panics is a file the next run can read at a glance.
 //!
 //! The hook is a last-resort writer, so every error in it is swallowed:
-//! there is nothing useful to do about a failure to record a failure.
+//! there is nothing useful to do about a failure to record a failure. It
+//! touches nothing but this file — no subscriber, no lock it does not own —
+//! because a panic raised inside a panic hook aborts the process with no
+//! unwinding and no way to catch it.
 //!
 //! What the next run can say, and what it cannot: `crash.log` proves the
 //! last run panicked somewhere. It does not prove the app was killed — a
@@ -140,9 +143,18 @@ fn write_block(path: &Path, info: &std::panic::PanicHookInfo<'_>) {
         let _ = file.write_all(block.as_bytes());
         let _ = file.flush();
     }
-    // The log file too, in case the subscriber is still standing: a reader
-    // who only has the log then still sees that the run ended here.
-    tracing::error!(%location, "panic: {message}");
+    // And that is all this hook does. It used to log the panic through
+    // `tracing` as well, which is the one thing it must not do: the panic may
+    // be inside the subscriber, inside the writer this very block went past,
+    // or inside a lock one of them holds. A panic raised inside a panic hook
+    // is not caught by anything — the process aborts on the spot, without
+    // unwinding and without the hook that was installed before this one.
+    //
+    // Nothing is lost by leaving it out. The block is on disk before this
+    // line, the diagnostics report reads it from there, and the next run's
+    // startup logs a warning naming this panic (see `take_previous` and the
+    // banner in lib.rs) — so the log file gets it too, one run later, from a
+    // subscriber that is known to be healthy.
 }
 
 /// The panic's message, whichever of the two shapes it was raised with.
