@@ -4,3 +4,29 @@ node_modules
 *.log
 .DS_Store
 Cargo.toml.bak
+
+# Third-party UI reference screenshots: excluded from the public repository
+refs/
+
+# Worker folders, and anything else that appears at the root.
+#
+# Divixi's "a folder each" worker mode gives a worker its own folder directly
+# under the track folder -- which, when you develop Divixi with Divixi, is this
+# repository root -- named after the worker itself
+# (own_dir() in src-tauri/src/conductor.rs). The name is whatever the worker is
+# called, so there is no prefix or parent folder to match on, and a new worker
+# adds a new root-level folder at any time. Rather than list names that go stale,
+# ignore every directory at the root and name the ones that belong to the project.
+#
+# Root-level FILES are deliberately left alone: a new LICENSE or CONTRIBUTING.md
+# still shows up in git status. Only directories are covered.
+#
+# Adding a real top-level directory to the project? Add a "!" line for it here,
+# or git will not see it.
+/*/
+!/.github/
+!/crates/
+!/docs/
+!/scripts/
+!/src-tauri/
+!/ui/

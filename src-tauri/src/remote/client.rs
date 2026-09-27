@@ -17,7 +17,7 @@
 //!
 //! SSH runs non-interactively (BatchMode): the host must be reachable with
 //! a key or an agent, as `ssh <host>` in a terminal would be. Its options
-//! are Kiro Crew's for supervised tunnels (instances.md §9).
+//! are Kiro Crew's for supervised tunnels.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
