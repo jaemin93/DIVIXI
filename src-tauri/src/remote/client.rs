@@ -1,6 +1,6 @@
 //! Using a Divixi on another machine from this app (like Kiro Crew's remote
-//! hosts): an SSH tunnel to that machine's divixi-server, a pairing link
-//! it mints over SSH (`divixi-server token`), and a window of this app
+//! hosts): divixi-server started there over SSH if it is not running, a
+//! pairing link it mints (`divixi-server token`), an SSH tunnel to it, and a window of this app
 //! showing it. The page there talks to that server, not to this app
 //! (it carries `divixi-served`; see ui/src/lib/ipc.svelte.ts).
 //!
@@ -32,6 +32,10 @@ pub struct Host {
     /// Where divixi-server is there (a login shell resolves `~`).
     #[serde(default = "default_bin")]
     pub bin: String,
+    /// Put in front of PATH there when starting divixi-server, so it finds
+    /// the agents (as Kiro Crew's "Remote PATH"). Empty: the SSH shell's own.
+    #[serde(default)]
+    pub path: String,
 }
 
 fn default_port() -> u16 {
@@ -89,6 +93,25 @@ fn check_bin(bin: &str) -> Result<(), String> {
     }
 }
 
+/// The remote PATH: directories as in a path, joined by `:`.
+fn check_path(path: &str) -> Result<(), String> {
+    if path.chars().all(|c| c.is_ascii_alphanumeric() || "~/._-:".contains(c)) {
+        Ok(())
+    } else {
+        Err("the remote PATH may hold letters, digits, ~ / . _ - : only".into())
+    }
+}
+
+/// The shell line run there: start divixi-server if this user has none
+/// running (detached, so it outlives the SSH session), then mint a link.
+fn remote_line(host: &Host) -> String {
+    let path = if host.path.is_empty() { String::new() } else { format!("PATH={}:\"$PATH\"; export PATH; ", host.path) };
+    let bin = &host.bin;
+    format!(
+        "{path}pgrep -u \"$(id -u)\" -x divixi-server >/dev/null || setsid -f {bin} serve >/dev/null 2>&1 </dev/null; {bin} token"
+    )
+}
+
 fn ssh() -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("ssh");
     #[cfg(windows)]
@@ -136,11 +159,11 @@ async fn wait_for(port: u16, child: &mut tokio::process::Child) -> Result<(), St
     Err("the remote Divixi did not answer through the tunnel: is divixi-server running there?".into())
 }
 
-/// A pairing link from the remote, pointed at our end of the tunnel.
-async fn pairing_link(host: &Host, local_port: u16) -> Result<String, String> {
+/// Start the remote Divixi if need be and take a pairing token from it.
+async fn start_and_token(host: &Host) -> Result<String, String> {
     let out = ssh()
         .arg(&host.ssh)
-        .arg(format!("{} token", host.bin))
+        .arg(remote_line(host))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -150,8 +173,7 @@ async fn pairing_link(host: &Host, local_port: u16) -> Result<String, String> {
     let line = text.lines().find(|l| l.contains("/auth/pair?token=")).ok_or_else(|| {
         format!("{} token gave no link: {}", host.bin, String::from_utf8_lossy(&out.stderr).trim())
     })?;
-    let token = line.split("/auth/pair?token=").nth(1).unwrap_or_default().trim();
-    Ok(format!("http://127.0.0.1:{local_port}/auth/pair?token={token}"))
+    Ok(line.split("/auth/pair?token=").nth(1).unwrap_or_default().trim().to_string())
 }
 
 fn window_label(id: &str) -> String {
@@ -172,8 +194,10 @@ pub async fn remote_host_save(app: AppHandle, mut host: Host) -> Result<Vec<Host
     host.ssh = host.ssh.trim().to_string();
     host.bin = host.bin.trim().to_string();
     host.name = host.name.trim().to_string();
+    host.path = host.path.trim().to_string();
     check_ssh(&host.ssh)?;
     check_bin(&host.bin)?;
+    check_path(&host.path)?;
     if host.name.is_empty() {
         host.name = host.ssh.clone();
     }
@@ -198,11 +222,13 @@ pub async fn remote_host_delete(app: AppHandle, id: String) -> Result<Vec<HostVi
     Ok(remote_hosts(app).await)
 }
 
-/// Open the host in a window: the tunnel first (or the one already open),
-/// then a fresh pairing link, then the window.
+/// Open the host in a window: the remote Divixi started if it is not
+/// running and a pairing token, then the tunnel (or the one already open),
+/// then the window.
 #[tauri::command]
 pub async fn remote_host_connect(app: AppHandle, id: String) -> Result<Vec<HostView>, String> {
     let host = hosts(&app).into_iter().find(|h| h.id == id).ok_or("no such host")?;
+    let token = start_and_token(&host).await?;
     let tunnels = &app.state::<AppState>().tunnels;
     let local_port = {
         let mut open = tunnels.open.lock().await;
@@ -230,7 +256,7 @@ pub async fn remote_host_connect(app: AppHandle, id: String) -> Result<Vec<HostV
             }
         }
     };
-    let link = pairing_link(&host, local_port).await?;
+    let link = format!("http://127.0.0.1:{local_port}/auth/pair?token={token}");
     let url = link.parse::<tauri::Url>().map_err(|e| e.to_string())?;
     let label = window_label(&id);
     match app.get_webview_window(&label) {
@@ -292,5 +318,20 @@ mod tests {
         assert!(check_bin("~/.local/bin/divixi-server").is_ok());
         assert!(check_bin("~/x; rm -rf /").is_err());
         assert!(check_bin("../../bin/sh").is_err());
+        assert!(check_path("").is_ok());
+        assert!(check_path("~/.local/bin:/usr/bin:/bin").is_ok());
+        assert!(check_path("/bin;reboot").is_err());
+        assert!(check_path("$(reboot)").is_err());
+    }
+
+    #[test]
+    fn the_remote_line_starts_the_server_once() {
+        let mut h = Host { id: "a".into(), name: "a".into(), ssh: "a".into(), port: 7488, bin: "~/x/divixi-server".into(), path: String::new() };
+        assert_eq!(
+            remote_line(&h),
+            "pgrep -u \"$(id -u)\" -x divixi-server >/dev/null || setsid -f ~/x/divixi-server serve >/dev/null 2>&1 </dev/null; ~/x/divixi-server token"
+        );
+        h.path = "~/.local/bin".into();
+        assert!(remote_line(&h).starts_with("PATH=~/.local/bin:\"$PATH\"; export PATH; pgrep"));
     }
 }
