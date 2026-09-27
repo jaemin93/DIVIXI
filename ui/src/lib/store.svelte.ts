@@ -2,6 +2,7 @@ import { invoke, listen, inTauri, local, bring, boardBase } from "./ipc.svelte";
 import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Lang, type LangPref } from "./i18n.svelte";
+import { notify } from "./notify.svelte";
 
 /** Mirrors `orchestra_core::AgentEvent` — serde tags it with `kind`. */
 export type AgentEvent =
@@ -486,7 +487,7 @@ export const ZOOM_MAX = 200;
 export const ZOOM_STEP = 10;
 
 /** Settings sections, in the settings column. */
-export type SettingsSection = "overview" | "appearance" | "chat" | "agents" | "knowledge" | "remote" | "about";
+export type SettingsSection = "overview" | "appearance" | "chat" | "notify" | "agents" | "knowledge" | "remote" | "about";
 
 /** Mirrors `workspace::Entry`: one file or folder, path relative to the track folder. */
 export type WsEntry = { path: string; name: string; dir: boolean; size: number };
@@ -1582,6 +1583,12 @@ class Store {
     const i = this.decisions.findIndex((x) => x.id === d.id);
     if (i >= 0) this.decisions[i] = d;
     else this.decisions.push(d);
+    // A new card waits for the human.
+    if (i < 0 && d.status === "open") {
+      const track = this.tracks.find((x) => x.id === d.track)?.name ?? "";
+      void notify("decision", t(d.permission ? "notify.permission" : "notify.decision", { track }), d.question, d.track);
+      // (A card is kept in the bell even when seen: it waits for an answer.)
+    }
   }
 
   /** The current track's decisions, oldest first. */
@@ -2280,6 +2287,13 @@ class Store {
       void this.refreshConductor();
     }
     fold(run, env.at_ms, env.event);
+    // The conductor answered, or its turn failed.
+    if (env.session === "conductor" && (env.event.kind === "finished" || env.event.kind === "failed")) {
+      const track = this.tracks.find((x) => x.id === env.track)?.name ?? "";
+      const onScreen = this.view === "track" && this.track === env.track;
+      if (env.event.kind === "finished") void notify("reply", t("notify.reply", { track }), run.message.trim() || t("notify.replyEmpty"), env.track, { onScreen });
+      else void notify("failed", t("notify.failed", { track }), env.event.error, env.track, { onScreen });
+    }
     // A finished run may have written files: the open panel catches up.
     if (this.panelOpen && env.track === this.track && (env.event.kind === "finished" || env.event.kind === "failed")) {
       void this.refreshWorkspace();

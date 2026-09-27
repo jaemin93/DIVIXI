@@ -1173,6 +1173,8 @@ pub fn run() {
         // one that runs instead of starting a second. First, as the plugin asks.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_dialog::init())
+        // The system's notifications (ui/src/lib/notify.svelte.ts).
+        .plugin(tauri_plugin_notification::init())
         // Closing the window hides it: conductors and workers go on working,
         // and the tray icon brings it back. Quit (the tray menu) ends the app.
         .on_window_event(|window, event| {

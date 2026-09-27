@@ -22,6 +22,9 @@ export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 /** The remote instance this webview shows, or null for this PC. */
 export const instanceId: string | null = inTauri ? ((window as unknown as { __DIVIXI_INSTANCE__?: string }).__DIVIXI_INSTANCE__ ?? null) : null;
 
+/** That instance's name as this PC calls it (for notifications). */
+export const instanceName: string | null = instanceId ? ((window as unknown as { __DIVIXI_INSTANCE_NAME__?: string }).__DIVIXI_INSTANCE_NAME__ ?? null) : null;
+
 /** This PC's own Divixi: its folders, terminal and files are at hand. */
 export const local = inTauri && instanceId === null;
 

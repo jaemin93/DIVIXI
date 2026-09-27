@@ -24,7 +24,8 @@
     | "terminal"
     | "book"
     | "home"
-    | "pin";
+    | "pin"
+    | "bell";
 </script>
 
 <script lang="ts">
@@ -57,6 +58,8 @@
     <path d="M9 3L4 8l5 5M12 3v10" />
   {:else if name === "expand"}
     <path d="M7 3l5 5-5 5M4 3v10" />
+  {:else if name === "bell"}
+    <path d="M4 11.5V7a4 4 0 0 1 8 0v4.5l1 1H3z" /><path d="M6.8 13.5a1.3 1.3 0 0 0 2.4 0" />
   {:else if name === "pin"}
     <path d="M6 2.5h4l-.5 4 2 2.5h-7l2-2.5z" /><path d="M8 9v4.5" />
   {:else if name === "home"}

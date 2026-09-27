@@ -585,13 +585,16 @@ pub async fn show_instance(app: AppHandle, id: Option<String>) -> Result<(), Str
     let tunnels = &app.state::<AppState>().tunnels;
     let shown = id.as_deref().map(pane_label);
     if let Some(id) = &id {
-        if !hosts(&app).iter().any(|h| &h.id == id) {
-            return Err("no such remote instance".into());
-        }
+        let host = hosts(&app).into_iter().find(|h| &h.id == id).ok_or("no such remote instance")?;
         let label = pane_label(id);
         if app.get_webview(&label).is_none() {
-            // The page learns which instance it shows before it runs.
-            let script = format!("window.__DIVIXI_INSTANCE__ = {};", serde_json::Value::String(id.clone()));
+            // The page learns which instance it shows (and its name, for
+            // notifications) before it runs.
+            let script = format!(
+                "window.__DIVIXI_INSTANCE__ = {}; window.__DIVIXI_INSTANCE_NAME__ = {};",
+                serde_json::Value::String(id.clone()),
+                serde_json::Value::String(host.name)
+            );
             let builder = tauri::webview::WebviewBuilder::new(&label, tauri::WebviewUrl::App("index.html".into())).initialization_script(&script).auto_resize();
             let size = window.inner_size().map_err(|e| e.to_string())?;
             window.add_child(builder, tauri::PhysicalPosition::new(0, 0), size).map_err(|e| e.to_string())?;

@@ -26,6 +26,8 @@
   import { invoke, inTauri } from "./ipc.svelte";
   import RemoteHosts from "./RemoteHosts.svelte";
   import RemoteServer from "./RemoteServer.svelte";
+  import { notify, notifyPrefs, setNotify, type NotifyKind } from "./notify.svelte";
+  const NOTIFY_KINDS: NotifyKind[] = ["decision", "reply", "failed"];
   import { onMount } from "svelte";
 
   /** Minutes before an unused conductor or worker session is closed (0: never). */
@@ -56,6 +58,7 @@
       entries: [
         { id: "appearance", icon: "look", label: t("settings.appearance"), blurb: t("settings.appearanceBlurb") },
         { id: "chat", icon: "chat", label: t("settings.chat"), blurb: t("settings.chatBlurb") },
+        { id: "notify", icon: "bell", label: t("settings.notify"), blurb: t("settings.notifyBlurb") },
         { id: "agents", icon: "agents", label: t("settings.agents"), blurb: t("settings.agentsBlurb") },
         { id: "knowledge", icon: "book", label: t("settings.knowledge"), blurb: t("settings.knowledgeBlurb") },
         // Remote instances are opened from the desktop app.
@@ -229,6 +232,22 @@
         {/each}
       </div>
       <p class="note">{t("settings.chatNote")}</p>
+    {:else if store.settingsSection === "notify"}
+      <div class="card pad">
+        {#each NOTIFY_KINDS as k (k)}
+          <label class="nrow">
+            <input type="checkbox" checked={notifyPrefs[k]} onchange={(e) => setNotify(k, e.currentTarget.checked)} />
+            <span>
+              <span class="ftitle">{t(`notify.kind.${k}`)}</span>
+              <span class="fnote">{t(`notify.kind.${k}Note`)}</span>
+            </span>
+          </label>
+        {/each}
+        <div class="actions ntest">
+          <button class="btn" onclick={() => void notify("decision", t("notify.testTitle"), t("notify.testBody"), null, { test: true })}>{t("notify.test")}</button>
+        </div>
+      </div>
+      <p class="note">{t("notify.note")}</p>
     {:else if store.settingsSection === "agents"}
       <div class="actions">
         <button class="btn" disabled={store.detecting} onclick={() => store.detect()}>
@@ -265,6 +284,32 @@
 </section>
 
 <style>
+  .nrow {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--lineq);
+  }
+
+  .nrow input {
+    margin-top: 3px;
+    accent-color: var(--acc);
+  }
+
+  .nrow > span {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .nrow .fnote {
+    margin: 4px 0 0;
+  }
+
+  .ntest {
+    margin-top: 14px;
+  }
+
   .idle {
     display: flex;
     align-items: center;

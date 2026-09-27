@@ -4,6 +4,7 @@
   import { t } from "./i18n.svelte";
   import SystemMeter from "./SystemMeter.svelte";
   import InstanceSwitcher from "./InstanceSwitcher.svelte";
+  import NotificationBell from "./NotificationBell.svelte";
 
   /**
    * The window's own chrome. The OS title bar is off (`decorations: false`),
@@ -13,7 +14,8 @@
    *
    * The instance switcher (this PC or a remote instance) sits at the left.
    * The empty middle is on purpose: a command bar and notifications go
-   * there later. The system meter sits by the window buttons.
+   * there later. The system meter and the notification bell sit by the
+   * window buttons.
    */
   const win = getCurrentWindow();
   let maximized = $state(false);
@@ -38,6 +40,7 @@
   <InstanceSwitcher />
   <span class="grow" data-tauri-drag-region></span>
   <SystemMeter />
+  <NotificationBell />
   <div class="controls">
     <button class="wc" onclick={() => win.minimize()} aria-label={t("win.minimize")} title={t("win.minimize")}>
       <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" stroke="currentColor" stroke-width="1" /></svg>
