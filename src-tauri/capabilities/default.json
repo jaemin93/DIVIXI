@@ -14,7 +14,6 @@
     "core:window:allow-unmaximize",
     "core:window:allow-close",
     "core:window:allow-is-maximized",
-    "core:webview:allow-set-webview-zoom",
-    "notification:default"
+    "core:webview:allow-set-webview-zoom"
   ]
 }

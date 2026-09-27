@@ -21,15 +21,17 @@ fn main() {
     tauri_build::try_build(attributes).expect("failed to run tauri-build");
 }
 
-/// `DIVIXI_BUILD`: a hash of the sources (the app's Rust, its crates and its
-/// UI). Two builds of the same code match, git or not (a server builds from
-/// an archive), so a remote instance built from other code can be told
-/// apart even when both say version 0.1.0. Line endings are left out: a
+/// `DIVIXI_BUILD`: a hash of the Rust sources (the app's and its crates').
+/// Two builds of the same code match, git or not (a server builds from an
+/// archive), so a remote instance built from other code can be told apart
+/// even when both say version 0.1.0. The UI is left out: a remote instance
+/// runs commands and the page is always this PC's, so a change to the page
+/// alone asks nothing of the remote. Line endings are left out too: a
 /// Windows checkout and a Linux one hash alike.
 fn build_id() {
     let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
     let root = manifest.parent().expect("src-tauri has a parent").to_path_buf();
-    let dirs = [root.join("src-tauri/src"), root.join("crates"), root.join("ui/src")];
+    let dirs = [root.join("src-tauri/src"), root.join("crates")];
     let mut files = Vec::new();
     for d in &dirs {
         println!("cargo:rerun-if-changed={}", d.display());
@@ -68,7 +70,7 @@ fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         }
         if p.is_dir() {
             walk(&p, out);
-        } else if matches!(p.extension().and_then(|x| x.to_str()), Some("rs" | "ts" | "svelte" | "css" | "js" | "json" | "toml")) {
+        } else if matches!(p.extension().and_then(|x| x.to_str()), Some("rs" | "toml")) {
             out.push(p);
         }
     }

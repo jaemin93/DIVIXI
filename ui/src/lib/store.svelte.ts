@@ -487,7 +487,7 @@ export const ZOOM_MAX = 200;
 export const ZOOM_STEP = 10;
 
 /** Settings sections, in the settings column. */
-export type SettingsSection = "overview" | "appearance" | "chat" | "notify" | "agents" | "knowledge" | "remote" | "about";
+export type SettingsSection = "overview" | "appearance" | "chat" | "agents" | "knowledge" | "remote" | "about";
 
 /** Mirrors `workspace::Entry`: one file or folder, path relative to the track folder. */
 export type WsEntry = { path: string; name: string; dir: boolean; size: number };
@@ -1586,7 +1586,7 @@ class Store {
     // A new card waits for the human.
     if (i < 0 && d.status === "open") {
       const track = this.tracks.find((x) => x.id === d.track)?.name ?? "";
-      void notify("decision", t(d.permission ? "notify.permission" : "notify.decision", { track }), d.question, d.track);
+      notify("decision", t(d.permission ? "notify.permission" : "notify.decision", { track }), d.question, d.track);
     }
   }
 
@@ -2289,8 +2289,8 @@ class Store {
     // The conductor answered, or its turn failed.
     if (env.session === "conductor" && (env.event.kind === "finished" || env.event.kind === "failed")) {
       const track = this.tracks.find((x) => x.id === env.track)?.name ?? "";
-      if (env.event.kind === "finished") void notify("reply", t("notify.reply", { track }), run.message.trim() || t("notify.replyEmpty"), env.track);
-      else void notify("failed", t("notify.failed", { track }), env.event.error, env.track);
+      if (env.event.kind === "finished") notify("reply", t("notify.reply", { track }), run.message.trim() || t("notify.replyEmpty"), env.track);
+      else notify("failed", t("notify.failed", { track }), env.event.error, env.track);
     }
     // A finished run may have written files: the open panel catches up.
     if (this.panelOpen && env.track === this.track && (env.event.kind === "finished" || env.event.kind === "failed")) {
