@@ -23,13 +23,18 @@
   import Icon, { type IconName } from "./Icon.svelte";
   import SplitHandle from "./SplitHandle.svelte";
   import { t } from "./i18n.svelte";
-  import { invoke, inTauri } from "./ipc.svelte";
+  import { invoke, inTauri, local } from "./ipc.svelte";
   import RemoteHosts from "./RemoteHosts.svelte";
   import RemoteServer from "./RemoteServer.svelte";
   import { onMount } from "svelte";
 
   /** Minutes before an unused conductor or worker session is closed (0: never). */
   let idleMinutes = $state(30);
+
+  /** Mirrors `logging::Level`: how much is being logged, and what set it. */
+  type LogLevel = { filter: string; preset: string; source: string };
+  let level = $state<LogLevel | null>(null);
+
   onMount(() => {
     invoke<string | null>("get_setting", { key: "sessions.idle_minutes" })
       .then((v) => {
@@ -37,6 +42,8 @@
         if (v !== null && Number.isFinite(n)) idleMinutes = n;
       })
       .catch(() => {});
+    // The log is this PC's own, as is the folder it lives in.
+    if (local) invoke<LogLevel>("log_level").then((l) => (level = l)).catch(() => {});
   });
   function saveIdle() {
     const n = Math.max(0, Math.min(1440, Math.round(Number(idleMinutes) || 0)));
@@ -86,6 +93,64 @@
     { id: "m", label: t("settings.size.m"), px: "13px" },
     { id: "l", label: t("settings.size.l"), px: "15px" },
   ]);
+
+  /** The diagnostics report, kept on screen so it is read before it is pasted. */
+  let report = $state("");
+  let collecting = $state(false);
+  let copied = $state(false);
+
+  /** The levels the backend offers, in the order they read in. */
+  const levels = $derived([
+    { id: "quiet", label: t("settings.level.quiet") },
+    { id: "info", label: t("settings.level.info") },
+    { id: "debug", label: t("settings.level.debug") },
+    { id: "trace", label: t("settings.level.trace") },
+  ]);
+
+  /** Takes effect at once: no restart, and the run being debugged is kept. */
+  async function setLevel(id: string) {
+    try {
+      level = await invoke<LogLevel>("log_level_set", { level: id });
+    } catch (err) {
+      store.lastError = t("settings.levelFailed", { why: String(err) });
+    }
+  }
+
+  /** What put the level in force, in this language. */
+  function levelFrom(source: string): string {
+    if (source === "env") return t("settings.levelFrom.env");
+    if (source === "setting") return t("settings.levelFrom.setting");
+    return t("settings.levelFrom.default");
+  }
+
+  async function openLogs() {
+    try {
+      await invoke("logs_open");
+    } catch (err) {
+      store.lastError = t("settings.openLogsFailed", { why: String(err) });
+    }
+  }
+
+  /** Collect the report, show it, and put it on the clipboard. */
+  async function copyReport() {
+    collecting = true;
+    copied = false;
+    try {
+      report = await invoke<string>("diagnostics_report");
+    } catch (err) {
+      store.lastError = t("settings.reportFailed", { why: String(err) });
+      collecting = false;
+      return;
+    }
+    collecting = false;
+    try {
+      await navigator.clipboard.writeText(report);
+      copied = true;
+    } catch {
+      // The report is on screen either way, so it can be copied by hand.
+      store.lastError = t("settings.copyFailed");
+    }
+  }
 
   $effect(() => {
     if (store.info === null) store.loadInfo();
@@ -255,11 +320,51 @@
       <div class="rows mono kv">
         <div class="row"><span class="dim">version</span><span>{store.info?.version ?? "…"}</span></div>
         <div class="row"><span class="dim">db</span><span class="path">{store.info?.db_path ?? "…"}</span></div>
+        <div class="row"><span class="dim">logs</span><span class="path">{store.info?.logs_dir ?? "…"}</span></div>
         <div class="row"><span class="dim">adapters</span><span class="path">{store.info?.adapters_dir ?? "…"}</span></div>
         <div class="row"><span class="dim">workspace</span><span class="path">{store.info?.workspace ?? "…"}</span></div>
         <div class="row"><span class="dim">runs</span><span>{store.info?.runs ?? "…"}</span></div>
       </div>
       <p class="note">{t("settings.aboutNote")}</p>
+
+      {#if local}
+        <div class="group">
+          <div class="gtitle">{t("settings.diag")}</div>
+          <div class="card pad">
+            <div class="ftitle">{t("settings.logs")}</div>
+            <p class="fnote">{t("settings.logsNote")}</p>
+            <div class="actions">
+              <button class="btn" onclick={openLogs}>{t("settings.openLogs")}</button>
+            </div>
+
+            <div class="ftitle top">{t("settings.level")}</div>
+            <p class="fnote">{t("settings.levelNote")}</p>
+            <div class="seg" role="radiogroup" aria-label={t("settings.level")}>
+              {#each levels as l (l.id)}
+                <button class="segopt" class:on={level?.preset === l.id} role="radio" aria-checked={level?.preset === l.id} onclick={() => setLevel(l.id)}>
+                  {l.label}
+                </button>
+              {/each}
+            </div>
+            {#if level}
+              <p class="fnote now mono">{t("settings.levelNow", { filter: level.filter, from: levelFrom(level.source) })}</p>
+            {/if}
+            {#if level && (level.preset === "debug" || level.preset === "trace")}
+              <p class="fnote warn">{t("settings.levelDebugNote")}</p>
+            {/if}
+
+            <div class="ftitle top">{t("settings.report")}</div>
+            <p class="fnote">{t("settings.reportNote")}</p>
+            <div class="actions">
+              <button class="btn" disabled={collecting} onclick={copyReport}>
+                {collecting ? t("settings.reportMaking") : t("settings.copyReport")}
+              </button>
+              {#if copied}<span class="copied" aria-live="polite">{t("settings.reportCopied")}</span>{/if}
+            </div>
+            {#if report}<pre class="report mono">{report}</pre>{/if}
+          </div>
+        </div>
+      {/if}
     {/if}
   </div>
 </section>
@@ -395,7 +500,40 @@
 
   .actions {
     display: flex;
+    align-items: center;
     gap: 8px;
+  }
+
+  .copied {
+    font-size: 12px;
+    color: var(--ok);
+  }
+
+  /* The filter in force, under its buttons. */
+  .fnote.now {
+    margin: 10px 0 0;
+    font-size: 11px;
+    color: var(--lab);
+  }
+
+  /* Turning the level up records more than the app's own lines. */
+  .fnote.warn {
+    margin: 8px 0 0;
+    color: var(--warn);
+  }
+
+  /* The report as it will be pasted: scrolls, wraps nothing, selectable. */
+  .report {
+    margin: 12px 0 0;
+    max-height: 320px;
+    overflow: auto;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    background: var(--inp);
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--txt);
+    user-select: text;
   }
 
   /* Overview tiles: hairline boxes, one number each. */

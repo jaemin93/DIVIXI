@@ -20,6 +20,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io
 tokio-util = { version = "0.7", features = ["compat"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The log file under the app data folder: a new one each day, the last few kept.
+tracing-appender = "0.2.5"
+# The crash file stamps itself (tracing-appender already builds this).
+time = { version = "0.3", features = ["formatting"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [profile.dev]
@@ -27,3 +31,25 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Enough debug information to read a backtrace, and no more.
+#
+# A release build has no console, so `logs/crash.log` (src-tauri/src/crash.rs)
+# is the only account of a panic a user can send. Without this, its backtrace
+# is a column of addresses nobody can act on.
+#
+# `line-tables-only` is the cheap end of the scale: file and line per frame,
+# no type or variable information.
+#
+# Measured on this workspace, Windows/MSVC, release:
+#   divixi.exe  33,097,728 -> 33,079,808 bytes  (-0.05%: no cost at all)
+#   divixi.pdb  14,913,536 -> 111,898,624 bytes (x7.5, and not shipped)
+#
+# MSVC keeps every byte of it in the .pdb, so the executable a user installs
+# does not grow -- and, for the same reason, a Windows backtrace is only
+# symbolised where that .pdb is beside the .exe. It is on a machine that
+# builds its own release, and not in the installer. Shipping or archiving
+# the .pdb is a separate decision. On Linux and macOS the information is in
+# the binary itself, so divixi-server gets readable backtraces from this.
+[profile.release]
+debug = "line-tables-only"
