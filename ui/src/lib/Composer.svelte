@@ -761,17 +761,6 @@
       <button class="btn send stop" type="button" disabled={store.cancelling} onclick={() => store.cancelConductor()} title={t("composer.stopTitle")} aria-label={t("composer.stop")}>■</button>
     {/if}
     <button
-      type="button"
-      class="btn kbbtn"
-      class:on={kbQuery !== null}
-      onclick={() => (kbQuery === null ? startKb() : endKb())}
-      title={t("composer.kb.button")}
-      aria-label={t("composer.kb.button")}
-      aria-pressed={kbQuery !== null}
-    >
-      <Icon name="book" size={15} />
-    </button>
-    <button
       class="btn send"
       class:queueing={store.busy}
       type="submit"
@@ -933,26 +922,6 @@
   .fx:hover {
     color: var(--hi);
     background: var(--sel);
-  }
-
-  .kbbtn {
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--dim);
-  }
-
-  .kbbtn:hover,
-  .kbbtn.on {
-    color: var(--acc);
-    border-color: var(--acc);
-  }
-
-  .kbbtn.on {
-    background: var(--accbg);
   }
 
   /* Searching knowledge: the box says so. */
