@@ -244,7 +244,7 @@
           </label>
         {/each}
         <div class="actions ntest">
-          <button class="btn" onclick={() => void notify("decision", t("notify.testTitle"), t("notify.testBody"), null, { test: true })}>{t("notify.test")}</button>
+          <button class="btn" onclick={() => void notify("decision", t("notify.testTitle"), t("notify.testBody"))}>{t("notify.test")}</button>
         </div>
       </div>
       <p class="note">{t("notify.note")}</p>

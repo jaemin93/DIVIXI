@@ -102,12 +102,11 @@ async function mayNotify(): Promise<boolean> {
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 /**
- * Something for the human: into the bell's list, and to the system when
- * that kind is turned on and they are not looking. `test`: the settings'
- * test button, which reaches the system even while looking, if any kind
- * is on there.
+ * Something for the human: into the bell's list, and to the system only
+ * when that kind is turned on and they are not looking (the settings' test
+ * too: a system notification never comes while the window is looked at).
  */
-export async function notify(kind: NotifyKind, title: string, body: string, track: string | null = null, opts: { test?: boolean } = {}) {
+export async function notify(kind: NotifyKind, title: string, body: string, track: string | null = null) {
   if (!inTauri) return;
   body = clip(body.trim(), 400);
   change((xs) => {
@@ -119,8 +118,7 @@ export async function notify(kind: NotifyKind, title: string, body: string, trac
     const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     return [{ id, kind, title, body, at: Date.now(), read: false, count: 1, instance: instanceId, instanceName, track }, ...xs];
   });
-  const system = opts.test ? Object.values(notifyPrefs).some(Boolean) : notifyPrefs[kind] && !looking();
-  if (!system) return;
+  if (!notifyPrefs[kind] || looking()) return;
   if (!(await mayNotify())) return;
   const where = instanceName ? `[${instanceName}] ` : "";
   sendNotification({ title: where + title, body: clip(body, 180) });
