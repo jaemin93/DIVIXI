@@ -43,6 +43,23 @@ npm install
 npm run app          # tauri dev — 창이 뜹니다
 ```
 
+## 원격 인스턴스 서버 (divixi-server)
+
+Linux 서버 같은 곳에 화면 없는 Divixi를 두고, PC의 Divixi 앱에서 원격 인스턴스로 붙어 씁니다
+(창 왼쪽 위에서 로컬 ↔ 인스턴스 전환, 대화·파일·터미널 모두 서버에서). 설치·연결·항상 켜 두기·업데이트는
+**[docs/divixi-server.md](docs/divixi-server.md)**에 있습니다. 요약:
+
+```bash
+sudo apt install -y build-essential pkg-config libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev \
+  libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev      # + Rust, Node.js 20+
+npm ci && npm run build
+cargo build --release -p orchestra-app --features server --bin divixi-server
+install -Dm755 target/release/divixi-server ~/.local/bin/divixi-server
+```
+
+그다음 앱의 **설정 › 원격 인스턴스 › 원격 인스턴스 추가**에 `user@server`(SSH 터널)를 넣으면, 앱이 SSH로 서버를 켜고
+붙습니다.
+
 ACP 연결만 따로 확인하려면:
 
 ```bash
@@ -63,8 +80,8 @@ cargo run -p orchestra-acp --example smoke -- "Reply with exactly: ORCHESTRA OK"
 
 | 에이전트 | ACP 진입 | 권한 모드 (기본 = 가장 자율적인 것) |
 |---|---|---|
-| Claude Code | `@agentclientprotocol/claude-agent-acp` (devDependency, `node`로 직접) | default · acceptEdits · plan · auto · **bypassPermissions** |
-| Codex | `@agentclientprotocol/codex-acp` (devDependency, `@openai/codex` 번들) | read-only · agent · **agent-full-access** |
+| Claude Code | `@agentclientprotocol/claude-agent-acp` (앱 데이터의 `adapters/`에 받아 `node`로; 개발판은 devDependency) | default · acceptEdits · plan · auto · **bypassPermissions** |
+| Codex | `@agentclientprotocol/codex-acp` (같은 방식, `@openai/codex` 번들) | read-only · agent · **agent-full-access** |
 | GitHub Copilot | 설치된 `copilot.exe --acp` | agent · plan · **autopilot** |
 | Antigravity | Google의 `agy_acp_server` zip을 앱 데이터 폴더에 다운로드 | default · auto_edit · **yolo** |
 
