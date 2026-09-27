@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import { t } from "./i18n.svelte";
   import SystemMeter from "./SystemMeter.svelte";
+  import InstanceSwitcher from "./InstanceSwitcher.svelte";
 
   /**
    * The window's own chrome. The OS title bar is off (`decorations: false`),
@@ -10,6 +11,7 @@
    * drawn in the app's palette. Double-clicking the strip toggles maximize;
    * Tauri handles that through the drag-region attribute.
    *
+   * The instance switcher (this PC or a remote instance) sits at the left.
    * The empty middle is on purpose: a command bar and notifications go
    * there later. The system meter sits by the window buttons.
    */
@@ -33,6 +35,7 @@
 </script>
 
 <div class="chrome" data-tauri-drag-region>
+  <InstanceSwitcher />
   <span class="grow" data-tauri-drag-region></span>
   <SystemMeter />
   <div class="controls">

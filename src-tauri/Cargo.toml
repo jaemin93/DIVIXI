@@ -48,6 +48,8 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "json
 hmac = "0.12"
 sha2 = "0.10"
 ignore = "0.4"
+# The remote instance's event socket, from this app (axum's own WebSocket crate).
+tokio-tungstenite = "0.29"
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

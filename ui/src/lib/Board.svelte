@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { inTauri } from "./ipc.svelte";
+  import { inTauri, bring } from "./ipc.svelte";
   import { store, type DesignNode, type DesignOp, type DesignTag, type Stroke } from "./store.svelte";
   import { strokePath, strokesBox, worldStrokes, localStrokes, overlaps, edgeEnds, TAG_COLORS, type Box } from "./ink";
   import { t } from "./i18n.svelte";
@@ -317,7 +317,9 @@
           dropOver = false;
           if (!over || !el) return;
           const at = toWorld({ clientX: p.position.x / devicePixelRatio, clientY: p.position.y / devicePixelRatio });
-          void store.designAddFiles(p.paths, Math.round(at.x), Math.round(at.y));
+          void bring(p.paths)
+            .then((paths) => store.designAddFiles(paths, Math.round(at.x), Math.round(at.y)))
+            .catch((err) => (store.lastError = String(err)));
         }
       })
       .then((u) => (gone ? u() : (unlisten = u)))

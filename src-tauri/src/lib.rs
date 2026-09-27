@@ -1138,6 +1138,8 @@ pub fn run() {
             remote::client::remote_host_delete,
             remote::client::remote_host_connect,
             remote::client::remote_host_disconnect,
+            remote::client::instance_invoke,
+            remote::client::instance_upload,
             workspace_search,
             workspace_save_as,
             design_extracts,
@@ -1220,11 +1222,20 @@ pub fn run() {
         // Both read files, so they answer off the UI thread.
         .register_asynchronous_uri_scheme_protocol(preview::SCHEME, |ctx, request, responder| {
             let app = ctx.app_handle().clone();
+            // `/@<id>/…`: a remote instance's file, fetched from there.
+            if let Some((id, rest)) = remote::client::instance_path(request.uri()) {
+                tauri::async_runtime::spawn(async move { responder.respond(remote::client::proxy(&app, &id, "preview", &rest).await) });
+                return;
+            }
             tauri::async_runtime::spawn_blocking(move || responder.respond(preview::handle(&app, request)));
         })
         // A design board's reference files (pictures, PDFs) for its cards.
         .register_asynchronous_uri_scheme_protocol(preview::BOARD_SCHEME, |ctx, request, responder| {
             let app = ctx.app_handle().clone();
+            if let Some((id, rest)) = remote::client::instance_path(request.uri()) {
+                tauri::async_runtime::spawn(async move { responder.respond(remote::client::proxy(&app, &id, "board", &rest).await) });
+                return;
+            }
             tauri::async_runtime::spawn_blocking(move || responder.respond(preview::handle_board(&app, request)));
         })
         .setup(|app| {

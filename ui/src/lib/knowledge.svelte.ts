@@ -1,4 +1,4 @@
-import { invoke, listen } from "./ipc.svelte";
+import { invoke, listen, local, bring } from "./ipc.svelte";
 import { store, type ArtifactInfo } from "./store.svelte";
 
 /** Mirrors `orchestra_knowledge::Source`: a document in the library. */
@@ -207,7 +207,7 @@ class Knowledge {
   async pickAndAdd() {
     let paths: string[] = [];
     try {
-      paths = await invoke<string[]>("pick_files", { start: store.currentTrack?.cwd ?? null });
+      paths = await bring(await invoke<string[]>("pick_files", { start: local ? (store.currentTrack?.cwd ?? null) : null }));
     } catch (err) {
       store.lastError = String(err);
       return;

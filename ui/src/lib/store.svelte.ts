@@ -1,4 +1,4 @@
-import { invoke, listen, inTauri, boardBase } from "./ipc.svelte";
+import { invoke, listen, local, bring, boardBase } from "./ipc.svelte";
 import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Lang, type LangPref } from "./i18n.svelte";
@@ -1199,8 +1199,8 @@ class Store {
   /** The system file picker, opened in the track's folder. */
   async pickAttachments() {
     try {
-      const paths = await invoke<string[]>("pick_files", { start: this.currentTrack?.cwd ?? null });
-      await this.attach(paths);
+      const paths = await invoke<string[]>("pick_files", { start: local ? (this.currentTrack?.cwd ?? null) : null });
+      await this.attach(await bring(paths));
     } catch (err) {
       this.lastError = String(err);
     }
@@ -1435,7 +1435,7 @@ class Store {
   async designPickFiles(x: number, y: number) {
     try {
       const paths = await invoke<string[]>("pick_files", { start: null });
-      await this.designAddFiles(paths, x, y);
+      await this.designAddFiles(await bring(paths), x, y);
     } catch (err) {
       this.lastError = String(err);
     }
@@ -1941,7 +1941,8 @@ class Store {
 
   /** Show or hide the track list column; persisted. */
   async setTerminal(open: boolean) {
-    if (!inTauri) return;
+    // A terminal is this PC's.
+    if (!local) return;
     this.termOpen = open;
     if (open) this.termMounted = true;
     try {
@@ -2084,7 +2085,7 @@ class Store {
       }
       // Setup comes first when nothing has been detected yet, or when the
       // last detection left nothing to run workers on.
-      if (inTauri && (agents === null || this.readyAgents.length === 0)) {
+      if (local && (agents === null || this.readyAgents.length === 0)) {
         this.setupStep = 1;
         this.setupOpen = true;
       }

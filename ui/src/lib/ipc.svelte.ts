@@ -8,6 +8,12 @@ import { listen as tauriListen } from "@tauri-apps/api/event";
  * to /api/invoke/<name>, events over one WebSocket that picks up where it
  * left off after a drop. Everything else in the UI imports `invoke` and
  * `listen` from here, never from @tauri-apps/api.
+ *
+ * In the app's window a remote instance can be chosen in the header (as
+ * Kiro Crew's): the window then shows that Divixi. Its commands go through
+ * this app (`instance_invoke`), which holds the instance's tokens and
+ * tunnel, and its events come back as `instance-event`; a few commands
+ * stay with this app (the instance list itself). Switching reloads the page.
  */
 
 /**
@@ -17,6 +23,45 @@ import { listen as tauriListen } from "@tauri-apps/api/event";
  */
 export const inTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window && !document.querySelector('meta[name="divixi-served"]');
+
+const INSTANCE_KEY = "divixi.instance";
+
+/** The remote instance this window shows, or null for this PC. */
+export const instanceId: string | null = (() => {
+  if (!inTauri) return null;
+  try {
+    return sessionStorage.getItem(INSTANCE_KEY);
+  } catch {
+    return null;
+  }
+})();
+
+/** This PC's own Divixi: its folders, terminal and files are at hand. */
+export const local = inTauri && instanceId === null;
+
+/** Show another instance (or this PC, null) in this window. */
+export function switchInstance(id: string | null) {
+  try {
+    if (id) sessionStorage.setItem(INSTANCE_KEY, id);
+    else sessionStorage.removeItem(INSTANCE_KEY);
+  } catch {
+    // No storage: stay where we are.
+    return;
+  }
+  location.reload();
+}
+
+/** Commands that are this app's even while an instance is shown. */
+const OWN = new Set(["remote_hosts", "remote_host_save", "remote_host_delete", "remote_host_connect", "remote_host_disconnect", "pick_files"]);
+
+/**
+ * Files of this PC (picked or dropped) as the Divixi being shown can use
+ * them: the paths themselves here, copies kept there for an instance.
+ */
+export function bring(paths: string[]): Promise<string[]> {
+  if (!instanceId || paths.length === 0) return Promise.resolve(paths);
+  return tauriInvoke<string[]>("instance_upload", { id: instanceId, paths });
+}
 
 /** Where a browser's connection to the app stands. */
 export const remote = $state<{ state: "connecting" | "online" | "reconnecting" | "signed-out" | "dropped" }>({
@@ -67,7 +112,9 @@ async function remoteInvoke<T>(cmd: string, args?: Record<string, unknown>): Pro
 
 /** Call an app command: through IPC in the app, through the server in a browser. */
 export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  return inTauri ? tauriInvoke<T>(cmd, args) : remoteInvoke<T>(cmd, args);
+  if (!inTauri) return remoteInvoke<T>(cmd, args);
+  if (instanceId && !OWN.has(cmd)) return tauriInvoke<T>("instance_invoke", { id: instanceId, cmd, args: args ?? {} });
+  return tauriInvoke<T>(cmd, args);
 }
 
 // ----- events -----
@@ -76,6 +123,24 @@ const handlers = new Map<string, Set<Handler>>();
 let socket: WebSocket | null = null;
 let lastSeq = 0;
 let backoff = 1000;
+
+/** The chosen instance's events, as this app passes them on. */
+let relaying = false;
+function relay() {
+  if (relaying) return;
+  relaying = true;
+  void tauriListen<{ id: string; frame: { seq?: number; event?: string; payload?: unknown; reset?: boolean } }>("instance-event", (e) => {
+    const { id, frame } = e.payload;
+    if (id !== instanceId) return;
+    if (frame.reset) {
+      location.reload();
+      return;
+    }
+    const set = frame.event ? handlers.get(frame.event) : undefined;
+    if (!set) return;
+    for (const h of set) h({ event: frame.event!, id: frame.seq ?? 0, payload: frame.payload });
+  });
+}
 
 function connect() {
   if (socket || remote.state === "signed-out" || remote.state === "dropped") return;
@@ -117,11 +182,12 @@ function connect() {
 
 /** Listen to an app event; the returned function stops listening. */
 export async function listen<T>(event: string, handler: (e: Event<T>) => void): Promise<() => void> {
-  if (inTauri) return tauriListen<T>(event, handler);
+  if (inTauri && !instanceId) return tauriListen<T>(event, handler);
   let set = handlers.get(event);
   if (!set) handlers.set(event, (set = new Set()));
   set.add(handler as Handler);
-  connect();
+  if (inTauri) relay();
+  else connect();
   return () => {
     set!.delete(handler as Handler);
   };
@@ -132,6 +198,16 @@ export async function listen<T>(event: string, handler: (e: Event<T>) => void): 
  * starts asking for things, and where the event stream stands.
  */
 export async function signedIn(): Promise<boolean> {
+  if (inTauri && instanceId) {
+    // Reach the chosen instance before the app asks it for anything.
+    try {
+      await tauriInvoke("remote_host_connect", { id: instanceId });
+      return true;
+    } catch (err) {
+      instance.error = String(err);
+      return false;
+    }
+  }
   if (inTauri) return true;
   let me = await fetch("/api/me", { credentials: "same-origin" }).catch(() => null);
   if (me?.status === 401 && (await refresh())) me = await fetch("/api/me", { credentials: "same-origin" }).catch(() => null);
@@ -152,14 +228,20 @@ export async function signOut() {
   socket?.close();
 }
 
+/** Why the chosen instance could not be reached, if it could not. */
+export const instance = $state<{ error: string }>({ error: "" });
+
+/** An instance's files come through this app, under `/@<id>/`. */
+const via = () => (instanceId ? `@${encodeURIComponent(instanceId)}/` : "");
+
 /** Where a track file is served for previewing. */
 export function previewBase(): string {
   if (!inTauri) return `${location.origin}/preview/`;
-  return navigator.userAgent.includes("Windows") ? "http://preview.localhost/" : "preview://localhost/";
+  return (navigator.userAgent.includes("Windows") ? "http://preview.localhost/" : "preview://localhost/") + via();
 }
 
 /** Where a design board's files are served. */
 export function boardBase(): string {
   if (!inTauri) return `${location.origin}/board/`;
-  return navigator.userAgent.includes("Windows") ? "http://board.localhost/" : "board://localhost/";
+  return (navigator.userAgent.includes("Windows") ? "http://board.localhost/" : "board://localhost/") + via();
 }

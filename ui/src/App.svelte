@@ -15,7 +15,8 @@
   import KnowledgeView from "./lib/KnowledgeView.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
   import SignIn from "./lib/SignIn.svelte";
-  import { inTauri, remote } from "./lib/ipc.svelte";
+  import Unreachable from "./lib/Unreachable.svelte";
+  import { inTauri, remote, instance } from "./lib/ipc.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
@@ -57,6 +58,11 @@
 
 {#if !inTauri && (remote.state === "signed-out" || remote.state === "dropped")}
   <SignIn />
+{:else if instance.error}
+  <div class="shell">
+    <WindowChrome />
+    <Unreachable />
+  </div>
 {:else}
 <div class="shell">
   {#if inTauri}<WindowChrome />{/if}

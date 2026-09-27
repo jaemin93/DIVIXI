@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick, untrack } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { invoke, inTauri } from "./ipc.svelte";
+  import { invoke, inTauri, bring } from "./ipc.svelte";
   import { store, type ArtifactInfo, type KbPick, type WsEntry } from "./store.svelte";
   import AgentPicker from "./AgentPicker.svelte";
   import Icon from "./Icon.svelte";
@@ -484,7 +484,9 @@
         else if (p.type === "leave") dropping = false;
         else if (p.type === "drop") {
           dropping = false;
-          void store.attach(p.paths);
+          void bring(p.paths)
+            .then((paths) => store.attach(paths))
+            .catch((err) => (store.lastError = String(err)));
           box?.focus();
         }
       })

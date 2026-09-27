@@ -1,19 +1,28 @@
-//! Using a Divixi on another machine from this app (like Kiro Crew's remote
-//! hosts): divixi-server started there over SSH if it is not running, a
-//! pairing link it mints (`divixi-server token`), an SSH tunnel to it, and a window of this app
-//! showing it. The page there talks to that server, not to this app
-//! (it carries `divixi-served`; see ui/src/lib/ipc.svelte.ts).
+//! Using a Divixi on another machine from this app (Kiro Crew's remote
+//! instances), in the same window: the header switches between this PC and
+//! an instance, and while an instance is chosen the page's commands, events
+//! and file previews go there through this module (ui/src/lib/ipc.svelte.ts).
+//!
+//! Connecting: divixi-server is started there over SSH if it is not
+//! running, a pairing token is minted there (`divixi-server token`), an SSH
+//! tunnel is opened to it, and the token is exchanged for the device's
+//! access and refresh tokens. Those stay here, in Rust; the page never
+//! holds them. Events come over one WebSocket per instance and are re-sent
+//! to the page as `instance-event`.
 //!
 //! SSH runs non-interactively (BatchMode): the host must be reachable with
 //! a key or an agent, as `ssh <host>` in a terminal would be. Its options
 //! are Kiro Crew's for supervised tunnels (instances.md §9).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
+use serde_json::{json, Value};
+use tauri::{Emitter, Manager};
 
 use crate::{AppHandle, AppState};
 
@@ -46,7 +55,7 @@ fn default_bin() -> String {
     "~/.local/bin/divixi-server".to_string()
 }
 
-/// A host as the settings page shows it.
+/// A host as the settings page and the switcher show it.
 #[derive(Serialize)]
 pub struct HostView {
     #[serde(flatten)]
@@ -55,15 +64,39 @@ pub struct HostView {
     pub local_port: Option<u16>,
 }
 
-/// Open tunnels, by host id.
+/// Open connections, by host id.
 #[derive(Default)]
 pub struct Tunnels {
-    open: tokio::sync::Mutex<HashMap<String, Tunnel>>,
+    open: tokio::sync::Mutex<HashMap<String, Arc<Conn>>>,
 }
 
-struct Tunnel {
+struct Conn {
+    host: Host,
     local_port: u16,
-    child: tokio::process::Child,
+    base: String,
+    tunnel: tokio::sync::Mutex<tokio::process::Child>,
+    tokens: parking_lot::Mutex<Tokens>,
+    http: reqwest::Client,
+    events: parking_lot::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+#[derive(Clone, Deserialize)]
+struct Tokens {
+    access: String,
+    refresh: String,
+}
+
+impl Conn {
+    fn alive(&self) -> bool {
+        self.tunnel.try_lock().map(|mut c| matches!(c.try_wait(), Ok(None))).unwrap_or(true)
+    }
+
+    async fn close(&self) {
+        if let Some(h) = self.events.lock().take() {
+            h.abort();
+        }
+        let _ = self.tunnel.lock().await.kill().await;
+    }
 }
 
 fn hosts(app: &AppHandle) -> Vec<Host> {
@@ -132,7 +165,7 @@ fn free_port() -> Result<u16, String> {
 }
 
 /// Wait until the tunnel answers, or say why not.
-async fn wait_for(port: u16, child: &mut tokio::process::Child) -> Result<(), String> {
+async fn wait_for(http: &reqwest::Client, base: &str, child: &mut tokio::process::Child) -> Result<(), String> {
     for _ in 0..60 {
         if let Ok(Some(status)) = child.try_wait() {
             let mut err = String::new();
@@ -142,21 +175,12 @@ async fn wait_for(port: u16, child: &mut tokio::process::Child) -> Result<(), St
             }
             return Err(format!("ssh ended ({status}): {}", err.trim()));
         }
-        if let Ok(mut s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let probe = format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
-            if s.write_all(probe.as_bytes()).await.is_ok() {
-                let mut buf = vec![0u8; 256];
-                if let Ok(n) = s.read(&mut buf).await {
-                    if String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200") {
-                        return Ok(());
-                    }
-                }
-            }
+        if http.get(format!("{base}/api/health")).send().await.is_ok_and(|r| r.status().is_success()) {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    Err("the remote Divixi did not answer through the tunnel: is divixi-server running there?".into())
+    Err("the remote instance did not answer through the tunnel: is divixi-server running there?".into())
 }
 
 /// Start the remote Divixi if need be and take a pairing token from it.
@@ -176,15 +200,213 @@ async fn start_and_token(host: &Host) -> Result<String, String> {
     Ok(line.split("/auth/pair?token=").nth(1).unwrap_or_default().trim().to_string())
 }
 
-fn window_label(id: &str) -> String {
-    format!("remote-{id}")
+/// This PC as the remote's device list names it.
+fn device_name() -> String {
+    format!("Divixi · {}", sysinfo::System::host_name().unwrap_or_else(|| "PC".into()))
 }
 
-// ----- commands (the PC's settings page; never reachable remotely) -----
+/// Exchange a pairing token for the device's tokens.
+async fn sign_in(http: &reqwest::Client, base: &str, host: &Host) -> Result<Tokens, String> {
+    let token = start_and_token(host).await?;
+    let res = http
+        .post(format!("{base}/auth/token"))
+        .header("X-Divixi", "1")
+        .header("Content-Type", "application/json")
+        .body(json!({ "token": token, "name": device_name() }).to_string())
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res.bytes().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("the remote instance refused the sign-in ({status})"));
+    }
+    serde_json::from_slice(&body).map_err(|e| e.to_string())
+}
+
+/// New tokens: from the refresh token, or (refused) a fresh sign-in.
+async fn renew(conn: &Conn) -> Result<(), String> {
+    let refresh = conn.tokens.lock().refresh.clone();
+    let res = conn.http.post(format!("{}/auth/refresh", conn.base)).header("X-Divixi", "1").bearer_auth(refresh).send().await;
+    let tokens = match res {
+        Ok(r) if r.status().is_success() => serde_json::from_slice(&r.bytes().await.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?,
+        _ => sign_in(&conn.http, &conn.base, &conn.host).await?,
+    };
+    *conn.tokens.lock() = tokens;
+    Ok(())
+}
+
+async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
+    let tunnels = &app.state::<AppState>().tunnels;
+    let mut open = tunnels.open.lock().await;
+    if let Some(c) = open.get(id) {
+        if c.alive() {
+            return Ok(c.clone());
+        }
+        // Its ssh has ended: the connection is gone.
+        if let Some(c) = open.remove(id) {
+            c.close().await;
+        }
+    }
+    let host = hosts(app).into_iter().find(|h| h.id == id).ok_or("no such remote instance")?;
+    let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
+    let local_port = free_port()?;
+    let base = format!("http://127.0.0.1:{local_port}");
+    let mut child = ssh()
+        .args(["-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3", "-L"])
+        .arg(format!("127.0.0.1:{local_port}:127.0.0.1:{}", host.port))
+        .arg(&host.ssh)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run ssh: {e}"))?;
+    wait_for(&http, &base, &mut child).await?;
+    let tokens = match sign_in(&http, &base, &host).await {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = child.kill().await;
+            return Err(e);
+        }
+    };
+    let conn = Arc::new(Conn {
+        host,
+        local_port,
+        base,
+        tunnel: tokio::sync::Mutex::new(child),
+        tokens: parking_lot::Mutex::new(tokens),
+        http,
+        events: parking_lot::Mutex::new(None),
+    });
+    let pump = tauri::async_runtime::spawn(pump_events(app.clone(), conn.clone()));
+    *conn.events.lock() = Some(pump);
+    open.insert(id.to_string(), conn.clone());
+    Ok(conn)
+}
+
+/// A command on the instance, as the page would call it here.
+async fn call(conn: &Conn, cmd: &str, args: &Value) -> Result<Value, String> {
+    let url = format!("{}/api/invoke/{cmd}", conn.base);
+    let body = args.to_string();
+    let mut renewed = false;
+    loop {
+        let access = conn.tokens.lock().access.clone();
+        let res = conn
+            .http
+            .post(&url)
+            .header("X-Divixi", "1")
+            .header("Content-Type", "application/json")
+            .bearer_auth(access)
+            .body(body.clone())
+            .send()
+            .await
+            .map_err(|e| format!("the remote instance did not answer: {e}"))?;
+        let status = res.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED && !renewed {
+            renew(conn).await?;
+            renewed = true;
+            continue;
+        }
+        let v: Value = serde_json::from_slice(&res.bytes().await.map_err(|e| e.to_string())?).unwrap_or_else(|_| json!({ "error": format!("{status}") }));
+        return match v.get("error") {
+            Some(e) => Err(e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string())),
+            None => Ok(v.get("ok").cloned().unwrap_or(Value::Null)),
+        };
+    }
+}
+
+/// The instance's events, re-sent to the page as `instance-event`
+/// (`{id, frame}`), picking up where it left off after a drop.
+async fn pump_events(app: AppHandle, conn: Arc<Conn>) {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+    let mut since = 0u64;
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        let url = format!("ws://127.0.0.1:{}/api/events?since={since}", conn.local_port);
+        let Ok(mut req) = url.into_client_request() else { return };
+        let access = conn.tokens.lock().access.clone();
+        if let Ok(v) = format!("Bearer {access}").parse() {
+            req.headers_mut().insert("Authorization", v);
+        }
+        match tokio_tungstenite::connect_async(req).await {
+            Ok((mut ws, _)) => {
+                backoff = Duration::from_secs(1);
+                while let Some(Ok(msg)) = ws.next().await {
+                    let Message::Text(text) = msg else { continue };
+                    let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };
+                    if let Some(seq) = frame.get("seq").and_then(Value::as_u64) {
+                        since = seq;
+                    }
+                    let _ = app.emit("instance-event", json!({ "id": conn.host.id, "frame": frame }));
+                }
+            }
+            Err(tokio_tungstenite::tungstenite::Error::Http(res)) if res.status() == 401 => {
+                if renew(&conn).await.is_err() {
+                    tokio::time::sleep(backoff).await;
+                }
+                continue;
+            }
+            Err(_) => {}
+        }
+        if !conn.alive() {
+            return;
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(10));
+    }
+}
+
+/// `/@<id>/<rest>` on the preview and board schemes: an instance's file.
+pub fn instance_path(uri: &tauri::http::Uri) -> Option<(String, String)> {
+    let rest = uri.path().strip_prefix("/@")?;
+    let (id, rest) = rest.split_once('/')?;
+    let rest = match uri.query() {
+        Some(q) => format!("{rest}?{q}"),
+        None => rest.to_string(),
+    };
+    Some((id.to_string(), rest))
+}
+
+/// An instance's file for the preview (`kind` "preview") or board ("board")
+/// scheme, fetched with the device's token and passed on with its type and
+/// policy (a preview comes sandboxed).
+pub async fn proxy(app: &AppHandle, id: &str, kind: &str, rest: &str) -> tauri::http::Response<Cow<'static, [u8]>> {
+    let reply = |status: u16, text: &'static str| tauri::http::Response::builder().status(status).body(Cow::Borrowed(text.as_bytes())).expect("a plain reply");
+    let Some(conn) = app.state::<AppState>().tunnels.open.lock().await.get(id).cloned() else {
+        return reply(502, "not connected to that remote instance");
+    };
+    let url = format!("{}/{kind}/{rest}", conn.base);
+    let mut renewed = false;
+    loop {
+        let access = conn.tokens.lock().access.clone();
+        let Ok(res) = conn.http.get(&url).bearer_auth(access).send().await else { return reply(502, "the remote instance did not answer") };
+        if res.status() == reqwest::StatusCode::UNAUTHORIZED && !renewed && renew(&conn).await.is_ok() {
+            renewed = true;
+            continue;
+        }
+        let mut out = tauri::http::Response::builder().status(res.status().as_u16());
+        for h in ["content-type", "content-security-policy"] {
+            if let Some(v) = res.headers().get(h).and_then(|v| v.to_str().ok()) {
+                out = out.header(h, v);
+            }
+        }
+        let body = res.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+        return out.body(Cow::Owned(body)).unwrap_or_else(|_| reply(500, "bad reply"));
+    }
+}
+
+async fn disconnect(app: &AppHandle, id: &str) {
+    let conn = app.state::<AppState>().tunnels.open.lock().await.remove(id);
+    if let Some(c) = conn {
+        c.close().await;
+    }
+}
+
+// ----- commands (this app's own page; never reachable remotely) -----
 
 #[tauri::command]
 pub async fn remote_hosts(app: AppHandle) -> Vec<HostView> {
-    let open = app.state::<AppState>().tunnels.open.lock().await.iter().map(|(k, t)| (k.clone(), t.local_port)).collect::<HashMap<_, _>>();
+    let open = app.state::<AppState>().tunnels.open.lock().await.iter().filter(|(_, c)| c.alive()).map(|(k, c)| (k.clone(), c.local_port)).collect::<HashMap<_, _>>();
     hosts(&app).into_iter().map(|h| HostView { local_port: open.get(&h.id).copied(), host: h }).collect()
 }
 
@@ -203,6 +425,9 @@ pub async fn remote_host_save(app: AppHandle, mut host: Host) -> Result<Vec<Host
     }
     if host.id.is_empty() {
         host.id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+    } else {
+        // A changed host is reached anew.
+        disconnect(&app, &host.id).await;
     }
     let mut list = hosts(&app);
     match list.iter_mut().find(|h| h.id == host.id) {
@@ -222,68 +447,11 @@ pub async fn remote_host_delete(app: AppHandle, id: String) -> Result<Vec<HostVi
     Ok(remote_hosts(app).await)
 }
 
-/// Open the host in a window: the remote Divixi started if it is not
-/// running and a pairing token, then the tunnel (or the one already open),
-/// then the window.
+/// Connect to the instance (or keep the open connection).
 #[tauri::command]
 pub async fn remote_host_connect(app: AppHandle, id: String) -> Result<Vec<HostView>, String> {
-    let host = hosts(&app).into_iter().find(|h| h.id == id).ok_or("no such host")?;
-    let token = start_and_token(&host).await?;
-    let tunnels = &app.state::<AppState>().tunnels;
-    let local_port = {
-        let mut open = tunnels.open.lock().await;
-        // A tunnel whose ssh has ended is gone.
-        if let Some(t) = open.get_mut(&id) {
-            if !matches!(t.child.try_wait(), Ok(None)) {
-                open.remove(&id);
-            }
-        }
-        match open.get(&id) {
-            Some(t) => t.local_port,
-            None => {
-                let local_port = free_port()?;
-                let mut child = ssh()
-                    .args(["-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3", "-L"])
-                    .arg(format!("127.0.0.1:{local_port}:127.0.0.1:{}", host.port))
-                    .arg(&host.ssh)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| format!("could not run ssh: {e}"))?;
-                wait_for(local_port, &mut child).await?;
-                open.insert(id.clone(), Tunnel { local_port, child });
-                local_port
-            }
-        }
-    };
-    let link = format!("http://127.0.0.1:{local_port}/auth/pair?token={token}");
-    let url = link.parse::<tauri::Url>().map_err(|e| e.to_string())?;
-    let label = window_label(&id);
-    match app.get_webview_window(&label) {
-        Some(w) => {
-            w.navigate(url).map_err(|e| e.to_string())?;
-            let _ = w.show();
-            let _ = w.set_focus();
-        }
-        None => {
-            tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(url))
-                .title(format!("Divixi — {}", host.name))
-                .inner_size(1440.0, 900.0)
-                .min_inner_size(900.0, 600.0)
-                .build()
-                .map_err(|e| e.to_string())?;
-        }
-    }
+    connect(&app, &id).await?;
     Ok(remote_hosts(app).await)
-}
-
-async fn disconnect(app: &AppHandle, id: &str) {
-    if let Some(mut t) = app.state::<AppState>().tunnels.open.lock().await.remove(id) {
-        let _ = t.child.kill().await;
-    }
-    if let Some(w) = app.get_webview_window(&window_label(id)) {
-        let _ = w.close();
-    }
 }
 
 #[tauri::command]
@@ -292,14 +460,56 @@ pub async fn remote_host_disconnect(app: AppHandle, id: String) -> Vec<HostView>
     remote_hosts(app).await
 }
 
-/// End every tunnel (the app is quitting; a server has no tray to quit from).
+/// A command for the chosen instance, from the page (ipc.svelte.ts). The
+/// instance's own rules decide what it runs (remote/bridge.rs).
+#[tauri::command]
+pub async fn instance_invoke(app: AppHandle, id: String, cmd: String, args: Value) -> Result<Value, String> {
+    if cmd.is_empty() || !cmd.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err("not a command name".into());
+    }
+    let conn = connect(&app, &id).await?;
+    call(&conn, &cmd, &args).await
+}
+
+/// Files of this PC (picked or dropped) taken to the instance: each is kept
+/// there as an attachment (`save_attachment`), and its path there returned
+/// in the same order, for the command that wanted them.
+#[tauri::command]
+pub async fn instance_upload(app: AppHandle, id: String, paths: Vec<String>) -> Result<Vec<String>, String> {
+    use base64::Engine;
+    let conn = connect(&app, &id).await?;
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let path = std::path::Path::new(&p);
+        let meta = tokio::fs::metadata(path).await.map_err(|e| format!("{p}: {e}"))?;
+        if !meta.is_file() {
+            return Err(format!("{p}: only files can be sent to a remote instance"));
+        }
+        if meta.len() > 50 * 1024 * 1024 {
+            return Err(format!("{p}: files over 50 MB are not sent"));
+        }
+        let bytes = tokio::fs::read(path).await.map_err(|e| format!("{p}: {e}"))?;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let there = call(&conn, "save_attachment", &json!({ "name": name, "data": data })).await?;
+        out.push(there.as_str().ok_or("the remote instance gave no path")?.to_string());
+    }
+    Ok(out)
+}
+
+/// End every connection (the app is quitting; a server has no tray to quit from).
 #[cfg_attr(feature = "server", allow(dead_code))]
 pub fn close_all(app: &AppHandle) {
     let state = app.state::<AppState>();
     let guard = state.tunnels.open.try_lock();
     if let Ok(mut open) = guard {
-        for (_, mut t) in open.drain() {
-            let _ = t.child.start_kill();
+        for (_, c) in open.drain() {
+            if let Some(h) = c.events.lock().take() {
+                h.abort();
+            }
+            if let Ok(mut t) = c.tunnel.try_lock() {
+                let _ = t.start_kill();
+            }
         }
     }
 }
@@ -333,5 +543,13 @@ mod tests {
         );
         h.path = "~/.local/bin".into();
         assert!(remote_line(&h).starts_with("PATH=~/.local/bin:\"$PATH\"; export PATH; pgrep"));
+    }
+
+    #[test]
+    fn instance_paths() {
+        let uri: tauri::http::Uri = "http://preview.localhost/@ab12/tr001/index.html?x=1".parse().unwrap();
+        assert_eq!(instance_path(&uri), Some(("ab12".into(), "tr001/index.html?x=1".into())));
+        let local: tauri::http::Uri = "http://preview.localhost/tr001/index.html".parse().unwrap();
+        assert_eq!(instance_path(&local), None);
     }
 }

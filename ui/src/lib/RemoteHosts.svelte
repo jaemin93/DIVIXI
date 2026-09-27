@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke } from "./ipc.svelte";
+  import { invoke, instanceId, switchInstance } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
@@ -57,7 +57,9 @@
     try {
       const { local_port: _lp, ...host } = editing;
       const port = Number(host.port) || PORT;
-      hosts = await invoke<Host[]>("remote_host_save", { host: { ...host, port, bin: host.bin.trim() || BIN } });
+      // An empty name takes the one the field suggests.
+      const name = host.name.trim() || t("remote.namePlaceholder", { n: hosts.length + 1 });
+      hosts = await invoke<Host[]>("remote_host_save", { host: { ...host, name, port, bin: host.bin.trim() || BIN } });
       editing = null;
     } catch (err) {
       formError = String(err);
@@ -70,6 +72,8 @@
     confirmDelete = "";
     try {
       hosts = await invoke<Host[]>(cmd, { id });
+      // The instance on screen is gone: back to this PC.
+      if (cmd !== "remote_host_connect" && id === instanceId) switchInstance(null);
     } catch (err) {
       error = String(err);
     } finally {
@@ -108,9 +112,16 @@
           </div>
         </div>
         <div class="acts">
-          <button class="btn sm" class:btn-acc={!on} disabled={busy === h.id} onclick={() => act("remote_host_connect", h.id)}>
-            {busy === h.id ? t("remote.connecting") : on ? t("remote.openWindow") : t("remote.connect")}
-          </button>
+          {#if instanceId === h.id}
+            <span class="viewing">{t("remote.viewing")}</span>
+          {:else}
+            <button class="btn sm btn-acc" onclick={() => switchInstance(h.id)}>{t("remote.show")}</button>
+          {/if}
+          {#if !on && instanceId !== h.id}
+            <button class="btn sm" disabled={busy === h.id} onclick={() => act("remote_host_connect", h.id)}>
+              {busy === h.id ? t("remote.connecting") : t("remote.connect")}
+            </button>
+          {/if}
           {#if on}
             <button class="btn sm" disabled={busy === h.id} onclick={() => act("remote_host_disconnect", h.id)}>{t("remote.disconnect")}</button>
           {/if}
@@ -144,7 +155,7 @@
         <div class="dtitle" id="remote-dlg-title">{editing.id ? t("remote.editTitle") : t("remote.add")}</div>
         <label>
           <span class="lab">{t("remote.name")}</span>
-          <input bind:this={first} bind:value={editing.name} placeholder={t("remote.namePlaceholder")} autocomplete="off" />
+          <input bind:this={first} bind:value={editing.name} placeholder={t("remote.namePlaceholder", { n: hosts.length + 1 })} autocomplete="off" />
         </label>
         <label>
           <span class="lab">{t("remote.ssh")}</span>
@@ -295,6 +306,13 @@
   .btn.sm {
     height: 28px;
     padding: 0 12px;
+  }
+
+  .viewing {
+    align-self: center;
+    padding: 0 6px;
+    font-size: 12px;
+    color: var(--acct);
   }
 
   .danger {

@@ -96,6 +96,8 @@ const SERVER_ALLOWED: &[&str] = &[
     "design_review",
     "design_undo",
     "design_add_blob",
+    // Files the Divixi app brought over first (instance_upload).
+    "design_add_files",
     "design_extract_retry",
     "knowledge_add",
     "knowledge_sync",

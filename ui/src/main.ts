@@ -6,7 +6,8 @@ import { connectKnowledge } from "./lib/knowledge.svelte";
 import { signedIn } from "./lib/ipc.svelte";
 
 // In a browser on another device, nothing is asked of the app until the
-// device is paired; the app shows how to pair it meanwhile.
+// device is paired; the app shows how to pair it meanwhile. With a remote
+// instance chosen, nothing is asked until it is reached.
 void signedIn().then((ok) => {
   if (!ok) return;
   connectEvents().catch((err) => {

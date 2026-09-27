@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { inTauri } from "./ipc.svelte";
+  import { local } from "./ipc.svelte";
   import { store, agentLabel, type AgentId, type ConfigOption, type OptionConfig, type Track, type TrackPatch, WORKER_FOLDERS, type WorkerFolder } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import Icon from "./Icon.svelte";
@@ -175,7 +175,7 @@
         <div class="folder">
           <Icon name="folder" size={14} />
           <input class="mono" type="text" bind:value={cwd} spellcheck="false" />
-          {#if inTauri}<button class="btn" type="button" onclick={browse}>{t("newtrack.browse")}</button>{/if}
+          {#if local}<button class="btn" type="button" onclick={browse}>{t("newtrack.browse")}</button>{/if}
         </div>
       </div>
 

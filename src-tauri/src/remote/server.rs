@@ -4,7 +4,9 @@
 //! proxies from loopback); the checks here hold whatever is in front:
 //! the Host must be this server's (DNS rebinding), writes and the event
 //! socket must come from this origin (CSRF) with the `X-Divixi` header,
-//! and everything under /api needs a device's access cookie.
+//! and everything under /api needs a device's access token: a cookie in a
+//! browser, `Authorization: Bearer` from the Divixi app (remote/client.rs),
+//! which holds its tokens in Rust and never in a page.
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
@@ -53,9 +55,10 @@ impl Ctx {
 pub fn router(ctx: Ctx) -> Router {
     Router::new()
         .route("/auth/pair", get(pair))
+        .route("/auth/token", post(token))
         .route("/auth/refresh", post(refresh))
         .route("/auth/logout", post(logout))
-        .route("/api/health", get(|| async { axum::Json(json!({ "ok": true })) }))
+        .route("/api/health", get(|| async { axum::Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })) }))
         .route("/api/me", get(me))
         // An attachment (up to 50 MB) comes as base64 in a command.
         .route("/api/invoke/{cmd}", post(invoke).layer(axum::extract::DefaultBodyLimit::max(72 * 1024 * 1024)))
@@ -100,9 +103,11 @@ async fn guard(State(ctx): State<Ctx>, request: Request<Body>, next: axum::middl
     let writes = request.method() != Method::GET && request.method() != Method::HEAD;
     let socket = request.uri().path() == "/api/events";
     if writes || socket {
-        // From this very origin: http on loopback, https through serve.
+        // From this very origin: http on loopback, https through serve. A
+        // browser always names the origin of such a request; the Divixi app
+        // (no browser, no cookies to ride on) names none.
         let origin = request.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()).unwrap_or_default();
-        let ok = origin == format!("http://{host}") || origin == format!("https://{host}");
+        let ok = origin.is_empty() || origin == format!("http://{host}") || origin == format!("https://{host}");
         if !ok {
             return (StatusCode::FORBIDDEN, "cross-origin request").into_response();
         }
@@ -124,9 +129,13 @@ fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(|(_, v)| v.to_string())
 }
 
+fn bearer(headers: &HeaderMap) -> Option<String> {
+    headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(|v| v.trim().to_string())
+}
+
 /// The requesting device, or why not.
 fn device(ctx: &Ctx, headers: &HeaderMap, peer: &SocketAddr) -> Result<super::auth::Device, Refused> {
-    let token = cookie(headers, &named(ACCESS_COOKIE, headers)).ok_or(Refused::SignIn)?;
+    let token = bearer(headers).or_else(|| cookie(headers, &named(ACCESS_COOKIE, headers))).ok_or(Refused::SignIn)?;
     let st = ctx.state();
     st.remote.auth.check(&st.store, &token, login(headers, peer).as_deref())
 }
@@ -175,6 +184,25 @@ async fn pair(State(ctx): State<Ctx>, ConnectInfo(peer): ConnectInfo<SocketAddr>
     }
 }
 
+#[derive(serde::Deserialize)]
+struct TokenBody {
+    token: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// The Divixi app's sign-in: a pairing token in, the device's tokens out as
+/// JSON (it keeps them itself; no cookies).
+async fn token(State(ctx): State<Ctx>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response<Body> {
+    let Ok(b) = serde_json::from_slice::<TokenBody>(&body) else { return (StatusCode::BAD_REQUEST, "expected {\"token\"}").into_response() };
+    let name = b.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Divixi app".into());
+    let st = ctx.state();
+    match st.remote.auth.redeem(&st.store, &b.token, &name, login(&headers, &peer)) {
+        Ok((access, refresh)) => axum::Json(json!({ "access": access, "refresh": refresh })).into_response(),
+        Err(r) => refused(r),
+    }
+}
+
 const SIGN_IN_AGAIN: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Divixi</title><body style='font-family:system-ui;padding:24px'><h3>이 링크는 쓸 수 없습니다</h3><p>링크는 5분 안에 한 번만 열 수 있습니다. Divixi 앱의 설정 › 원격 인스턴스에서 다시 연결하세요.</p><p>This link can't be used: it works once, within five minutes. Connect again from the Divixi app (Settings › Remote instances).</p>";
 
 /// A short name for the device list, from the browser's user agent.
@@ -189,9 +217,17 @@ fn device_name(ua: &str) -> String {
     }
 }
 
+/// New tokens for a refresh token: from the cookie (a browser, new cookies
+/// back) or as `Bearer` (the app, JSON back).
 async fn refresh(State(ctx): State<Ctx>, headers: HeaderMap) -> Response<Body> {
-    let Some(token) = cookie(&headers, &named(REFRESH_COOKIE, &headers)) else { return refused(Refused::SignIn) };
     let st = ctx.state();
+    if let Some(token) = bearer(&headers) {
+        return match st.remote.auth.refresh(&st.store, &token) {
+            Ok((access, refresh)) => axum::Json(json!({ "access": access, "refresh": refresh })).into_response(),
+            Err(r) => refused(r),
+        };
+    }
+    let Some(token) = cookie(&headers, &named(REFRESH_COOKIE, &headers)) else { return refused(Refused::SignIn) };
     match st.remote.auth.refresh(&st.store, &token) {
         Ok((access, refresh)) => {
             let mut res = StatusCode::NO_CONTENT.into_response();
