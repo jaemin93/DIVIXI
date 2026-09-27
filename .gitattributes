@@ -1,0 +1,39 @@
+# Line endings, settled once so they cannot drift.
+#
+# Divixi is developed on Windows and the repository is public, so a macOS or
+# Linux contributor can arrive at any time. Without this file, what lands in a
+# commit depends on each person's `core.autocrlf`, and the day someone has it
+# set to `true` a whole file turns over in a diff that says nothing.
+#
+# `text=auto` lets Git decide what is text; `eol=lf` fixes what text looks like
+# in the repository. Working copies are unaffected on Unix, and on Windows the
+# editors this project uses all handle LF.
+#
+# This costs nothing to adopt: every text file here is already LF. Checked when
+# it was added -- the only tracked files containing a CR byte were 50 PNGs, one
+# ICO and one ICNS, which is image data rather than a line ending, and
+# `git add --renormalize .` restaged nothing. So this records what is already
+# true rather than rewriting the tree.
+* text=auto eol=lf
+
+# Binary, stated rather than guessed.
+#
+# `text=auto` asks Git to sniff each file, and a heuristic that is right almost
+# always is still a heuristic. A PNG misread as text would be rewritten on
+# checkout and arrive corrupt. These say so outright.
+*.png binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+
+# Lockfiles are generated, not written.
+#
+# `linguist-generated` collapses them in a pull request by default -- a
+# dependency bump is then a readable manifest change rather than a thousand
+# lines of resolved tree. They stay expandable, and `git diff` is untouched:
+# when the resolved versions are the thing being checked, they are still there.
+Cargo.lock linguist-generated
+package-lock.json linguist-generated
