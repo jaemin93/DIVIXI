@@ -39,6 +39,11 @@ const STDERR_TAIL: usize = 40;
 #[cfg(unix)]
 const TERM_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How often to ask whether the agent's process group has emptied out, while
+/// the SIGTERM grace runs.
+#[cfg(unix)]
+const POLL: std::time::Duration = std::time::Duration::from_millis(25);
+
 /// A running agent. Dropping it kills the process and the tree it started.
 pub struct AgentProcess {
     child: tokio::process::Child,
@@ -51,6 +56,27 @@ pub struct AgentProcess {
     /// nothing signals a pgid the kernel may since have reused.
     #[cfg(unix)]
     group: Option<i32>,
+}
+
+/// Has every process in `pgid` gone?
+///
+/// Signal 0 is the POSIX existence check: it delivers nothing and only reports
+/// whether the target could be signalled. ESRCH means the group has no members
+/// left. Anything else (EPERM, say) is treated as "still there", because the
+/// safe reading of an unclear answer is that something is still running.
+///
+/// A zombie counts as present: a process exists until it is reaped. The caller
+/// therefore reaps the leader before relying on this.
+#[cfg(unix)]
+fn group_gone(pgid: i32) -> bool {
+    if pgid <= 1 {
+        return true;
+    }
+    // SAFETY: signal 0 delivers nothing; killpg cannot violate memory safety.
+    if unsafe { libc::killpg(pgid, 0) } == 0 {
+        return false;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 /// Send `sig` to every process in `pgid`.
@@ -114,38 +140,73 @@ impl AgentProcess {
 
         // Signalled even when the child has already exited: its death says
         // nothing about the grandchildren, which are the whole point here.
+        //
+        // `self.group` is deliberately NOT taken until after SIGKILL. If this
+        // future is cancelled at one of the awaits below -- and it is, on a
+        // path that happens routinely: a failed session start sends its error
+        // and then calls shutdown(), and the creator answers by aborting the
+        // task (see session.rs) -- then `Drop` runs instead, and it can only
+        // act as the backstop if the pgid is still here. Taking it first left
+        // the group with no SIGKILL at all, which is exactly the leak this
+        // whole mechanism exists to prevent.
         #[cfg(unix)]
-        if let Some(pgid) = self.group.take() {
+        if let Some(pgid) = self.group {
+            let deadline = tokio::time::Instant::now() + TERM_GRACE;
             signal_group(pgid, libc::SIGTERM, self.pid);
-            // Wait on the direct child as the sign that the group is going.
-            // A timeout, not a hang: an agent that ignores SIGTERM must not
-            // keep the app waiting.
-            match tokio::time::timeout(TERM_GRACE, self.child.wait()).await {
-                Ok(_) => tracing::debug!(pid = ?self.pid, pgid, "agent group stopped on SIGTERM"),
-                Err(_) => {
-                    tracing::debug!(pid = ?self.pid, pgid, "agent still up after SIGTERM; sending SIGKILL");
+
+            // Reap the leader first. Until it is reaped it stays a zombie, and
+            // a zombie is still a group member, so the emptiness check below
+            // would never come back true while it lingers.
+            let _ = tokio::time::timeout_at(deadline, self.child.wait()).await;
+
+            // Now give the REST of the group the rest of the grace. Waiting on
+            // the direct child alone was not a grace period at all: `try_wait`
+            // above may already have reaped it, in which case `wait` returns at
+            // once and SIGKILL followed SIGTERM by microseconds -- in precisely
+            // the case this code is for, a live grandchild behind a dead
+            // wrapper.
+            let mut lingered = false;
+            while tokio::time::Instant::now() < deadline {
+                if group_gone(pgid) {
+                    break;
                 }
+                lingered = true;
+                tokio::time::sleep(POLL).await;
             }
-            // On pid reuse: `wait` above reaps the leader, which in principle
-            // frees its pid, and this pgid is that pid. It is not a hole in
-            // practice, because a process group lives as long as any member
-            // does and the kernel will not hand that pid to a new process
-            // while the group exists. So in the case this code is for -- a
-            // grandchild still running -- the group is still ours. If instead
-            // everything has already exited, the group is gone and killpg
-            // returns ESRCH, which `signal_group` ignores.
+
+            if group_gone(pgid) {
+                tracing::debug!(pid = ?self.pid, pgid, lingered, "agent group stopped on SIGTERM");
+            } else {
+                tracing::debug!(pid = ?self.pid, pgid, "agent group still up after SIGTERM; sending SIGKILL");
+            }
+            // Harmless if the group is already gone: killpg answers ESRCH and
+            // `signal_group` ignores it.
+            //
+            // On pid reuse: the leader has been reaped by now, which in
+            // principle frees its pid, and this pgid is that pid. It is not a
+            // hole in practice, because a process group lives as long as any
+            // member does and the kernel will not hand that pid to a new
+            // process while the group exists. So in the case this code is for
+            // -- a grandchild still running -- the group is still ours.
             signal_group(pgid, libc::SIGKILL, self.pid);
+            // Only now: past here there is nothing left for Drop to do.
+            self.group = None;
         }
 
-        // Unchanged from before the Unix work: an already-exited child is left
-        // for `kill_on_drop` to reap, and only a live one is killed here. On
-        // Unix the block above has already waited on it.
-        if !exited {
+        // Reap, and say honestly whether anything was killed. The question is
+        // whether the child is alive *now*, not whether it was alive when this
+        // function started: on Unix the block above has already waited on it,
+        // and asking the stale answer logged "agent kill failed" after every
+        // ordinary shutdown.
+        let still_running = matches!(self.child.try_wait(), Ok(None));
+        if still_running {
             if let Err(err) = self.child.kill().await {
                 tracing::debug!(pid = ?self.pid, %err, "agent kill failed (probably already gone)");
             } else {
                 tracing::debug!(pid = ?self.pid, "agent terminated");
             }
+        } else if !exited {
+            tracing::debug!(pid = ?self.pid, "agent exited during shutdown");
         }
         // `_job` drops here: on Windows that closes the job and kills any
         // grandchildren the agent left behind.
@@ -205,6 +266,24 @@ pub fn spawn(spec: &AgentSpec) -> anyhow::Result<(AgentProcess, AgentLines)> {
     // hole, so the two platforms are not equally strict.
     // tokio::process::Command has its own process_group on unix, so no
     // std::os::unix::process::CommandExt import is needed here.
+    //
+    // What this costs, and it is a real cost: leaving our process group also
+    // leaves the terminal's FOREGROUND group. SIGINT and SIGQUIT are delivered
+    // to the foreground group, so Ctrl-C in a shell running `divixi-server` in
+    // the foreground no longer reaches the agents -- it only reaches the server,
+    // which has no signal handler and dies at once, running neither `shutdown`
+    // nor `Drop`, and leaving the agent trees behind.
+    //
+    // Not a problem for the desktop app (closing the window goes through the
+    // ordinary shutdown path) or on Windows (the kernel tears the job object
+    // down when the handle closes). Not a problem under systemd either, whose
+    // default `KillMode=control-group` kills the unit's whole cgroup, agents
+    // included -- and that is how docs/divixi-server.md says to run it. It bites
+    // the documented debugging path: `divixi-server serve` in a terminal.
+    //
+    // The fix belongs in the binary, not here: `divixi-server` needs to wait on
+    // ctrl_c()/SIGTERM and close its sessions. Until it does, that terminal is
+    // the one place where an interrupted Divixi leaks agents.
     #[cfg(unix)]
     cmd.process_group(0);
 
@@ -430,7 +509,19 @@ setTimeout(() => process.exit(0), 30000);
     /// Start `node wrapper.js heartbeat.js beat.txt`, wait for the grandchild
     /// to be writing, tear the agent down, and report whether the grandchild
     /// kept going afterwards.
-    async fn grandchild_survives_shutdown(detached: bool) -> bool {
+    /// How the agent is torn down, which is the axis these tests vary.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Teardown {
+        /// `shutdown().await` runs to completion.
+        Graceful,
+        /// The task is aborted while `shutdown()` is parked on an await, so the
+        /// future is dropped and `Drop` is the only thing left to clean up.
+        /// This is not hypothetical: session.rs aborts the task right after a
+        /// failed session start calls `shutdown()`.
+        Cancelled,
+    }
+
+    async fn grandchild_survives_shutdown(detached: bool, how: Teardown) -> bool {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -463,7 +554,18 @@ setTimeout(() => process.exit(0), 30000);
         // header calls out, and the wrapper ignores it.
         drop(lines);
 
-        process.shutdown().await;
+        match how {
+            Teardown::Graceful => process.shutdown().await,
+            Teardown::Cancelled => {
+                // Get shutdown() into one of its awaits, then abort. Dropping
+                // the future drops the AgentProcess, so Drop is the only
+                // remaining chance to kill the group.
+                let task = tokio::spawn(async move { process.shutdown().await });
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                task.abort();
+                let _ = task.await;
+            }
+        }
 
         let at_shutdown = size(&beat);
         tokio::time::sleep(Duration::from_millis(750)).await;
@@ -496,12 +598,42 @@ setTimeout(() => process.exit(0), 30000);
             eprintln!("skipping: node is not on PATH");
             return;
         }
-        let leaked = grandchild_survives_shutdown(false).await;
+        let leaked = grandchild_survives_shutdown(false, Teardown::Graceful).await;
         assert!(
             !leaked,
             "a grandchild in the agent's own process group kept running after shutdown(). \
              On Unix that means the SIGTERM/SIGKILL to the group did not reach it; on Windows \
              it means the job object did not take the tree."
+        );
+    }
+
+    /// The same contract when nobody gets to finish tidying up.
+    ///
+    /// `shutdown()` parks on an await, and session.rs aborts the task that is
+    /// running it right after a failed session start -- so the future is
+    /// dropped mid-teardown and `Drop` is all that is left. This shipped
+    /// broken: the pgid was taken out of the struct before the first await, so
+    /// `Drop` found `None` and the group never got SIGKILL. Nothing in the
+    /// log said so; the grandchild simply stayed.
+    ///
+    /// Which platform this really tests: Unix, again. There the grace is 500ms
+    /// and the poll loop runs, so the abort at 60ms is certain to land while
+    /// `shutdown()` is parked. On Windows there is no grace at all -- the job
+    /// handle does the work -- so `shutdown()` may well have finished before
+    /// the abort arrives, and the case degenerates into the graceful one. It is
+    /// still worth running there: it costs nothing and it pins that closing the
+    /// job handle is what tears the tree down, however teardown was reached.
+    #[tokio::test]
+    #[cfg_attr(not(windows), ignore = "unverified on Unix: ci.yml runs it as a reporting step; promote to a gate once that passes")]
+    async fn a_cancelled_shutdown_still_kills_the_tree() {
+        if !have_node() {
+            eprintln!("skipping: node is not on PATH");
+            return;
+        }
+        let leaked = grandchild_survives_shutdown(false, Teardown::Cancelled).await;
+        assert!(
+            !leaked,
+            "the grandchild outlived an aborted shutdown(). Drop is the backstop for exactly this              case, so either the pgid was cleared before Drop could use it (Unix) or the job handle              did not close (Windows)."
         );
     }
 
@@ -517,7 +649,7 @@ setTimeout(() => process.exit(0), 30000);
             eprintln!("skipping: node is not on PATH");
             return;
         }
-        let leaked = grandchild_survives_shutdown(true).await;
+        let leaked = grandchild_survives_shutdown(true, Teardown::Graceful).await;
         assert!(
             !leaked,
             "a detached grandchild outlived shutdown() on Windows: the job object should have \
