@@ -6,14 +6,25 @@
   import { t } from "./i18n.svelte";
 
   /**
-   * Settings › Remote instances: Divixis on other machines (a Linux server
-   * running divixi-server), used from this app. Connecting starts
-   * divixi-server there if need be, opens an SSH tunnel, and shows that
-   * Divixi in a window of its own. Laid out as Kiro Crew's page: a card per
-   * instance, then adding one; the form is a dialog (name, SSH host, binary
-   * path, port, PATH, then Save and Cancel).
+   * Settings › Remote instances: Divixis on other machines, shown in this
+   * window from the header's switcher. Reached over SSH (divixi-server
+   * started there if need be, a tunnel, a pairing token minted over SSH)
+   * or at an address (a Divixi serving on its network, which lets in this
+   * PC's GitHub account if it is its owner's). Laid out as Kiro Crew's
+   * page: a card per instance, then adding one; the form is a dialog.
    */
-  type Host = { id: string; name: string; ssh: string; port: number; bin: string; path: string; local_port: number | null };
+  type Host = {
+    id: string;
+    name: string;
+    kind: "ssh" | "direct";
+    url: string;
+    ssh: string;
+    port: number;
+    bin: string;
+    path: string;
+    local_port: number | null;
+    connected: boolean;
+  };
 
   const PORT = 7488;
   const BIN = "~/.local/bin/divixi-server";
@@ -26,7 +37,7 @@
   let confirmDelete = $state("");
   let first = $state<HTMLInputElement>();
 
-  const blank = (): Host => ({ id: "", name: "", ssh: "", port: PORT, bin: BIN, path: "", local_port: null });
+  const blank = (): Host => ({ id: "", name: "", kind: "ssh", url: "", ssh: "", port: PORT, bin: BIN, path: "", local_port: null, connected: false });
 
   onMount(async () => {
     try {
@@ -55,7 +66,7 @@
     if (!editing) return;
     formError = "";
     try {
-      const { local_port: _lp, ...host } = editing;
+      const { local_port: _lp, connected: _c, ...host } = editing;
       const port = Number(host.port) || PORT;
       // An empty name takes the one the field suggests.
       const name = host.name.trim() || t("remote.namePlaceholder", { n: hosts.length + 1 });
@@ -101,14 +112,17 @@
     </div>
 
     {#each hosts as h (h.id)}
-      {@const on = h.local_port !== null}
+      {@const on = h.connected}
       <div class="host">
         <span class="badge"><Icon name="remote" /></span>
         <div class="what">
           <div class="name">{h.name}</div>
-          <div class="meta mono"><span class="tag">SSH</span>{h.ssh} · {t("remote.remotePort", { port: h.port })}</div>
+          <div class="meta mono">
+            {#if h.kind === "direct"}<span class="tag">{t("remote.kindDirectTag")}</span>{h.url}
+            {:else}<span class="tag">SSH</span>{h.ssh} · {t("remote.remotePort", { port: h.port })}{/if}
+          </div>
           <div class="state" class:on>
-            <span class="dot"></span>{on ? t("remote.connected", { port: h.local_port ?? 0 }) : t("remote.notConnected")}
+            <span class="dot"></span>{on ? (h.local_port !== null ? t("remote.connected", { port: h.local_port }) : t("instances.connected")) : t("remote.notConnected")}
           </div>
         </div>
         <div class="acts">
@@ -158,27 +172,43 @@
           <input bind:this={first} bind:value={editing.name} placeholder={t("remote.namePlaceholder", { n: hosts.length + 1 })} autocomplete="off" />
         </label>
         <label>
-          <span class="lab">{t("remote.ssh")}</span>
-          <input class="mono" bind:value={editing.ssh} placeholder="user@myhost.example.com" spellcheck="false" autocomplete="off" />
-          <span class="hint">{t("remote.sshHint")}</span>
+          <span class="lab">{t("remote.kind")}</span>
+          <select bind:value={editing.kind}>
+            <option value="ssh">{t("remote.kindSsh")}</option>
+            <option value="direct">{t("remote.kindDirect")}</option>
+          </select>
+          <span class="hint">{editing.kind === "direct" ? t("remote.kindDirectHint") : t("remote.kindSshHint")}</span>
         </label>
-        <label>
-          <span class="lab">{t("remote.bin")}</span>
-          <input class="mono" bind:value={editing.bin} placeholder={BIN} spellcheck="false" autocomplete="off" />
-        </label>
-        <label>
-          <span class="lab">{t("remote.port")} <span class="def">{t("remote.default", { value: PORT })}</span></span>
-          <input class="mono" type="number" min="1024" max="65535" bind:value={editing.port} placeholder={String(PORT)} />
-          <span class="hint">{t("remote.portHint")}</span>
-        </label>
-        <label>
-          <span class="lab">{t("remote.path")} <span class="def">{t("remote.pathDefault")}</span></span>
-          <input class="mono" bind:value={editing.path} placeholder="~/.local/bin:/usr/local/bin" spellcheck="false" autocomplete="off" />
-          <span class="hint">{t("remote.pathHint")}</span>
-        </label>
+        {#if editing.kind === "direct"}
+          <label>
+            <span class="lab">{t("remote.url")}</span>
+            <input class="mono" bind:value={editing.url} placeholder="http://my-pc:7488" spellcheck="false" autocomplete="off" />
+            <span class="hint">{t("remote.urlHint")}</span>
+          </label>
+        {:else}
+          <label>
+            <span class="lab">{t("remote.ssh")}</span>
+            <input class="mono" bind:value={editing.ssh} placeholder="host-1-alias" spellcheck="false" autocomplete="off" />
+            <span class="hint">{t("remote.sshHint")}</span>
+          </label>
+          <label>
+            <span class="lab">{t("remote.port")} <span class="def">{t("remote.default", { value: PORT })}</span></span>
+            <input class="mono" type="number" min="1024" max="65535" bind:value={editing.port} placeholder={String(PORT)} />
+            <span class="hint">{t("remote.portHint")}</span>
+          </label>
+          <label>
+            <span class="lab">{t("remote.bin")}</span>
+            <input class="mono" bind:value={editing.bin} placeholder={BIN} spellcheck="false" autocomplete="off" />
+          </label>
+          <label>
+            <span class="lab">{t("remote.path")} <span class="def">{t("remote.pathDefault")}</span></span>
+            <input class="mono" bind:value={editing.path} placeholder="~/.local/bin:/usr/local/bin" spellcheck="false" autocomplete="off" />
+            <span class="hint">{t("remote.pathHint")}</span>
+          </label>
+        {/if}
         {#if formError}<p class="err mono">{formError}</p>{/if}
         <div class="dacts">
-          <button class="btn btn-acc" type="submit" disabled={!editing.ssh.trim()}>{t("remote.save")}</button>
+          <button class="btn btn-acc" type="submit" disabled={!(editing.kind === "direct" ? editing.url : editing.ssh).trim()}>{t("remote.save")}</button>
           <button class="btn" type="button" onclick={close}>{t("remote.cancel")}</button>
         </div>
       </form>
@@ -417,6 +447,15 @@
     font-size: 12px;
     color: var(--dim);
     line-height: 1.5;
+  }
+
+  select {
+    height: 42px;
+    padding: 0 10px;
+    background: var(--inp);
+    border: 1px solid var(--lines);
+    color: var(--txt);
+    font-size: 14px;
   }
 
   input {

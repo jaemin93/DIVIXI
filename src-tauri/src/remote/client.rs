@@ -3,10 +3,12 @@
 //! an instance, and while an instance is chosen the page's commands, events
 //! and file previews go there through this module (ui/src/lib/ipc.svelte.ts).
 //!
-//! Connecting: divixi-server is started there over SSH if it is not
-//! running, a pairing token is minted there (`divixi-server token`), an SSH
-//! tunnel is opened to it, and the token is exchanged for the device's
-//! access and refresh tokens. Those stay here, in Rust; the page never
+//! Connecting, two ways. Over SSH: divixi-server is started there if it is
+//! not running, a pairing token is minted there (`divixi-server token`), an
+//! SSH tunnel is opened to it, and the token is exchanged for the device's
+//! access and refresh tokens. At an address (a Divixi that serves on its
+//! network, such as over Tailscale): this PC's GitHub token is shown to it,
+//! and it lets in its owner. The tokens stay here, in Rust; the page never
 //! holds them. Events come over one WebSocket per instance and are re-sent
 //! to the page as `instance-event`.
 //!
@@ -28,11 +30,18 @@ use crate::{AppHandle, AppState};
 
 const HOSTS_KEY: &str = "setting:remote.hosts";
 
-/// A Divixi on another machine, reached over SSH.
+/// A Divixi on another machine, reached over SSH or at an address.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Host {
     pub id: String,
     pub name: String,
+    /// "ssh" (a tunnel, signed in over SSH) or "direct" (an address, signed
+    /// in with this PC's GitHub account).
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// The address for "direct": `http://host:port`.
+    #[serde(default)]
+    pub url: String,
     /// What follows `ssh`: a name, `user@host`, or an ~/.ssh/config alias.
     pub ssh: String,
     /// divixi-server's port on that machine.
@@ -45,6 +54,10 @@ pub struct Host {
     /// the agents (as Kiro Crew's "Remote PATH"). Empty: the SSH shell's own.
     #[serde(default)]
     pub path: String,
+}
+
+fn default_kind() -> String {
+    "ssh".to_string()
 }
 
 fn default_port() -> u16 {
@@ -60,8 +73,9 @@ fn default_bin() -> String {
 pub struct HostView {
     #[serde(flatten)]
     pub host: Host,
-    /// The local port of its tunnel while connected.
+    /// The local port of its tunnel while connected over SSH.
     pub local_port: Option<u16>,
+    pub connected: bool,
 }
 
 /// Open connections, by host id.
@@ -72,9 +86,10 @@ pub struct Tunnels {
 
 struct Conn {
     host: Host,
-    local_port: u16,
+    local_port: Option<u16>,
     base: String,
-    tunnel: tokio::sync::Mutex<tokio::process::Child>,
+    /// The SSH tunnel; none for an address.
+    tunnel: tokio::sync::Mutex<Option<tokio::process::Child>>,
     tokens: parking_lot::Mutex<Tokens>,
     http: reqwest::Client,
     events: parking_lot::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
@@ -88,14 +103,16 @@ struct Tokens {
 
 impl Conn {
     fn alive(&self) -> bool {
-        self.tunnel.try_lock().map(|mut c| matches!(c.try_wait(), Ok(None))).unwrap_or(true)
+        self.tunnel.try_lock().map(|mut c| c.as_mut().is_none_or(|c| matches!(c.try_wait(), Ok(None)))).unwrap_or(true)
     }
 
     async fn close(&self) {
         if let Some(h) = self.events.lock().take() {
             h.abort();
         }
-        let _ = self.tunnel.lock().await.kill().await;
+        if let Some(c) = self.tunnel.lock().await.as_mut() {
+            let _ = c.kill().await;
+        }
     }
 }
 
@@ -159,6 +176,18 @@ fn ssh() -> tokio::process::Command {
     cmd
 }
 
+/// An instance's address: plain http to a host and port (the network
+/// under it, Tailscale say, keeps it private).
+fn check_url(url: &str) -> Result<(), String> {
+    let rest = url.strip_prefix("http://").ok_or("the address starts with http:// (over Tailscale or a trusted network)")?;
+    let ok = !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c));
+    if ok {
+        Ok(())
+    } else {
+        Err("the address is http://host:port, nothing after it".into())
+    }
+}
+
 /// A free local port (the OS picks one).
 fn free_port() -> Result<u16, String> {
     std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|l| l.local_addr()).map(|a| a.port()).map_err(|e| e.to_string())
@@ -205,11 +234,20 @@ fn device_name() -> String {
     format!("Divixi · {}", sysinfo::System::host_name().unwrap_or_else(|| "PC".into()))
 }
 
-/// Exchange a pairing token for the device's tokens.
-async fn sign_in(http: &reqwest::Client, base: &str, host: &Host) -> Result<Tokens, String> {
-    let token = start_and_token(host).await?;
+/// Sign in for the device's tokens: a pairing token minted over SSH, or
+/// this PC's GitHub token at an address.
+async fn sign_in(app: &AppHandle, http: &reqwest::Client, base: &str, host: &Host) -> Result<Tokens, String> {
+    let (path, token) = if host.kind == "direct" {
+        let gh = super::github::account(app);
+        if gh.token.is_empty() {
+            return Err("sign in to GitHub first (Settings › Remote instances): an instance at an address lets in its owner's GitHub account".into());
+        }
+        ("github", gh.token)
+    } else {
+        ("token", start_and_token(host).await?)
+    };
     let res = http
-        .post(format!("{base}/auth/token"))
+        .post(format!("{base}/auth/{path}"))
         .header("X-Divixi", "1")
         .header("Content-Type", "application/json")
         .body(json!({ "token": token, "name": device_name() }).to_string())
@@ -219,18 +257,19 @@ async fn sign_in(http: &reqwest::Client, base: &str, host: &Host) -> Result<Toke
     let status = res.status();
     let body = res.bytes().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        return Err(format!("the remote instance refused the sign-in ({status})"));
+        let why = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+        return Err(format!("the remote instance refused the sign-in ({status}){}", why.map(|w| format!(": {w}")).unwrap_or_default()));
     }
     serde_json::from_slice(&body).map_err(|e| e.to_string())
 }
 
 /// New tokens: from the refresh token, or (refused) a fresh sign-in.
-async fn renew(conn: &Conn) -> Result<(), String> {
+async fn renew(app: &AppHandle, conn: &Conn) -> Result<(), String> {
     let refresh = conn.tokens.lock().refresh.clone();
     let res = conn.http.post(format!("{}/auth/refresh", conn.base)).header("X-Divixi", "1").bearer_auth(refresh).send().await;
     let tokens = match res {
         Ok(r) if r.status().is_success() => serde_json::from_slice(&r.bytes().await.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?,
-        _ => sign_in(&conn.http, &conn.base, &conn.host).await?,
+        _ => sign_in(app, &conn.http, &conn.base, &conn.host).await?,
     };
     *conn.tokens.lock() = tokens;
     Ok(())
@@ -250,21 +289,33 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
     }
     let host = hosts(app).into_iter().find(|h| h.id == id).ok_or("no such remote instance")?;
     let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
-    let local_port = free_port()?;
-    let base = format!("http://127.0.0.1:{local_port}");
-    let mut child = ssh()
-        .args(["-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3", "-L"])
-        .arg(format!("127.0.0.1:{local_port}:127.0.0.1:{}", host.port))
-        .arg(&host.ssh)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("could not run ssh: {e}"))?;
-    wait_for(&http, &base, &mut child).await?;
-    let tokens = match sign_in(&http, &base, &host).await {
+    let (base, local_port, mut child) = if host.kind == "direct" {
+        let base = host.url.trim_end_matches('/').to_string();
+        let up = http.get(format!("{base}/api/health")).send().await.is_ok_and(|r| r.status().is_success());
+        if !up {
+            return Err(format!("{base} did not answer: is that Divixi serving on its network?"));
+        }
+        (base, None, None)
+    } else {
+        let local_port = free_port()?;
+        let base = format!("http://127.0.0.1:{local_port}");
+        let mut child = ssh()
+            .args(["-N", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3", "-L"])
+            .arg(format!("127.0.0.1:{local_port}:127.0.0.1:{}", host.port))
+            .arg(&host.ssh)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("could not run ssh: {e}"))?;
+        wait_for(&http, &base, &mut child).await?;
+        (base, Some(local_port), Some(child))
+    };
+    let tokens = match sign_in(app, &http, &base, &host).await {
         Ok(t) => t,
         Err(e) => {
-            let _ = child.kill().await;
+            if let Some(c) = child.as_mut() {
+                let _ = c.kill().await;
+            }
             return Err(e);
         }
     };
@@ -284,7 +335,7 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
 }
 
 /// A command on the instance, as the page would call it here.
-async fn call(conn: &Conn, cmd: &str, args: &Value) -> Result<Value, String> {
+async fn call(app: &AppHandle, conn: &Conn, cmd: &str, args: &Value) -> Result<Value, String> {
     let url = format!("{}/api/invoke/{cmd}", conn.base);
     let body = args.to_string();
     let mut renewed = false;
@@ -302,7 +353,7 @@ async fn call(conn: &Conn, cmd: &str, args: &Value) -> Result<Value, String> {
             .map_err(|e| format!("the remote instance did not answer: {e}"))?;
         let status = res.status();
         if status == reqwest::StatusCode::UNAUTHORIZED && !renewed {
-            renew(conn).await?;
+            renew(app, conn).await?;
             renewed = true;
             continue;
         }
@@ -322,7 +373,7 @@ async fn pump_events(app: AppHandle, conn: Arc<Conn>) {
     let mut since = 0u64;
     let mut backoff = Duration::from_secs(1);
     loop {
-        let url = format!("ws://127.0.0.1:{}/api/events?since={since}", conn.local_port);
+        let url = format!("{}/api/events?since={since}", conn.base.replacen("http://", "ws://", 1));
         let Ok(mut req) = url.into_client_request() else { return };
         let access = conn.tokens.lock().access.clone();
         if let Ok(v) = format!("Bearer {access}").parse() {
@@ -341,7 +392,7 @@ async fn pump_events(app: AppHandle, conn: Arc<Conn>) {
                 }
             }
             Err(tokio_tungstenite::tungstenite::Error::Http(res)) if res.status() == 401 => {
-                if renew(&conn).await.is_err() {
+                if renew(&app, &conn).await.is_err() {
                     tokio::time::sleep(backoff).await;
                 }
                 continue;
@@ -380,7 +431,7 @@ pub async fn proxy(app: &AppHandle, id: &str, kind: &str, rest: &str) -> tauri::
     loop {
         let access = conn.tokens.lock().access.clone();
         let Ok(res) = conn.http.get(&url).bearer_auth(access).send().await else { return reply(502, "the remote instance did not answer") };
-        if res.status() == reqwest::StatusCode::UNAUTHORIZED && !renewed && renew(&conn).await.is_ok() {
+        if res.status() == reqwest::StatusCode::UNAUTHORIZED && !renewed && renew(app, &conn).await.is_ok() {
             renewed = true;
             continue;
         }
@@ -407,7 +458,7 @@ async fn disconnect(app: &AppHandle, id: &str) {
 #[tauri::command]
 pub async fn remote_hosts(app: AppHandle) -> Vec<HostView> {
     let open = app.state::<AppState>().tunnels.open.lock().await.iter().filter(|(_, c)| c.alive()).map(|(k, c)| (k.clone(), c.local_port)).collect::<HashMap<_, _>>();
-    hosts(&app).into_iter().map(|h| HostView { local_port: open.get(&h.id).copied(), host: h }).collect()
+    hosts(&app).into_iter().map(|h| HostView { local_port: open.get(&h.id).copied().flatten(), connected: open.contains_key(&h.id), host: h }).collect()
 }
 
 /// Add a host, or change one (same id).
@@ -417,11 +468,17 @@ pub async fn remote_host_save(app: AppHandle, mut host: Host) -> Result<Vec<Host
     host.bin = host.bin.trim().to_string();
     host.name = host.name.trim().to_string();
     host.path = host.path.trim().to_string();
-    check_ssh(&host.ssh)?;
-    check_bin(&host.bin)?;
-    check_path(&host.path)?;
+    host.url = host.url.trim().trim_end_matches('/').to_string();
+    if host.kind == "direct" {
+        check_url(&host.url)?;
+    } else {
+        host.kind = "ssh".into();
+        check_ssh(&host.ssh)?;
+        check_bin(&host.bin)?;
+        check_path(&host.path)?;
+    }
     if host.name.is_empty() {
-        host.name = host.ssh.clone();
+        host.name = if host.kind == "direct" { host.url.clone() } else { host.ssh.clone() };
     }
     if host.id.is_empty() {
         host.id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
@@ -468,7 +525,7 @@ pub async fn instance_invoke(app: AppHandle, id: String, cmd: String, args: Valu
         return Err("not a command name".into());
     }
     let conn = connect(&app, &id).await?;
-    call(&conn, &cmd, &args).await
+    call(&app, &conn, &cmd, &args).await
 }
 
 /// Files of this PC (picked or dropped) taken to the instance: each is kept
@@ -491,7 +548,7 @@ pub async fn instance_upload(app: AppHandle, id: String, paths: Vec<String>) -> 
         let bytes = tokio::fs::read(path).await.map_err(|e| format!("{p}: {e}"))?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
         let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-        let there = call(&conn, "save_attachment", &json!({ "name": name, "data": data })).await?;
+        let there = call(&app, &conn, "save_attachment", &json!({ "name": name, "data": data })).await?;
         out.push(there.as_str().ok_or("the remote instance gave no path")?.to_string());
     }
     Ok(out)
@@ -508,7 +565,9 @@ pub fn close_all(app: &AppHandle) {
                 h.abort();
             }
             if let Ok(mut t) = c.tunnel.try_lock() {
-                let _ = t.start_kill();
+                if let Some(t) = t.as_mut() {
+                    let _ = t.start_kill();
+                }
             }
         }
     }
@@ -532,11 +591,15 @@ mod tests {
         assert!(check_path("~/.local/bin:/usr/bin:/bin").is_ok());
         assert!(check_path("/bin;reboot").is_err());
         assert!(check_path("$(reboot)").is_err());
+        assert!(check_url("http://my-pc:7488").is_ok());
+        assert!(check_url("http://100.64.1.2:7488").is_ok());
+        assert!(check_url("https://my-pc").is_err(), "the event socket is plain ws");
+        assert!(check_url("http://my-pc:7488/x?y").is_err());
     }
 
     #[test]
     fn the_remote_line_starts_the_server_once() {
-        let mut h = Host { id: "a".into(), name: "a".into(), ssh: "a".into(), port: 7488, bin: "~/x/divixi-server".into(), path: String::new() };
+        let mut h = Host { id: "a".into(), name: "a".into(), kind: "ssh".into(), url: String::new(), ssh: "a".into(), port: 7488, bin: "~/x/divixi-server".into(), path: String::new() };
         assert_eq!(
             remote_line(&h),
             "pgrep -u \"$(id -u)\" -x divixi-server >/dev/null || setsid -f ~/x/divixi-server serve >/dev/null 2>&1 </dev/null; ~/x/divixi-server token"

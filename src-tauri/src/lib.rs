@@ -82,6 +82,8 @@ pub struct AppState {
     pub(crate) remote: remote::Remote,
     /// Tunnels to Divixis on other machines, opened from this one.
     pub(crate) tunnels: remote::client::Tunnels,
+    /// A GitHub sign-in underway (remote/github.rs).
+    pub(crate) github: remote::github::Pending,
 }
 
 impl AppState {
@@ -1140,6 +1142,14 @@ pub fn run() {
             remote::client::remote_host_disconnect,
             remote::client::instance_invoke,
             remote::client::instance_upload,
+            remote::remote_server_status,
+            remote::remote_server_set,
+            remote::remote_server_drop,
+            remote::github::github_account,
+            remote::github::github_set_client_id,
+            remote::github::github_login_start,
+            remote::github::github_login_wait,
+            remote::github::github_logout,
             workspace_search,
             workspace_save_as,
             design_extracts,
@@ -1290,6 +1300,7 @@ pub fn run() {
                 library,
                 remote,
                 tunnels: remote::client::Tunnels::default(),
+                github: remote::github::Pending::default(),
             });
             // Artifact agents nobody has talked to for an hour are closed.
             artifact::sweep_idle(app.handle().clone());
@@ -1335,7 +1346,7 @@ pub fn run() {
         .expect("failed to start Divixi");
 }
 
-/// A pairing link for a remote instance's window, made without the running app (the
+/// A pairing link for another PC's Divixi app (it takes the token from it), made without the running app (the
 /// server's `token` command): signed with the same key, for its port.
 pub fn pair_link() -> anyhow::Result<String> {
     let data_dir = data_dir_offline()?;
@@ -1351,6 +1362,39 @@ pub fn pair_link() -> anyhow::Result<String> {
 }
 
 /// The app's data folder, as Tauri resolves it (`<data>/app.divixi`), without an app.
+/// `divixi-server owner <login>`: the GitHub account that may come in at an
+/// address (a new one drops every device that came in before).
+pub fn set_owner(login: Option<&str>) -> anyhow::Result<String> {
+    let login = login.map(str::trim).filter(|l| !l.is_empty()).ok_or_else(|| anyhow::anyhow!("name a GitHub login, or --none"))?;
+    let login = (login != "--none").then_some(login);
+    if let Some(l) = login {
+        if !l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            anyhow::bail!("{l:?} is not a GitHub login");
+        }
+    }
+    let data_dir = data_dir_offline()?;
+    let (store, _) = open_store(&data_dir)?;
+    let auth = remote::auth::Auth::open(&data_dir)?;
+    remote::github::set_owner(&store, &auth, login)?;
+    Ok(match login {
+        Some(l) => format!("{l} owns this Divixi"),
+        None => "no owner: nobody comes in by GitHub".to_string(),
+    })
+}
+
+/// `divixi-server listen all|local`: every network, or this machine only
+/// (SSH tunnels). Takes effect when divixi-server starts again.
+pub fn set_listen(how: Option<&str>) -> anyhow::Result<String> {
+    let how = match how {
+        Some("all") => "all",
+        Some("local") => "local",
+        _ => anyhow::bail!("say all or local"),
+    };
+    let (store, _) = open_store(&data_dir_offline()?)?;
+    store.set_meta(&format!("{SETTING_PREFIX}remote.listen"), how)?;
+    Ok(format!("listen {how}: restart divixi-server for it to apply"))
+}
+
 fn data_dir_offline() -> anyhow::Result<PathBuf> {
     const ID: &str = "app.divixi";
     let home = || std::env::var_os("HOME").map(PathBuf::from);

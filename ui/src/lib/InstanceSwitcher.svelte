@@ -8,7 +8,7 @@
    * The header's instance switcher (Kiro Crew's, top left): this PC, then
    * the remote instances by name. Choosing one shows it in this window.
    */
-  type Host = { id: string; name: string; ssh: string; local_port: number | null };
+  type Host = { id: string; name: string; kind: string; url: string; ssh: string; connected: boolean };
 
   let open = $state(false);
   let hosts = $state<Host[]>([]);
@@ -75,12 +75,12 @@
       {#if hosts.length}<div class="sep"></div>{/if}
       {#each hosts as h (h.id)}
         <button class="item" class:on={instanceId === h.id} role="menuitem" onclick={() => pick(h.id)}>
-          <span class="dot" class:on={h.local_port !== null}></span>
+          <span class="dot" class:on={h.connected}></span>
           <span class="what">
             <span class="name">{h.name}</span>
-            <span class="sub mono">{h.ssh}</span>
+            <span class="sub mono">{h.kind === "direct" ? h.url : h.ssh}</span>
           </span>
-          {#if h.local_port !== null}<span class="state">{t("instances.connected")}</span>{/if}
+          {#if h.connected}<span class="state">{t("instances.connected")}</span>{/if}
         </button>
       {/each}
       <div class="sep"></div>

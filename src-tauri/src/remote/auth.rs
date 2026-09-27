@@ -1,13 +1,16 @@
-//! Who may use Divixi from another device: pairing links, cookies, devices.
+//! Who may use this Divixi as a remote instance: devices and their tokens.
 //!
 //! As in Kiro Crew (docs/system-specs/modules/dashboard-token-auth.md):
 //! a token is `base64url(claims).base64url(HMAC-SHA256)` under a key kept
-//! in the app's data folder, so a restart signs nobody out. A pairing link
-//! lives five minutes and is good once; it becomes an access cookie (an
-//! hour) and a refresh cookie (thirty days, renewed each time it is used).
-//! Each paired device is listed and can be dropped; "drop all" moves a
-//! generation every token carries. A refresh token used twice means it
-//! was copied: the device is dropped.
+//! in the app's data folder, so a restart signs nobody out. A device comes
+//! in one of two ways: with a pairing token minted on this machine
+//! (`divixi-server token`, run over SSH: whoever can do that owns it; five
+//! minutes, good once), or as this instance's owner's GitHub account
+//! (server.rs checks that with GitHub). Either way it gets an access token
+//! (an hour) and a refresh token (thirty days, renewed each time it is
+//! used). Each device is listed and can be dropped; a new owner moves a
+//! generation every token carries, dropping them all. A refresh token used
+//! twice means it was copied: the device is dropped.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -70,8 +73,7 @@ pub struct Device {
     pub name: String,
     pub created: i64,
     pub last_seen: i64,
-    /// Its Tailscale login when it paired through tailscale serve; later
-    /// requests through serve must carry the same.
+    /// The GitHub login it came in as; it stays in while that is the owner.
     #[serde(default)]
     pub login: Option<String>,
     /// The refresh token's current link; an older one coming back is a copy.
@@ -178,7 +180,7 @@ impl Auth {
     }
 
     /// Open a pairing link: once, within its five minutes. A new device.
-    pub fn redeem(&self, store: &Store, token: &str, name: &str, login: Option<String>) -> Result<(String, String), Refused> {
+    pub fn redeem(&self, store: &Store, token: &str, name: &str) -> Result<(String, String), Refused> {
         let claims = self.verify(token).filter(|c| c.k == Kind::Pair).ok_or(Refused::SignIn)?;
         {
             let mut used = self.used.lock();
@@ -188,10 +190,16 @@ impl Auth {
                 return Err(Refused::SignIn);
             }
         }
-        let _one = self.lock.lock();
         if claims.g != self.generation(store) {
             return Err(Refused::SignIn);
         }
+        Ok(self.admit(store, name, None))
+    }
+
+    /// A new device, let in by the caller (a pairing token, or the owner's
+    /// GitHub account as `login`).
+    pub fn admit(&self, store: &Store, name: &str, login: Option<String>) -> (String, String) {
+        let _one = self.lock.lock();
         let mut devices = self.devices(store);
         let t = now();
         devices.push(Device {
@@ -205,20 +213,20 @@ impl Auth {
         let i = devices.len() - 1;
         let pair = self.issue(store, &mut devices, i);
         self.save_devices(store, &devices);
-        Ok(pair)
+        pair
     }
 
     /// The device an access token belongs to, if it may still come in.
-    /// `login` is the Tailscale login of a request through serve.
-    pub fn check(&self, store: &Store, token: &str, login: Option<&str>) -> Result<Device, Refused> {
+    /// `owner` is this instance's owner (a GitHub login) now.
+    pub fn check(&self, store: &Store, token: &str, owner: Option<&str>) -> Result<Device, Refused> {
         let claims = self.verify(token).filter(|c| c.k == Kind::Access).ok_or(Refused::SignIn)?;
         if claims.g != self.generation(store) {
             return Err(Refused::Dropped);
         }
         let device = self.devices(store).into_iter().find(|d| d.id == claims.d).ok_or(Refused::Dropped)?;
-        // Paired through serve as one person: through serve it must be that person.
-        if let (Some(want), Some(got)) = (device.login.as_deref(), login) {
-            if want != got {
+        // In as the owner's GitHub account: out once another owns it.
+        if let Some(login) = device.login.as_deref() {
+            if !owner.is_some_and(|o| o.eq_ignore_ascii_case(login)) {
                 return Err(Refused::Dropped);
             }
         }
@@ -252,6 +260,14 @@ impl Auth {
         devices.retain(|d| d.id != id);
         self.save_devices(store, &devices);
     }
+
+    /// Drop every device: tokens of the old generation stop working.
+    pub fn drop_all(&self, store: &Store) {
+        let _one = self.lock.lock();
+        let g = self.generation(store) + 1;
+        let _ = store.set_meta(GENERATION_KEY, &g.to_string());
+        self.save_devices(store, &[]);
+    }
 }
 
 #[cfg(test)]
@@ -266,10 +282,10 @@ mod tests {
     fn a_pairing_link_works_once() {
         let (a, s) = auth();
         let (link, _) = a.pair_token(&s);
-        let (access, _) = a.redeem(&s, &link, "Phone", None).unwrap();
+        let (access, _) = a.redeem(&s, &link, "Phone").unwrap();
         assert_eq!(a.check(&s, &access, None).unwrap().name, "Phone");
-        assert_eq!(a.redeem(&s, &link, "Phone", None), Err(Refused::SignIn), "a link is good once");
-        assert_eq!(a.redeem(&s, "junk.token", "x", None), Err(Refused::SignIn));
+        assert_eq!(a.redeem(&s, &link, "Phone"), Err(Refused::SignIn), "a link is good once");
+        assert_eq!(a.redeem(&s, "junk.token", "x"), Err(Refused::SignIn));
         // A link is not an access token, nor the other way round.
         assert_eq!(a.check(&s, &link, None).unwrap_err(), Refused::SignIn);
     }
@@ -278,7 +294,7 @@ mod tests {
     fn tampering_is_refused() {
         let (a, s) = auth();
         let (link, _) = a.pair_token(&s);
-        let (access, _) = a.redeem(&s, &link, "Phone", None).unwrap();
+        let (access, _) = a.redeem(&s, &link, "Phone").unwrap();
         let (body, sig) = access.split_once('.').unwrap();
         let mut forged = serde_json::from_slice::<Claims>(&URL_SAFE_NO_PAD.decode(body).unwrap()).unwrap();
         forged.exp += 1_000_000;
@@ -292,7 +308,7 @@ mod tests {
     fn refresh_rotates_and_a_copy_drops_the_device() {
         let (a, s) = auth();
         let (link, _) = a.pair_token(&s);
-        let (_, refresh) = a.redeem(&s, &link, "Phone", None).unwrap();
+        let (_, refresh) = a.redeem(&s, &link, "Phone").unwrap();
         let (access2, refresh2) = a.refresh(&s, &refresh).unwrap();
         assert!(a.check(&s, &access2, None).is_ok());
         // The old refresh token again: someone copied it.
@@ -305,7 +321,7 @@ mod tests {
     #[test]
     fn drop_one() {
         let (a, s) = auth();
-        let pair = |name: &str| a.redeem(&s, &a.pair_token(&s).0, name, None).unwrap();
+        let pair = |name: &str| a.redeem(&s, &a.pair_token(&s).0, name).unwrap();
         let (phone, _) = pair("Phone");
         let (tablet, _) = pair("Tablet");
         let phone_id = a.check(&s, &phone, None).unwrap().id;
@@ -315,11 +331,24 @@ mod tests {
     }
 
     #[test]
-    fn a_device_paired_as_one_tailscale_user_stays_that_user() {
+    fn a_device_in_as_the_owner_stays_in_while_they_own_it() {
         let (a, s) = auth();
-        let (access, _) = a.redeem(&s, &a.pair_token(&s).0, "Phone", Some("me@example.com".into())).unwrap();
-        assert!(a.check(&s, &access, Some("me@example.com")).is_ok());
-        assert_eq!(a.check(&s, &access, Some("someone@else.com")).unwrap_err(), Refused::Dropped);
-        assert!(a.check(&s, &access, None).is_ok(), "on the PC itself, no serve, no login");
+        let (access, _) = a.admit(&s, "Laptop", Some("Octocat".into()));
+        assert!(a.check(&s, &access, Some("octocat")).is_ok(), "GitHub logins ignore case");
+        assert_eq!(a.check(&s, &access, Some("someone")).unwrap_err(), Refused::Dropped);
+        assert_eq!(a.check(&s, &access, None).unwrap_err(), Refused::Dropped, "no owner, no GitHub devices");
+        let (paired, _) = a.redeem(&s, &a.pair_token(&s).0, "SSH").unwrap();
+        assert!(a.check(&s, &paired, None).is_ok(), "a device paired over SSH has no login to match");
+    }
+
+    #[test]
+    fn drop_all_ends_every_token() {
+        let (a, s) = auth();
+        let (access, refresh) = a.admit(&s, "Laptop", Some("octocat".into()));
+        let (link, _) = a.pair_token(&s);
+        a.drop_all(&s);
+        assert_eq!(a.check(&s, &access, Some("octocat")).unwrap_err(), Refused::Dropped);
+        assert_eq!(a.refresh(&s, &refresh), Err(Refused::Dropped));
+        assert_eq!(a.redeem(&s, &link, "Late"), Err(Refused::SignIn), "a link from before goes too");
     }
 }

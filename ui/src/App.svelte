@@ -14,9 +14,8 @@
   import DesignView from "./lib/DesignView.svelte";
   import KnowledgeView from "./lib/KnowledgeView.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
-  import SignIn from "./lib/SignIn.svelte";
   import Unreachable from "./lib/Unreachable.svelte";
-  import { inTauri, remote, instance } from "./lib/ipc.svelte";
+  import { inTauri, instance } from "./lib/ipc.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
@@ -56,9 +55,7 @@
      it never opens. The app's menus open where they belong. -->
 <svelte:window onkeydown={onKey} oncontextmenu={(e) => e.preventDefault()} />
 
-{#if !inTauri && (remote.state === "signed-out" || remote.state === "dropped")}
-  <SignIn />
-{:else if instance.error}
+{#if instance.error}
   <div class="shell">
     <WindowChrome />
     <Unreachable />

@@ -3,12 +3,11 @@ import "./lib/tokens.css";
 import App from "./App.svelte";
 import { connectEvents, store } from "./lib/store.svelte";
 import { connectKnowledge } from "./lib/knowledge.svelte";
-import { signedIn } from "./lib/ipc.svelte";
+import { ready } from "./lib/ipc.svelte";
 
-// In a browser on another device, nothing is asked of the app until the
-// device is paired; the app shows how to pair it meanwhile. With a remote
-// instance chosen, nothing is asked until it is reached.
-void signedIn().then((ok) => {
+// With a remote instance chosen, nothing is asked of it until it is
+// reached; the app says why not if it cannot be.
+void ready().then((ok) => {
   if (!ok) return;
   connectEvents().catch((err) => {
     store.lastError = String(err);

@@ -79,6 +79,7 @@ impl Hub {
     }
 
     /// The newest number.
+    #[cfg(test)]
     pub fn last(&self) -> u64 {
         self.ring.lock().0
     }

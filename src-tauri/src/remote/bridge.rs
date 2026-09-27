@@ -75,12 +75,11 @@ pub const ALLOWED: &[&str] = &[
     "set_setting",
 ];
 
-/// On a server (divixi-server) there is no PC in front of it: whoever
-/// paired is its owner, and does there what the PC's window does. Still
-/// closed: anything that opens a window or a browser on the machine
-/// (pickers, save dialogs, the file manager, agent sign-in), the terminal,
-/// and the remote-access controls.
-#[cfg(feature = "server")]
+/// Whoever comes in is this Divixi's owner (over SSH, or as its GitHub
+/// account), and does there what its own window does. Still closed:
+/// anything that opens a window or a browser on the machine (pickers, save
+/// dialogs, the file manager, agent sign-in), the terminal, and the
+/// remote-instance and GitHub controls.
 const SERVER_ALLOWED: &[&str] = &[
     "create_track",
     "update_track",
@@ -105,13 +104,11 @@ const SERVER_ALLOWED: &[&str] = &[
     "knowledge_embed_now",
     "knowledge_default_config",
 ];
-#[cfg(not(feature = "server"))]
-const SERVER_ALLOWED: &[&str] = &[];
 
-/// Settings another device may not read or write: secrets and the remote
-/// access switches.
+/// Settings another device may not read or write: secrets, GitHub and the
+/// remote-instance switches.
 fn setting_closed(key: &str) -> bool {
-    key.starts_with("remote") || key.starts_with("knowledge.embed") || key.contains("key") || key.contains("token") || key.contains("secret")
+    key.starts_with("remote") || key.starts_with("github") || key.starts_with("knowledge.embed") || key.contains("key") || key.contains("token") || key.contains("secret")
 }
 
 /// Whether a remote caller may make this call.
@@ -197,8 +194,11 @@ mod tests {
         assert!(allowed("list_tracks", &json!({})).is_ok());
         assert!(allowed("pick_folder", &json!({})).is_err());
         assert!(allowed("term_open", &json!({})).is_err());
-        assert!(allowed("delete_track", &json!({})).is_err());
+        assert!(allowed("delete_track", &json!({})).is_ok(), "the owner may");
+        assert!(allowed("remote_server_set", &json!({})).is_err());
+        assert!(allowed("github_login_start", &json!({})).is_err());
         assert!(allowed("get_setting", &json!({ "key": "theme" })).is_ok());
+        assert!(allowed("get_setting", &json!({ "key": "github.client_id" })).is_err());
         assert!(allowed("get_setting", &json!({ "key": "knowledge.embed.key" })).is_err());
         assert!(allowed("set_setting", &json!({ "key": "remote.enabled" })).is_err());
     }
