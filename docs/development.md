@@ -32,10 +32,25 @@ docs/design/       design notes
 
 ```bash
 npm install
-npm run app                          # tauri dev
-cargo test -p orchestra-app --lib    # the app's tests (some are Windows-only)
-npx svelte-check                     # UI types
+npm run build                        # once, before any cargo command: see below
+npm run app                          # the app, in development mode (tauri dev)
 cargo build -p orchestra-app --features server --bin divixi-server
+```
+
+Node 20.19+ or 22.12+, as `engines` in package.json says: vite 8 and
+vite-plugin-svelte both refuse anything older.
+
+`tauri-build` reads the built UI from `dist/`, which is not in git, so on a fresh
+clone every cargo command needs `npm run build` to have run once. `npm run app`
+does it for you; a bare `cargo test` does not.
+
+The checks, which are the same four CI runs (`.github/workflows/ci.yml`):
+
+```bash
+npm run check                        # UI types (svelte-check)
+npm test                             # UI unit tests (node --test)
+npm run check:i18n                   # every string exists in both ko and en
+cargo test --workspace               # Rust (a couple of tests are Windows-only)
 ```
 
 Useful examples:

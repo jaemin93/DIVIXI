@@ -1,0 +1,65 @@
+# Everything a job needs before it can build Divixi, in one place.
+#
+# Extracted because the alternative is four copies of the Linux package list
+# and five copies of the Node version across ci.yml and release.yml. Those are
+# exactly the lines that rot when only three of the copies get updated.
+#
+# Deliberately NOT in here: `npm run build`, cargo commands, bundling. Those
+# differ per job, and hiding them behind another layer would make the workflows
+# harder to read rather than easier.
+name: Set up the build environment
+description: Node, npm dependencies, optionally the Rust toolchain, and Tauri's Linux packages.
+
+inputs:
+  rust:
+    description: Install the Rust toolchain and its cache. Set to "false" for a Node-only job.
+    required: false
+    default: "true"
+  rust-components:
+    description: Extra rustup components, comma separated (e.g. "clippy").
+    required: false
+    default: ""
+  cache-key:
+    description: Suffix for the Rust cache key. Artifacts are not portable between platforms, so pass something per-platform.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        # Matches the `engines` field in package.json: vite 8 needs
+        # ^20.19 || >=22.12 and vite-plugin-svelte needs ^20.19 || ^22.12 || >=24,
+        # so a bare "20" is not enough. Keep the three in step.
+        node-version: 22
+        cache: npm
+
+    # The minimal profile has no clippy or rustfmt; anything extra is an input.
+    - uses: dtolnay/rust-toolchain@stable
+      if: inputs.rust == 'true'
+      with:
+        components: ${{ inputs.rust-components }}
+
+    - uses: Swatinem/rust-cache@v2
+      if: inputs.rust == 'true'
+      with:
+        key: ${{ inputs.cache-key }}
+        cache-all-crates: true
+
+    # Tauri's Linux prerequisites. The built binary only loads gtk3; the rest
+    # are needed to compile. patchelf is for the bundler. See
+    # docs/divixi-server.md, which installs the same set on a server.
+    - name: System packages (Linux)
+      if: inputs.rust == 'true' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+          libayatana-appindicator3-dev librsvg2-dev \
+          pkg-config libssl-dev patchelf
+
+    - name: npm ci
+      shell: bash
+      run: npm ci

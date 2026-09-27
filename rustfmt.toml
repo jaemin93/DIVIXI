@@ -1,0 +1,20 @@
+# Divixi's Rust style, written down rather than changed.
+#
+# The code was not developed under rustfmt. It joins expressions onto one long
+# line where that reads better, and its doc comments and prompt strings run
+# well past any sane code width (the conductor's preamble has a 918-character
+# line). rustfmt's default max_width of 100 would rewrap about 1,000 lines.
+#
+# max_width is therefore set to the width the code actually uses. 200 sits in
+# the flat minimum of the churn curve measured over the whole workspace
+# (170 -> 326 hunks, 180 -> 304, 190 -> 295, 200 -> 293, 210 -> 282, 220 -> 287,
+# 240 -> 297), and it is a round number a contributor can hold in their head.
+#
+# Note that `cargo fmt --check` does NOT pass on the current tree at any
+# width: about 300 hunks remain at 200, nearly all of them rustfmt wanting to
+# join lines the author left expanded. That is why CI does not gate on
+# formatting yet. Reformatting the tree is a deliberate, separate commit --
+# do it on its own, with no other change in it, or every later `git blame`
+# lands on that commit.
+max_width = 200
+edition = "2021"

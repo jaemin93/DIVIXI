@@ -1,0 +1,220 @@
+# Pull-request checks.
+#
+# Ordering matters: `npm ci && npm run build` must run before any cargo
+# command. tauri-build reads the frontend bundle from ../dist (see
+# tauri.conf.json `frontendDist`), and dist/ is not in git, so a cargo step on
+# a fresh checkout fails without it.
+#
+# Not gated here, deliberately:
+#   - `cargo fmt --check`: the tree predates rustfmt and does not pass at any
+#     max_width (about 300 hunks at the 200 set in rustfmt.toml). Add the gate in
+#     the same commit that reformats the tree.
+#   - prettier: same reason, for the UI.
+#   - code signing and notarization: no certificates. macOS is built unsigned,
+#     which proves it compiles and bundles but not that it launches.
+#   - the agent process tree on Unix: implemented but never executed on a Unix
+#     machine, only cross-compiled. Run and reported on macOS and Linux
+#     (`continue-on-error`) rather than gated, until one real run says it works.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A CI machine is thrown away; incremental artifacts only cost cache space.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # Everything that needs only Node: types and the UI unit tests. Fails in
+  # about a minute, before anyone waits on a Rust build.
+  #
+  # The unit tests live here rather than in the `test` matrix because nothing
+  # in them is platform-dependent -- they cover the queue, scroll anchoring,
+  # the error list and instance ordering as plain functions. Running them once
+  # is enough; running them three times would only delay the answer behind a
+  # Rust toolchain they do not need.
+  frontend:
+    name: Types, unit tests, i18n
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # No Rust in a Node-only job: skip the toolchain, the cache and the
+      # Linux packages, and this finishes in about a minute.
+      - uses: ./.github/actions/setup-build
+        with:
+          rust: "false"
+
+      # `npm run check` wraps svelte-check with the two flags it needs: it
+      # wants TypeScript 6 for its own API and TypeScript 7 under the
+      # @typescript/native alias, reached with --tsgo. Both are
+      # devDependencies. Running the same script CI and contributors run keeps
+      # the two from drifting apart.
+      - name: svelte-check
+        run: npm run check
+
+      # `node --test` over ui/src/lib/**/*.test.ts. These had no CI coverage at
+      # all until now: the types job only checked types and the matrix job only
+      # ran cargo, so a broken UI test could not fail a pull request.
+      - name: npm test
+        run: npm test
+
+      # Every string the UI shows exists in both languages. A missing key is
+      # invisible in a build and in the types -- it only shows up as an
+      # untranslated label in front of whoever runs the other locale.
+      - name: npm run check:i18n
+        run: npm run check:i18n
+
+  test:
+    name: Test (${{ matrix.name }})
+    needs: frontend
+    strategy:
+      # One platform failing should not hide the others: macOS has never been
+      # verified, so its result is the interesting one.
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+          - name: macos
+            os: macos-14 # Apple Silicon
+          - name: linux
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # clippy is not in rustup's minimal profile, which is what the toolchain
+      # action installs; ask for it or `cargo clippy` is "no such command".
+      - uses: ./.github/actions/setup-build
+        with:
+          rust-components: clippy
+          # Windows, macOS and Linux artifacts are not interchangeable.
+          cache-key: ${{ matrix.name }}
+
+      # Must precede every cargo step: see the note at the top of this file.
+      - name: Build UI (required by tauri-build)
+        run: npm run build
+
+      # No `-D warnings` yet: the existing lint warnings have not been triaged,
+      # and turning them fatal on day one would block every PR for reasons
+      # unrelated to it. Errors still fail the step, which is what catches a
+      # tree that does not compile. Tighten once the warnings are cleared.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets
+
+      # The Windows-only tests (expand_env, shell_runs_on_a_pty) drop out via
+      # cfg on the other platforms; the rest are portable.
+      - name: cargo test
+        run: cargo test --workspace
+
+      # The Unix teardown (a process group, signalled SIGTERM then SIGKILL) is
+      # implemented -- but it has only ever been cross-compiled from Windows,
+      # never executed on macOS or Linux. So the test stays #[ignore]d there
+      # and runs here as a report instead: the real result is visible on every
+      # run, and a wrong guess about a platform nobody has tested cannot block
+      # unrelated pull requests.
+      #
+      # When this step passes, delete it and the #[cfg_attr(not(windows),
+      # ignore)] in crates/acp/src/process.rs. The test then runs in
+      # `cargo test` above and becomes an ordinary gate.
+      - name: Agent process tree on Unix (report only, not yet gated)
+        if: runner.os != 'Windows'
+        continue-on-error: true
+        run: cargo test -p orchestra-acp --lib -- --ignored --exact process::tests::shutdown_kills_the_process_group
+
+      - name: Build app binary
+        run: cargo build -p orchestra-app --bin divixi
+
+      # divixi-server is what actually gets deployed to a Linux box, and it
+      # compiles the whole crate against Tauri's mock runtime, so it breaks
+      # independently of the app.
+      - name: Build divixi-server
+        run: cargo build -p orchestra-app --features server --bin divixi-server
+
+      # Divixi starts a remote instance over SSH with `setsid`, which exists on
+      # Linux and not on macOS (remote_line() in src-tauri/src/remote/client.rs).
+      # This step records that difference per platform rather than asserting it,
+      # so the day someone fixes it the log shows the change.
+      - name: Remote-launch prerequisites
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          for tool in setsid pgrep id; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "present: $tool"
+            else
+              echo "MISSING: $tool  (remote_line() in src-tauri/src/remote/client.rs needs it)"
+            fi
+          done
+
+  # Unsigned bundles. Proves the installer/app package can be produced on each
+  # platform; it does not prove the result launches, and on macOS an unsigned
+  # .app is refused by Gatekeeper on any machine that did not build it.
+  bundle:
+    name: Bundle (${{ matrix.name }}, unsigned)
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Bundle targets are named explicitly rather than left to
+          # `bundle.targets: "all"`. On Linux "all" also builds AppImage and
+          # rpm, which download a toolchain at build time and are the flakiest
+          # part of Tauri's bundler in CI; deb proves the same thing. MSI is
+          # kept on Windows because it is the target with the version-format
+          # constraint (major <= 255), so it is the one worth exercising.
+          - name: windows
+            os: windows-latest
+            bundles: nsis,msi
+          - name: macos
+            os: macos-14
+            bundles: app,dmg
+          - name: linux
+            os: ubuntu-22.04
+            bundles: deb
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-build
+        with:
+          cache-key: bundle-${{ matrix.name }}
+
+      # tauri build runs beforeBuildCommand (npm run build) itself.
+      - name: tauri build (unsigned)
+        run: npx tauri build --bundles ${{ matrix.bundles }}
+
+      # bundle.icon in tauri.conf.json does not list icons/icon.icns, so the
+      # .app is expected to carry no icon until that is fixed. Report it rather
+      # than fail: the bundle itself is still valid.
+      - name: Check .app carries an icon (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          app=$(find target/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)
+          echo "bundle: $app"
+          if ls "$app/Contents/Resources/"*.icns >/dev/null 2>&1; then
+            echo "icon present: $(ls "$app/Contents/Resources/"*.icns)"
+          else
+            echo "NO .icns in the bundle -- add icons/icon.icns to bundle.icon in tauri.conf.json"
+          fi
+          plutil -p "$app/Contents/Info.plist" | grep -E 'CFBundleShortVersionString|CFBundleVersion|CFBundleIdentifier'
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: divixi-${{ matrix.name }}-unsigned
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            target/release/bundle/**/*.exe
+            target/release/bundle/**/*.msi
+            target/release/bundle/**/*.dmg
+            target/release/bundle/**/*.deb

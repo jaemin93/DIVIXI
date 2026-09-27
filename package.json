@@ -2,10 +2,17 @@
   "name": "divixi",
   "private": true,
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test": "node --test \"ui/src/lib/**/*.test.ts\"",
+    "check": "svelte-check --tsconfig ./tsconfig.json --tsgo --output human",
+    "check:i18n": "node scripts/check-i18n.mjs",
     "tauri": "tauri",
     "app": "tauri dev"
   },
@@ -24,8 +31,12 @@
     "@agentclientprotocol/codex-acp": "^1.12.0",
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tauri-apps/cli": "^2.11.5",
+    "@types/node": "^26.6.3",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "prettier": "^3.9.9",
     "svelte": "^5.57.1",
-    "typescript": "^7.0.2",
+    "svelte-check": "^4.7.6",
+    "typescript": "^6.0.3",
     "vite": "^8.3.0"
   }
 }

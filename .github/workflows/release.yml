@@ -1,0 +1,211 @@
+# Builds the installers for a release and attaches them to a GitHub Release.
+#
+# Versioning, as decided: the manifests keep plain semver (package.json,
+# Cargo.toml, tauri.conf.json all stay 0.1.0 and move on their own schedule),
+# and the *release* is named by date. The date is read from the tag; nothing in
+# the repository is rewritten by this workflow.
+#
+#   git tag v2026-09-27   && git push origin v2026-09-27     -> "2026-09-27"
+#   git tag v2026-09-27.2 && git push origin v2026-09-27.2   -> "2026-09-27 (2)"
+#
+# A tag that does not match that shape fails the `prepare` job with a message
+# saying what was expected, before any machine spends twenty minutes compiling.
+#
+# Signing is wired up but optional: with no certificates in secrets the macOS
+# and Windows bundles go out unsigned and the run still succeeds. See the
+# `secrets` notes on the bundle job for what to add later.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload assets to it
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # Parse the tag once, on one cheap machine, so a typo fails in seconds.
+  prepare:
+    name: Read the tag
+    runs-on: ubuntu-22.04
+    outputs:
+      date: ${{ steps.tag.outputs.date }}
+      title: ${{ steps.tag.outputs.title }}
+      seq: ${{ steps.tag.outputs.seq }}
+    steps:
+      - name: Parse the tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+
+          # vYYYY-MM-DD, optionally .N for the Nth release of that day.
+          if [[ ! "$tag" =~ ^v([0-9]{4})-([0-9]{2})-([0-9]{2})(\.([0-9]+))?$ ]]; then
+            echo "::error title=Bad release tag::'$tag' is not a release tag." \
+                 "Expected vYYYY-MM-DD, or vYYYY-MM-DD.N for the Nth release of that day." \
+                 "Examples: v2026-09-27, v2026-09-27.2"
+            exit 1
+          fi
+
+          y="${BASH_REMATCH[1]}"
+          m="${BASH_REMATCH[2]}"
+          d="${BASH_REMATCH[3]}"
+          seq="${BASH_REMATCH[5]:-1}"
+          date="$y-$m-$d"
+
+          # The shape can be right and the date still impossible (v2026-13-40).
+          # `date -d` normalises, so compare the round trip.
+          if [ "$(date -u -d "$date" +%Y-%m-%d 2>/dev/null || true)" != "$date" ]; then
+            echo "::error title=Bad release tag::'$tag' has the right shape but $date is not a real date." \
+                 "Expected vYYYY-MM-DD with a calendar date that exists."
+            exit 1
+          fi
+
+          if [ "$seq" = "0" ]; then
+            echo "::error title=Bad release tag::'$tag' uses .0; the suffix counts from 1, and the first release of a day needs no suffix."
+            exit 1
+          fi
+
+          # One release a day is the common case and gets a bare date. A second
+          # needs something to tell it apart in the releases list.
+          if [ "$seq" = "1" ]; then title="$date"; else title="$date ($seq)"; fi
+
+          {
+            echo "date=$date"
+            echo "seq=$seq"
+            echo "title=$title"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "tag $tag -> release \"$title\""
+
+  bundle:
+    name: Bundle (${{ matrix.name }})
+    needs: prepare
+    strategy:
+      # Never abandon the other platforms because one failed: a release with
+      # two of three installers is worth more than none, and the failure is
+      # then visible per platform.
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+            args: ""
+          - name: macos
+            os: macos-14
+            # One bundle for both Intel and Apple Silicon: fewer downloads to
+            # explain, and one fewer runner.
+            args: "--target universal-apple-darwin"
+            rust-target: universal-apple-darwin
+          - name: linux
+            os: ubuntu-22.04
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-build
+        with:
+          cache-key: release-${{ matrix.name }}
+
+      # The universal macOS bundle needs both architectures' std.
+      - name: Add the macOS universal target
+        if: matrix.rust-target != ''
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      # tauri-action reads the version from tauri.conf.json (semver, unchanged
+      # by this workflow) and runs beforeBuildCommand (npm run build) itself.
+      #
+      # Signing, when the secrets exist. All of these are optional: unset, the
+      # bundles are produced unsigned and the step still succeeds.
+      #
+      #   macOS, to stop Gatekeeper refusing the .dmg on other machines:
+      #     APPLE_CERTIFICATE            base64 of a "Developer ID Application" .p12
+      #     APPLE_CERTIFICATE_PASSWORD   that .p12's password
+      #     APPLE_SIGNING_IDENTITY       e.g. "Developer ID Application: NAME (TEAMID)"
+      #     APPLE_ID / APPLE_PASSWORD    Apple ID and an app-specific password, for notarising
+      #     APPLE_TEAM_ID                the ten-character team id
+      #   Windows, to stop SmartScreen warning on the installer:
+      #     WINDOWS_CERTIFICATE          base64 of a code-signing .pfx
+      #     WINDOWS_CERTIFICATE_PASSWORD that .pfx's password
+      #     (Windows signing also needs `bundle > windows > certificateThumbprint`
+      #      or a signCommand in tauri.conf.json; adding the secrets alone is
+      #      not enough.)
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: ${{ needs.prepare.outputs.title }}
+          # Left as a draft on purpose: the notes below are a raw commit list,
+          # the macOS build is unsigned until the certificates exist, and
+          # publishing is the one step that emails every watcher. A human opens
+          # the draft, writes the notes, and presses publish.
+          releaseDraft: true
+          prerelease: false
+          # Let GitHub list the commits since the previous tag; a person edits
+          # the draft afterwards.
+          releaseBody: |
+            Divixi ${{ needs.prepare.outputs.title }}
+
+            > Draft. Replace this with real notes before publishing.
+
+            Built from `${{ github.ref_name }}` (${{ github.sha }}).
+            App version in the manifests: see `tauri.conf.json`.
+
+            **macOS is untested and these bundles are unsigned.** macOS will
+            refuse to open the app until it is signed and notarised; on Windows
+            SmartScreen will warn.
+          generateReleaseNotes: true
+          args: ${{ matrix.args }}
+
+  # divixi-server has no bundler: it is a bare binary a Linux box runs.
+  # docs/divixi-server.md tells people to build it from source, so this is a
+  # convenience, not the documented path.
+  server:
+    name: divixi-server (linux)
+    needs: [prepare, bundle]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-build
+        with:
+          cache-key: release-server
+
+      # tauri-build needs the frontend bundle even for the windowless binary:
+      # it embeds the same dist/.
+      - name: Build UI (required by tauri-build)
+        run: npm run build
+
+      - name: Build divixi-server
+        run: cargo build --release -p orchestra-app --features server --bin divixi-server
+
+      # Attached to the draft the bundle job created, under a name that says
+      # which release it belongs to.
+      - name: Stage the binary
+        run: |
+          mkdir -p staging
+          cp target/release/divixi-server "staging/divixi-server-${{ needs.prepare.outputs.date }}-x86_64-linux"
+
+      - name: Upload to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ needs.prepare.outputs.title }}
+          draft: true
+          fail_on_unmatched_files: true
+          files: staging/divixi-server-*

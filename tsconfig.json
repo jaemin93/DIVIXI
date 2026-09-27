@@ -1,0 +1,35 @@
+{
+  // Types are checked by `npx svelte-check`, never by a build: Vite strips the
+  // annotations and emits nothing from tsc. `noEmit` says so.
+  //
+  // The UI lives in ui/ (vite.config.ts sets `root: "ui"`), so the include
+  // list names ui/src rather than the repository root.
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    // Vite resolves imports, so extensionless and .ts specifiers must both be
+    // accepted the way the bundler accepts them.
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    // `import.meta.env` and Vite's asset module declarations; "node" for the
+    // `node:test` / `node:assert` imports the unit tests use (`npm test`).
+    "types": ["vite/client", "node"],
+
+    "strict": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    // Svelte compiles each file on its own: a type-only import that looks like
+    // a value import would survive into the output and fail at runtime.
+    "verbatimModuleSyntax": true,
+
+    // ui/src/lib/xterm-css.js ships as JavaScript on purpose.
+    "allowJs": true,
+    "checkJs": false,
+    // Dependency .d.ts files are not ours to fix, and xterm's are large.
+    "skipLibCheck": true
+  },
+  "include": ["ui/src/**/*.ts", "ui/src/**/*.js", "ui/src/**/*.svelte", "vite.config.ts"],
+  "exclude": ["node_modules", "dist", "target"]
+}
