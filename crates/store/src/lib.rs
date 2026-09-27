@@ -896,6 +896,17 @@ impl Store {
             "DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE track = ?1 AND session = ?2)",
             params![track, worker],
         )?;
+        // Nothing puts a decision on a worker run today — every card hangs
+        // off the conductor's turn or an artifact's, even the permission
+        // questions a worker raises. This is here so that stays true by
+        // construction rather than by reading three call sites: a card
+        // pointing at a deleted run could never be answered, and the bell
+        // would keep offering it. Scoped to this worker's runs, so the
+        // conductor's own cards are untouched.
+        tx.execute(
+            "DELETE FROM decisions WHERE track = ?1 AND run IN (SELECT id FROM runs WHERE track = ?1 AND session = ?2)",
+            params![track, worker],
+        )?;
         let gone = tx.execute("DELETE FROM runs WHERE track = ?1 AND session = ?2", params![track, worker])?;
         tx.execute("DELETE FROM meta WHERE key = 'worker_session:' || ?1 || '/' || ?2", params![track, worker])?;
         tx.commit()?;
@@ -1107,6 +1118,11 @@ impl Store {
 
     /// Answer an open decision: one of its options, or the human's own
     /// words when the decision allows them.
+    /// The answer lands only if the card is still open, and that is decided
+    /// by the `UPDATE` itself (as [`Self::dismiss_decision`] does), not by a
+    /// read before it. Reading first and writing after leaves a gap two
+    /// answers can both pass — a double click, or two devices on the same
+    /// Divixi — and each would hand the conductor its own turn for one card.
     pub fn answer_decision(&self, id: i64, choice: Option<usize>, own: Option<&str>, note: &str) -> anyhow::Result<Decision> {
         let d = self.decision(id)?.ok_or_else(|| anyhow::anyhow!("no decision {id}"))?;
         if d.status != DecisionStatus::Open {
@@ -1123,11 +1139,16 @@ impl Store {
             (None, None) => anyhow::bail!("choose an option or write an answer"),
         };
         let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE decisions SET status = ?2, choice = ?3, answer = ?4, note = ?5, decided_at = ?6 WHERE id = ?1",
+        // The check that counts. The read above only works out what the
+        // answer means; this is what makes it the one answer.
+        let changed = conn.execute(
+            "UPDATE decisions SET status = ?2, choice = ?3, answer = ?4, note = ?5, decided_at = ?6 WHERE id = ?1 AND status = 'open'",
             params![id, DecisionStatus::Decided.as_str(), choice.map(|i| i as i64), answer, note.trim(), now_ms()],
         )?;
         drop(conn);
+        if changed == 0 {
+            anyhow::bail!("decision {id} was answered or set aside already");
+        }
         self.decision(id)?.ok_or_else(|| anyhow::anyhow!("decision {id} vanished"))
     }
 
@@ -1511,6 +1532,66 @@ mod tests {
         let next = store.begin_run(&track, "ui", "claude_code", "again", ".").unwrap();
         assert_ne!(next, first);
         assert_ne!(next, second);
+    }
+
+    #[test]
+    fn a_card_takes_one_answer_however_many_arrive() {
+        // Two devices on the same Divixi, or one double click: both used to
+        // pass the read-then-write check and the conductor got two turns
+        // for one card.
+        let store = Store::in_memory().unwrap();
+        let track = store.create_track(&new_track("T", "", ".", "claude_code")).unwrap().id;
+        let card = store
+            .open_decision(&NewDecision {
+                track: track.clone(),
+                run: None,
+                question: "Which way?".into(),
+                context: String::new(),
+                options: vec![opt("left"), opt("right")],
+                recommended: None,
+                allow_other: false,
+                permission: None,
+            })
+            .unwrap();
+
+        let first = store.answer_decision(card.id, Some(0), None, "").unwrap();
+        assert_eq!(first.status, DecisionStatus::Decided);
+        assert_eq!(first.answer.as_deref(), Some("left"));
+
+        let second = store.answer_decision(card.id, Some(1), None, "");
+        assert!(second.is_err(), "the second answer is refused, not written over the first");
+        assert_eq!(store.decision(card.id).unwrap().unwrap().answer.as_deref(), Some("left"), "the first answer stands");
+
+        // Setting aside an answered card is refused the same way.
+        assert!(store.dismiss_decision(card.id).is_err());
+    }
+
+    #[test]
+    fn deleting_a_worker_takes_the_decisions_of_its_runs_and_no_others() {
+        let store = Store::in_memory().unwrap();
+        let track = store.create_track(&new_track("T", "", ".", "claude_code")).unwrap().id;
+        let conductor = store.begin_run(&track, "conductor", "claude_code", "hi", ".").unwrap();
+        let worker = store.begin_run(&track, "ui", "claude_code", "do it", ".").unwrap();
+        let card = |run: &str| NewDecision {
+            track: track.clone(),
+            run: Some(run.to_string()),
+            question: "Which way?".into(),
+            context: String::new(),
+            options: vec![opt("left"), opt("right")],
+            recommended: None,
+            allow_other: false,
+            permission: None,
+        };
+        let his = store.open_decision(&card(&conductor)).unwrap();
+        let hers = store.open_decision(&card(&worker)).unwrap();
+
+        store.delete_worker(&track, "ui").unwrap();
+        assert!(store.decision(hers.id).unwrap().is_none(), "a card on a run that is gone could never be answered");
+        assert!(store.decision(his.id).unwrap().is_some(), "the conductor's own cards stay");
+    }
+
+    fn opt(label: &str) -> DecisionOption {
+        DecisionOption { label: label.into(), detail: String::new(), id: String::new() }
     }
 
     fn new_track(name: &str, intent: &str, cwd: &str, agent: &str) -> TrackPatch {

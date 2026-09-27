@@ -110,7 +110,17 @@ const WORKER_QUIET_CHECK: Duration = Duration::from_secs(30);
 /// nothing that parking does not, now that parking outlives the app.
 const REPORT_WAIT: Duration = Duration::from_secs(60);
 /// What `conductor_turn` returns while an earlier turn is still running.
-pub(crate) const BUSY: &str = "conductor is still responding";
+///
+/// The `busy:` head is the machine-readable half, for callers that must
+/// tell "not now" from "cannot": [`deliver`] and [`flush_parked`] compare
+/// against this constant, and the UI's `stillAnswering` (store.svelte.ts)
+/// recognises the message so a queued chat line waits for the turn to end
+/// instead of being handed back to the human as a failure.
+///
+/// **Whoever edits this string:** the UI matches on it. Keep the `busy:`
+/// prefix and the words "still responding", or change `stillAnswering` in
+/// the same commit — otherwise a queued message quietly stops queueing.
+pub(crate) const BUSY: &str = "busy: conductor is still responding";
 
 /// One open agent session and what it runs on.
 pub struct Live {
@@ -161,6 +171,16 @@ pub struct Sessions {
     /// Runs the human stopped by hand, so the record and the report say
     /// "stopped" and not "failed". Forgotten once the run has reported.
     stopped: parking_lot::Mutex<HashSet<String>>,
+    /// Workers whose record is being deleted, by `track/worker` key.
+    ///
+    /// Deleting takes a while — a git call reads the worker's checkout for
+    /// unmerged work — and closing its session does not stop the conductor
+    /// from opening it again with `ask_worker` meanwhile. A turn started in
+    /// that window would have its run deleted out from under it: its events
+    /// would fail the foreign key on `runs`, and an hour of work would go
+    /// with no record at all. So the name is held here for the length of
+    /// the delete and [`start_worker_turn`] refuses it.
+    deleting: parking_lot::Mutex<HashSet<String>>,
 }
 
 impl Sessions {
@@ -218,6 +238,40 @@ impl Sessions {
 
     /// Forget every session of a track (its conductor and workers). Turns in
     /// flight are cancelled so they end soon; nothing new starts.
+    /// Close every session there is, across every track. Returns how many were
+    /// closed, for the log.
+    ///
+    /// For process shutdown. Two things per session, and both matter: `cancel`
+    /// interrupts a turn that is mid-flight, and dropping the last `Arc` is what
+    /// actually ends the session -- the task's `turn_rx` closes, its loop
+    /// returns, and it runs `process.shutdown().await`, which is where the
+    /// agent's process group is taken down.
+    ///
+    /// Draining the maps here is therefore not bookkeeping, it is the mechanism.
+    /// The tasks then unwind in parallel, so a caller waits one grace period
+    /// rather than one per session.
+    ///
+    /// Both ways out of the app use this: the server's signal handler and the
+    /// desktop's tray Quit. Neither can rely on destructors -- `process::exit`
+    /// and `app.exit` do not unwind the tasks that hold the agents -- so the
+    /// sessions have to be closed on the way out, on purpose.
+    ///
+    /// Windows would survive without it, since the kernel closes each agent's
+    /// job object when the process dies. Unix has no such backstop: the agents
+    /// are in process groups of their own and simply keep running.
+    pub async fn shutdown_all(&self) -> usize {
+        let mut closed = 0;
+        for (_, conductor) in self.conductors.lock().await.drain() {
+            conductor.live.session.cancel();
+            closed += 1;
+        }
+        for (_, live) in self.workers.lock().await.drain() {
+            live.session.cancel();
+            closed += 1;
+        }
+        closed
+    }
+
     pub async fn close_track(&self, track: &str) {
         if let Some(conductor) = self.conductors.lock().await.remove(track) {
             conductor.live.session.cancel();
@@ -917,7 +971,8 @@ async fn deliver(app: AppHandle, hand: Hand) -> bool {
         }
     };
     if keep {
-        park(&app, &track, Parked { text, open, what, worker, run, at: now_ms(), why, tries: 1 }).await;
+        let at = now_ms();
+        park(&app, &track, Parked { id: park_id(at), text, open, what, worker, run, at, why, tries: 1 }).await;
     } else {
         tracing::warn!(%track, %what, %why, "could not hand this to the conductor");
     }
@@ -931,6 +986,11 @@ async fn deliver(app: AppHandle, hand: Hand) -> bool {
 /// the work, so it waits here instead, and the human is told it is waiting.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Parked {
+    /// Tells this entry from every other, so a flush removes the one it
+    /// handed on rather than whatever is at the front now. Entries written
+    /// before this existed have none; [`Parked::is`] falls back for those.
+    #[serde(default)]
+    id: String,
     text: String,
     #[serde(default)]
     open: bool,
@@ -946,6 +1006,57 @@ struct Parked {
     why: String,
     #[serde(default)]
     tries: u32,
+}
+
+impl Parked {
+    /// Whether this is the same waiting turn as `other`.
+    fn is(&self, other: &Parked) -> bool {
+        if !self.id.is_empty() && !other.id.is_empty() {
+            return self.id == other.id;
+        }
+        // Written before ids: what identified an entry then. One report per
+        // run, so a report is unique by its run; a decision by its text and
+        // the millisecond it was put aside.
+        self.at == other.at && self.what == other.what && self.run == other.run
+    }
+}
+
+/// Ids handed out within this run of the app; `at` separates the rest.
+static PARK_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn park_id(at: i64) -> String {
+    format!("{at}-{}", PARK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// How many full report texts one track's waiting list keeps.
+///
+/// The list is one JSON row rewritten whole on every change, and one
+/// report's text runs to 12k characters. Left alone it grows with every
+/// worker that finishes while the conductor is shut, and never shrinks by
+/// itself. Past this many the older ones are folded to a stub — nothing is
+/// dropped, because the report itself lives in `meta report:<run>` and both
+/// the conversation and `read_report` take it from there; only the verbatim
+/// copy the conductor would have been handed goes.
+const PARKED_FULL_TEXT: usize = 10;
+
+/// The stub an old waiting report is folded to. Keeps the header shape, so
+/// the timeline still finds its worker and run and draws its card.
+fn folded_text(item: &Parked) -> Option<String> {
+    let (worker, run) = (item.worker.as_deref()?, item.run.as_deref()?);
+    Some(format!(
+        "{REPORT_PREFIX} worker={worker} run={run} status=kept\n\nThis report waited behind several others, so only its place was kept here. The report itself is in the record: call read_report(\"{run}\") to read it, then tell the human what happened."
+    ))
+}
+
+/// Fold every waiting report but the newest few (see [`PARKED_FULL_TEXT`]).
+/// Idempotent: folding an already folded entry writes the same stub.
+fn fold_old(list: &mut [Parked]) {
+    let fold_before = list.len().saturating_sub(PARKED_FULL_TEXT);
+    for item in list.iter_mut().take(fold_before) {
+        if let Some(stub) = folded_text(item) {
+            item.text = stub;
+        }
+    }
 }
 
 /// What the UI hears when a track's waiting list changes.
@@ -1009,6 +1120,7 @@ async fn park(app: &AppHandle, track: &str, item: Parked) {
     let state = app.state::<AppState>();
     let mut list = parked_list(&state.store, track);
     list.push(item.clone());
+    fold_old(&mut list);
     keep_parked(&state.store, track, &list);
     tracing::warn!(%track, what = %item.what, why = %item.why, pending = list.len(), "the conductor could not take this; it waits");
     let _ = app.emit(
@@ -1031,6 +1143,8 @@ async fn park(app: &AppHandle, track: &str, item: Parked) {
 /// while the conductor is still out of reach.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WaitingItem {
+    /// Unique among what is waiting; the UI keys its list on this.
+    pub id: String,
     pub track: String,
     /// What it is, in one phrase.
     pub what: String,
@@ -1054,6 +1168,7 @@ pub fn parked_all(state: &AppState) -> Vec<WaitingItem> {
     for track in state.store.tracks().unwrap_or_default() {
         for item in parked_list(&state.store, &track.id) {
             out.push(WaitingItem {
+                id: item.id,
                 track: track.id.clone(),
                 what: item.what,
                 worker: item.worker,
@@ -1102,15 +1217,23 @@ pub fn flush_parked(app: AppHandle, track: String) -> std::pin::Pin<Box<dyn std:
                 let _one = PARKED.lock().await;
                 let state = app.state::<AppState>();
                 let mut list = parked_list(&state.store, &track);
-                if !list.is_empty() {
-                    list.remove(0);
+                // By identity, not by position. Three things call this (a
+                // conductor opening, a turn ending, the minute sweep), so
+                // two flushes on one track are ordinary; `begin_turn` keeps
+                // them from both delivering, but the copy taken above can
+                // still be stale by the time we get back here. Taking the
+                // front on trust would then drop a report nobody delivered.
+                if list.iter().any(|item| item.is(&next)) {
+                    list.retain(|item| !item.is(&next));
+                    keep_parked(&state.store, &track, &list);
+                    tracing::info!(%track, what = %next.what, left = list.len(), "handed the conductor what was waiting");
+                    let _ = app.emit(
+                        "parked",
+                        Waiting { track: track.clone(), pending: list.len(), added: None, worker: None, run: None, why: String::new() },
+                    );
+                } else {
+                    tracing::info!(%track, what = %next.what, "what was waiting had already been taken off the list");
                 }
-                keep_parked(&state.store, &track, &list);
-                tracing::info!(%track, what = %next.what, left = list.len(), "handed the conductor what was waiting");
-                let _ = app.emit(
-                    "parked",
-                    Waiting { track: track.clone(), pending: list.len(), added: None, worker: None, run: None, why: String::new() },
-                );
                 // The turn it just started holds the conductor; the next
                 // round sees that and comes back when the turn ends.
             }
@@ -1119,11 +1242,12 @@ pub fn flush_parked(app: AppHandle, track: String) -> std::pin::Pin<Box<dyn std:
                     let _one = PARKED.lock().await;
                     let state = app.state::<AppState>();
                     let mut list = parked_list(&state.store, &track);
-                    if let Some(first) = list.first_mut() {
-                        first.tries += 1;
-                        first.why = err.clone();
+                    // The one that failed, not the one at the front now.
+                    if let Some(item) = list.iter_mut().find(|item| item.is(&next)) {
+                        item.tries += 1;
+                        item.why = err.clone();
+                        keep_parked(&state.store, &track, &list);
                     }
-                    keep_parked(&state.store, &track, &list);
                     tracing::warn!(%track, what = %next.what, %err, "what was waiting still cannot go through");
                 }
                 return;
@@ -1348,6 +1472,9 @@ async fn start_worker_turn(
         let mut workers = state.sessions.workers.lock().await;
         if state.sessions.opening.lock().contains(&key) {
             return Err(format!("worker {name} is still starting; wait for it before sending more."));
+        }
+        if state.sessions.deleting.lock().contains(&key) {
+            return Err(format!("worker {name} is being deleted; its record is going. Use another name."));
         }
         // The track now wants the worker elsewhere (its folder setting
         // changed): the session is reopened there, with its memory if it can.
@@ -2364,6 +2491,96 @@ pub async fn workers_tidy(app: AppHandle, track: String) -> Result<Vec<String>, 
     Ok(closed)
 }
 
+/// Take a deleted worker's reports off its track's waiting list.
+///
+/// Its runs and the reports kept against them are gone, so an entry still
+/// pointing at one is worse than nothing: the conversation would draw a
+/// card with no report behind it, and if the entry ever went through, the
+/// conductor would be handed a report and told to call `read_report` on a
+/// run that no longer exists. The emitted event is what tells the UI to
+/// read the list again.
+async fn forget_parked_of(app: &AppHandle, track: &str, worker: &str) {
+    let _one = PARKED.lock().await;
+    let state = app.state::<AppState>();
+    let mut list = parked_list(&state.store, track);
+    let had = list.len();
+    without_worker(&mut list, worker);
+    if list.len() == had {
+        return;
+    }
+    keep_parked(&state.store, track, &list);
+    tracing::info!(%track, %worker, gone = had - list.len(), "took a deleted worker's reports off the waiting list");
+    let _ = app.emit(
+        "parked",
+        Waiting { track: track.to_string(), pending: list.len(), added: None, worker: None, run: None, why: String::new() },
+    );
+}
+
+/// Drop a worker's entries from a waiting list. Everything else stays,
+/// the conductor's own answers included.
+fn without_worker(list: &mut Vec<Parked>, worker: &str) {
+    list.retain(|item| item.worker.as_deref() != Some(worker));
+}
+
+/// Delete a worker's record: its runs with their events, their kept
+/// reports, any decision hanging off them, the agent session the app would
+/// have resumed, and its place in the conductor's waiting list. Returns how
+/// many runs went.
+///
+/// What this never touches: the worker's folder and every file in it, and
+/// its checkout. Those hold what the human asked for; the app does not
+/// delete their results.
+///
+/// Refused while the worker is in a turn, and while it holds changes nobody
+/// has merged — deleting the record would leave no way back to them.
+///
+/// The name is held in [`Sessions::deleting`] for the whole of it. Closing
+/// a session does not stop the conductor reopening the worker with
+/// `ask_worker`, and the unmerged-work check runs git, which takes long
+/// enough for that to happen: a turn started in the gap would have its run
+/// deleted under it, its events would fail the foreign key, and the work
+/// would go unrecorded. With the name held, that turn is refused instead.
+pub async fn worker_delete(app: AppHandle, track: String, worker: String) -> Result<u32, String> {
+    /// The mark goes however the delete ends.
+    struct Deleting<'a>(&'a parking_lot::Mutex<HashSet<String>>, String);
+    impl Drop for Deleting<'_> {
+        fn drop(&mut self) {
+            self.0.lock().remove(&self.1);
+        }
+    }
+
+    let key = worker_key(&track, &worker);
+    let state = app.state::<AppState>();
+    {
+        // Under the `workers` lock, which is the one [`start_worker_turn`]
+        // makes its own checks under: marking and checking have to be one
+        // step, or a turn starting right now passes its check just before
+        // the mark goes down and is deleted out from under itself.
+        let workers = state.sessions.workers.lock().await;
+        if workers.get(&key).is_some_and(|live| live.running.is_some()) {
+            return Err(format!("{worker} is still working; stop it or wait for its report"));
+        }
+        // A session part-way through opening has no run yet, but it will:
+        // its `begin_run` lands after the slow checks below would have finished.
+        if state.sessions.opening.lock().contains(&key) {
+            return Err(format!("{worker} is starting a turn; wait for that before deleting it"));
+        }
+        if !state.sessions.deleting.lock().insert(key.clone()) {
+            return Err(format!("worker {worker} is already being deleted"));
+        }
+    }
+    // Nothing awaits between leaving that block and taking the guard, so
+    // the mark cannot be left behind.
+    let _deleting = Deleting(&state.sessions.deleting, key);
+
+    worker_close(app.clone(), track.clone(), worker.clone()).await?;
+    worktree::check_nothing_pending(&state.store, &track, std::slice::from_ref(&worker))?;
+    let gone = state.store.delete_worker(&track, &worker).map_err(|e| e.to_string())?;
+    forget_parked_of(&app, &track, &worker).await;
+    tracing::info!(%track, %worker, runs = gone, "deleted a worker's record; its folder and files stay");
+    Ok(gone)
+}
+
 /// What the UI shows about one worker's agent session.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WorkerState {
@@ -2456,7 +2673,10 @@ const CANCEL_GRACE: Duration = Duration::from_secs(15);
 pub async fn conductor_close(app: AppHandle, track: String) -> Result<ConductorState, String> {
     let st = app.state::<AppState>();
     if st.sessions.is_busy(&track) {
-        return Err("the conductor is still responding".to_string());
+        // Deliberately not worded like [`BUSY`]: that one means "not yet,
+        // it will go on its own" and the UI treats it that way. This one
+        // means the close did not happen.
+        return Err("the conductor is mid-turn; stop it or wait for it before closing".to_string());
     }
     if let Some(old) = st.sessions.conductors.lock().await.remove(&track) {
         tracing::info!(%track, agent = %old.live.agent, "closing conductor session (asked)");
@@ -2556,6 +2776,155 @@ pub async fn conductor_turn(
         st.sessions.end_turn(&track);
     }
     outcome
+}
+
+#[cfg(test)]
+mod parked_list_tests {
+    use super::*;
+
+    fn report(worker: &str, run: &str, at: i64) -> Parked {
+        Parked {
+            id: park_id(at),
+            text: format!("{REPORT_PREFIX} worker={worker} run={run} status=done\n\n{}", "x".repeat(4_000)),
+            open: false,
+            what: format!("report of {worker} run {run}"),
+            worker: Some(worker.to_string()),
+            run: Some(run.to_string()),
+            at,
+            why: "the conductor session is closed".to_string(),
+            tries: 1,
+        }
+    }
+
+    fn answer(at: i64, which: i64) -> Parked {
+        Parked {
+            id: park_id(at),
+            text: format!("{DECISION_PREFIX} #{which}"),
+            open: true,
+            what: format!("decision #{which}"),
+            worker: None,
+            run: None,
+            at,
+            why: "the conductor stayed busy".to_string(),
+            tries: 1,
+        }
+    }
+
+    // ----- telling one waiting turn from another -----
+
+    #[test]
+    fn entries_are_told_apart_by_id() {
+        let a = report("ui", "t001", 100);
+        let b = report("ui", "t002", 100);
+        assert!(a.is(&a.clone()));
+        assert!(!a.is(&b), "two reports parked in the same millisecond are still two");
+
+        // Two answers to one card, which is how a duplicate `what` arises.
+        let one = answer(100, 3);
+        let two = answer(100, 3);
+        assert_eq!(one.what, two.what);
+        assert_eq!(one.at, two.at);
+        assert!(!one.is(&two), "same text, same instant, different entries");
+    }
+
+    #[test]
+    fn entries_written_before_ids_fall_back_to_what_identified_them() {
+        let mut old = report("ui", "t001", 100);
+        let mut same = old.clone();
+        old.id = String::new();
+        same.id = String::new();
+        assert!(old.is(&same), "no id either side: matched on run, text and instant");
+
+        let mut other = report("ui", "t002", 100);
+        other.id = String::new();
+        assert!(!old.is(&other));
+
+        // One side has an id and the other does not: the fallback still decides.
+        let fresh = report("ui", "t001", 100);
+        assert!(old.is(&fresh), "an entry rewritten with an id is still the same entry");
+    }
+
+    // ----- what a flush removes -----
+
+    #[test]
+    fn a_flush_removes_what_it_handed_on_not_whatever_is_first() {
+        // The interleaving this guards: a flush copies the front entry,
+        // hands it on, and by the time it comes back the list has moved.
+        // Removing by position would drop a report nobody delivered.
+        let delivered = report("ui", "t001", 100);
+        let mut list = vec![report("api", "t002", 90), delivered.clone(), report("db", "t003", 110)];
+
+        assert!(list.iter().any(|item| item.is(&delivered)));
+        list.retain(|item| !item.is(&delivered));
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].run.as_deref(), Some("t002"), "the one in front of it is untouched");
+        assert_eq!(list[1].run.as_deref(), Some("t003"));
+
+        // Handed on twice (two flushes raced): the second finds nothing to
+        // remove and leaves the list alone rather than taking the next one.
+        assert!(!list.iter().any(|item| item.is(&delivered)));
+    }
+
+    // ----- the list does not grow without bound -----
+
+    #[test]
+    fn the_newest_reports_keep_their_text_and_the_older_ones_are_folded() {
+        let mut list: Vec<Parked> = (0..PARKED_FULL_TEXT + 5).map(|i| report("ui", &format!("t{i:03}"), i as i64)).collect();
+        let full = list[0].text.len();
+        fold_old(&mut list);
+
+        for (i, item) in list.iter().enumerate() {
+            if i < 5 {
+                assert!(item.text.len() < full, "an older report is folded to a stub");
+                assert!(item.text.starts_with(REPORT_PREFIX), "the header stays, so the timeline still finds its card");
+                assert!(item.text.contains(&format!("read_report(\"t{i:03}\")")), "and it says where the report is");
+                assert!(item.text.contains("worker=ui"));
+            } else {
+                assert_eq!(item.text.len(), full, "the newest keep their text");
+            }
+        }
+        assert_eq!(list.len(), PARKED_FULL_TEXT + 5, "folding never drops an entry");
+    }
+
+    #[test]
+    fn folding_is_idempotent_and_leaves_alone_what_it_cannot_fold() {
+        let mut list: Vec<Parked> = (0..PARKED_FULL_TEXT + 2).map(|i| report("ui", &format!("t{i:03}"), i as i64)).collect();
+        // A decision answer has no run, so there is nothing in the record
+        // to fold it back to: its text is all there is of it.
+        list.insert(0, answer(1, 7));
+        let kept = list[0].text.clone();
+
+        fold_old(&mut list);
+        let once = list[1].text.clone();
+        fold_old(&mut list);
+
+        assert_eq!(list[1].text, once, "folding twice writes the same stub");
+        assert_eq!(list[0].text, kept, "an answer with no run keeps its text");
+    }
+
+    #[test]
+    fn a_short_list_is_left_entirely_alone() {
+        let mut list: Vec<Parked> = (0..PARKED_FULL_TEXT).map(|i| report("ui", &format!("t{i:03}"), i as i64)).collect();
+        let before: Vec<String> = list.iter().map(|item| item.text.clone()).collect();
+        fold_old(&mut list);
+        assert_eq!(list.iter().map(|item| item.text.clone()).collect::<Vec<_>>(), before);
+    }
+
+    // ----- a deleted worker leaves nothing behind -----
+
+    #[test]
+    fn deleting_a_worker_takes_its_waiting_reports_and_no_others() {
+        // Its runs and its kept reports have just gone. An entry left
+        // pointing at one would draw a card with nothing behind it, and if
+        // it ever went through the conductor would be told to read a
+        // report that is not there.
+        let mut list = vec![report("ui", "t001", 100), answer(105, 3), report("api", "t002", 110), report("ui", "t003", 120)];
+        without_worker(&mut list, "ui");
+
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].what, "decision #3", "the conductor's own answer stays");
+        assert_eq!(list[1].worker.as_deref(), Some("api"), "so do other workers' reports");
+    }
 }
 
 #[cfg(test)]
@@ -2779,6 +3148,7 @@ mod parked_tests {
         assert!(parked_list(&store, "tr001").is_empty(), "nothing waits to begin with");
 
         let report = Parked {
+            id: park_id(1),
             text: format!("{REPORT_PREFIX} worker=ui run=t002 status=done"),
             open: false,
             what: "report of ui run t002".to_string(),
@@ -2789,6 +3159,9 @@ mod parked_tests {
             tries: 1,
         };
         let answer = Parked {
+            // Written before ids existed: it reads back with none, and
+            // `Parked::is` falls back for it.
+            id: String::new(),
             text: format!("{DECISION_PREFIX} #3"),
             open: true,
             what: "decision #3".to_string(),
@@ -2805,6 +3178,8 @@ mod parked_tests {
         assert_eq!(waiting[0].run.as_deref(), Some("t002"), "oldest first: the report goes in before what came after it");
         assert_eq!(waiting[1].what, "decision #3");
         assert!(!waiting[0].open, "a report still does not open a closed conductor");
+        assert!(!waiting[0].id.is_empty(), "the id comes back with the entry");
+        assert!(waiting[1].id.is_empty(), "and an older entry reads back without one");
 
         // One handed on: the rest stays.
         keep_parked(&store, "tr001", &waiting[1..]);
@@ -2822,6 +3197,7 @@ mod parked_tests {
         assert!(parked_list(&store, "tr001").is_empty(), "unreadable reads as nothing to hand on");
         // and writing over it works, so the track is not stuck.
         keep_parked(&store, "tr001", &[Parked {
+            id: park_id(3),
             text: "x".to_string(),
             open: false,
             what: "report of ui run t009".to_string(),
