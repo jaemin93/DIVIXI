@@ -9,8 +9,13 @@
 //!    installs an agent while Orchestra is open would never see it. The search
 //!    re-reads the registry PATH on Windows and checks known install
 //!    directories on every platform.
-//! 2. **Resolve** the ACP launch: a locally installed npm adapter, the CLI's
-//!    own `--acp` mode, or a downloaded server binary.
+//! 2. **Resolve** the ACP launch: an npm adapter kept in the app's adapter
+//!    folder (or, in development, the repo's node_modules), the CLI's own
+//!    `--acp` mode, or a downloaded server binary. Claude Code and Codex
+//!    speak ACP through Zed's adapters (now published by the ACP org); they
+//!    are installed once, at the pinned version, into the adapter folder
+//!    ([`install_npm_adapter`]) and run under `node` from there. Until then
+//!    they run through `npx`, which works but is slow to start.
 //! 3. **Probe** over the protocol: `initialize` reports name, version and
 //!    login methods; `session/new` answers `auth_required` when nobody has
 //!    logged in. See [`orchestra_acp::probe`].
@@ -367,15 +372,17 @@ fn spec_for(adapter: &Adapter) -> Option<AgentSpec> {
 }
 
 fn resolve_adapter(kind: AgentKind, cli: Option<&CliInfo>, adapters_dir: &Path) -> Adapter {
+    if let Some((package, script)) = npm_adapter(kind) {
+        // The repo's node_modules (development), then the adapter folder, then npx.
+        let found = find_local_script(script).or_else(|| installed_npm_adapter(adapters_dir, kind));
+        return match found {
+            Some(p) => Adapter::LocalScript { path: p.to_string_lossy().into_owned() },
+            None => Adapter::Npx { package: package.to_string() },
+        };
+    }
     match kind {
-        AgentKind::ClaudeCode => match find_local_script(orchestra_acp::CLAUDE_ADAPTER_SCRIPT) {
-            Some(p) => Adapter::LocalScript { path: p.to_string_lossy().into_owned() },
-            None => Adapter::Npx { package: orchestra_acp::CLAUDE_ADAPTER.to_string() },
-        },
-        AgentKind::Codex => match find_local_script(CODEX_ADAPTER_SCRIPT) {
-            Some(p) => Adapter::LocalScript { path: p.to_string_lossy().into_owned() },
-            None => Adapter::Npx { package: CODEX_ADAPTER.to_string() },
-        },
+        // Resolved above through their npm adapters.
+        AgentKind::ClaudeCode | AgentKind::Codex => Adapter::Missing { reason: "no ACP adapter".to_string() },
         AgentKind::Copilot => match cli {
             Some(c) => Adapter::Cli { path: c.path.clone() },
             None => Adapter::Missing { reason: "copilot CLI not found".to_string() },
@@ -390,6 +397,94 @@ fn resolve_adapter(kind: AgentKind, cli: Option<&CliInfo>, adapters_dir: &Path) 
             }
         }
     }
+}
+
+/// The npm adapter an agent speaks ACP through: `name@version` and its
+/// entry script under a folder with a `node_modules`.
+pub fn npm_adapter(kind: AgentKind) -> Option<(&'static str, &'static str)> {
+    match kind {
+        AgentKind::ClaudeCode => Some((orchestra_acp::CLAUDE_ADAPTER, orchestra_acp::CLAUDE_ADAPTER_SCRIPT)),
+        AgentKind::Codex => Some((CODEX_ADAPTER, CODEX_ADAPTER_SCRIPT)),
+        _ => None,
+    }
+}
+
+/// `<adapters>/<name>/<version>` for `@scope/name@version`. Short on
+/// purpose: Codex's own binary sits deep inside (node_modules/@openai/
+/// codex-win32-x64/vendor/…/codex.exe), and Windows will not start a program
+/// whose path runs past 260 characters.
+fn npm_adapter_dir(adapters_dir: &Path, package: &str) -> PathBuf {
+    let (name, version) = package.rsplit_once('@').filter(|(n, _)| !n.is_empty()).unwrap_or((package, "latest"));
+    adapters_dir.join(name.rsplit('/').next().unwrap_or(name)).join(version)
+}
+
+/// The adapter's entry script, if it is installed in the adapter folder.
+pub fn installed_npm_adapter(adapters_dir: &Path, kind: AgentKind) -> Option<PathBuf> {
+    let (package, script) = npm_adapter(kind)?;
+    let path = npm_adapter_dir(adapters_dir, package).join(script);
+    path.is_file().then_some(path)
+}
+
+/// Install an agent's npm adapter, at the pinned version, into the adapter
+/// folder: `npm install` into a fresh folder beside it, moved into place
+/// only once the entry script is there, so a failed or cut-off install
+/// never looks installed. Safe to call again: an existing install is
+/// returned as it is. Needs npm (it comes with Node, which the adapter
+/// runs under anyway).
+pub async fn install_npm_adapter(kind: AgentKind, adapters_dir: &Path) -> anyhow::Result<PathBuf> {
+    let (package, script) = npm_adapter(kind).ok_or_else(|| anyhow::anyhow!("{} has no npm adapter", kind.name()))?;
+    if let Some(existing) = installed_npm_adapter(adapters_dir, kind) {
+        return Ok(existing);
+    }
+    let dir = npm_adapter_dir(adapters_dir, package);
+    let parent = dir.parent().ok_or_else(|| anyhow::anyhow!("no folder for {package}"))?;
+    std::fs::create_dir_all(parent)?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tmp = parent.join(format!(".install-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&tmp)?;
+    tracing::info!(package, dir = %dir.display(), "installing ACP adapter");
+
+    // npm is a .cmd shim on Windows; Rust quotes a .cmd's arguments safely.
+    let mut cmd = tokio::process::Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" });
+    cmd.args(["install", "--prefix"])
+        .arg(&tmp)
+        .args(["--no-audit", "--no-fund", "--omit=dev", "--loglevel=error", package])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let run = cmd.output();
+    let out = match tokio::time::timeout(Duration::from_secs(600), run).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(err)) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            anyhow::bail!("could not run npm (is Node.js installed?): {err}");
+        }
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            anyhow::bail!("npm install {package} took over ten minutes");
+        }
+    };
+    if !out.status.success() || !tmp.join(script).is_file() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        let err = String::from_utf8_lossy(&out.stderr);
+        let tail: Vec<&str> = err.lines().rev().take(6).collect();
+        anyhow::bail!("npm install {package} failed: {}", tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+    }
+    // Another install may have finished first: keep that one.
+    if dir.join(script).is_file() {
+        let _ = std::fs::remove_dir_all(&tmp);
+    } else {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::rename(&tmp, &dir)?;
+    }
+    tracing::info!(package, "ACP adapter installed");
+    Ok(dir.join(script))
 }
 
 fn antigravity_dir(adapters_dir: &Path, release: &AntigravityRelease) -> PathBuf {
@@ -748,5 +843,18 @@ mod tests {
         assert_eq!(find_file(&dir, "srv.exe"), Some(nested.join("srv.exe")));
         assert_eq!(find_file(&dir, "other"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn npm_adapters_have_a_folder_per_version() {
+        let root = Path::new("/data/adapters");
+        assert_eq!(
+            npm_adapter_dir(root, "@agentclientprotocol/claude-agent-acp@0.79.0"),
+            root.join("claude-agent-acp").join("0.79.0")
+        );
+        assert_eq!(npm_adapter_dir(root, "plain@1.2.3"), root.join("plain").join("1.2.3"));
+        assert!(npm_adapter(AgentKind::ClaudeCode).is_some() && npm_adapter(AgentKind::Codex).is_some());
+        assert!(npm_adapter(AgentKind::Copilot).is_none());
+        assert_eq!(installed_npm_adapter(Path::new("/nowhere"), AgentKind::Codex), None);
     }
 }

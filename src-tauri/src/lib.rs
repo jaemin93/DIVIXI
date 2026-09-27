@@ -962,10 +962,12 @@ fn set_setting(state: State<'_, AppState>, key: String, value: String) -> Result
 /// Detect every agent now and remember the result. Takes several seconds:
 /// each agent is launched and probed over ACP.
 #[tauri::command]
-async fn detect_agents(state: State<'_, AppState>) -> Result<Vec<AgentStatus>, String> {
+async fn detect_agents(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<AgentStatus>, String> {
     let opts = state.detect_options();
     let statuses = orchestra_agents::detect_all(&opts).await;
-    state.save_agents(statuses)
+    let saved = state.save_agents(statuses)?;
+    install_adapters_in_background(&app);
+    Ok(saved)
 }
 
 /// Run an agent's ACP login flow and re-probe it. May open a browser.
@@ -993,7 +995,8 @@ struct DownloadEvent {
     progress: orchestra_agents::DownloadProgress,
 }
 
-/// Download an agent's ACP server (Antigravity only, for now) and re-detect it.
+/// Download an agent's ACP server (Antigravity) or install its npm adapter
+/// (Claude Code, Codex) into the adapter folder, and re-detect it.
 ///
 /// Progress goes out as `agent_download` events so the webview can draw a bar.
 #[tauri::command]
@@ -1003,18 +1006,60 @@ async fn download_agent(
     agent: String,
 ) -> Result<AgentStatus, String> {
     let kind = AgentKind::parse(&agent).ok_or_else(|| format!("unknown agent {agent}"))?;
-    if kind != AgentKind::Antigravity {
-        return Err(format!("{} needs no download", kind.name()));
-    }
     let id = kind.id().to_string();
-    orchestra_agents::download_antigravity_with(&state.adapters_dir, move |progress| {
-        let _ = app.emit("agent_download", DownloadEvent { agent: id.clone(), progress });
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    match kind {
+        AgentKind::Antigravity => {
+            orchestra_agents::download_antigravity_with(&state.adapters_dir, move |progress| {
+                let _ = app.emit("agent_download", DownloadEvent { agent: id.clone(), progress });
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        _ if orchestra_agents::npm_adapter(kind).is_some() => {
+            // npm says no byte counts: the bar only shows it working.
+            let _ = app.emit("agent_download", DownloadEvent { agent: id.clone(), progress: orchestra_agents::DownloadProgress { phase: orchestra_agents::DownloadPhase::Downloading, received: 0, total: None } });
+            orchestra_agents::install_npm_adapter(kind, &state.adapters_dir).await.map_err(|e| e.to_string())?;
+            let _ = app.emit("agent_download", DownloadEvent { agent: id, progress: orchestra_agents::DownloadProgress { phase: orchestra_agents::DownloadPhase::Done, received: 0, total: None } });
+        }
+        _ => return Err(format!("{} needs no download", kind.name())),
+    }
     let opts = state.detect_options();
     let next = orchestra_agents::detect(kind, &opts).await;
     state.update_agent(next)
+}
+
+/// Agents that still run their npm adapter through `npx` (slow to start)
+/// get it installed into the adapter folder, in the background, once; each
+/// is detected again after, so new sessions run it from there. A failure
+/// (no npm, no network) leaves npx in place, to try again next start.
+pub(crate) fn install_adapters_in_background(app: &AppHandle) {
+    static BUSY: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<AgentKind>>> = std::sync::OnceLock::new();
+    let Ok(Some(statuses)) = app.state::<AppState>().load_agents() else { return };
+    for status in statuses {
+        let kind = status.kind;
+        if !matches!(status.adapter, orchestra_agents::Adapter::Npx { .. }) || orchestra_agents::npm_adapter(kind).is_none() {
+            continue;
+        }
+        if !BUSY.get_or_init(Default::default).lock().insert(kind) {
+            continue;
+        }
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
+            match orchestra_agents::install_npm_adapter(kind, &state.adapters_dir).await {
+                Ok(_) => {
+                    let next = orchestra_agents::detect(kind, &state.detect_options()).await;
+                    if let Err(err) = state.update_agent(next) {
+                        tracing::warn!(agent = kind.id(), %err, "could not keep the agent after installing its adapter");
+                    }
+                }
+                Err(err) => tracing::warn!(agent = kind.id(), %err, "adapter install failed; npx stays in use"),
+            }
+            if let Some(busy) = BUSY.get() {
+                busy.lock().remove(&kind);
+            }
+        });
+    }
 }
 
 /// Persist session events and forward them to the webview, coalescing
@@ -1385,6 +1430,9 @@ pub fn run() {
             }
             // Remote instances: in divixi-server, events are kept for its windows and its server comes up.
             remote::boot(app.handle());
+            // Adapters still run through npx (an install detected before they
+            // were kept in the adapter folder) get installed there.
+            install_adapters_in_background(app.handle());
             // A server has nobody to run setup: it looks for its agents itself, once.
             #[cfg(feature = "server")]
             {
@@ -1397,6 +1445,7 @@ pub fn run() {
                         if let Err(err) = state.save_agents(statuses) {
                             tracing::warn!(%err, "could not keep the detected agents");
                         }
+                        install_adapters_in_background(&handle);
                     }
                 });
             }
