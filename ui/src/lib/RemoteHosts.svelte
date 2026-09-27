@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke, instanceId, switchInstance, onInstanceStatus } from "./ipc.svelte";
+  import { invoke, onInstanceStatus } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
@@ -25,6 +25,9 @@
     local_port: number | null;
     connected: boolean;
     online: boolean;
+    version: string | null;
+    build: string | null;
+    stale: boolean;
   };
 
   const PORT = 7488;
@@ -38,7 +41,7 @@
   let confirmDelete = $state("");
   let first = $state<HTMLInputElement>();
 
-  const blank = (): Host => ({ id: "", name: "", kind: "ssh", url: "", ssh: "", port: PORT, bin: BIN, path: "", local_port: null, connected: false, online: false });
+  const blank = (): Host => ({ id: "", name: "", kind: "ssh", url: "", ssh: "", port: PORT, bin: BIN, path: "", local_port: null, connected: false, online: false, version: null, build: null, stale: false });
 
   onMount(() => {
     invoke<Host[]>("remote_hosts")
@@ -69,7 +72,7 @@
     if (!editing) return;
     formError = "";
     try {
-      const { local_port: _lp, connected: _c, online: _o, ...host } = editing;
+      const { local_port: _lp, connected: _c, online: _o, version: _v, build: _b, stale: _s, ...host } = editing;
       const port = Number(host.port) || PORT;
       // An empty name takes the one the field suggests.
       const name = host.name.trim() || t("remote.namePlaceholder", { n: hosts.length + 1 });
@@ -85,9 +88,8 @@
     error = "";
     confirmDelete = "";
     try {
+      // Disconnecting or deleting closes the instance's webview too (Local shows).
       hosts = await invoke<Host[]>(cmd, { id });
-      // The instance on screen is gone: back to this PC.
-      if (cmd !== "remote_host_connect" && id === instanceId) switchInstance(null);
     } catch (err) {
       error = String(err);
     } finally {
@@ -125,7 +127,7 @@
             {:else}<span class="tag">SSH</span>{h.ssh} · {t("remote.remotePort", { port: h.port })}{/if}
           </div>
           <div class="state" class:on={h.online} class:trying={on && !h.online}>
-            <span class="dot"></span>{#if !on}{t("remote.notConnected")}{:else if !h.online}{t("instances.link.trying")}{:else if h.local_port !== null}{t("remote.connected", { port: h.local_port })}{:else}{t("instances.link.online")}{/if}
+            <span class="dot"></span>{#if h.stale}<span class="stale">{t("instances.stale", { version: h.version ?? "?", build: h.build ?? "?" })}</span>{:else if !on}{t("remote.notConnected")}{:else if !h.online}{t("instances.link.trying")}{:else if h.local_port !== null}{t("remote.connected", { port: h.local_port })}{:else}{t("instances.link.online")}{/if}
           </div>
         </div>
         <div class="acts">
@@ -326,7 +328,8 @@
     background: var(--ok);
   }
 
-  .state.trying {
+  .state.trying,
+  .stale {
     color: var(--warn);
   }
 

@@ -10,37 +10,24 @@ import { listen as tauriListen } from "@tauri-apps/api/event";
  * commands then go through this app (`instance_invoke`), which holds the
  * instance's tunnel and tokens (src-tauri/src/remote/client.rs), and its
  * events come back as `instance-event`. A few commands stay with this app
- * whatever is shown ([`OWN`]). Switching reloads the page.
+ * whatever is shown ([`OWN`]). Each instance shown has a webview of its
+ * own in the window (kept warm when another is shown), told its instance
+ * before it runs (`window.__DIVIXI_INSTANCE__`); the window's first
+ * webview is Local.
  */
 
 /** Whether the page runs in the app's window (not a bare browser in development). */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-const INSTANCE_KEY = "divixi.instance";
-
-/** The remote instance this window shows, or null for this PC. */
-export const instanceId: string | null = (() => {
-  if (!inTauri) return null;
-  try {
-    return sessionStorage.getItem(INSTANCE_KEY);
-  } catch {
-    return null;
-  }
-})();
+/** The remote instance this webview shows, or null for this PC. */
+export const instanceId: string | null = inTauri ? ((window as unknown as { __DIVIXI_INSTANCE__?: string }).__DIVIXI_INSTANCE__ ?? null) : null;
 
 /** This PC's own Divixi: its folders, terminal and files are at hand. */
 export const local = inTauri && instanceId === null;
 
-/** Show another instance (or this PC, null) in this window. */
-export function switchInstance(id: string | null) {
-  try {
-    if (id) sessionStorage.setItem(INSTANCE_KEY, id);
-    else sessionStorage.removeItem(INSTANCE_KEY);
-  } catch {
-    // No storage: stay where we are.
-    return;
-  }
-  location.reload();
+/** Show another instance (or this PC, null) in this window: its webview comes to the front. */
+export function switchInstance(id: string | null): Promise<void> {
+  return tauriInvoke("show_instance", { id });
 }
 
 /**
@@ -49,6 +36,7 @@ export function switchInstance(id: string | null) {
  * there, see `bring`), and opening a link (in this PC's browser).
  */
 const OWN = new Set([
+  "show_instance",
   "remote_hosts",
   "remote_host_save",
   "remote_host_delete",

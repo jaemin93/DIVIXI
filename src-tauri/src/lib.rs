@@ -75,7 +75,7 @@ pub struct AppState {
     /// CPU, memory and disk readings for the title bar.
     meter: metrics::Meter,
     /// Shells in the bottom panel.
-    terminals: terminal::Terminals,
+    pub(crate) terminals: terminal::Terminals,
     /// The knowledge library and its sync queue.
     pub(crate) library: knowledge::Library,
     /// Reaching the app from a phone (src/remote).
@@ -1199,6 +1199,7 @@ pub fn run() {
             remote::client::instance_invoke,
             remote::client::instance_upload,
             remote::client::instance_save_as,
+            remote::client::show_instance,
             browse_dirs,
             make_dir,
             remote::remote_server_status,

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { instance, switchInstance } from "./ipc.svelte";
+  import { instance, instanceId, invoke } from "./ipc.svelte";
   import Mark from "./Mark.svelte";
   import { t } from "./i18n.svelte";
 
@@ -12,7 +12,8 @@
   <pre class="mono why">{instance.error}</pre>
   <div class="acts">
     <button class="btn btn-acc" onclick={() => location.reload()}>{t("instances.retry")}</button>
-    <button class="btn" onclick={() => switchInstance(null)}>{t("instances.backLocal")}</button>
+    <!-- Its webview goes (Local shows); picking it again starts afresh. -->
+    <button class="btn" onclick={() => void invoke("remote_host_disconnect", { id: instanceId })}>{t("instances.backLocal")}</button>
   </div>
 </main>
 

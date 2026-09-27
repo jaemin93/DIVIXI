@@ -33,6 +33,10 @@ pub struct Remote {
     pub auth: auth::Auth,
     pub events: Arc<events::Hub>,
     running: tokio::sync::Mutex<Option<Running>>,
+    /// Shells another PC opened here, by terminal id: the device's.
+    pub terms: parking_lot::Mutex<std::collections::HashMap<u64, String>>,
+    /// Event sockets open, by device: a device with none for a while is gone.
+    pub sockets: parking_lot::Mutex<std::collections::HashMap<String, usize>>,
 }
 
 struct Running {
@@ -43,7 +47,13 @@ struct Running {
 
 impl Remote {
     pub fn open(data_dir: &Path) -> anyhow::Result<Self> {
-        Ok(Self { auth: auth::Auth::open(data_dir)?, events: Arc::new(events::Hub::default()), running: tokio::sync::Mutex::new(None) })
+        Ok(Self {
+            auth: auth::Auth::open(data_dir)?,
+            events: Arc::new(events::Hub::default()),
+            running: tokio::sync::Mutex::new(None),
+            terms: Default::default(),
+            sockets: Default::default(),
+        })
     }
 }
 

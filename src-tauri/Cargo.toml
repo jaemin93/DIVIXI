@@ -40,7 +40,8 @@ orchestra-store = { path = "../crates/store" }
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = ["tray-icon"] }
+# unstable: more than one webview in a window (a warm one per remote instance).
+tauri = { version = "2", features = ["tray-icon", "unstable"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 # Remote instances (src/remote): the server and its signed tokens.
@@ -62,4 +63,4 @@ imagesize = "0.13"
 
 [dev-dependencies]
 # A mock app for the remote bridge's tests.
-tauri = { version = "2", features = ["tray-icon", "test"] }
+tauri = { version = "2", features = ["tray-icon", "unstable", "test"] }

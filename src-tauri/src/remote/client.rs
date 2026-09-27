@@ -1,7 +1,10 @@
 //! Using a Divixi on another machine from this app (Kiro Crew's remote
 //! instances), in the same window: the header switches between this PC and
-//! an instance, and while an instance is chosen the page's commands, events
-//! and file previews go there through this module (ui/src/lib/ipc.svelte.ts).
+//! an instance. Each instance shown gets a webview of its own in the main
+//! window, kept warm (hidden, not closed) when another is shown, so going
+//! back is instant; [`WARM`] at most, the least recently shown closed
+//! first. That webview's commands, events and file previews go to its
+//! instance through this module (ui/src/lib/ipc.svelte.ts).
 //!
 //! Connecting, two ways. Over SSH: divixi-server is started there if it is
 //! not running, a pairing token is minted there (`divixi-server token`), an
@@ -78,7 +81,15 @@ pub struct HostView {
     pub connected: bool,
     /// Connected, and its link answering now.
     pub online: bool,
+    /// Its version and build (a hash of its sources), once connected.
+    pub version: Option<String>,
+    pub build: Option<String>,
+    /// Built from other code than this app: some commands may not match.
+    pub stale: bool,
 }
+
+/// This app's build (see build.rs): an instance with another is out of step.
+pub const BUILD: &str = env!("DIVIXI_BUILD");
 
 /// Open connections, by host id.
 #[derive(Default)]
@@ -87,6 +98,8 @@ pub struct Tunnels {
     /// One connect at a time per host; the map is only held for a moment,
     /// so a slow SSH never holds up the others (or the list).
     gates: parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Instances with a webview, least recently shown first.
+    panes: parking_lot::Mutex<Vec<String>>,
 }
 
 impl Tunnels {
@@ -110,6 +123,9 @@ struct Conn {
     renewing: tokio::sync::Mutex<()>,
     /// The event socket is up and answering pings.
     online: std::sync::atomic::AtomicBool,
+    /// What its /api/health said when connecting.
+    version: String,
+    build: String,
 }
 
 /// The header's indicator: `instance-status` `{id, online}` whenever an
@@ -224,8 +240,23 @@ fn free_port() -> Result<u16, String> {
     std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|l| l.local_addr()).map(|a| a.port()).map_err(|e| e.to_string())
 }
 
+#[derive(Deserialize, Default)]
+struct Health {
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    build: String,
+}
+
+/// The instance's /api/health, if it answers.
+async fn health(http: &reqwest::Client, base: &str) -> Option<Health> {
+    let r = http.get(format!("{base}/api/health")).send().await.ok().filter(|r| r.status().is_success())?;
+    // An older instance says only {"ok":true}: no build to compare.
+    Some(serde_json::from_slice(&r.bytes().await.ok()?).unwrap_or_default())
+}
+
 /// Wait until the tunnel answers, or say why not.
-async fn wait_for(http: &reqwest::Client, base: &str, child: &mut tokio::process::Child) -> Result<(), String> {
+async fn wait_for(http: &reqwest::Client, base: &str, child: &mut tokio::process::Child) -> Result<Health, String> {
     for _ in 0..60 {
         if let Ok(Some(status)) = child.try_wait() {
             let mut err = String::new();
@@ -235,8 +266,8 @@ async fn wait_for(http: &reqwest::Client, base: &str, child: &mut tokio::process
             }
             return Err(format!("ssh ended ({status}): {}", err.trim()));
         }
-        if http.get(format!("{base}/api/health")).send().await.is_ok_and(|r| r.status().is_success()) {
-            return Ok(());
+        if let Some(h) = health(http, base).await {
+            return Ok(h);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -339,13 +370,12 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
     }
     let host = hosts(app).into_iter().find(|h| h.id == id).ok_or("no such remote instance")?;
     let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
-    let (base, local_port, mut child) = if host.kind == "direct" {
+    let (base, local_port, mut child, said) = if host.kind == "direct" {
         let base = host.url.trim_end_matches('/').to_string();
-        let up = http.get(format!("{base}/api/health")).send().await.is_ok_and(|r| r.status().is_success());
-        if !up {
+        let Some(said) = health(&http, &base).await else {
             return Err(format!("{base} did not answer: is that Divixi serving on its network?"));
-        }
-        (base, None, None)
+        };
+        (base, None, None, said)
     } else {
         let local_port = free_port()?;
         let base = format!("http://127.0.0.1:{local_port}");
@@ -357,8 +387,8 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("could not run ssh: {e}"))?;
-        wait_for(&http, &base, &mut child).await?;
-        (base, Some(local_port), Some(child))
+        let said = wait_for(&http, &base, &mut child).await?;
+        (base, Some(local_port), Some(child), said)
     };
     let tokens = match sign_in(app, &http, &base, &host).await {
         Ok(t) => t,
@@ -380,6 +410,8 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
         terms: parking_lot::Mutex::new(Vec::new()),
         renewing: tokio::sync::Mutex::new(()),
         online: std::sync::atomic::AtomicBool::new(false),
+        version: said.version,
+        build: said.build,
     });
     let pump = tauri::async_runtime::spawn(pump_events(app.clone(), conn.clone()));
     *conn.events.lock() = Some(pump);
@@ -522,10 +554,74 @@ pub async fn proxy(app: &AppHandle, id: &str, kind: &str, rest: &str) -> tauri::
 }
 
 async fn disconnect(app: &AppHandle, id: &str) {
+    close_pane(app, id);
     let conn = app.state::<AppState>().tunnels.open.lock().await.remove(id);
     if let Some(c) = conn {
         c.close(app).await;
     }
+}
+
+// ----- a webview per instance shown -----
+
+/// Webviews kept (hidden) besides the one shown, at most.
+const WARM: usize = 3;
+
+fn pane_label(id: &str) -> String {
+    format!("inst-{id}")
+}
+
+fn close_pane(app: &AppHandle, id: &str) {
+    app.state::<AppState>().tunnels.panes.lock().retain(|p| p != id);
+    if let Some(w) = app.get_webview(&pane_label(id)) {
+        let _ = w.close();
+    }
+}
+
+/// Show an instance in the main window (its warm webview, or a new one), or
+/// this PC (`None`: the window's own webview, under the others).
+#[tauri::command]
+pub async fn show_instance(app: AppHandle, id: Option<String>) -> Result<(), String> {
+    let window = app.get_window("main").ok_or("the app has no window")?;
+    let tunnels = &app.state::<AppState>().tunnels;
+    let shown = id.as_deref().map(pane_label);
+    if let Some(id) = &id {
+        if !hosts(&app).iter().any(|h| &h.id == id) {
+            return Err("no such remote instance".into());
+        }
+        let label = pane_label(id);
+        if app.get_webview(&label).is_none() {
+            // The page learns which instance it shows before it runs.
+            let script = format!("window.__DIVIXI_INSTANCE__ = {};", serde_json::Value::String(id.clone()));
+            let builder = tauri::webview::WebviewBuilder::new(&label, tauri::WebviewUrl::App("index.html".into())).initialization_script(&script).auto_resize();
+            let size = window.inner_size().map_err(|e| e.to_string())?;
+            window.add_child(builder, tauri::PhysicalPosition::new(0, 0), size).map_err(|e| e.to_string())?;
+        }
+        let mut panes = tunnels.panes.lock();
+        panes.retain(|p| p != id);
+        panes.push(id.clone());
+    }
+    // The others hide; past WARM kept, the least recently shown close.
+    let panes: Vec<String> = tunnels.panes.lock().clone();
+    let keep = WARM + usize::from(id.is_some());
+    let over = panes.len().saturating_sub(keep);
+    for (i, p) in panes.iter().enumerate() {
+        let label = pane_label(p);
+        let Some(w) = app.get_webview(&label) else { continue };
+        if Some(&label) == shown.as_ref() {
+            let _ = w.show();
+            let _ = w.set_focus();
+        } else if i < over {
+            close_pane(&app, p);
+        } else {
+            let _ = w.hide();
+        }
+    }
+    if id.is_none() {
+        if let Some(main) = app.get_webview("main") {
+            let _ = main.set_focus();
+        }
+    }
+    Ok(())
 }
 
 // ----- commands (this app's own page; never reachable remotely) -----
@@ -540,13 +636,21 @@ pub async fn remote_hosts(app: AppHandle) -> Vec<HostView> {
         .await
         .iter()
         .filter(|(_, c)| c.alive())
-        .map(|(k, c)| (k.clone(), (c.local_port, c.online.load(std::sync::atomic::Ordering::Relaxed))))
+        .map(|(k, c)| (k.clone(), c.clone()))
         .collect::<HashMap<_, _>>();
     hosts(&app)
         .into_iter()
-        .map(|h| {
-            let (local_port, online) = open.get(&h.id).copied().unwrap_or((None, false));
-            HostView { local_port, connected: open.contains_key(&h.id), online, host: h }
+        .map(|h| match open.get(&h.id) {
+            Some(c) => HostView {
+                local_port: c.local_port,
+                connected: true,
+                online: c.online.load(std::sync::atomic::Ordering::Relaxed),
+                version: (!c.version.is_empty()).then(|| c.version.clone()),
+                build: (!c.build.is_empty()).then(|| c.build.clone()),
+                stale: c.build != BUILD,
+                host: h,
+            },
+            None => HostView { local_port: None, connected: false, online: false, version: None, build: None, stale: false, host: h },
         })
         .collect()
 }

@@ -43,7 +43,7 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/auth/token", post(token))
         .route("/auth/github", post(github))
         .route("/auth/refresh", post(refresh))
-        .route("/api/health", get(|| async { axum::Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") })) }))
+        .route("/api/health", get(|| async { axum::Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "build": env!("DIVIXI_BUILD") })) }))
         // An attachment (up to 50 MB) comes as base64 in a command.
         .route("/api/invoke/{cmd}", post(invoke).layer(axum::extract::DefaultBodyLimit::max(72 * 1024 * 1024)))
         .route("/api/events", get(events))
@@ -159,9 +159,10 @@ async fn refresh(State(ctx): State<Ctx>, headers: HeaderMap) -> Response<Body> {
 // ----- commands and events -----
 
 async fn invoke(State(ctx): State<Ctx>, Path(cmd): Path<String>, headers: HeaderMap, body: Bytes) -> Response<Body> {
-    if let Err(r) = device(&ctx, &headers) {
-        return refused(r);
-    }
+    let who = match device(&ctx, &headers) {
+        Ok(d) => d.id,
+        Err(r) => return refused(r),
+    };
     let args: Value = if body.is_empty() {
         json!({})
     } else {
@@ -173,8 +174,19 @@ async fn invoke(State(ctx): State<Ctx>, Path(cmd): Path<String>, headers: Header
     if let Err(why) = super::bridge::allowed(&cmd, &args) {
         return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": why }))).into_response();
     }
+    let closing = (cmd == "term_close").then(|| args.get("id").and_then(Value::as_u64)).flatten();
     match super::bridge::invoke(&ctx.app, &cmd, args).await {
-        Ok(v) => axum::Json(json!({ "ok": v })).into_response(),
+        Ok(v) => {
+            // A shell is the device's that opened it (see `orphans`).
+            let terms = &ctx.state().remote.terms;
+            if let (true, Some(id)) = (cmd == "term_open", v.as_u64()) {
+                terms.lock().insert(id, who);
+            }
+            if let Some(id) = closing {
+                terms.lock().remove(&id);
+            }
+            axum::Json(json!({ "ok": v })).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": e }))).into_response(),
     }
 }
@@ -186,11 +198,55 @@ struct Since {
 }
 
 async fn events(State(ctx): State<Ctx>, headers: HeaderMap, Query(q): Query<Since>, ws: WebSocketUpgrade) -> Response<Body> {
-    if let Err(r) = device(&ctx, &headers) {
-        return refused(r);
-    }
+    let who = match device(&ctx, &headers) {
+        Ok(d) => d.id,
+        Err(r) => return refused(r),
+    };
     let hub = ctx.state().remote.events.clone();
-    ws.on_upgrade(move |socket| pump(socket, hub, q.since))
+    ws.on_upgrade(move |socket| async move {
+        *ctx.state().remote.sockets.lock().entry(who.clone()).or_default() += 1;
+        pump(socket, hub, q.since).await;
+        let left = {
+            let st = ctx.state();
+            let mut sockets = st.remote.sockets.lock();
+            let n = sockets.entry(who.clone()).or_default();
+            *n = n.saturating_sub(1);
+            *n
+        };
+        if left == 0 {
+            tauri::async_runtime::spawn(orphans(ctx.app.clone(), who));
+        }
+    })
+}
+
+/// How long a device may be away (no event socket) before its shells here
+/// are closed. The app pings every 10 s while it runs; this is a crash, a
+/// lost network, a laptop asleep.
+const AWAY: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Close the shells of a device that did not come back.
+async fn orphans(app: AppHandle, who: String) {
+    tokio::time::sleep(AWAY).await;
+    let st = app.state::<AppState>();
+    if st.remote.sockets.lock().get(&who).copied().unwrap_or(0) > 0 {
+        return;
+    }
+    let gone: Vec<u64> = {
+        let mut terms = st.remote.terms.lock();
+        let ids: Vec<u64> = terms.iter().filter(|(_, d)| **d == who).map(|(t, _)| *t).collect();
+        for t in &ids {
+            terms.remove(t);
+        }
+        ids
+    };
+    for t in &gone {
+        if let Ok(id) = u32::try_from(*t) {
+            st.terminals.close(id);
+        }
+    }
+    if !gone.is_empty() {
+        tracing::info!(device = %who, shells = gone.len(), "closed the shells of a device that went away");
+    }
 }
 
 async fn pump(mut socket: WebSocket, hub: Arc<super::events::Hub>, since: u64) {
