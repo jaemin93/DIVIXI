@@ -15,6 +15,8 @@
   import KnowledgeView from "./lib/KnowledgeView.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
   import Unreachable from "./lib/Unreachable.svelte";
+  import ErrorToasts from "./lib/ErrorToasts.svelte";
+  import CrashBanner from "./lib/CrashBanner.svelte";
   import { inTauri, instance } from "./lib/ipc.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
   import { slide } from "svelte/transition";
@@ -54,6 +56,14 @@
 <!-- The webview's own right-click menu (reload, inspect, …) is not the app's:
      it never opens. The app's menus open where they belong. -->
 <svelte:window onkeydown={onKey} oncontextmenu={(e) => e.preventDefault()} />
+
+<!-- Errors from anywhere in the app, over whatever is on screen. Mounted
+     once, outside every view, so none of them has to carry its own. -->
+<ErrorToasts />
+
+<!-- And, on the launch after a panic, what happened to the run before this
+     one. It stays until it is closed: unlike an error, it is already over. -->
+<CrashBanner />
 
 {#if instance.error}
   <div class="shell">

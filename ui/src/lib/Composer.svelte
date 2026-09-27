@@ -44,10 +44,16 @@
     if (kbQuery !== null) return;
     const something = text.trim() || store.attachments.length || store.kbPicked.length || (store.chatArtifact && store.designSelected.length);
     // A design picked a moment ago is still being written out: wait for it.
-    if (!something || store.busy || store.attaching > 0) return;
+    // A turn in flight is no reason to wait: the message joins the line.
+    if (!something || store.attaching > 0) return;
     draft = "";
     store.send(text);
-    queueMicrotask(grow);
+    // The box stays open through the turn, so it keeps the caret too: the
+    // next message (and Esc to stop) needs no click to get back here.
+    queueMicrotask(() => {
+      grow();
+      box?.focus();
+    });
   }
 
   /** The box grows with its text, up to eight lines; only past that does it scroll. */
@@ -168,6 +174,13 @@
         draft = "";
         return;
       }
+    }
+    // Esc stops the turn in flight, as it does in the agent's own terminal.
+    // The pickers above take Esc first; this is the box's own.
+    if (e.key === "Escape" && store.busy && !store.cancelling) {
+      e.preventDefault();
+      void store.cancelConductor();
+      return;
     }
     // Enter sends; Shift+Enter (and Ctrl/Alt+Enter) breaks the line.
     if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing) {
@@ -729,8 +742,7 @@
         bind:this={box}
         bind:value={draft}
         rows="1"
-        disabled={store.busy}
-        placeholder={store.busy ? t("composer.busy") : store.chatArtifact ? t("design.placeholder") : t("composer.placeholder")}
+        placeholder={store.busy ? t("composer.queueing") : store.chatArtifact ? t("design.placeholder") : t("composer.placeholder")}
         aria-label={t("composer.placeholder")}
         onkeydown={onKey}
         oninput={() => {
@@ -744,22 +756,29 @@
       ></textarea>
     </div>
     {#if store.busy}
-      <!-- While the conductor answers, the send button is a stop button: Ctrl+C. -->
+      <!-- While the conductor answers, a stop button stands beside the send
+           one (Ctrl+C, or Esc in the box); sending still works and queues. -->
       <button class="btn send stop" type="button" disabled={store.cancelling} onclick={() => store.cancelConductor()} title={t("composer.stopTitle")} aria-label={t("composer.stop")}>■</button>
-    {:else}
-      <button
-        type="button"
-        class="btn kbbtn"
-        class:on={kbQuery !== null}
-        onclick={() => (kbQuery === null ? startKb() : endKb())}
-        title={t("composer.kb.button")}
-        aria-label={t("composer.kb.button")}
-        aria-pressed={kbQuery !== null}
-      >
-        <Icon name="book" size={15} />
-      </button>
-      <button class="btn send" type="submit" disabled={(!draft.trim() && !store.attachments.length && !store.kbPicked.length) || store.attaching > 0 || kbQuery !== null} aria-label={t("composer.send")}>→</button>
     {/if}
+    <button
+      type="button"
+      class="btn kbbtn"
+      class:on={kbQuery !== null}
+      onclick={() => (kbQuery === null ? startKb() : endKb())}
+      title={t("composer.kb.button")}
+      aria-label={t("composer.kb.button")}
+      aria-pressed={kbQuery !== null}
+    >
+      <Icon name="book" size={15} />
+    </button>
+    <button
+      class="btn send"
+      class:queueing={store.busy}
+      type="submit"
+      disabled={(!draft.trim() && !store.attachments.length && !store.kbPicked.length) || store.attaching > 0 || kbQuery !== null}
+      title={store.busy ? t("composer.queueTitle") : t("composer.send")}
+      aria-label={store.busy ? t("composer.queueTitle") : t("composer.send")}>→</button
+    >
   </form>
 
   <div class="status">
@@ -773,8 +792,6 @@
     {/if}
 
     <span class="grow"></span>
-
-    {#if store.lastError}<span class="mono err" title={store.lastError}>{store.lastError}</span>{/if}
 
     <!-- context -->
     <Popover bind:open={contextOpen} align="right" width={280}>
@@ -1142,7 +1159,6 @@
     font-size: 14px;
     line-height: 22px;
     padding: 11px 14px;
-    outline: none;
     resize: none;
     overflow-y: hidden;
   }
@@ -1240,6 +1256,13 @@
     border-color: var(--acct);
   }
 
+  /* Sending while the conductor answers puts the message in the line, not
+     on the wire: the arrow says so by standing quieter. */
+  .send.queueing {
+    border-color: var(--line);
+    color: var(--dim);
+  }
+
   /* One row, always: chips shrink and cut before anything wraps. No
      overflow clipping here: the popovers open upward out of this row. */
   .status {
@@ -1285,15 +1308,6 @@
 
   .grow {
     flex: 1;
-  }
-
-  .err {
-    font-size: 10px;
-    color: var(--acct);
-    max-width: 360px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   /* Context: a hairline track, accent fill; no numbers until asked. */

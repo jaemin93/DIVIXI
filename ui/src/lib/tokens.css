@@ -35,6 +35,7 @@
   --membln: #2e1310;
   --sel: #151515;
   --sb: #242424;
+  --focus: #f0eeeb;
 }
 
 .lt {
@@ -71,6 +72,7 @@
   --membln: #e8c4c0;
   --sel: #eae7e1;
   --sb: #d3cfc7;
+  --focus: #0e0d0c;
 }
 
 :root {
@@ -131,6 +133,43 @@ body {
 button {
   font-family: inherit;
   cursor: pointer;
+}
+
+/* Where the keyboard is.
+ *
+ * `:focus-visible`, never `:focus`: a control clicked with the mouse is
+ * not ringed, one reached with Tab always is. (A text field is ringed
+ * either way — that is what the selector is specified to do, and a caret
+ * alone is a thin thing to hunt for.)
+ *
+ * The ring is the palette's highest-contrast ink: near-white on the dark
+ * theme, near-black on the light one, around 17:1 against every surface
+ * in the app where 3:1 is what a control's boundary is asked for. It is
+ * deliberately not the red accent, which already means brand, danger and
+ * "this is the primary button" — a ring in that colour would vanish into
+ * the controls already wearing it.
+ *
+ * Two pixels with one of offset: enough to read against a hairline
+ * border, tight enough not to be clipped by the scrolling lists and
+ * popovers it sits inside. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* Said to a screen reader, shown to nobody: the keys a control answers to
+   when there is no room (or no reason) to print them on it. Not
+   `display: none`, which would take it out of the accessibility tree too. */
+.offscreen {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* The mono uppercase micro-label is the house signature. */
