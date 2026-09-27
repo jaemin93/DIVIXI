@@ -3,9 +3,28 @@
   "private": true,
   "version": "0.1.0",
   "license": "Apache-2.0",
+  "description": "One conductor, many agents. A desktop app for directing coding agents: you talk to one conductor, and it divides the work among worker sessions that run side by side.",
+  "author": "The divixi contributors",
+  "homepage": "https://github.com/jaemin93/divixi#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jaemin93/divixi.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jaemin93/divixi/issues"
+  },
+  "keywords": [
+    "tauri",
+    "svelte",
+    "rust",
+    "coding-agent",
+    "acp",
+    "agent-client-protocol",
+    "desktop"
+  ],
   "type": "module",
   "engines": {
-    "node": "^20.19.0 || >=22.12.0"
+    "node": ">=22.18.0"
   },
   "scripts": {
     "dev": "vite",
@@ -13,6 +32,7 @@
     "test": "node --test \"ui/src/lib/**/*.test.ts\"",
     "check": "svelte-check --tsconfig ./tsconfig.json --tsgo --output human",
     "check:i18n": "node scripts/check-i18n.mjs",
+    "check:readme": "node scripts/check-readmes.mjs",
     "tauri": "tauri",
     "app": "tauri dev"
   },

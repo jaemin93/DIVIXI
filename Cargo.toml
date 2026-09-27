@@ -6,6 +6,9 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/jaemin93/divixi"
+homepage = "https://github.com/jaemin93/divixi"
+description = "One conductor, many agents."
 rust-version = "1.85"
 
 [workspace.dependencies]

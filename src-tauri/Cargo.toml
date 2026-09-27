@@ -3,6 +3,9 @@ name = "orchestra-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
 # `cargo run` (and so `tauri dev`) runs the desktop app, not divixi-server.
 default-run = "divixi"
 
