@@ -20,11 +20,18 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, master]
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+# Nothing here writes to the repository: it type-checks, tests, builds, and
+# uploads workflow artifacts (which use their own scoped token, not this one).
+# Declared so that a repository default of "read and write" does not hand a
+# write token to three jobs that have no use for one.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,6 +50,8 @@ jobs:
   frontend:
     name: Types, unit tests, i18n
     runs-on: ubuntu-22.04
+    # Node only; a minute in practice.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -72,9 +81,17 @@ jobs:
       - name: npm run check:i18n
         run: npm run check:i18n
 
+      # The English and Korean READMEs have to keep the same shape and working
+      # links. A pull request that edits only one of them reads fine on its own
+      # and leaves the other saying something else; nothing but this notices.
+      - name: npm run check:readme
+        run: npm run check:readme
+
   test:
     name: Test (${{ matrix.name }})
     needs: frontend
+    # Cold Rust build on the slowest runner, plus the suites.
+    timeout-minutes: 45
     strategy:
       # One platform failing should not hide the others: macOS has never been
       # verified, so its result is the interesting one.
@@ -128,7 +145,11 @@ jobs:
       - name: Agent process tree on Unix (report only, not yet gated)
         if: runner.os != 'Windows'
         continue-on-error: true
-        run: cargo test -p orchestra-acp --lib -- --ignored --exact process::tests::shutdown_kills_the_process_group
+        # Both of them: the graceful teardown and the aborted one. The second
+        # covers the path session.rs actually takes when a session fails to
+        # start, which is where the pgid-cleared-too-early leak lived.
+        # Quoted: a plain scalar ending in a colon reads as a mapping key.
+        run: "cargo test -p orchestra-acp --lib -- --ignored process::tests::"
 
       - name: Build app binary
         run: cargo build -p orchestra-app --bin divixi
@@ -161,6 +182,8 @@ jobs:
   bundle:
     name: Bundle (${{ matrix.name }}, unsigned)
     needs: test
+    # Release-profile build and three bundlers.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

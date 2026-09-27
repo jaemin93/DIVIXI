@@ -11,33 +11,114 @@
 # A tag that does not match that shape fails the `prepare` job with a message
 # saying what was expected, before any machine spends twenty minutes compiling.
 #
-# Signing is wired up but optional: with no certificates in secrets the macOS
-# and Windows bundles go out unsigned and the run still succeeds. See the
-# `secrets` notes on the bundle job for what to add later.
+# Three ways in:
+#
+#   push of a v* tag   a person cut the release; the date comes from the tag
+#   schedule           nightly at 07:00 in Seoul; `prepare` makes the tag
+#   workflow_dispatch  the same as the nightly, on demand
+#
+# ## The nightly makes its own tag, and finishes the job in one run
+#
+# A tag pushed with GITHUB_TOKEN does NOT start another workflow run. GitHub
+# does that on purpose, to stop a workflow from triggering itself forever. So
+# the nightly cannot push a tag and leave: nothing would pick it up, and the
+# release would never be built.
+#
+# Everything therefore happens in this one run. `prepare` decides the tag,
+# creates it, pushes it, and hands it down through `needs.prepare.outputs.tag`.
+# Downstream jobs must use that output and never `github.ref_name`, which on a
+# scheduled run is the default branch, not a tag.
+#
+# The same property is what keeps this safe: because the pushed tag raises no
+# event, there is no loop to guard against.
+#
+# Signing is wired up but optional, per platform and all-or-nothing: with no
+# certificates the bundles go out unsigned and the run succeeds with a warning,
+# with a full set they are signed, and with a partial set the job fails rather
+# than ship something that looks signed and is not. See the guard steps in the
+# bundle job for the secret names.
+#
+# ## Draft, then published by the workflow itself
+#
+# The release is created as a draft, every job attaches its assets to that one
+# draft, and the final `publish` job takes it public. No person presses
+# anything: review already happened on the pull request that put the code on the
+# default branch, so a second approval here would add a button without adding a
+# decision.
+#
+# The draft is therefore a staging area, not a review gate -- but it is load
+# bearing. Publishing at creation time would put a release with no installers in
+# front of everyone for the twenty-odd minutes the bundles take, notify every
+# watcher, and leave an empty release behind whenever a build broke. Publishing
+# last means a night that fails stays a draft and stays invisible.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  schedule:
+    # 22:00 UTC = 07:00 the next day in Seoul, so the release is waiting at the
+    # start of the working day, carrying the day that just ended. Korea has no
+    # daylight saving, so this is fixed all year.
+    #
+    # GitHub runs scheduled workflows on a best-effort basis and only on the
+    # default branch. A busy hour can delay the start by minutes to tens of
+    # minutes; workflow_dispatch is there for anything time-sensitive.
+    - cron: "0 22 * * *"
+  workflow_dispatch:
 
+# Read by default; the jobs that need to write say so themselves. Today that
+# is all of them -- prepare pushes the nightly tag, the rest create the release
+# and upload to it -- but the next job added here starts out unprivileged.
 permissions:
-  contents: write # create the release and upload assets to it
+  contents: read
+
+# One release at a time per ref. cancel-in-progress is deliberately FALSE:
+# cancelling a release halfway through leaves a draft holding one platform's
+# bundles and not the others, which is worse than making the second run wait.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # Parse the tag once, on one cheap machine, so a typo fails in seconds.
+  # Decide what is being released, on one cheap machine, so a typo or a quiet
+  # day costs seconds rather than three platform builds.
+  #
+  # Two paths, one per trigger, each in its own step so neither has to carry the
+  # other's conditionals:
+  #   `tag`     a pushed tag: read the date out of it, validate the shape
+  #   `nightly` schedule or dispatch: decide whether to release at all, then
+  #             pick a tag and push it
   prepare:
-    name: Read the tag
+    name: Decide the release
     runs-on: ubuntu-22.04
+    # Writes: the nightly pushes the tag it just decided on.
+    permissions:
+      contents: write
+    timeout-minutes: 10
     outputs:
-      date: ${{ steps.tag.outputs.date }}
-      title: ${{ steps.tag.outputs.title }}
-      seq: ${{ steps.tag.outputs.seq }}
+      # Whichever step ran; the other's outputs are empty strings.
+      tag: ${{ steps.tag.outputs.tag || steps.nightly.outputs.tag }}
+      date: ${{ steps.tag.outputs.date || steps.nightly.outputs.date }}
+      title: ${{ steps.tag.outputs.title || steps.nightly.outputs.title }}
+      seq: ${{ steps.tag.outputs.seq || steps.nightly.outputs.seq }}
+      # Only the nightly can decide there is nothing to do. A pushed tag is a
+      # person saying "release this", so it never skips.
+      skip: ${{ steps.nightly.outputs.skip || 'false' }}
     steps:
+      # fetch-depth: 0 for the whole history and every tag: `git rev-list
+      # <last tag>..HEAD` has to be able to reach back to the previous release,
+      # and the tag search below needs the tags to be present.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Parse the tag
+        if: github.event_name == 'push'
         id: tag
         shell: bash
         run: |
@@ -76,6 +157,7 @@ jobs:
           if [ "$seq" = "1" ]; then title="$date"; else title="$date ($seq)"; fi
 
           {
+            echo "tag=$tag"
             echo "date=$date"
             echo "seq=$seq"
             echo "title=$title"
@@ -83,9 +165,216 @@ jobs:
 
           echo "tag $tag -> release \"$title\""
 
+      # The nightly, and the manual run that behaves like it.
+      #
+      # Order matters: decide whether to release BEFORE making a tag, or a quiet
+      # day leaves a tag behind with no release attached to it.
+      - name: Decide and tag the nightly
+        id: nightly
+        if: github.event_name != 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Anything this workflow has released before -- git tags, not
+          # releases, and still deliberately so now that success publishes.
+          #
+          # A night that failed leaves a draft but it DOES leave its tag. Asking
+          # `gh release view` would skip such a night when counting "days already
+          # released", so a retry the next day would count commits from two days
+          # back and the release notes would double up. The tag is the record of
+          # "this day was attempted"; that is the thing worth measuring from.
+          last="$(git tag -l 'v[0-9]*' --sort=-creatordate | head -n 1)"
+
+          if [ -n "$last" ]; then
+            commits="$(git rev-list "${last}..HEAD" --count)"
+            echo "last release tag: $last ($commits commit(s) since)"
+          else
+            commits=1
+            echo "no release tag yet; treating this as the first release"
+          fi
+
+          if [ "$commits" -eq 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Nothing to release::No commits on $(git rev-parse --abbrev-ref HEAD) since $last, so no release was created today. The build and test jobs are skipped too."
+            echo "SKIPPING: HEAD is $last, nothing new."
+            exit 0
+          fi
+
+          # The date is Seoul's, not UTC's. The cron fires at 22:00 UTC, which is
+          # already 07:00 the next morning in Seoul -- so the KST date is the one
+          # a person reads on the release when they open it over breakfast. Using
+          # the UTC date would label that morning's release with yesterday.
+          #
+          # Assert the offset first. If the runner had no tz database, TZ would
+          # be ignored silently and this would quietly produce the UTC date --
+          # every nightly tag a day behind, with nothing in the log to say so.
+          # Better to stop. (Korea has no DST, so +0900 holds all year.)
+          offset="$(TZ=Asia/Seoul date +%z)"
+          if [ "$offset" != "+0900" ]; then
+            echo "::error title=Time zone database missing::TZ=Asia/Seoul resolved to '$offset', not +0900. Without tzdata the date below would silently be the UTC date, which is a day behind at this hour."
+            exit 1
+          fi
+          date="$(TZ=Asia/Seoul date +%F)"
+          echo "date in Seoul right now: $date (UTC: $(date -u +%F\ %T))"
+
+          # First release of the day is the bare date; later ones take .2, .3 …
+          # Checks tags and releases both: a draft release can exist for a tag
+          # whose git tag was deleted, and reusing that name would collide.
+          base="v$date"
+          candidate="$base"
+          seq=1
+          while [ -n "$(git tag -l "$candidate")" ] \
+                || gh release view "$candidate" >/dev/null 2>&1; do
+            seq=$((seq + 1))
+            candidate="${base}.${seq}"
+            if [ "$seq" -gt 50 ]; then
+              echo "::error title=Too many releases today::50 tags already exist for $date; refusing to keep counting."
+              exit 1
+            fi
+          done
+          tag="$candidate"
+          if [ "$seq" = "1" ]; then title="$date"; else title="$date ($seq)"; fi
+          echo "releasing as $tag -> \"$title\""
+
+          # Create and push it here, in this run. A tag pushed with GITHUB_TOKEN
+          # raises no workflow event (see the note at the top of this file), so
+          # nothing else will ever pick it up -- the jobs after this one are the
+          # only chance this tag has to become a release.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Divixi $title"
+          git push origin "refs/tags/$tag"
+
+          {
+            echo "skip=false"
+            echo "tag=$tag"
+            echo "date=$date"
+            echo "seq=$seq"
+            echo "title=$title"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # One draft, made once, before anything builds.
+  #
+  # Why not `releaseDraft: true` on each matrix leg: a draft has no git tag, so
+  # GitHub's get-release-by-tag cannot find it. Each leg would look for the
+  # release, miss the draft the previous leg made, and create its own -- leaving
+  # the Windows, macOS and Linux assets split across three drafts. Making it
+  # here once and handing the id down is what keeps them together.
+  create-release:
+    name: Create the draft release
+    needs: prepare
+    if: needs.prepare.outputs.skip == 'false'
+    runs-on: ubuntu-22.04
+    # Writes: creates the draft.
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    outputs:
+      release_id: ${{ steps.draft.outputs.release_id }}
+    steps:
+      - name: Create or reuse the draft
+        id: draft
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_TITLE: ${{ needs.prepare.outputs.title }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            const name = process.env.RELEASE_TITLE;
+            const { owner, repo } = context.repo;
+
+            // Drafts are invisible to get-release-by-tag, so list and match by
+            // hand. Includes drafts because the token has write access.
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner, repo, per_page: 100,
+            });
+            const sameTag = releases.filter((r) => r.tag_name === tag);
+
+            // A published release under this tag means the tag has already
+            // shipped. Re-running the workflow would rewrite assets people may
+            // already have downloaded, so stop instead.
+            // Still a guard now that publishing is automatic, and for the same
+            // reason: not overwriting assets people may already have
+            // downloaded. What changed is when it fires.
+            //
+            //   a night that partly failed   the release is still a draft
+            //                                (publish never ran), so the branch
+            //                                below reuses it -- "Re-run failed
+            //                                jobs" finishes the release
+            //   a night that succeeded       published, and this stops it
+            //   "Re-run all jobs"            prepare runs again and picks the
+            //                                next .N, so it makes a NEW release
+            //                                rather than repairing this one
+            const published = sameTag.find((r) => !r.draft);
+            if (published) {
+              core.setFailed(
+                `${tag} is already published (${published.html_url}). ` +
+                `Refusing to add assets to a released tag: someone may already have downloaded them. ` +
+                `To finish a run that failed part-way, use "Re-run failed jobs" -- that keeps this tag ` +
+                `and reuses its draft. "Re-run all jobs" would cut a new .N release instead.`,
+              );
+              return;
+            }
+
+            // A draft from an earlier failed run of the same tag: reuse it
+            // rather than pile up duplicates.
+            const draft = sameTag.find((r) => r.draft);
+            if (draft) {
+              core.info(`reusing draft ${draft.id} for ${tag}`);
+              core.setOutput('release_id', String(draft.id));
+              return;
+            }
+
+            const { data: made } = await github.rest.repos.createRelease({
+              owner, repo,
+              tag_name: tag,
+              name,
+              draft: true,
+              prerelease: false,
+              generate_release_notes: true,
+              target_commitish: context.sha,
+              // This body is written for readers, not for an editor: the
+              // `publish` job releases it as-is, so there is no "replace this
+              // line" step and nothing here may address a maintainer.
+              //
+              // `generate_release_notes: true` PRE-pends this body to the
+              // notes it generates, so everything below lands above the commit
+              // list -- which is the only place the signing warning gets read.
+              body: [
+                '### Nothing here is signed yet',
+                '',
+                'These installers carry no code-signing certificate, so both',
+                'systems will try to stop you opening them. That is expected for',
+                'now, not a sign that anything is wrong with the download.',
+                '',
+                '- **macOS** refuses an unsigned app outright, and Divixi has',
+                '  never been verified on a Mac at all. To open it anyway:',
+                '  right-click the app and choose *Open*, or clear the quarantine',
+                '  flag with `xattr -d com.apple.quarantine /Applications/Divixi.app`.',
+                '- **Windows** shows a SmartScreen warning. Choose *More info*,',
+                '  then *Run anyway*.',
+                '',
+                'If you would rather not do either, build from source -- the',
+                'README has the steps.',
+                '',
+                '---',
+                '',
+                `Built from \`${tag}\` (\`${context.sha}\`).`,
+                'The version in the manifests is semver and moves on its own',
+                'schedule; the release is named by date.',
+              ].join('\n'),
+            });
+            core.info(`created draft ${made.id} for ${tag}`);
+            core.setOutput('release_id', String(made.id));
+
   bundle:
     name: Bundle (${{ matrix.name }})
-    needs: prepare
+    needs: [prepare, create-release]
+    if: needs.prepare.outputs.skip == 'false'
     strategy:
       # Never abandon the other platforms because one failed: a release with
       # two of three installers is worth more than none, and the failure is
@@ -105,6 +394,10 @@ jobs:
           - name: linux
             os: ubuntu-22.04
             args: ""
+    # Writes: tauri-action uploads the bundles to the draft.
+    permissions:
+      contents: write
+    timeout-minutes: 60
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -118,25 +411,109 @@ jobs:
         if: matrix.rust-target != ''
         run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
 
-      # tauri-action reads the version from tauri.conf.json (semver, unchanged
-      # by this workflow) and runs beforeBuildCommand (npm run build) itself.
+      # Signing is all-or-nothing per platform, and a half-filled secret set
+      # fails here rather than quietly producing an unsigned bundle that looks
+      # like a signed one in the logs.
       #
-      # Signing, when the secrets exist. All of these are optional: unset, the
-      # bundles are produced unsigned and the step still succeeds.
+      # macOS needs six secrets together:
+      #   APPLE_CERTIFICATE            base64 of a "Developer ID Application" .p12
+      #   APPLE_CERTIFICATE_PASSWORD   that .p12's password
+      #   APPLE_SIGNING_IDENTITY       e.g. "Developer ID Application: NAME (TEAMID)"
+      #   APPLE_ID                     the Apple ID used to notarise
+      #   APPLE_PASSWORD               an app-specific password for that Apple ID
+      #   APPLE_TEAM_ID                the ten-character team id
       #
-      #   macOS, to stop Gatekeeper refusing the .dmg on other machines:
-      #     APPLE_CERTIFICATE            base64 of a "Developer ID Application" .p12
-      #     APPLE_CERTIFICATE_PASSWORD   that .p12's password
-      #     APPLE_SIGNING_IDENTITY       e.g. "Developer ID Application: NAME (TEAMID)"
-      #     APPLE_ID / APPLE_PASSWORD    Apple ID and an app-specific password, for notarising
-      #     APPLE_TEAM_ID                the ten-character team id
-      #   Windows, to stop SmartScreen warning on the installer:
-      #     WINDOWS_CERTIFICATE          base64 of a code-signing .pfx
-      #     WINDOWS_CERTIFICATE_PASSWORD that .pfx's password
-      #     (Windows signing also needs `bundle > windows > certificateThumbprint`
-      #      or a signCommand in tauri.conf.json; adding the secrets alone is
-      #      not enough.)
-      - uses: tauri-apps/tauri-action@v0
+      # Signed-but-not-notarised is deliberately NOT a state we ship: Gatekeeper
+      # treats a Developer-ID-signed, un-notarised app worse than an unsigned
+      # one, because it looks like it is trying to pass. So 0/6 or 6/6 only.
+      #
+      # Divixi has no auto-updater, so 0/6 produces a plainly unsigned bundle
+      # rather than an ad-hoc signed one. (An ad-hoc signature only matters when
+      # something has to verify a seal in place, which is an updater's job.)
+      - name: Resolve macOS signing mode
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          set=0
+          missing=""
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                      APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!name:-}" ]; then
+              set=$((set + 1))
+            else
+              missing="$missing $name"
+            fi
+          done
+
+          if [ "$set" -eq 6 ]; then
+            echo "macOS signing: Developer ID + notarization (6/6 secrets set)."
+          elif [ "$set" -eq 0 ]; then
+            echo "::warning title=Unsigned macOS bundle::No Apple secrets are set, so the .app and .dmg go out unsigned. Gatekeeper will refuse them on any machine that did not build them."
+          else
+            echo "::error title=Incomplete Apple signing secrets::$set of 6 Apple secrets are set. Signing needs all six or none -- a Developer-ID-signed but un-notarised bundle is worse for users than an unsigned one. Missing:$missing"
+            exit 1
+          fi
+
+      # Windows is the same rule plus one extra condition: the two secrets are
+      # not enough on their own. Tauri also needs `bundle > windows >
+      # certificateThumbprint` (or a signCommand) in tauri.conf.json, or it
+      # never invokes signtool and the installer comes out unsigned while the
+      # secrets sit there looking like they did something.
+      - name: Resolve Windows signing mode
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          set=0
+          [ -n "${WINDOWS_CERTIFICATE:-}" ] && set=$((set + 1)) || true
+          [ -n "${WINDOWS_CERTIFICATE_PASSWORD:-}" ] && set=$((set + 1)) || true
+
+          configured=$(node -e '
+            const c = require("./src-tauri/tauri.conf.json");
+            const w = (c.bundle && c.bundle.windows) || {};
+            process.stdout.write(w.certificateThumbprint || w.signCommand ? "yes" : "no");
+          ')
+          echo "secrets set: $set/2 | tauri.conf.json signing configured: $configured"
+
+          if [ "$set" -eq 2 ] && [ "$configured" = "yes" ]; then
+            echo "Windows signing: on."
+          elif [ "$set" -eq 0 ] && [ "$configured" = "no" ]; then
+            echo "::warning title=Unsigned Windows installer::No signing certificate, so SmartScreen will warn users until one is added."
+          elif [ "$set" -eq 2 ] && [ "$configured" = "no" ]; then
+            echo "::error title=Windows signing secrets are set but unused::Both WINDOWS_CERTIFICATE secrets exist, but tauri.conf.json has no bundle.windows.certificateThumbprint (or signCommand), so Tauri will never call signtool and the installer would ship unsigned. Add the config or remove the secrets."
+            exit 1
+          elif [ "$set" -eq 1 ]; then
+            echo "::error title=Incomplete Windows signing secrets::1 of 2 secrets is set. Provide both WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD, or neither."
+            exit 1
+          else
+            echo "::error title=Windows signing configured without secrets::tauri.conf.json asks for signing but no certificate secrets are set, so the build will fail inside signtool. Add the secrets or remove the config."
+            exit 1
+          fi
+
+      # Uploads into the draft `create-release` made, by id. Per tauri-action's
+      # docs, with `releaseId` set it does not consult `tagName`/`releaseName`
+      # to find a release, so they are omitted -- and `tagName` is better left
+      # out than passed: the docs also say that if it points at an existing
+      # release, `releaseDraft` has to match that release's state, which is one
+      # more thing to keep in step for no gain. The only documented cost of
+      # omitting it is where `latest.json` points, and Divixi has no updater so
+      # no `latest.json` is produced.
+      #
+      # The Apple secrets are handed over unconditionally; unset ones arrive as
+      # empty strings, which tauri-action treats as absent. The guard step above
+      # is what makes a half-filled set impossible to reach.
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0, 2026-03-14
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -147,29 +524,18 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          # Which release this binary came from, for the app's update check.
+          # src-tauri/build.rs bakes it in; without it a build calls itself a
+          # development build, which is the honest answer for a working copy.
+          #
+          # It must be `outputs.tag` (v2026-09-28). build.rs rejects the title
+          # ("2026-09-28 (2)") and the date, and panics on the spot rather than
+          # shipping a binary that reports a version nothing can parse. Set here
+          # per step, never at the top of the workflow: ci.yml and a developer's
+          # `npm run app` have to stay development builds.
+          DIVIXI_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: ${{ needs.prepare.outputs.title }}
-          # Left as a draft on purpose: the notes below are a raw commit list,
-          # the macOS build is unsigned until the certificates exist, and
-          # publishing is the one step that emails every watcher. A human opens
-          # the draft, writes the notes, and presses publish.
-          releaseDraft: true
-          prerelease: false
-          # Let GitHub list the commits since the previous tag; a person edits
-          # the draft afterwards.
-          releaseBody: |
-            Divixi ${{ needs.prepare.outputs.title }}
-
-            > Draft. Replace this with real notes before publishing.
-
-            Built from `${{ github.ref_name }}` (${{ github.sha }}).
-            App version in the manifests: see `tauri.conf.json`.
-
-            **macOS is untested and these bundles are unsigned.** macOS will
-            refuse to open the app until it is signed and notarised; on Windows
-            SmartScreen will warn.
-          generateReleaseNotes: true
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
 
   # divixi-server has no bundler: it is a bare binary a Linux box runs.
@@ -177,7 +543,12 @@ jobs:
   # convenience, not the documented path.
   server:
     name: divixi-server (linux)
-    needs: [prepare, bundle]
+    needs: [prepare, create-release, bundle]
+    if: needs.prepare.outputs.skip == 'false'
+    # Writes: uploads the server binary to the draft.
+    permissions:
+      contents: write
+    timeout-minutes: 30
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -192,20 +563,120 @@ jobs:
         run: npm run build
 
       - name: Build divixi-server
+        # Same tag as the bundles get, for the same reason: the server reports
+        # its build to the app that connects to it. See the note in the bundle
+        # job -- `outputs.tag`, not the title, and never workflow-wide.
+        env:
+          DIVIXI_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: cargo build --release -p orchestra-app --features server --bin divixi-server
 
-      # Attached to the draft the bundle job created, under a name that says
-      # which release it belongs to.
       - name: Stage the binary
         run: |
           mkdir -p staging
           cp target/release/divixi-server "staging/divixi-server-${{ needs.prepare.outputs.date }}-x86_64-linux"
 
-      - name: Upload to the release
-        uses: softprops/action-gh-release@v2
+      # By release id, not by tag. `gh release upload` and softprops both find
+      # the release by tag, which cannot work here: the release is a draft and a
+      # draft has no git tag, so they would create a second one.
+      - name: Upload to the draft release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ needs.prepare.outputs.title }}
-          draft: true
-          fail_on_unmatched_files: true
-          files: staging/divixi-server-*
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const release_id = Number(process.env.RELEASE_ID);
+            const { owner, repo } = context.repo;
+
+            const dir = 'staging';
+            const files = fs.readdirSync(dir);
+            if (files.length === 0) core.setFailed('nothing in staging/ to upload');
+
+            // A re-run would otherwise hit "asset already exists".
+            const { data: existing } = await github.rest.repos.listReleaseAssets({
+              owner, repo, release_id, per_page: 100,
+            });
+
+            for (const name of files) {
+              const old = existing.find((a) => a.name === name);
+              if (old) {
+                core.info(`replacing existing asset ${name}`);
+                await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: old.id });
+              }
+              const data = fs.readFileSync(path.join(dir, name));
+              await github.rest.repos.uploadReleaseAsset({
+                owner, repo, release_id, name, data,
+                headers: {
+                  'content-type': 'application/octet-stream',
+                  'content-length': data.length,
+                },
+              });
+              core.info(`uploaded ${name} (${data.length} bytes)`);
+            }
+
+  # The last step, and the only one that makes anything public.
+  #
+  # Publishing is automatic because the human review already happened: nothing
+  # reaches the default branch except through a reviewed pull request, so asking
+  # for a second approval here would only add a button nobody benefits from
+  # pressing. The draft is a staging area for assets, not a review gate.
+  #
+  # It has to come after `server`, which is the only point where every asset is
+  # attached -- the three platform bundles and the Linux server binary.
+  #
+  # Note there is NO `always()` here, and that is the safety property. A job
+  # whose `needs` failed or was cancelled is skipped by default, so a night
+  # where one platform broke never publishes: the release stays a draft, holding
+  # whatever did build, invisible to anyone watching the repository. Adding
+  # `always()` would publish half a release.
+  publish:
+    name: Publish the release
+    needs: [prepare, create-release, bundle, server]
+    if: needs.prepare.outputs.skip == 'false'
+    # Writes: flips the release out of draft.
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Un-draft the release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        with:
+          script: |
+            const release_id = Number(process.env.RELEASE_ID);
+            const tag = process.env.RELEASE_TAG;
+            const { owner, repo } = context.repo;
+
+            // Check the assets are really there before going public. The job
+            // graph already implies it, but a silent upload failure would
+            // otherwise publish an empty release, and that is the one outcome
+            // this whole arrangement exists to prevent.
+            const { data: assets } = await github.rest.repos.listReleaseAssets({
+              owner, repo, release_id, per_page: 100,
+            });
+            if (assets.length === 0) {
+              core.setFailed(
+                `${tag} has no assets attached; refusing to publish an empty release. ` +
+                `Look at the bundle and server jobs.`,
+              );
+              return;
+            }
+            core.info(`${assets.length} asset(s): ${assets.map((a) => a.name).join(', ')}`);
+
+            // make_latest is a STRING in this API, not a boolean. Passing a
+            // boolean silently skips it and the release gets no "Latest" badge.
+            const { data } = await github.rest.repos.updateRelease({
+              owner, repo, release_id,
+              draft: false,
+              make_latest: 'true',
+            });
+            core.info(`published ${data.html_url}`);
+            core.summary
+              .addHeading(`Released ${data.name}`, 2)
+              .addLink(data.html_url, data.html_url)
+              .addRaw(`\n\n${assets.length} asset(s) attached.`)
+              .write();

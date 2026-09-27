@@ -1,0 +1,33 @@
+# Keeps the pinned action SHAs (and the dependency trees) moving.
+#
+# Pinning third-party actions to a commit is only safe if something bumps them;
+# otherwise the repository quietly runs a year-old action. Dependabot opens a
+# pull request per update, which is also how the change gets reviewed.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    ignore:
+      # Pinned on purpose: the remote bridge uses unstable Tauri APIs, and the
+      # CLI refuses a mismatched @tauri-apps/api. See docs/development.md.
+      - dependency-name: "@tauri-apps/api"
+      - dependency-name: "@tauri-apps/cli"
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    ignore:
+      # Same reason, from the Rust side.
+      - dependency-name: "tauri"
+      - dependency-name: "tauri-build"

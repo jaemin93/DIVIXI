@@ -29,19 +29,21 @@ runs:
   steps:
     - uses: actions/setup-node@v4
       with:
-        # Matches the `engines` field in package.json: vite 8 needs
-        # ^20.19 || >=22.12 and vite-plugin-svelte needs ^20.19 || ^22.12 || >=24,
-        # so a bare "20" is not enough. Keep the three in step.
+        # Matches the `engines` field in package.json (>=22.18). The binding
+        # constraint is not vite but `npm test`, which runs node --test over
+        # .ts files: that needs glob expansion (21+) and unflagged type
+        # stripping (22.18+). "22" resolves to the newest 22.x, which is past
+        # both. Keep this and engines in step.
         node-version: 22
         cache: npm
 
     # The minimal profile has no clippy or rustfmt; anything extra is an input.
-    - uses: dtolnay/rust-toolchain@stable
+    - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-03
       if: inputs.rust == 'true'
       with:
         components: ${{ inputs.rust-components }}
 
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2, 2026-08-06
       if: inputs.rust == 'true'
       with:
         key: ${{ inputs.cache-key }}
