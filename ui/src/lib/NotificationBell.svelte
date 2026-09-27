@@ -1,23 +1,24 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { instanceId, switchInstance } from "./ipc.svelte";
-  import { inbox, markRead, markAllRead, remove, clearAll, GOTO, type Notice } from "./notify.svelte";
+  import { inbox, remove, clearAll, GOTO, type Notice } from "./notify.svelte";
   import { store } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
 
   /**
-   * The bell at the top right (as Kiro Crew's): how many notices are
-   * unread, and the list of them: search, read all, clear, grouped by day;
-   * one opens its track, on the Divixi it came from (another webview is
-   * told through localStorage, `GOTO`).
+   * The bell at the top right: the decision cards that wait for an answer,
+   * and nothing else. The badge is how many there are, so a number on it
+   * always means that many questions are unanswered; answering one takes it
+   * out of the list. One opens its card, on the Divixi it came from (another
+   * webview is told through localStorage, `GOTO`).
    */
   let open = $state(false);
   let query = $state("");
   let el = $state<HTMLDivElement>();
 
-  const unread = $derived(inbox.items.filter((x) => !x.read).length);
+  const waiting = $derived(inbox.items.length);
 
   const shown = $derived.by(() => {
     const q = query.trim().toLowerCase();
@@ -46,16 +47,29 @@
     return out;
   });
 
-  /** Open a notice's track where it lives. */
+  /**
+   * Bring the card on screen. A track that just opened renders its timeline
+   * over the next frames, so this waits for the card to exist.
+   */
+  function reveal(decision: number, left = 30) {
+    const card = document.getElementById(`decision-${decision}`);
+    if (card) {
+      card.scrollIntoView({ block: "center", behavior: "smooth" });
+      return;
+    }
+    if (left > 0) setTimeout(() => reveal(decision, left - 1), 100);
+  }
+
+  /** Open a notice's decision card where it lives. */
   function go(n: Notice) {
-    markRead(n.id);
     open = false;
     if (n.instance === instanceId) {
-      if (n.track) void store.selectTrack(n.track);
+      if (n.track) void store.selectTrack(n.track).then(() => reveal(n.decision));
+      else reveal(n.decision);
       return;
     }
     try {
-      localStorage.setItem(GOTO, JSON.stringify({ instance: n.instance, track: n.track, at: Date.now() }));
+      localStorage.setItem(GOTO, JSON.stringify({ instance: n.instance, track: n.track, decision: n.decision, at: Date.now() }));
     } catch {
       // No storage: it just switches.
     }
@@ -64,7 +78,7 @@
 
   /** A notice opened from another webview, meant for this one. */
   function take(raw: string | null) {
-    let g: { instance: string | null; track: string | null; at: number } | null = null;
+    let g: { instance: string | null; track: string | null; decision?: number; at: number } | null = null;
     try {
       g = raw ? JSON.parse(raw) : null;
     } catch {
@@ -72,6 +86,7 @@
     }
     if (!g || g.instance !== instanceId || Date.now() - g.at > 15_000 || !g.track) return;
     const track = g.track;
+    const decision = g.decision;
     try {
       localStorage.removeItem(GOTO);
     } catch {
@@ -79,8 +94,11 @@
     }
     // A fresh webview may not have its tracks yet.
     const tryOpen = (left: number) => {
-      if (store.tracks.some((x) => x.id === track)) void store.selectTrack(track);
-      else if (left > 0) setTimeout(() => tryOpen(left - 1), 300);
+      if (store.tracks.some((x) => x.id === track)) {
+        void store.selectTrack(track).then(() => {
+          if (typeof decision === "number") reveal(decision);
+        });
+      } else if (left > 0) setTimeout(() => tryOpen(left - 1), 300);
     };
     tryOpen(30);
   }
@@ -113,7 +131,7 @@
 <div class="nb" bind:this={el}>
   <button class="bell" class:on={open} onclick={() => (open = !open)} aria-haspopup="dialog" aria-expanded={open} aria-label={t("notify.title")} title={t("notify.title")}>
     <Icon name="bell" size={15} />
-    {#if unread}<span class="badge mono">{unread > 99 ? "99+" : unread}</span>{/if}
+    {#if waiting}<span class="badge mono">{waiting > 99 ? "99+" : waiting}</span>{/if}
   </button>
 
   {#if open}
@@ -121,9 +139,6 @@
       <div class="head">
         <span class="title">{t("notify.title")}</span>
         <span class="grow"></span>
-        <button class="ib" onclick={markAllRead} disabled={!unread} title={t("notify.readAll")} aria-label={t("notify.readAll")}>
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M1.5 8.5l3 3 6-7M7.5 11.5l1 0 6-7" /></svg>
-        </button>
         <button class="ib" onclick={clearAll} disabled={!inbox.items.length} title={t("notify.clear")} aria-label={t("notify.clear")}>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 9h5.6l.7-9M7 7v4.5M9 7v4.5" /></svg>
         </button>
@@ -133,17 +148,15 @@
         {#each groups as g (g.key)}
           <div class="mlab-sm group">{t(`notify.day.${g.key}`)}</div>
           {#each g.items as n (n.id)}
-            <div class="item" class:unread={!n.read}>
+            <div class="item">
               <button class="main" onclick={() => go(n)}>
-                <span class="kind {n.kind}"><Icon name="bell" size={13} /></span>
+                <span class="kind"><Icon name="bell" size={13} /></span>
                 <span class="what">
                   <span class="ntitle">{#if n.instanceName}<span class="inst">{n.instanceName}</span>{/if}{n.title}</span>
                   <span class="body">{n.body}</span>
                 </span>
                 <span class="side">
                   <span class="when">{whenLabel(n.at, store.now, store.lang)}</span>
-                  {#if n.count > 1}<span class="count mono">{n.count}</span>{/if}
-                  {#if !n.read}<span class="dot"></span>{/if}
                 </span>
               </button>
               <button class="x" onclick={() => remove(n.id)} aria-label={t("notify.remove")} title={t("notify.remove")}><Icon name="close" size={10} /></button>
@@ -255,7 +268,6 @@
     border: 1px solid var(--lines);
     color: var(--txt);
     font-size: 12.5px;
-    outline: none;
   }
 
   .search:focus {
@@ -305,15 +317,7 @@
     justify-content: center;
     border: 1px solid var(--line);
     background: var(--inp);
-    color: var(--dim);
-  }
-
-  .kind.decision {
     color: var(--warn);
-  }
-
-  .kind.failed {
-    color: var(--deltx);
   }
 
   .what {
@@ -330,10 +334,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .item:not(.unread) .ntitle {
-    color: var(--txt);
   }
 
   .inst {
@@ -367,22 +367,6 @@
     font-size: 11px;
     color: var(--lab);
     white-space: nowrap;
-  }
-
-  .count {
-    min-width: 16px;
-    padding: 0 4px;
-    font-size: 10px;
-    text-align: center;
-    color: var(--dim);
-    background: var(--sel);
-  }
-
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--acc);
   }
 
   .x {

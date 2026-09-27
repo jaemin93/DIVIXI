@@ -38,7 +38,7 @@
   }
 </script>
 
-<section class="decision" class:open class:dismissed={decision.status === "dismissed"}>
+<section id="decision-{decision.id}" class="decision" class:open class:dismissed={decision.status === "dismissed"}>
   <div class="head">
     <span class="mlab kind">{decision.permission ? t("decision.permission") : t("decision.label")} · #{decision.id}</span>
     {#if open}
@@ -281,7 +281,6 @@
     color: var(--txt);
     font-family: var(--sans);
     font-size: var(--chat-fs);
-    outline: none;
     resize: vertical;
   }
 
