@@ -12,7 +12,6 @@ crates/mcp/        in-process HTTP MCP server: the conductor's tools
 crates/store/      SQLite event store: append-only log, runs projection, FTS5
 src-tauri/         the app: commands, sessions, remote instances (src/remote), divixi-server
 ui/                Svelte 5 UI
-docs/design/       design notes
 ```
 
 ## Principles
@@ -37,19 +36,23 @@ npm run app                          # the app, in development mode (tauri dev)
 cargo build -p orchestra-app --features server --bin divixi-server
 ```
 
-Node 20.19+ or 22.12+, as `engines` in package.json says: vite 8 and
-vite-plugin-svelte both refuse anything older.
+Node 22.18+, as `engines` in package.json says. Not just vite's floor:
+`npm test` runs `node --test` over `.ts` files directly, which needs Node to
+expand the glob (21+) and to strip types without a flag (22.18+). On an older
+Node the other three checks pass and that one fails with
+`Unknown file extension ".ts"`.
 
 `tauri-build` reads the built UI from `dist/`, which is not in git, so on a fresh
 clone every cargo command needs `npm run build` to have run once. `npm run app`
 does it for you; a bare `cargo test` does not.
 
-The checks, which are the same four CI runs (`.github/workflows/ci.yml`):
+The checks, which are the same five CI runs (`.github/workflows/ci.yml`):
 
 ```bash
 npm run check                        # UI types (svelte-check)
 npm test                             # UI unit tests (node --test)
 npm run check:i18n                   # every string exists in both ko and en
+npm run check:readme                 # README.md and README.ko.md keep the same shape
 cargo test --workspace               # Rust (a couple of tests are Windows-only)
 ```
 

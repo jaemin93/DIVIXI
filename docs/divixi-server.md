@@ -43,7 +43,14 @@ nvm이든 배포판 패키지든 상관없습니다.
 
 ## 2. 소스 받기
 
-저장소를 받을 수 있으면 `git clone`을 씁니다. 저장소가 PC에만 있으면 PC에서 서버로 보냅니다.
+서버에서 바로 받는 것이 가장 간단합니다.
+
+```bash
+# 서버에서
+git clone https://github.com/jaemin93/divixi ~/divixi-src
+```
+
+아직 밀지 않은 변경을 올리거나 서버에서 GitHub에 닿지 못할 때는 PC에서 보냅니다.
 
 ```bash
 # PC에서 (저장소 폴더 안에서)

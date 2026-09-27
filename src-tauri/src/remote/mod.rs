@@ -1,4 +1,4 @@
-//! Remote instances. See docs/design/remote-access.md.
+//! Remote instances.
 //!
 //! Any Divixi can be a remote instance for other PCs' Divixi apps: the
 //! headless divixi-server always is, the desktop app when its settings say
@@ -7,6 +7,10 @@
 //! WebSocket. Who may come in is [`auth`]'s, with this machine's pairing
 //! tokens (over SSH) or its owner's GitHub account ([`github`]). The other
 //! side, reaching instances from this app, is [`client`].
+//!
+//! What this looks like to whoever runs one -- installing the headless server,
+//! connecting to it, keeping it running and updating it -- is
+//! docs/divixi-server.md.
 
 pub mod auth;
 pub mod bridge;

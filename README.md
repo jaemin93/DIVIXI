@@ -1,7 +1,15 @@
-# Divixi
+<p align="center">
+  <img src="docs/images/divixi.png" alt="" width="120" height="120">
+</p>
 
-**One conductor, many agents.** A desktop app for directing coding agents: you talk to one
-conductor, and it divides the work among worker sessions that run side by side.
+<h1 align="center">Divixi</h1>
+
+<p align="center"><strong>One conductor, many agents.</strong></p>
+
+<p align="center"><strong>English</strong> | <a href="README.ko.md">한국어</a></p>
+
+A desktop app for directing coding agents: you talk to one conductor, and it divides the
+work among worker sessions that run side by side.
 
 Divixi drives the agents you already use (Claude Code, Codex, GitHub Copilot, Antigravity)
 over the [Agent Client Protocol](https://agentclientprotocol.com), under your own logins.
@@ -33,9 +41,8 @@ and macOS is untested.
 
 **You need:**
 
-- **Node.js 20.19 or later** (or 22.12+). The Claude Code and Codex adapters are Node
-  programs. Divixi
-  installs them into its data folder on first use.
+- **Node.js 22.18 or later.** The Claude Code and Codex adapters are Node programs.
+  Divixi installs them into its data folder on first use.
 - **At least one agent, installed and signed in:**
 
 | Agent | Install | Sign in |
@@ -48,9 +55,11 @@ and macOS is untested.
 On first launch, Divixi finds the agents you have and checks that each one can open a
 session.
 
-**From source** (Rust stable, Node.js 20.19+):
+**From source** (Rust stable, Node.js 22.18+):
 
 ```bash
+git clone https://github.com/jaemin93/divixi
+cd divixi
 npm install
 npm run app                                     # development build, with a window
 npx tauri build                                 # installer in target/release/bundle
@@ -67,7 +76,15 @@ running, and update it.
 
 ## Data and privacy
 
-- **No telemetry.** Divixi sends nothing about you or your use anywhere.
+- **No telemetry.** Divixi sends nothing about you or your use anywhere — nothing
+  reported, counted or phoned home. The only request Divixi makes of a server is the
+  update check below, and only when you ask for it.
+- **Checking for updates.** Pressing *Check for updates* in **Settings → About** asks the
+  public GitHub API for the newest published release of this repository. The request
+  carries no sign-in, no version, no platform, and nothing that identifies you or this
+  machine. There is no check at startup and none on a timer. Divixi never downloads or
+  installs anything by itself: it tells you a release exists and opens its page in your
+  browser.
 - **Where your data lives.** Tracks, conversations, boards and the knowledge library are
   in the app's data folder: `%APPDATA%\app.divixi` on Windows, `~/.local/share/app.divixi`
   on Linux.
@@ -84,23 +101,25 @@ running, and update it.
 
 ## Contributing
 
-See [docs/development.md](docs/development.md) for how the code is laid out and how to
-work on it. Design notes are in [docs/design](docs/design).
+Start with **[CONTRIBUTING.md](CONTRIBUTING.md)**: how to report a bug, how to set up,
+the checks to run, and what to know before opening a pull request.
+[docs/development.md](docs/development.md) is the developer guide — how the code is laid
+out, the principles it is written to, and the traps worth knowing about.
+
+Everyone taking part is covered by the [Code of Conduct](CODE_OF_CONDUCT.md). For a
+security vulnerability, do not open a public issue: [SECURITY.md](SECURITY.md) has the
+private route.
 
 ### Reporting a bug
 
-Open **Settings → About → Diagnostics**. *Copy diagnostics* puts the version, your OS,
-the agents it found and the last warnings and errors on the clipboard as a Markdown
-block for the issue; it is shown on screen first, so you can read it before pasting it.
-*Open log folder* opens the log itself if more of it is wanted.
+Open **Settings → About → Diagnostics** and press *Copy diagnostics*. That puts the
+version, your OS, the agents Divixi found and the last warnings and errors on the
+clipboard as one Markdown block; it is shown on screen first, so you can read it before
+pasting. Attach it to a
+[bug report](https://github.com/jaemin93/divixi/issues/new?template=bug_report.yml).
 
-The same pane has **How much is logged**. Turning it up takes effect where you stand — no
-restart, so whatever you were reproducing is still on screen — and is remembered for next
-time. `DIVIXI_LOG` sets the level the app *starts* at and takes the same filters as
-`RUST_LOG`; what you choose in the settings comes after it.
-
-Debug and above also record what the agents write to stderr, so leave it up only while you
-need it.
+[CONTRIBUTING.md](CONTRIBUTING.md#reporting-a-bug) has the rest: where the log lives, and
+how to turn the logging up before you reproduce the problem.
 
 ## Acknowledgements
 
