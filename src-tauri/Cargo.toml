@@ -50,7 +50,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 # Remote instances (src/remote): the server and its signed tokens.
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws", "query"] }
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 ignore = "0.4"
 # The remote instance's event socket, from this app (axum's own WebSocket crate).
