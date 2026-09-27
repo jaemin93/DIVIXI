@@ -44,6 +44,9 @@
       .catch(() => {});
     // The log is this PC's own, as is the folder it lives in.
     if (local) invoke<LogLevel>("log_level").then((l) => (level = l)).catch(() => {});
+    // Which release this app is, for the update card. Reads a string compiled
+    // into the binary; asks GitHub nothing (src-tauri/src/update.rs).
+    if (local) invoke<string | null>("update_release").then((r) => (release = r)).catch(() => {});
   });
   function saveIdle() {
     const n = Math.max(0, Math.min(1440, Math.round(Number(idleMinutes) || 0)));
@@ -149,6 +152,63 @@
     } catch {
       // The report is on screen either way, so it can be copied by hand.
       store.lastError = t("settings.copyFailed");
+    }
+  }
+
+  // ----- updates -----
+
+  /**
+   * What `update_check` answers. Every outcome is a named case, failures
+   * included, so there is a line to show for each of them and none of them
+   * can go by unsaid. Mirrors `Check` in src-tauri/src/update.rs.
+   */
+  type Check =
+    | { kind: "dev_build" }
+    | { kind: "up_to_date"; current: string }
+    | { kind: "ahead"; current: string; latest: string }
+    | { kind: "update"; current: string; latest: string; url: string }
+    | { kind: "offline"; detail: string }
+    | { kind: "rate_limited"; detail: string }
+    | { kind: "no_release" }
+    | { kind: "failed"; detail: string }
+    | { kind: "bad_build"; current: string };
+
+  /** The release this build came from, or null for a development build. */
+  let release = $state<string | null>(null);
+  /** The last check's answer, or null before the button has been pressed. */
+  let check = $state<Check | null>(null);
+  let checking = $state(false);
+
+  /** The cases that are something wrong rather than an answer. */
+  const WRONG = new Set(["offline", "rate_limited", "no_release", "failed", "bad_build"]);
+
+  /**
+   * Ask GitHub, on this press and on no other occasion.
+   *
+   * There is deliberately no check at startup and none on a timer: the README
+   * promises divixi sends nothing anywhere on its own, and a request made
+   * without being asked for would be the one exception. See the module header
+   * in src-tauri/src/update.rs.
+   */
+  async function checkUpdate() {
+    checking = true;
+    check = null;
+    try {
+      check = await invoke<Check>("update_check");
+    } catch (err) {
+      // The command names a case for every failure it knows, so getting here
+      // means the call itself never landed. Still shown, not swallowed.
+      check = { kind: "failed", detail: String(err) };
+    }
+    checking = false;
+  }
+
+  /** The release's page in this PC's browser. Nothing is downloaded here. */
+  async function openRelease(url: string) {
+    try {
+      await invoke("open_url", { url });
+    } catch (err) {
+      store.lastError = t("settings.updateOpenFailed", { why: String(err) });
     }
   }
 
@@ -327,7 +387,61 @@
       </div>
       <p class="note">{t("settings.aboutNote")}</p>
 
+      <!-- This PC's own app is the one an update would replace, so the card is
+           local-only like the log folder and the diagnostics above it. A
+           remote instance is updated where it runs. -->
       {#if local}
+        <div class="group">
+          <div class="gtitle">{t("settings.updates")}</div>
+          <div class="card pad">
+            <div class="ftitle">{t("settings.updateCheck")}</div>
+            <p class="fnote">{t("settings.updateNote")}</p>
+            <p class="fnote now mono">
+              {release === null ? t("settings.updateDevBuild") : t("settings.updateRelease", { tag: release })}
+            </p>
+            <div class="actions">
+              <button class="btn" disabled={checking} onclick={checkUpdate}>
+                {checking ? t("settings.updateChecking") : t("settings.updateCheck")}
+              </button>
+            </div>
+            {#if check}
+              {@const c = check}
+              {@const wrong = WRONG.has(c.kind)}
+              <!-- A failure interrupts (role=alert); an answer is announced
+                   when the reader gets to it (role=status). The pair is kept
+                   in step, as in CrashBanner and ErrorToasts. -->
+              <div class="ures" role={wrong ? "alert" : "status"} aria-live={wrong ? "assertive" : "polite"}>
+                {#if c.kind === "dev_build"}
+                  <p class="fnote warn">{t("settings.updateDevNote")}</p>
+                {:else if c.kind === "up_to_date"}
+                  <p class="fnote ok">{t("settings.updateLatest", { tag: c.current })}</p>
+                {:else if c.kind === "ahead"}
+                  <p class="fnote">{t("settings.updateAhead", { tag: c.current, latest: c.latest })}</p>
+                {:else if c.kind === "update"}
+                  <p class="fnote found">{t("settings.updateFound", { tag: c.latest, current: c.current })}</p>
+                  <div class="actions">
+                    <button class="btn" onclick={() => openRelease(c.url)}>{t("settings.updateOpen")}</button>
+                  </div>
+                  <p class="fnote warn">{t("settings.updateUnsigned")}</p>
+                {:else if c.kind === "offline"}
+                  <p class="fnote bad">{t("settings.updateOffline")}</p>
+                  <p class="fnote why mono">{c.detail}</p>
+                {:else if c.kind === "rate_limited"}
+                  <p class="fnote bad">{t("settings.updateRateLimited")}</p>
+                  <p class="fnote why mono">{c.detail}</p>
+                {:else if c.kind === "no_release"}
+                  <p class="fnote bad">{t("settings.updateNoRelease")}</p>
+                {:else if c.kind === "bad_build"}
+                  <p class="fnote bad">{t("settings.updateBadBuild", { tag: c.current })}</p>
+                {:else}
+                  <p class="fnote bad">{t("settings.updateFailed")}</p>
+                  <p class="fnote why mono">{c.detail}</p>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        </div>
+
         <div class="group">
           <div class="gtitle">{t("settings.diag")}</div>
           <div class="card pad">
@@ -520,6 +634,40 @@
   .fnote.warn {
     margin: 8px 0 0;
     color: var(--warn);
+  }
+
+  /* The update check's answer, under the button that asked for it. */
+  .ures {
+    margin-top: 14px;
+  }
+
+  .ures .fnote {
+    margin: 0 0 8px;
+  }
+
+  .ures .fnote:last-child {
+    margin-bottom: 0;
+  }
+
+  .fnote.ok {
+    color: var(--ok);
+  }
+
+  /* A release is out: the one line in the card worth reading first. */
+  .fnote.found {
+    color: var(--hi);
+  }
+
+  .fnote.bad {
+    color: var(--acct);
+  }
+
+  /* What GitHub or the network actually said. English, like the diagnostics
+     report: it is quoted into an issue, not read for comfort. */
+  .fnote.why {
+    font-size: 11px;
+    color: var(--lab);
+    word-break: break-word;
   }
 
   /* The report as it will be pasted: scrolls, wraps nothing, selectable. */
