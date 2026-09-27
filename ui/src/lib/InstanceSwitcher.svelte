@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { invoke, instanceId, switchInstance } from "./ipc.svelte";
+  import { onMount } from "svelte";
+  import { invoke, instanceId, switchInstance, onInstanceStatus } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
@@ -7,8 +8,14 @@
   /**
    * The header's instance switcher (Kiro Crew's, top left): this PC, then
    * the remote instances by name. Choosing one shows it in this window.
+   * Each dot is its link now: green while it answers (the app pings it
+   * every 10 s), amber while connected but not answering (reconnecting),
+   * grey when not connected. It follows `instance-status` as it happens,
+   * and the list is read again every 10 s besides.
    */
-  type Host = { id: string; name: string; kind: string; url: string; ssh: string; connected: boolean };
+  type Host = { id: string; name: string; kind: string; url: string; ssh: string; connected: boolean; online: boolean };
+  type Link = "online" | "trying" | "off";
+  const link = (h: Host | undefined): Link => (h?.online ? "online" : h?.connected ? "trying" : "off");
 
   let open = $state(false);
   let hosts = $state<Host[]>([]);
@@ -16,14 +23,38 @@
 
   const current = $derived(hosts.find((h) => h.id === instanceId));
 
+  /** A reconnect of the instance on screen, underway. */
+  let reconnecting = false;
+
   async function load() {
     try {
       hosts = await invoke<Host[]>("remote_hosts");
     } catch (err) {
       store.lastError = String(err);
+      return;
+    }
+    // The instance on screen lost its link (its SSH ended, say): connect
+    // again rather than wait for the next thing asked of it.
+    const shown = hosts.find((h) => h.id === instanceId);
+    if (shown && !shown.connected && !reconnecting) {
+      reconnecting = true;
+      invoke<Host[]>("remote_host_connect", { id: shown.id })
+        .then((h) => (hosts = h))
+        .catch(() => {})
+        .finally(() => (reconnecting = false));
     }
   }
-  void load();
+  onMount(() => {
+    void load();
+    const every = setInterval(load, 10_000);
+    const stop = onInstanceStatus(({ id, online }) => {
+      hosts = hosts.map((h) => (h.id === id ? { ...h, online, connected: h.connected || online } : h));
+    });
+    return () => {
+      clearInterval(every);
+      void stop.then((f) => f());
+    };
+  });
 
   function toggle() {
     open = !open;
@@ -54,7 +85,8 @@
 <div class="sw" bind:this={el}>
   <button class="pill" class:remote={instanceId !== null} onclick={toggle} aria-haspopup="menu" aria-expanded={open}>
     {#if instanceId}
-      <span class="dot on"></span>
+      {@const l = link(current)}
+      <span class="dot {l}" title={t(`instances.link.${l}`)}></span>
       <span class="label">{current?.name ?? t("instances.remote")}</span>
     {:else}
       <Icon name="home" size={12} />
@@ -75,12 +107,12 @@
       {#if hosts.length}<div class="sep"></div>{/if}
       {#each hosts as h (h.id)}
         <button class="item" class:on={instanceId === h.id} role="menuitem" onclick={() => pick(h.id)}>
-          <span class="dot" class:on={h.connected}></span>
+          <span class="dot {link(h)}"></span>
           <span class="what">
             <span class="name">{h.name}</span>
             <span class="sub mono">{h.kind === "direct" ? h.url : h.ssh}</span>
           </span>
-          {#if h.connected}<span class="state">{t("instances.connected")}</span>{/if}
+          {#if link(h) !== "off"}<span class="state {link(h)}">{t(`instances.link.${link(h)}`)}</span>{/if}
         </button>
       {/each}
       <div class="sep"></div>
@@ -136,8 +168,25 @@
     background: var(--idle);
   }
 
-  .dot.on {
+  .dot.online {
     background: var(--ok);
+  }
+
+  .dot.trying {
+    background: var(--warn);
+    animation: blink 1.2s ease-in-out infinite;
+  }
+
+  @keyframes blink {
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .dot.trying {
+      animation: none;
+    }
   }
 
   .menu {
@@ -199,6 +248,10 @@
   .state {
     font-size: 11px;
     color: var(--ok);
+  }
+
+  .state.trying {
+    color: var(--warn);
   }
 
   .sep {

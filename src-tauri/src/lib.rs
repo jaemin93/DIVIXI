@@ -374,6 +374,24 @@ fn browse_dirs(path: Option<String>) -> Result<Dirs, String> {
     Ok(Dirs { path: show(&dir), parent: dir.parent().map(show), home: show(&home), dirs })
 }
 
+/// A new folder `name` in `parent` (the remote folder picker's "New
+/// folder"). Returns its path.
+#[tauri::command(async)]
+fn make_dir(parent: String, name: String) -> Result<String, String> {
+    let name = name.trim();
+    let bad = name.is_empty() || name == "." || name == ".." || name.len() > 255 || name.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'));
+    if bad {
+        return Err(format!("{name:?} cannot be a folder name"));
+    }
+    let parent = PathBuf::from(parent.trim());
+    if !parent.is_dir() {
+        return Err(format!("{} is not a folder", parent.display()));
+    }
+    let dir = parent.join(name);
+    std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(dir.display().to_string())
+}
+
 /// Let the human pick a folder for a track. `None` when they cancel.
 #[tauri::command]
 async fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<String>, String> {
@@ -1182,6 +1200,7 @@ pub fn run() {
             remote::client::instance_upload,
             remote::client::instance_save_as,
             browse_dirs,
+            make_dir,
             remote::remote_server_status,
             remote::remote_server_set,
             remote::remote_server_drop,

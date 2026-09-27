@@ -125,6 +125,11 @@ export function saveAs(track: string, path: string): Promise<string | null> {
   return tauriInvoke<string | null>("instance_save_as", { id: instanceId, track, path });
 }
 
+/** An instance's link came up or went down (this app's event, whatever is shown). */
+export function onInstanceStatus(handler: (s: { id: string; online: boolean }) => void): Promise<() => void> {
+  return tauriListen<{ id: string; online: boolean }>("instance-status", (e) => handler(e.payload));
+}
+
 /** Why the chosen instance could not be reached, if it could not. */
 export const instance = $state<{ error: string }>({ error: "" });
 

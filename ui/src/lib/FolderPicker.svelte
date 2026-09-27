@@ -7,7 +7,8 @@
   /**
    * Picking a folder on the remote instance being shown (the system picker
    * only knows this PC's): its folders, listed by the instance
-   * (`browse_dirs`), walked down and up; the path can be typed too.
+   * (`browse_dirs`), walked down and up; the path can be typed too. A new
+   * folder is made in the one shown (`make_dir`) and chosen.
    */
   let { start = "", onpick, onclose }: { start?: string; onpick: (path: string) => void; onclose: () => void } = $props();
 
@@ -17,6 +18,31 @@
   let typed = $state("");
   let error = $state("");
   let busy = $state(false);
+  /** The new folder's name while it is being typed; null when not. */
+  let naming = $state<string | null>(null);
+  let nameInput = $state<HTMLInputElement>();
+
+  $effect(() => {
+    nameInput?.focus();
+  });
+
+  async function make(e: Event) {
+    e.preventDefault();
+    if (!at || naming === null || !naming.trim()) return;
+    busy = true;
+    error = "";
+    try {
+      const made = await invoke<string>("make_dir", { parent: at.path, name: naming.trim() });
+      naming = null;
+      busy = false;
+      await go(at.path);
+      typed = made;
+    } catch (err) {
+      error = String(err);
+    } finally {
+      busy = false;
+    }
+  }
 
   async function go(path: string | null) {
     busy = true;
@@ -36,7 +62,10 @@
   const join = (base: string, name: string) => (base.endsWith("/") || base.endsWith("\\") ? base + name : `${base}${base.includes("\\") ? "\\" : "/"}${name}`);
 
   function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") onclose();
+    if (e.key !== "Escape") return;
+    // Escape leaves the name first, then the picker.
+    if (naming !== null) naming = null;
+    else onclose();
   }
 
   function onBackdrop(e: MouseEvent) {
@@ -64,6 +93,14 @@
       <button class="btn sm" type="submit" disabled={busy}>{t("folder.go")}</button>
     </form>
     <div class="list">
+      {#if naming !== null}
+        <form class="newrow" onsubmit={make}>
+          <Icon name="folder" size={14} />
+          <input class="mono" bind:this={nameInput} bind:value={naming} placeholder={t("folder.newName")} spellcheck="false" autocomplete="off" maxlength="255" />
+          <button class="btn sm btn-acc" type="submit" disabled={busy || !naming.trim()}>{t("folder.make")}</button>
+          <button class="btn sm" type="button" onclick={() => (naming = null)}>{t("remote.cancel")}</button>
+        </form>
+      {/if}
       {#if at}
         <button class="row" disabled={!at.parent || busy} onclick={() => at?.parent && go(at.parent)}>
           <span class="mono up">..</span>
@@ -81,6 +118,7 @@
     {#if error}<p class="err mono">{error}</p>{/if}
     <div class="foot">
       <button class="btn sm" disabled={busy || !at} onclick={() => at && go(at.home)}>{t("folder.home")}</button>
+      <button class="btn sm" disabled={busy || !at || naming !== null} onclick={() => (naming = "")}>{t("folder.new")}</button>
       <span class="grow"></span>
       <button class="btn" onclick={onclose}>{t("remote.cancel")}</button>
       <button class="btn btn-acc" disabled={busy || !typed.trim()} onclick={() => onpick(typed.trim())}>{t("folder.pick")}</button>
@@ -184,6 +222,27 @@
   .row:hover:not(:disabled) {
     color: var(--hi);
     background: var(--sel);
+  }
+
+  .newrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    color: var(--dim);
+    background: var(--sel);
+  }
+
+  .newrow input {
+    flex: 1;
+    min-width: 0;
+    height: 28px;
+    padding: 0 8px;
+    background: var(--inp);
+    border: 1px solid var(--acc);
+    color: var(--txt);
+    font-size: 12px;
+    outline: none;
   }
 
   .name,

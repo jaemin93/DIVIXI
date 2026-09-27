@@ -102,8 +102,9 @@ const SERVER_ALLOWED: &[&str] = &[
     "term_write",
     "term_resize",
     "term_close",
-    // This machine's folders, for picking a track's.
+    // This machine's folders, for picking a track's (and making one).
     "browse_dirs",
+    "make_dir",
     "design_extract_retry",
     "knowledge_add",
     "knowledge_sync",

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke, instanceId, switchInstance } from "./ipc.svelte";
+  import { invoke, instanceId, switchInstance, onInstanceStatus } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
@@ -24,6 +24,7 @@
     path: string;
     local_port: number | null;
     connected: boolean;
+    online: boolean;
   };
 
   const PORT = 7488;
@@ -37,14 +38,16 @@
   let confirmDelete = $state("");
   let first = $state<HTMLInputElement>();
 
-  const blank = (): Host => ({ id: "", name: "", kind: "ssh", url: "", ssh: "", port: PORT, bin: BIN, path: "", local_port: null, connected: false });
+  const blank = (): Host => ({ id: "", name: "", kind: "ssh", url: "", ssh: "", port: PORT, bin: BIN, path: "", local_port: null, connected: false, online: false });
 
-  onMount(async () => {
-    try {
-      hosts = await invoke<Host[]>("remote_hosts");
-    } catch (err) {
-      store.lastError = String(err);
-    }
+  onMount(() => {
+    invoke<Host[]>("remote_hosts")
+      .then((h) => (hosts = h))
+      .catch((err) => (store.lastError = String(err)));
+    const stop = onInstanceStatus(({ id, online }) => {
+      hosts = hosts.map((h) => (h.id === id ? { ...h, online, connected: h.connected || online } : h));
+    });
+    return () => void stop.then((f) => f());
   });
 
   $effect(() => {
@@ -66,7 +69,7 @@
     if (!editing) return;
     formError = "";
     try {
-      const { local_port: _lp, connected: _c, ...host } = editing;
+      const { local_port: _lp, connected: _c, online: _o, ...host } = editing;
       const port = Number(host.port) || PORT;
       // An empty name takes the one the field suggests.
       const name = host.name.trim() || t("remote.namePlaceholder", { n: hosts.length + 1 });
@@ -121,8 +124,8 @@
             {#if h.kind === "direct"}<span class="tag">{t("remote.kindDirectTag")}</span>{h.url}
             {:else}<span class="tag">SSH</span>{h.ssh} · {t("remote.remotePort", { port: h.port })}{/if}
           </div>
-          <div class="state" class:on>
-            <span class="dot"></span>{on ? (h.local_port !== null ? t("remote.connected", { port: h.local_port }) : t("instances.connected")) : t("remote.notConnected")}
+          <div class="state" class:on={h.online} class:trying={on && !h.online}>
+            <span class="dot"></span>{#if !on}{t("remote.notConnected")}{:else if !h.online}{t("instances.link.trying")}{:else if h.local_port !== null}{t("remote.connected", { port: h.local_port })}{:else}{t("instances.link.online")}{/if}
           </div>
         </div>
         <div class="acts">
@@ -325,6 +328,14 @@
 
   .state.on .dot {
     background: var(--ok);
+  }
+
+  .state.trying {
+    color: var(--warn);
+  }
+
+  .state.trying .dot {
+    background: var(--warn);
   }
 
   .acts {

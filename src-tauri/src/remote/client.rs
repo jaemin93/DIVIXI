@@ -76,6 +76,8 @@ pub struct HostView {
     /// The local port of its tunnel while connected over SSH.
     pub local_port: Option<u16>,
     pub connected: bool,
+    /// Connected, and its link answering now.
+    pub online: bool,
 }
 
 /// Open connections, by host id.
@@ -106,6 +108,16 @@ struct Conn {
     terms: parking_lot::Mutex<Vec<u64>>,
     /// Renewals one at a time: a refresh token used twice drops the device.
     renewing: tokio::sync::Mutex<()>,
+    /// The event socket is up and answering pings.
+    online: std::sync::atomic::AtomicBool,
+}
+
+/// The header's indicator: `instance-status` `{id, online}` whenever an
+/// instance's link comes up or goes down.
+fn set_online(app: &AppHandle, conn: &Conn, online: bool) {
+    if conn.online.swap(online, std::sync::atomic::Ordering::Relaxed) != online {
+        let _ = app.emit("instance-status", json!({ "id": conn.host.id, "online": online }));
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -123,6 +135,7 @@ impl Conn {
         if let Some(h) = self.events.lock().take() {
             h.abort();
         }
+        set_online(app, self, false);
         // Our shells there go with us (a moment each, at most).
         let terms = std::mem::take(&mut *self.terms.lock());
         for id in terms {
@@ -366,6 +379,7 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
         events: parking_lot::Mutex::new(None),
         terms: parking_lot::Mutex::new(Vec::new()),
         renewing: tokio::sync::Mutex::new(()),
+        online: std::sync::atomic::AtomicBool::new(false),
     });
     let pump = tauri::async_runtime::spawn(pump_events(app.clone(), conn.clone()));
     *conn.events.lock() = Some(pump);
@@ -404,13 +418,15 @@ async fn call(app: &AppHandle, conn: &Conn, cmd: &str, args: &Value) -> Result<V
     }
 }
 
-/// How long the event socket may stay silent (the server pings every 30 s).
-const SILENCE: Duration = Duration::from_secs(75);
+/// How often the app pings the instance over its event socket.
+const PING: Duration = Duration::from_secs(10);
+/// How long the socket may stay silent (a pong is due within a ping or two).
+const SILENCE: Duration = Duration::from_secs(25);
 
 /// The instance's events, re-sent to the page as `instance-event`
 /// (`{id, frame}`), picking up where it left off after a drop.
 async fn pump_events(app: AppHandle, conn: Arc<Conn>) {
-    use futures::StreamExt;
+    use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
     let mut since = 0u64;
     let mut backoff = Duration::from_secs(1);
@@ -424,16 +440,31 @@ async fn pump_events(app: AppHandle, conn: Arc<Conn>) {
         match tokio_tungstenite::connect_async(req).await {
             Ok((mut ws, _)) => {
                 backoff = Duration::from_secs(1);
-                // The server pings every 30 s: this long without a word, the
-                // link is gone even if no one said so (an address, a sleep).
-                while let Ok(Some(Ok(msg))) = tokio::time::timeout(SILENCE, ws.next()).await {
-                    let Message::Text(text) = msg else { continue };
-                    let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };
-                    if let Some(seq) = frame.get("seq").and_then(Value::as_u64) {
-                        since = seq;
+                set_online(&app, &conn, true);
+                // A ping every 10 s; this long without a word (a pong at
+                // least), the link is gone even if no one said so.
+                let mut ping = tokio::time::interval(PING);
+                let mut heard = tokio::time::Instant::now();
+                loop {
+                    tokio::select! {
+                        _ = ping.tick() => {
+                            if heard.elapsed() > SILENCE || ws.send(Message::Ping(Vec::new().into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        got = ws.next() => {
+                            let Some(Ok(msg)) = got else { break };
+                            heard = tokio::time::Instant::now();
+                            let Message::Text(text) = msg else { continue };
+                            let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };
+                            if let Some(seq) = frame.get("seq").and_then(Value::as_u64) {
+                                since = seq;
+                            }
+                            let _ = app.emit("instance-event", json!({ "id": conn.host.id, "frame": frame }));
+                        }
                     }
-                    let _ = app.emit("instance-event", json!({ "id": conn.host.id, "frame": frame }));
                 }
+                set_online(&app, &conn, false);
             }
             Err(tokio_tungstenite::tungstenite::Error::Http(res)) if res.status() == 401 => {
                 if renew(&app, &conn, &access).await.is_ok() {
@@ -501,8 +532,23 @@ async fn disconnect(app: &AppHandle, id: &str) {
 
 #[tauri::command]
 pub async fn remote_hosts(app: AppHandle) -> Vec<HostView> {
-    let open = app.state::<AppState>().tunnels.open.lock().await.iter().filter(|(_, c)| c.alive()).map(|(k, c)| (k.clone(), c.local_port)).collect::<HashMap<_, _>>();
-    hosts(&app).into_iter().map(|h| HostView { local_port: open.get(&h.id).copied().flatten(), connected: open.contains_key(&h.id), host: h }).collect()
+    let open = app
+        .state::<AppState>()
+        .tunnels
+        .open
+        .lock()
+        .await
+        .iter()
+        .filter(|(_, c)| c.alive())
+        .map(|(k, c)| (k.clone(), (c.local_port, c.online.load(std::sync::atomic::Ordering::Relaxed))))
+        .collect::<HashMap<_, _>>();
+    hosts(&app)
+        .into_iter()
+        .map(|h| {
+            let (local_port, online) = open.get(&h.id).copied().unwrap_or((None, false));
+            HostView { local_port, connected: open.contains_key(&h.id), online, host: h }
+        })
+        .collect()
 }
 
 /// Add a host, or change one (same id).
