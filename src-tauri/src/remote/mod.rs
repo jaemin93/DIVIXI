@@ -1,11 +1,10 @@
-//! Reaching Divixi from a phone. See docs/design/remote-access.md.
+//! Remote instances. See docs/design/remote-access.md.
 //!
-//! An axum server on 127.0.0.1 serves the app's own UI to a browser and
-//! carries its commands (through [`bridge`], a listed few) and events
+//! divixi-server runs an axum server on 127.0.0.1 that serves the app's own
+//! UI and carries its commands (through [`bridge`], a listed few) and events
 //! (through [`events`]) over HTTP and a WebSocket. Who may come in is
-//! [`auth`]'s: devices paired with a one-time QR link. What is in front of
-//! it (tailscale serve) is set up in a later step; on its own it answers
-//! the PC only.
+//! [`auth`]'s: windows paired with a one-time link. The desktop app reaches
+//! it over an SSH tunnel ([`client`]).
 
 pub mod auth;
 pub mod bridge;
@@ -17,7 +16,6 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use serde::Serialize;
 use tauri::Manager;
 
 use crate::AppHandle;
@@ -38,17 +36,6 @@ pub struct Remote {
 struct Running {
     port: u16,
     stop: tokio::sync::oneshot::Sender<()>,
-}
-
-/// What the settings page shows.
-#[derive(Serialize)]
-pub struct Status {
-    pub enabled: bool,
-    pub running: bool,
-    pub port: u16,
-    /// The address on this PC.
-    pub local_url: String,
-    pub devices: Vec<auth::Device>,
 }
 
 impl Remote {
@@ -96,98 +83,27 @@ pub async fn start(app: &AppHandle) -> Result<u16, String> {
                 let _ = stopped.await;
             });
         if let Err(err) = serve.await {
-            tracing::warn!(%err, "remote access server stopped");
+            tracing::warn!(%err, "remote instance server stopped");
         }
     });
     st.remote.events.on.store(true, Ordering::Relaxed);
     *running = Some(Running { port: want, stop });
-    tracing::info!(port = want, "remote access on");
+    tracing::info!(port = want, "remote instance server on");
     Ok(want)
 }
 
-pub async fn stop(app: &AppHandle) {
-    let st = app.state::<AppState>();
-    if let Some(r) = st.remote.running.lock().await.take() {
-        let _ = r.stop.send(());
-        tracing::info!("remote access off");
-    }
-    st.remote.events.on.store(false, Ordering::Relaxed);
-}
-
-/// At startup: the events hub listens, and the server comes up if it was on.
+/// At startup: the events hub listens and, in divixi-server, the server
+/// comes up. The desktop app serves nothing: it only opens remote
+/// instances (see [`client`]).
 pub fn boot(app: &AppHandle) {
     let st = app.state::<AppState>();
     events::install(app, st.remote.events.clone());
-    if cfg!(feature = "server") || setting(app, "remote.enabled").as_deref() == Some("true") {
+    if cfg!(feature = "server") {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(err) = start(&app).await {
-                tracing::warn!(%err, "could not start remote access");
+                tracing::warn!(%err, "could not start the remote instance server");
             }
         });
     }
-}
-
-// ----- commands for the PC's settings page (never reachable remotely) -----
-
-#[tauri::command]
-pub async fn remote_status(app: AppHandle) -> Status {
-    let st = app.state::<AppState>();
-    let running = st.remote.running.lock().await.as_ref().map(|r| r.port);
-    let port = running.unwrap_or_else(|| port(&app));
-    Status {
-        enabled: setting(&app, "remote.enabled").as_deref() == Some("true"),
-        running: running.is_some(),
-        port,
-        local_url: format!("http://127.0.0.1:{port}"),
-        devices: st.remote.auth.devices(&st.store),
-    }
-}
-
-#[tauri::command]
-pub async fn remote_set_enabled(app: AppHandle, enabled: bool) -> Result<Status, String> {
-    let st = app.state::<AppState>();
-    st.store.set_meta(&format!("{}remote.enabled", crate::SETTING_PREFIX), if enabled { "true" } else { "false" }).map_err(|e| e.to_string())?;
-    if enabled {
-        start(&app).await?;
-    } else {
-        stop(&app).await;
-    }
-    Ok(remote_status(app).await)
-}
-
-/// A pairing link (and its QR, as SVG) good for five minutes.
-#[derive(Serialize)]
-pub struct Pairing {
-    pub url: String,
-    pub expires: i64,
-    pub qr_svg: String,
-}
-
-#[tauri::command]
-pub async fn remote_pair(app: AppHandle) -> Result<Pairing, String> {
-    let st = app.state::<AppState>();
-    let port = st.remote.running.lock().await.as_ref().map(|r| r.port).ok_or("remote access is off")?;
-    let (token, expires) = st.remote.auth.pair_token(&st.store);
-    let base = match st.remote.public_host() {
-        Some(host) => format!("https://{host}"),
-        None => format!("http://127.0.0.1:{port}"),
-    };
-    let url = format!("{base}/auth/pair?token={token}");
-    let qr = qrcode::QrCode::new(url.as_bytes()).map_err(|e| e.to_string())?;
-    let qr_svg = qr.render::<qrcode::render::svg::Color>().min_dimensions(220, 220).quiet_zone(true).build();
-    Ok(Pairing { url, expires, qr_svg })
-}
-
-/// Drop one paired device, or all of them.
-#[tauri::command]
-pub async fn remote_drop(app: AppHandle, device: Option<String>) -> Status {
-    {
-        let st = app.state::<AppState>();
-        match device {
-            Some(id) => st.remote.auth.drop_device(&st.store, &id),
-            None => st.remote.auth.drop_all(&st.store),
-        }
-    }
-    remote_status(app).await
 }

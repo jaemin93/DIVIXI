@@ -43,11 +43,10 @@ serde_json.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
-# Remote access (src/remote): the server, signed tokens, the pairing QR.
+# Remote instances (src/remote): the server and its signed tokens.
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws", "query"] }
 hmac = "0.12"
 sha2 = "0.10"
-qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 ignore = "0.4"
 tokio.workspace = true
 tracing.workspace = true

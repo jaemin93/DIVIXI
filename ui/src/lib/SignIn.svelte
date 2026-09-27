@@ -3,7 +3,7 @@
   import Mark from "./Mark.svelte";
   import { t } from "./i18n.svelte";
 
-  /** A browser that is not (or no longer) paired: how to pair it. */
+  /** A remote instance's window that is not (or no longer) paired: how to connect again. */
 </script>
 
 <main class="signin">
@@ -14,10 +14,7 @@
   {:else}
     <p>{t("remote.signin.how")}</p>
   {/if}
-  <ol>
-    <li>{t("remote.signin.step1")}</li>
-    <li>{t("remote.signin.step2")}</li>
-  </ol>
+  <p class="step">{t("remote.signin.step")}</p>
 </main>
 
 <style>
@@ -48,12 +45,8 @@
     color: var(--dim);
   }
 
-  ol {
-    margin: 4px 0 0;
-    padding-left: 20px;
-    max-width: 420px;
-    text-align: left;
+  .step {
     font-size: 14px;
-    line-height: 1.8;
+    color: var(--txt);
   }
 </style>

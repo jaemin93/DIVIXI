@@ -1,4 +1,4 @@
-//! The HTTP side of remote access: an axum server on 127.0.0.1 only.
+//! The HTTP side of a remote instance: an axum server on 127.0.0.1 only.
 //!
 //! What reaches it from outside comes through `tailscale serve` (which
 //! proxies from loopback); the checks here hold whatever is in front:
@@ -175,7 +175,7 @@ async fn pair(State(ctx): State<Ctx>, ConnectInfo(peer): ConnectInfo<SocketAddr>
     }
 }
 
-const SIGN_IN_AGAIN: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Divixi</title><body style='font-family:system-ui;padding:24px'><h3>이 링크는 쓸 수 없습니다</h3><p>링크는 5분 안에 한 번만 열 수 있습니다. PC의 Divixi에서 설정 › 원격 접속 › 휴대폰 연결로 새 QR을 만드세요.</p><p>This link can't be used: it works once, within five minutes. Make a new QR on the PC (Settings › Remote access).</p>";
+const SIGN_IN_AGAIN: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Divixi</title><body style='font-family:system-ui;padding:24px'><h3>이 링크는 쓸 수 없습니다</h3><p>링크는 5분 안에 한 번만 열 수 있습니다. Divixi 앱의 설정 › 원격 인스턴스에서 다시 연결하세요.</p><p>This link can't be used: it works once, within five minutes. Connect again from the Divixi app (Settings › Remote instances).</p>";
 
 /// A short name for the device list, from the browser's user agent.
 fn device_name(ua: &str) -> String {

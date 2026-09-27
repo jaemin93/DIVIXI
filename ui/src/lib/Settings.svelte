@@ -24,7 +24,6 @@
   import SplitHandle from "./SplitHandle.svelte";
   import { t } from "./i18n.svelte";
   import { invoke, inTauri } from "./ipc.svelte";
-  import RemoteSettings from "./RemoteSettings.svelte";
   import RemoteHosts from "./RemoteHosts.svelte";
   import { onMount } from "svelte";
 
@@ -58,7 +57,7 @@
         { id: "chat", icon: "chat", label: t("settings.chat"), blurb: t("settings.chatBlurb") },
         { id: "agents", icon: "agents", label: t("settings.agents"), blurb: t("settings.agentsBlurb") },
         { id: "knowledge", icon: "book", label: t("settings.knowledge"), blurb: t("settings.knowledgeBlurb") },
-        // Pairing other devices is done at the PC.
+        // Remote instances are opened from the desktop app.
         ...(inTauri ? [{ id: "remote" as SettingsSection, icon: "remote" as IconName, label: t("settings.remote"), blurb: t("settings.remoteBlurb") }] : []),
       ],
     },
@@ -247,7 +246,6 @@
       <p class="note">{t("settings.idleNote")}</p>
       <AgentList />
     {:else if store.settingsSection === "remote"}
-      <RemoteSettings />
       <RemoteHosts />
     {:else if store.settingsSection === "knowledge"}
       <KnowledgeSettings />

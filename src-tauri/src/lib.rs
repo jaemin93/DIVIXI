@@ -1126,17 +1126,13 @@ pub fn run() {
             }
         });
     // On a server: no window, no tray; the same commands and state, reached
-    // through remote access only.
+    // from remote instance windows only.
     #[cfg(feature = "server")]
     let builder = tauri::test::mock_builder().plugin(tauri_plugin_dialog::init());
     builder
         .invoke_handler(tauri::generate_handler![
             list_tracks,
             get_run,
-            remote::remote_status,
-            remote::remote_set_enabled,
-            remote::remote_pair,
-            remote::remote_drop,
             remote::client::remote_hosts,
             remote::client::remote_host_save,
             remote::client::remote_host_delete,
@@ -1305,7 +1301,7 @@ pub fn run() {
             if app.get_webview_window("main").is_none() {
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into())).build()?;
             }
-            // Remote access: events are kept for other devices, and its server comes up if it was on.
+            // Remote instances: in divixi-server, events are kept for its windows and its server comes up.
             remote::boot(app.handle());
             // A server has nobody to run setup: it looks for its agents itself, once.
             #[cfg(feature = "server")]
@@ -1328,7 +1324,7 @@ pub fn run() {
         .expect("failed to start Divixi");
 }
 
-/// A pairing link for remote access, made without the running app (the
+/// A pairing link for a remote instance's window, made without the running app (the
 /// server's `token` command): signed with the same key, for its port.
 pub fn pair_link() -> anyhow::Result<String> {
     let data_dir = data_dir_offline()?;

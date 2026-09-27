@@ -252,14 +252,6 @@ impl Auth {
         devices.retain(|d| d.id != id);
         self.save_devices(store, &devices);
     }
-
-    /// Drop every device: tokens of the old generation stop working.
-    pub fn drop_all(&self, store: &Store) {
-        let _one = self.lock.lock();
-        let g = self.generation(store) + 1;
-        let _ = store.set_meta(GENERATION_KEY, &g.to_string());
-        self.save_devices(store, &[]);
-    }
 }
 
 #[cfg(test)]
@@ -311,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_one_or_all() {
+    fn drop_one() {
         let (a, s) = auth();
         let pair = |name: &str| a.redeem(&s, &a.pair_token(&s).0, name, None).unwrap();
         let (phone, _) = pair("Phone");
@@ -320,10 +312,6 @@ mod tests {
         a.drop_device(&s, &phone_id);
         assert_eq!(a.check(&s, &phone, None).unwrap_err(), Refused::Dropped);
         assert!(a.check(&s, &tablet, None).is_ok());
-        let (link, _) = a.pair_token(&s);
-        a.drop_all(&s);
-        assert_eq!(a.check(&s, &tablet, None).unwrap_err(), Refused::Dropped);
-        assert_eq!(a.redeem(&s, &link, "Late", None), Err(Refused::SignIn), "a link from before goes too");
     }
 
     #[test]

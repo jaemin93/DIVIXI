@@ -36,7 +36,7 @@ pub struct Frame {
 }
 
 pub struct Hub {
-    /// Kept only while remote access is on.
+    /// Kept only while the server is on (divixi-server).
     pub on: AtomicBool,
     ring: parking_lot::Mutex<(u64, VecDeque<Frame>)>,
     tx: broadcast::Sender<Frame>,
@@ -114,7 +114,7 @@ mod tests {
     fn numbered_and_caught_up() {
         let hub = Hub::default();
         hub.push("agent", "{}");
-        assert_eq!(hub.last(), 0, "nothing is kept while remote access is off");
+        assert_eq!(hub.last(), 0, "nothing is kept while the server is off");
         hub.on.store(true, Ordering::Relaxed);
         hub.push("agent", "{\"a\":1}");
         hub.push("decision", "");
