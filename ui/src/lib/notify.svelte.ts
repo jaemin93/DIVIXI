@@ -4,10 +4,12 @@ import { inTauri, instanceId, instanceName } from "./ipc.svelte";
 /**
  * What wants the human: a decision or permission card, the conductor's
  * answer, a failed turn. Each goes into the bell's list at the top right
- * (as Kiro Crew's), and, while the human is not looking, to the system's
- * notifications too. Not looking = the window is not focused (hidden in the
- * tray, behind another app), or this webview is a remote instance kept warm
- * behind the one on screen. A remote instance's notice says which instance.
+ * (as Kiro Crew's), always. The system's notifications are off unless
+ * turned on per kind in the settings (the user does not want them by
+ * default); when on, they come only while the human is not looking: the
+ * window not focused (hidden in the tray, behind another app), or this
+ * webview a remote instance kept warm behind the one on screen. A remote
+ * instance's notice says which instance.
  *
  * The list and which kinds are on are this PC's, whatever Divixi is shown:
  * localStorage, shared by the app's webviews (Local and each instance) and
@@ -31,12 +33,14 @@ export type Notice = {
   track: string | null;
 };
 
-const PREFS = "divixi.notify";
+/** v2: system notifications became opt-in; earlier stored choices were the old all-on defaults. */
+const PREFS = "divixi.notify.v2";
 const INBOX = "divixi.inbox";
 /** A notice to open in another webview: `{instance, track, at}`. */
 export const GOTO = "divixi.goto";
 const KEEP = 200;
-const DEFAULTS: Record<NotifyKind, boolean> = { decision: true, reply: true, failed: true };
+/** System notifications per kind: all off until the user turns one on. */
+const DEFAULTS: Record<NotifyKind, boolean> = { decision: false, reply: false, failed: false };
 
 function load<T>(key: string, fallback: T): T {
   try {
@@ -99,28 +103,24 @@ const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…`
 
 /**
  * Something for the human: into the bell's list, and to the system when
- * they are not looking and want this kind. `onScreen`: it happened in
- * what is on screen (the open track), so a human looking has seen it and
- * nothing is kept. `test` goes to the system whatever (the settings' test
- * button) and not into the list.
+ * that kind is turned on and they are not looking. `test`: the settings'
+ * test button, which reaches the system even while looking, if any kind
+ * is on there.
  */
-export async function notify(kind: NotifyKind, title: string, body: string, track: string | null = null, opts: { onScreen?: boolean; test?: boolean } = {}) {
+export async function notify(kind: NotifyKind, title: string, body: string, track: string | null = null, opts: { test?: boolean } = {}) {
   if (!inTauri) return;
-  const test = !!opts.test;
-  if (!test && opts.onScreen && looking()) return;
   body = clip(body.trim(), 400);
-  if (!test) {
-    change((xs) => {
-      const same = xs.findIndex((x) => x.title === title && x.body === body && x.instance === instanceId);
-      if (same >= 0) {
-        const again = { ...xs[same], at: Date.now(), read: false, count: xs[same].count + 1 };
-        return [again, ...xs.filter((_, i) => i !== same)];
-      }
-      const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      return [{ id, kind, title, body, at: Date.now(), read: false, count: 1, instance: instanceId, instanceName, track }, ...xs];
-    });
-  }
-  if (!test && (!notifyPrefs[kind] || looking())) return;
+  change((xs) => {
+    const same = xs.findIndex((x) => x.title === title && x.body === body && x.instance === instanceId);
+    if (same >= 0) {
+      const again = { ...xs[same], at: Date.now(), read: false, count: xs[same].count + 1 };
+      return [again, ...xs.filter((_, i) => i !== same)];
+    }
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    return [{ id, kind, title, body, at: Date.now(), read: false, count: 1, instance: instanceId, instanceName, track }, ...xs];
+  });
+  const system = opts.test ? Object.values(notifyPrefs).some(Boolean) : notifyPrefs[kind] && !looking();
+  if (!system) return;
   if (!(await mayNotify())) return;
   const where = instanceName ? `[${instanceName}] ` : "";
   sendNotification({ title: where + title, body: clip(body, 180) });

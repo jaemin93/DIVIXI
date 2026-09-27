@@ -1587,7 +1587,6 @@ class Store {
     if (i < 0 && d.status === "open") {
       const track = this.tracks.find((x) => x.id === d.track)?.name ?? "";
       void notify("decision", t(d.permission ? "notify.permission" : "notify.decision", { track }), d.question, d.track);
-      // (A card is kept in the bell even when seen: it waits for an answer.)
     }
   }
 
@@ -2290,9 +2289,8 @@ class Store {
     // The conductor answered, or its turn failed.
     if (env.session === "conductor" && (env.event.kind === "finished" || env.event.kind === "failed")) {
       const track = this.tracks.find((x) => x.id === env.track)?.name ?? "";
-      const onScreen = this.view === "track" && this.track === env.track;
-      if (env.event.kind === "finished") void notify("reply", t("notify.reply", { track }), run.message.trim() || t("notify.replyEmpty"), env.track, { onScreen });
-      else void notify("failed", t("notify.failed", { track }), env.event.error, env.track, { onScreen });
+      if (env.event.kind === "finished") void notify("reply", t("notify.reply", { track }), run.message.trim() || t("notify.replyEmpty"), env.track);
+      else void notify("failed", t("notify.failed", { track }), env.event.error, env.track);
     }
     // A finished run may have written files: the open panel catches up.
     if (this.panelOpen && env.track === this.track && (env.event.kind === "finished" || env.event.kind === "failed")) {
