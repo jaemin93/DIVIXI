@@ -3,31 +3,84 @@
 # Pinning third-party actions to a commit is only safe if something bumps them;
 # otherwise the repository quietly runs a year-old action. Dependabot opens a
 # pull request per update, which is also how the change gets reviewed.
+#
+# ## Grouping, and why major updates stay out of it
+#
+# The first run opened eleven pull requests at once. Reviewing eleven is worse
+# than reviewing three, and most of them were a patch digit -- so minor and
+# patch updates are grouped into one pull request per ecosystem.
+#
+# Major updates are deliberately left out of every group, so each arrives on its
+# own and gets read. The first run is the argument: `typescript` 6 -> 7 broke
+# `npm ci` outright, and the actions group quietly carried three major bumps
+# (checkout v4 -> v7 among them) inside a pull request titled "4 updates".
+# A major hidden in a group of twenty is a major nobody read.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    # One group of minor/patch plus, at most, a couple of majors on their own.
+    open-pull-requests-limit: 3
     groups:
       actions:
         patterns: ["*"]
+        # Majors excluded: an action's major version can change the runner it
+        # needs or the inputs it takes, and it changes CI itself -- if it breaks,
+        # every pull request goes red at once and the cause has to be obvious.
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: "/"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
     ignore:
       # Pinned on purpose: the remote bridge uses unstable Tauri APIs, and the
       # CLI refuses a mismatched @tauri-apps/api. See docs/development.md.
       - dependency-name: "@tauri-apps/api"
       - dependency-name: "@tauri-apps/cli"
+      # TypeScript is held at 6 by svelte-check, not by us. svelte-check 4.7.6
+      # declares `peer typescript@"^5.0.0 || ^6.0.0"`, so 7 fails `npm ci` with
+      # ERESOLVE before a single check runs.
+      #
+      # We are not missing out: TypeScript 7 is already here, as the
+      # @typescript/native alias, which is what `npm run check --tsgo` uses.
+      # This pin only covers the copy svelte-check itself loads.
+      #
+      # Lift this when a svelte-check release widens that peer range to include
+      # 7 -- then delete these lines and let the group carry it.
+      - dependency-name: "typescript"
+    groups:
+      npm:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: cargo
     directory: "/"
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
     ignore:
       # Same reason, from the Rust side.
       - dependency-name: "tauri"
       - dependency-name: "tauri-build"
+    groups:
+      # RustCrypto travels together or not at all.
+      #
+      # `src-tauri/src/remote/auth.rs` builds `Hmac<Sha256>`, so hmac and sha2
+      # have to agree on the `digest` traits underneath them. hmac 0.13 wants
+      # digest 0.11; sha2 0.10 provides digest 0.10. Bumped one at a time,
+      # neither pull request compiles -- which is exactly what the first run
+      # produced: two red pull requests that were each individually unmergeable.
+      #
+      # No update-types filter here on purpose. These move together whatever the
+      # size of the bump, because a "minor" 0.x bump in RustCrypto is a breaking
+      # one. Listed before the catch-all below: a dependency joins the first
+      # group whose patterns match it.
+      rustcrypto:
+        patterns: ["hmac", "sha2", "digest", "crypto-common"]
+      cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
