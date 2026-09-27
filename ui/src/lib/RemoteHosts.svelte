@@ -129,12 +129,8 @@
           </div>
         </div>
         <div class="acts">
-          {#if instanceId === h.id}
-            <span class="viewing">{t("remote.viewing")}</span>
-          {:else}
-            <button class="btn sm btn-acc" onclick={() => switchInstance(h.id)}>{t("remote.show")}</button>
-          {/if}
-          {#if !on && instanceId !== h.id}
+          <!-- Which one is on screen, and switching, are the header's (top left). -->
+          {#if !on}
             <button class="btn sm" disabled={busy === h.id} onclick={() => act("remote_host_connect", h.id)}>
               {busy === h.id ? t("remote.connecting") : t("remote.connect")}
             </button>
@@ -347,13 +343,6 @@
   .btn.sm {
     height: 28px;
     padding: 0 12px;
-  }
-
-  .viewing {
-    align-self: center;
-    padding: 0 6px;
-    font-size: 12px;
-    color: var(--acct);
   }
 
   .danger {
