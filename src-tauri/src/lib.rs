@@ -25,12 +25,19 @@ pub type Rt = tauri::test::MockRuntime;
 pub type AppHandle = tauri::AppHandle<Rt>;
 use tauri_plugin_dialog::DialogExt;
 
+/// `DIVIXI_LOG`, for `divixi-server -v` to set before anything logs.
+pub use logging::LEVEL_ENV;
+
 mod conductor;
+mod crash;
+mod diagnostics;
 mod embed;
 mod extract;
 pub mod artifact;
 pub mod design;
 mod knowledge;
+mod logging;
+mod mask;
 mod metrics;
 mod preview;
 mod terminal;
@@ -54,8 +61,15 @@ const AGENTS_META: &str = "agents";
 /// Process-wide state.
 pub struct AppState {
     pub(crate) store: Store,
+    /// The app data folder the paths below are under, for diagnostics.
+    data_dir: PathBuf,
     /// Where the store lives, for the settings page.
     db_path: String,
+    /// Where the log files are (`<app data>/logs`), for the settings page.
+    logs_dir: PathBuf,
+    /// The panic the run before this one left behind, if it left one. Read
+    /// at startup, because that is when this run takes the file over.
+    last_crash: Option<crash::Crash>,
     /// Where downloaded ACP servers live (`<app data>/adapters`).
     adapters_dir: PathBuf,
     /// Where pasted images are kept so they can be attached by path.
@@ -301,6 +315,61 @@ async fn worker_merge(app: AppHandle, track: String, worker: String) -> Result<w
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Stop a worker's turn in flight. The run stays in the record, marked
+/// stopped; the agent is really stopped, not just hidden.
+#[tauri::command]
+async fn worker_cancel(app: AppHandle, track: String, worker: String) -> Result<(), String> {
+    conductor::worker_cancel(app, track, worker).await
+}
+
+/// Close a worker's session; its record and its memory stay, so the same
+/// name reopens with its conversation. `false` when it was not open.
+#[tauri::command]
+async fn worker_close(app: AppHandle, track: String, worker: String) -> Result<bool, String> {
+    conductor::worker_close(app, track, worker).await
+}
+
+/// Close every worker session of a track that has nothing to do. Records
+/// stay; workers mid-turn are left alone. Returns the names closed.
+#[tauri::command]
+async fn workers_tidy(app: AppHandle, track: String) -> Result<Vec<String>, String> {
+    conductor::workers_tidy(app, track).await
+}
+
+/// Which workers have an open session, and which are working, by track.
+#[tauri::command]
+async fn worker_sessions(app: AppHandle) -> Result<Vec<(String, Vec<conductor::WorkerState>)>, String> {
+    Ok(conductor::worker_states(&app).await)
+}
+
+/// Delete a worker's record: its runs with their events and kept reports,
+/// and the agent session the app would have resumed. Its session is closed
+/// first. Returns how many runs went.
+///
+/// What this never touches: the worker's folder and every file in it, and
+/// its checkout. Those hold what the human asked for; the app does not
+/// delete their results. Refused while the worker is in a turn, and while
+/// it holds changes nobody has merged — deleting the record would leave no
+/// way back to them.
+#[tauri::command]
+async fn worker_delete(app: AppHandle, track: String, worker: String) -> Result<u32, String> {
+    worker_idle(&app.state::<AppState>(), &track, &worker).await?;
+    conductor::worker_close(app.clone(), track.clone(), worker.clone()).await?;
+    let state = app.state::<AppState>();
+    worktree::check_nothing_pending(&state.store, &track, std::slice::from_ref(&worker))?;
+    let gone = state.store.delete_worker(&track, &worker).map_err(|e| e.to_string())?;
+    tracing::info!(%track, %worker, runs = gone, "deleted a worker's record; its folder and files stay");
+    Ok(gone)
+}
+
+/// Everything waiting for a track's conductor (worker reports and decision
+/// answers it could not take yet), so the conversation can say so and show
+/// the report while it waits.
+#[tauri::command(async)]
+fn parked_deliveries(state: State<'_, AppState>) -> Result<Vec<conductor::WaitingItem>, String> {
+    Ok(conductor::parked_all(&state))
 }
 
 /// Throw away a worker's unmerged changes.
@@ -851,6 +920,7 @@ fn agent_statuses(state: State<'_, AppState>) -> Result<Option<Vec<AgentStatus>>
 struct AppInfo {
     version: String,
     db_path: String,
+    logs_dir: String,
     adapters_dir: String,
     workspace: String,
     runs: usize,
@@ -862,10 +932,57 @@ fn app_info(state: State<'_, AppState>) -> Result<AppInfo, String> {
     Ok(AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         db_path: state.db_path.clone(),
+        logs_dir: state.logs_dir.display().to_string(),
         adapters_dir: state.adapters_dir.display().to_string(),
         workspace: workspace_root().display().to_string(),
         runs,
     })
+}
+
+/// Show the log folder in the system file manager, for a bug report.
+///
+/// It is made if it is not there: the button says something even when
+/// opening the log file itself failed at startup.
+#[tauri::command]
+fn logs_open(state: State<'_, AppState>) -> Result<(), String> {
+    std::fs::create_dir_all(&state.logs_dir).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    // explorer.exe answers 1 for a folder it opened all the same, so the
+    // status is not checked; failing to start it at all is the error.
+    cmd.arg(&state.logs_dir).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// This install's facts as Markdown, to paste into a bug report. Holds no
+/// key or token; see src/diagnostics.rs.
+#[tauri::command(async)]
+fn diagnostics_report(app: AppHandle) -> Result<String, String> {
+    diagnostics::report(&app)
+}
+
+/// How much is being logged, and what put it there.
+#[tauri::command]
+fn log_level(state: State<'_, AppState>) -> logging::Level {
+    let _ = state;
+    logging::level()
+}
+
+/// Log more (or less) from now on, without restarting the app. `level` is
+/// one of `logging::PRESETS` or a filter in tracing's syntax.
+#[tauri::command]
+fn log_level_set(state: State<'_, AppState>, level: String) -> Result<logging::Level, String> {
+    logging::set_level(&state.store, level.trim())
+}
+
+/// The panic the run before this one left behind, for a notice about it.
+/// `None` is the ordinary answer.
+#[tauri::command]
+fn last_crash(state: State<'_, AppState>) -> Option<crash::Crash> {
+    state.last_crash.clone()
 }
 
 // ----- the track's working folder, for the side panel -----
@@ -1264,6 +1381,12 @@ pub fn run() {
             worker_file_diff,
             worker_merge,
             worker_discard,
+            worker_cancel,
+            worker_close,
+            worker_delete,
+            worker_sessions,
+            workers_tidy,
+            parked_deliveries,
             create_track,
             update_track,
             delete_track,
@@ -1311,6 +1434,11 @@ pub fn run() {
             get_setting,
             set_setting,
             app_info,
+            logs_open,
+            diagnostics_report,
+            log_level,
+            log_level_set,
+            last_crash,
             workspace_tree,
             workspace_read,
             workspace_write,
@@ -1356,7 +1484,20 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            // Before anything else logs. It waits until here because only
+            // an app can say where this platform keeps an app's files.
+            let logs_dir = logging::start(&data_dir);
+            // Taken before this run's hook can add to the file, so it is
+            // the previous run's panic and not a mix of the two.
+            let last_crash = crash::take_previous(&logs_dir);
+            crash::install(&logs_dir);
+            logging::banner(&logs_dir);
+            if let Some(crash) = &last_crash {
+                tracing::warn!(when = %crash.when, at = %crash.location, "the run before this one panicked: {}", crash.message);
+            }
             let (store, db_path) = open_store(&data_dir)?;
+            // A level chosen in the settings takes over from the environment.
+            logging::apply_saved(&store);
             let adapters_dir = data_dir.join("adapters");
             let attachments_dir = data_dir.join("attachments");
             let artifacts_dir = data_dir.join("artifacts");
@@ -1380,7 +1521,10 @@ pub fn run() {
             let remote = remote::Remote::open(&data_dir)?;
             app.manage(AppState {
                 store,
+                data_dir,
                 db_path,
+                logs_dir,
+                last_crash,
                 adapters_dir,
                 attachments_dir,
                 artifacts_dir,
@@ -1400,6 +1544,9 @@ pub fn run() {
             artifact::sweep_idle(app.handle().clone());
             // Conductors and workers nobody has used for a while are closed too.
             conductor::sweep_idle(app.handle().clone());
+            // Reports and answers a conductor could not take go in as soon
+            // as it can take them, whatever happened in between.
+            conductor::sweep_parked(app.handle().clone());
             // Permission cards left from an earlier run of the app: their agents are gone.
             tauri::async_runtime::spawn(conductor::dismiss_stale_permissions(app.handle().clone(), None));
             // Library sync, and a watch on its files.

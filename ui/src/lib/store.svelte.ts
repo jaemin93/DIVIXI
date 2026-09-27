@@ -2,7 +2,30 @@ import { invoke, listen, inTauri, local, bring, boardBase } from "./ipc.svelte";
 import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Lang, type LangPref } from "./i18n.svelte";
-import { notify } from "./notify.svelte";
+import { notifyDecision, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
+import {
+  dropQueued,
+  liveQueued,
+  liveQueuedFor,
+  nextQueued,
+  parseQueued,
+  pushQueued,
+  queuedFor,
+  queuedKeys,
+  releaseQueued as released,
+  unshiftQueued,
+  wasStopped,
+  type Queued,
+} from "./queue";
+
+import { addError, dropError, errorLife, type AppError } from "./errors";
+
+export { wasStopped, errorLife, type Queued, type AppError };
+
+/** Setting the waiting line is written to, so it survives the app closing. */
+const QUEUE_SETTING = "queued";
+/** Setting holding which tracks' headers are folded away. */
+const HEADERS_SETTING = "track_headers";
 
 /** Mirrors `orchestra_core::AgentEvent` — serde tags it with `kind`. */
 export type AgentEvent =
@@ -42,6 +65,42 @@ export type Envelope = {
 
 /** Session options chosen for one role: `option id → value id`, in the agent's own terms. */
 export type OptionConfig = Record<string, string>;
+
+/** Mirrors `conductor::WorkerState`: one worker's live agent session. */
+export type WorkerState = {
+  name: string;
+  /** Its agent session is open (a process is alive). */
+  open: boolean;
+  /** A turn is in flight. */
+  running: boolean;
+  run: string | null;
+  agent: string;
+};
+
+/** Mirrors `conductor::WaitingItem`: one turn a conductor has not taken yet. */
+export type WaitingItem = {
+  track: string;
+  /** What it is, in one phrase, e.g. "report of ui run t042". */
+  what: string;
+  /** The worker it came from, when it is a report. */
+  worker: string | null;
+  /** The worker run it reports on; its report is already in the record. */
+  run: string | null;
+  at: number;
+  why: string;
+  tries: number;
+};
+
+/** Mirrors `conductor::Waiting`: what a track's conductor has not taken yet. */
+export type WaitingDelivery = {
+  track: string;
+  pending: number;
+  /** What was just put aside, when one was. */
+  added: string | null;
+  worker: string | null;
+  run: string | null;
+  why: string;
+};
 
 /** Mirrors `orchestra_store::TrackInfo`: one conductor, its workers, one folder. */
 export type Track = {
@@ -352,6 +411,12 @@ export type WorkerReport = {
   /** Edits outside the worker's folder. */
   outside?: string[];
   reminder_run?: string;
+  /**
+   * How the turn ended when it did not end on its own (a timeout, a dead
+   * agent, a stop). The worker wrote this report before that, so what it
+   * says of the work stands — but it may have meant to do more after.
+   */
+  interrupted?: string;
 };
 
 /** What a worker changed in its own checkout and the human has not merged (worktree.rs). */
@@ -529,6 +594,7 @@ export type PanelTab = "changes" | "files" | "file";
 export type AppInfo = {
   version: string;
   db_path: string;
+  logs_dir: string;
   adapters_dir: string;
   workspace: string;
   runs: number;
@@ -771,6 +837,41 @@ class Store {
       await invoke("set_setting", { key: "panel", value: open ? "open" : "closed" });
     } catch (err) {
       this.lastError = String(err);
+    }
+  }
+
+  // ----- the track header above the conversation: open or folded away -----
+
+  /**
+   * Tracks whose header is folded to one line, by id. A track not listed is
+   * open: the first time anyone sees a track, they should see what it is
+   * for. Persisted per track, so one long brief folded away stays folded
+   * without hiding the next track's.
+   */
+  headerFolded = $state<Record<string, boolean>>({});
+
+  /** Whether a track's header is folded to one line. */
+  isHeaderFolded(track = this.track): boolean {
+    return !!this.headerFolded[track];
+  }
+
+  /** Fold a track's header away, or open it again; persisted. */
+  setHeaderFolded(track: string, folded: boolean) {
+    const { [track]: _was, ...rest } = this.headerFolded;
+    this.headerFolded = folded ? { ...rest, [track]: true } : rest;
+    invoke("set_setting", { key: HEADERS_SETTING, value: JSON.stringify(this.headerFolded) }).catch(tracing);
+  }
+
+  private async restoreHeaders() {
+    try {
+      const raw = await invoke<string | null>("get_setting", { key: HEADERS_SETTING });
+      const parsed: unknown = raw ? JSON.parse(raw) : {};
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+      const out: Record<string, boolean> = {};
+      for (const [id, folded] of Object.entries(parsed as Record<string, unknown>)) if (folded === true) out[id] = true;
+      this.headerFolded = out;
+    } catch (err) {
+      tracing(err);
     }
   }
 
@@ -1068,7 +1169,11 @@ class Store {
     }
   }
 
-  /** Stop the conductor's turn in flight, as Ctrl+C would; the run ends as cancelled. */
+  /**
+   * Stop the conductor's turn in flight, as Ctrl+C would; the run ends as
+   * cancelled, keeping what it had said so far. Messages waiting in the line
+   * are not thrown away: they go out as the next turn.
+   */
   async cancelConductor() {
     if (this.chatArtifact) {
       this.cancelling = true;
@@ -1086,6 +1191,126 @@ class Store {
     } finally {
       this.cancelling = false;
     }
+  }
+
+  /**
+   * Which workers have an open agent session, per track. Workers with no
+   * open session are not in here; the list itself comes from the runs, which
+   * outlive sessions.
+   */
+  workerSessions = $state<Record<string, WorkerState[]>>({});
+  /**
+   * Turns waiting for a conductor: reports (and decision answers) it could
+   * not take, kept in the record until it can. Read from the core, not
+   * counted from the `parked` events — an event can be missed, and the
+   * whole point of parking is that it survives the app closing.
+   */
+  parkedItems = $state<WaitingItem[]>([]);
+
+  /** How many are waiting, per track, for the list's mark. */
+  parked = $derived.by(() => {
+    const out: Record<string, number> = {};
+    for (const p of this.parkedItems) out[p.track] = (out[p.track] ?? 0) + 1;
+    return out;
+  });
+
+  /** What is waiting for the conversation on screen. Artifacts have none. */
+  get chatParked(): WaitingItem[] {
+    return this.chatArtifact ? [] : this.parkedItems.filter((p) => p.track === this.track);
+  }
+
+  /** A worker's live session, if it has one. */
+  workerSession(track: string, name: string): WorkerState | undefined {
+    return this.workerSessions[track]?.find((w) => w.name === name);
+  }
+
+  /** Ask which worker sessions are open, without touching any. Tracks not listed have none. */
+  async refreshWorkerSessions() {
+    try {
+      const list = await invoke<[string, WorkerState[]][]>("worker_sessions");
+      this.workerSessions = Object.fromEntries(list);
+    } catch (err) {
+      tracing(err);
+    }
+  }
+
+  /**
+   * Stop a worker's turn in flight. The agent is really stopped, not just
+   * hidden: its run ends and stays in the record marked stopped, and what it
+   * had got to still reaches the conductor as a report.
+   */
+  async cancelWorker(track: string, name: string): Promise<string> {
+    try {
+      await invoke("worker_cancel", { track, worker: name });
+    } catch (err) {
+      return String(err);
+    }
+    await this.refreshWorkerSessions();
+    return "";
+  }
+
+  /** Close a worker's session. Its record and memory stay. */
+  async closeWorker(track: string, name: string): Promise<string> {
+    try {
+      await invoke<boolean>("worker_close", { track, worker: name });
+    } catch (err) {
+      return String(err);
+    }
+    await this.refreshWorkerSessions();
+    return "";
+  }
+
+  /** Close every finished worker session of a track. Returns the names closed. */
+  async tidyWorkers(track: string): Promise<{ closed: string[]; error: string }> {
+    try {
+      const closed = await invoke<string[]>("workers_tidy", { track });
+      await this.refreshWorkerSessions();
+      return { closed, error: "" };
+    } catch (err) {
+      return { closed: [], error: String(err) };
+    }
+  }
+
+  /**
+   * Delete a worker's record: its runs and the session the app would have
+   * resumed. Its folder and every file in it stay untouched. Returns why the
+   * core refused, or "" when it is gone.
+   */
+  async deleteWorker(track: string, name: string): Promise<string> {
+    try {
+      await invoke<number>("worker_delete", { track, worker: name });
+    } catch (err) {
+      return String(err);
+    }
+    this.runs = this.runs.filter((r) => !(r.track === track && r.session === name));
+    this.workerSessions = { ...this.workerSessions, [track]: (this.workerSessions[track] ?? []).filter((w) => w.name !== name) };
+    if (this.view === "worker" && this.track === track && this.openWorker === name) {
+      this.openWorker = "";
+      this.view = "track";
+    }
+    return "";
+  }
+
+  /** What is waiting for every conductor. The truth; the event is a nudge. */
+  async loadParked() {
+    try {
+      this.parkedItems = await invoke<WaitingItem[]>("parked_deliveries");
+    } catch (err) {
+      tracing(err);
+    }
+  }
+
+  /**
+   * A track's waiting list changed: something was put aside, or something
+   * waiting finally went in. The event says which track; the list itself is
+   * read back from the core, so a missed event cannot leave the screen
+   * saying one thing while the record says another.
+   *
+   * (The bell is not used: it is for decision cards waiting on an answer.
+   * A report that is waiting shows in the conversation and on the track.)
+   */
+  takeParked(_w: WaitingDelivery) {
+    void this.loadParked();
   }
 
   /** Close a track's conductor session (deactivate); it resumes with its memory next time. */
@@ -1165,7 +1390,50 @@ class Store {
       if (d.tags.includes(name)) await this.updateArtifact(d.id, { tags: d.tags.filter((x) => x !== name) });
     }
   }
-  lastError = $state("");
+  // ----- errors the human should see, wherever they happened -----
+  //
+  // `lastError` stays as the way to raise one: the fifty-odd call sites
+  // that assign to it keep working untouched, which matters while other
+  // people are editing the files they live in. Setting it to "" still
+  // means "forget the last failure", as the handful of sites that do that
+  // intend. The rules are in `errors.ts`; `ErrorToasts` shows the list.
+
+  /** Errors on screen now, oldest first. */
+  errors = $state<AppError[]>([]);
+  private errorSeq = 0;
+
+  /** Raise an error for the human. Empty text raises nothing. */
+  raise(text: string) {
+    if (!text.trim()) return;
+    // The webview console keeps what the toast lets go. Nothing from the
+    // UI reaches the app's log file yet; see the handover.
+    console.error(`[divixi] ${text.trim()}`);
+    this.errors = addError(this.errors, text, ++this.errorSeq, Date.now());
+  }
+
+  /** Take one error off the screen (the human read it, or closed it). */
+  dismissError(id: number) {
+    this.errors = dropError(this.errors, id);
+  }
+
+  /** Clear the screen of errors at once. */
+  dismissErrors() {
+    this.errors = [];
+  }
+
+  /** The newest error on screen, or "" — and the way every caller raises one. */
+  get lastError(): string {
+    return this.errors.at(-1)?.text ?? "";
+  }
+
+  set lastError(text: string) {
+    if (!text.trim()) {
+      this.errors = [];
+      return;
+    }
+    this.raise(text);
+  }
+
   restored = $state(false);
 
   /** Last detection result; null until setup has run once. */
@@ -1296,7 +1564,10 @@ class Store {
       this.artifacts = await invoke<ArtifactInfo[]>("list_artifacts", { kind: null });
     } catch (err) {
       this.lastError = String(err);
+      // The list is unchanged, so it cannot speak for what is gone.
+      return;
     }
+    this.pruneQueued("artifact:", new Set(this.artifacts.map((a) => artifactKey(a.id))));
   }
 
   /** Show the designs: the last one open, else the newest. */
@@ -1367,6 +1638,7 @@ class Store {
     }
     this.artifacts = this.artifacts.filter((d) => d.id !== id);
     this.runs = this.runs.filter((r) => r.track !== artifactKey(id));
+    this.setQueued(this.queued.filter((q) => q.key !== artifactKey(id)));
     if (this.artifact === id) {
       const next = this.designs[0];
       if (next) await this.openArtifact(next.id);
@@ -1517,25 +1789,19 @@ class Store {
 
   /** One message to the artifact's agent: the composer's text and files, the
    *  picture of the board when it has ink, and the items picked on it. */
-  async artifactSend(prompt: string) {
-    const id = this.artifact;
-    const d = this.currentArtifact;
-    const typed = prompt.trim();
-    const key = this.chatKey;
-    const files = this.attachments.map((a) => a.path);
-    const selected = [...this.designSelected];
-    if (!id || !d || this.artifactBusy || (!typed && !files.length && !selected.length && !this.kbPicked.length)) return;
+  private async dispatchArtifact(out: Queued): Promise<boolean> {
+    const { key, target: id, agent, text: typed, files, picks, selected } = out;
     this.lastError = "";
-    this.attachments = [];
-    const picks = this.takeKnowledge(key);
     const typedWithKb = withKnowledge(typed, picks);
-    const image = boardPng(this.designDoc);
+    // The board as it stands now, but only if it is still the one on screen:
+    // a message queued here must not carry another artifact's picture.
+    const image = this.artifact === id ? boardPng(this.designDoc) : null;
     const text = withAttachments(typedWithKb, files);
     const pending: Run = {
       id: `pending-${Date.now()}`,
       track: artifactKey(id),
       session: ARTIFACT_SESSION,
-      agent: d.agent,
+      agent,
       prompt: text,
       status: "connecting",
       startedAt: Date.now(),
@@ -1555,11 +1821,12 @@ class Store {
       const r = this.runs.find((x) => x.id === pendingId || x.id === run);
       if (r) r.id = run;
       void this.refreshArtifactSession();
+      return true;
     } catch (err) {
       this.runs = this.runs.filter((x) => x.id !== pendingId);
-      if (!(this.attachmentsBy[key] ?? []).length) void this.attach(files, key);
-      this.restoreKnowledge(key, picks);
-      this.lastError = String(err);
+      if (this.stillAnswering(err)) return false;
+      this.returnToComposer(out, err);
+      return true;
     }
   }
 
@@ -1583,11 +1850,13 @@ class Store {
     const i = this.decisions.findIndex((x) => x.id === d.id);
     if (i >= 0) this.decisions[i] = d;
     else this.decisions.push(d);
-    // A new card waits for the human.
+    // A new card waits for the human: the one thing the bell is for.
     if (i < 0 && d.status === "open") {
       const track = this.tracks.find((x) => x.id === d.track)?.name ?? "";
-      notify("decision", t(d.permission ? "notify.permission" : "notify.decision", { track }), d.question, d.track);
+      notifyDecision(d.id, t(d.permission ? "notify.permission" : "notify.decision", { track }), d.question, d.track);
     }
+    // Answered or set aside: nothing is waiting, so the notice goes.
+    if (d.status !== "open") resolveDecisions([d.id]);
   }
 
   /** The current track's decisions, oldest first. */
@@ -1633,9 +1902,21 @@ class Store {
     return runs.find((r) => r.status === "running" || r.status === "connecting");
   }
 
-  /** The conversation on screen has a turn in flight; the composer waits. */
+  /**
+   * Whether a conversation (`track:<id>` or `artifact:<id>`) has a turn in
+   * flight. By key, not by what is on screen, so the waiting line of a track
+   * the human has left is still pumped when its turn ends.
+   */
+  busyFor(key: string): boolean {
+    const live = (r: Run) => r.status === "running" || r.status === "connecting";
+    if (key.startsWith("artifact:")) return this.runs.some((r) => r.track === key && live(r));
+    const track = key.slice("track:".length);
+    return !!track && this.runs.some((r) => r.track === track && r.session === "conductor" && live(r));
+  }
+
+  /** The conversation on screen has a turn in flight; the composer shows a stop. */
   get busy(): boolean {
-    return this.chatRuns.some((r) => r.status === "running" || r.status === "connecting");
+    return this.busyFor(this.chatKey);
   }
 
   /** Any track has a run in flight; the brand mark pulses. */
@@ -1668,6 +1949,7 @@ class Store {
       this.clearWorkspace();
       if (this.panelOpen) void this.refreshWorkspace();
       void this.refreshConductor();
+      void this.refreshWorkerSessions();
     }
     if (this.readyAgents.some((a) => a.kind === track.agent)) this.agent = track.agent as AgentId;
     try {
@@ -1706,9 +1988,12 @@ class Store {
     } catch (err) {
       return String(err);
     }
+    resolveDecisions(this.decisions.filter((d) => d.track === id).map((d) => d.id));
     this.decisions = this.decisions.filter((d) => d.track !== id);
     this.tracks = this.tracks.filter((t) => t.id !== id);
     this.runs = this.runs.filter((r) => r.track !== id);
+    this.setQueued(this.queued.filter((q) => q.key !== `track:${id}`));
+    if (this.headerFolded[id]) this.setHeaderFolded(id, false);
     if (this.track === id) {
       const next = this.tracks.at(-1);
       if (next) await this.selectTrack(next.id);
@@ -2004,6 +2289,10 @@ class Store {
       } catch {
         this.trackFilter = { ...DEFAULT_TRACK_FILTER };
       }
+      // Messages the human wrote but never sent, from the last time the app
+      // was open. They come back held; nothing is sent by opening the app.
+      await this.restoreQueue();
+      await this.restoreHeaders();
       setInterval(() => (this.now = Date.now()), 30_000);
       const cache: Record<string, SlashCommand[]> = {};
       AGENT_IDS.forEach((id, i) => {
@@ -2047,9 +2336,12 @@ class Store {
       // restored can be in flight.
       this.runs = summaries.map(fromSummary);
       this.tracks = tracks;
+      this.pruneQueued("track:", new Set(tracks.map((tr) => `track:${tr.id}`)));
       void this.loadArtifacts();
       try {
         this.decisions = await invoke<Decision[]>("list_decisions", { track: null });
+        // Cards answered while this webview was away leave no notice behind.
+        keepOnlyOpen(this.decisions.filter((d) => d.status === "open").map((d) => d.id));
       } catch (err) {
         this.lastError = String(err);
       }
@@ -2085,9 +2377,13 @@ class Store {
         if (this.readyAgents.some((a) => a.kind === current.agent)) this.agent = current.agent as AgentId;
         if (this.panelOpen) void this.refreshWorkspace();
         void this.refreshConductor();
+        void this.refreshWorkerSessions();
       } else {
         this.view = "new-track";
       }
+      // Reports a conductor could not take before the app last closed are
+      // still waiting; the track list says so.
+      void this.loadParked();
       // Setup comes first when nothing has been detected yet, or when the
       // last detection left nothing to run workers on.
       if (local && (agents === null || this.readyAgents.length === 0)) {
@@ -2182,22 +2478,207 @@ class Store {
   }
 
   /**
-   * Send a message to the conductor on the selected agent. The conductor
-   * decides whether to answer or to open workers; worker runs arrive as
-   * `agent` events with their own run ids and are added when first seen.
+   * Send a message to the conductor on the selected agent (or, in a design,
+   * to the artifact's agent). The conductor decides whether to answer or to
+   * open workers; worker runs arrive as `agent` events with their own run
+   * ids and are added when first seen.
+   *
+   * Sent during a turn, the message waits its turn instead of being refused:
+   * it joins the conversation at once with a "queued" badge and goes out by
+   * itself when the turn ends, stopped or not. See `pumpQueue`.
    */
   async send(prompt: string) {
-    if (this.chatArtifact) return this.artifactSend(prompt);
-    const typed = prompt.trim();
-    const track = this.track;
     const key = this.chatKey;
+    const out = this.compose(prompt, key);
+    if (!out) return;
+    // A turn is in flight, or messages are already waiting: this one takes
+    // its place in the line and goes out by itself when the turn ends. The
+    // composer never closes, so the human can keep typing either way.
+    // (Messages held from a previous run of the app are not in that line;
+    // they wait on the human, so they do not hold this one up.)
+    if (this.busyFor(key) || liveQueuedFor(this.queued, key).length) {
+      this.setQueued(pushQueued(this.queued, out));
+      this.startPump();
+      return;
+    }
+    await this.dispatch(out);
+  }
+
+  // ----- the waiting line: messages sent while a turn was in flight -----
+
+  /** Messages waiting for their conversation's turn to end, oldest first. */
+  queued = $state<Queued[]>([]);
+  private queueSeq = 0;
+  /** Conversations whose next message is on its way out right now. */
+  private handing = new Set<string>();
+  /** A slow beat that pumps the line even if an event was missed. */
+  private pumpTimer: ReturnType<typeof setInterval> | null = null;
+  /** A write of the line to its setting, waiting to be coalesced. */
+  private queueSaving: ReturnType<typeof setTimeout> | null = null;
+
+  /** The waiting messages of the conversation on screen. */
+  get chatQueue(): Queued[] {
+    return queuedFor(this.queued, this.chatKey);
+  }
+
+  /**
+   * Change the line and write it down. Everything that touches `queued`
+   * goes through here: what the human typed is theirs, and closing the app
+   * must not be enough to lose it.
+   */
+  private setQueued(list: Queued[]) {
+    this.queued = list;
+    if (this.queueSaving !== null) return;
+    // A pump can move several messages in one tick; one write covers them
+    // all. No longer than that: the window where closing the app would
+    // lose what was just typed should be as near to nothing as it can be.
+    this.queueSaving = setTimeout(() => {
+      this.queueSaving = null;
+      const value = this.queued.length ? JSON.stringify(this.queued) : "";
+      invoke("set_setting", { key: QUEUE_SETTING, value }).catch(tracing);
+    }, 0);
+  }
+
+  /**
+   * Read the line back at startup. Everything comes back held: it sits in
+   * its conversation marked unsent, with a send button, and goes nowhere
+   * until the human presses it. Sending by itself would be a surprise —
+   * the app may have been shut for days, the folder has moved on, and the
+   * message would spend an agent turn nobody asked for just now.
+   */
+  private async restoreQueue() {
+    try {
+      const list = parseQueued(await invoke<string | null>("get_setting", { key: QUEUE_SETTING }));
+      // Ids are unique already (they carry the moment they were made); this
+      // only keeps the counter ahead of what came back.
+      this.queueSeq = list.length;
+      this.queued = list;
+    } catch (err) {
+      tracing(err);
+    }
+  }
+
+  /**
+   * Drop waiting messages whose conversation is gone: a message with
+   * nowhere to show would sit in the setting for good, written back on
+   * every change. Called once the tracks are known and again once the
+   * artifacts are, each pruning only the keys it can speak for — a list
+   * that has not loaded yet must not condemn anything.
+   */
+  private pruneQueued(prefix: "track:" | "artifact:", alive: Set<string>) {
+    const stale = this.queued.filter((q) => q.key.startsWith(prefix) && !alive.has(q.key));
+    if (stale.length) this.setQueued(this.queued.filter((q) => !stale.includes(q)));
+  }
+
+  /** Send a held message after all: it rejoins the line and goes out. */
+  releaseQueued(id: string) {
+    if (!this.queued.some((q) => q.id === id)) return;
+    this.setQueued(released(this.queued, id));
+    this.startPump();
+    void this.pumpQueue();
+  }
+
+  /**
+   * Take what the composer holds — the typed text, its files, the knowledge
+   * picked, the board items — as one message to send now or in a moment.
+   * The composer is left empty, as it is on a plain send.
+   */
+  private compose(prompt: string, key: string): Queued | null {
+    const text = prompt.trim();
     const files = this.attachments.map((a) => a.path);
-    if ((!typed && !files.length && !this.kbPicked.length) || !track || this.busy) return;
-    this.lastError = "";
-    const agent = this.agent;
-    // The files and picked knowledge go with this message; the composer starts empty again.
+    const artifact = this.chatArtifact;
+    const selected = artifact ? [...this.designSelected] : [];
+    const target = artifact ? this.artifact : this.track;
+    if (!target) return null;
+    if (artifact && !this.currentArtifact) return null;
+    if (!text && !files.length && !this.kbPicked.length && !selected.length) return null;
     this.attachments = [];
     const picks = this.takeKnowledge(key);
+    return {
+      id: `q${++this.queueSeq}-${Date.now()}`,
+      key,
+      target,
+      agent: artifact ? (this.currentArtifact?.agent ?? this.agent) : this.agent,
+      text,
+      files,
+      picks,
+      selected,
+      at: Date.now(),
+    };
+  }
+
+  /** Take a waiting message back out of the line before it goes. */
+  cancelQueued(id: string) {
+    const item = this.queued.find((q) => q.id === id);
+    if (!item) return;
+    this.setQueued(dropQueued(this.queued, id));
+    // What it carried goes back to the composer, when nothing waits there.
+    if (item.files.length && !(this.attachmentsBy[item.key] ?? []).length) void this.attach(item.files, item.key);
+    this.restoreKnowledge(item.key, item.picks);
+    if (!liveQueued(this.queued).length) this.stopPump();
+  }
+
+  private startPump() {
+    if (this.pumpTimer !== null) return;
+    this.pumpTimer = setInterval(() => void this.pumpQueue(), 400);
+  }
+
+  private stopPump() {
+    if (this.pumpTimer === null) return;
+    clearInterval(this.pumpTimer);
+    this.pumpTimer = null;
+  }
+
+  /**
+   * Send the oldest waiting message of every conversation that is free. The
+   * beat is a safety net; `apply` calls this the moment a turn ends, so a
+   * queued message usually goes out at once. Held messages are passed over:
+   * they wait on the human, and the beat stops when only they are left.
+   */
+  async pumpQueue() {
+    if (!liveQueued(this.queued).length) {
+      this.stopPump();
+      return;
+    }
+    for (const key of queuedKeys(this.queued)) {
+      if (this.handing.has(key) || this.busyFor(key)) continue;
+      const { next, rest } = nextQueued(this.queued, key);
+      if (!next) continue;
+      this.handing.add(key);
+      this.setQueued(rest);
+      void this.dispatch(next)
+        .then((sent) => {
+          // The core was still answering (a worker report got in first):
+          // back to the front of the line, to try again on the next beat.
+          if (!sent) {
+            this.setQueued(unshiftQueued(this.queued, next));
+            this.startPump();
+          }
+        })
+        .finally(() => this.handing.delete(key));
+    }
+  }
+
+  /** Whether an error from the core means "not now" rather than "no". */
+  private stillAnswering(err: unknown): boolean {
+    return /still responding/i.test(String(err));
+  }
+
+  /** Put one message on its way. `false` means the core was busy: try again. */
+  private async dispatch(out: Queued): Promise<boolean> {
+    return out.key.startsWith("artifact:") ? this.dispatchArtifact(out) : this.dispatchTrack(out);
+  }
+
+  /** What a message that did not go out leaves behind in the composer. */
+  private returnToComposer(out: Queued, err: unknown) {
+    if (out.files.length && !(this.attachmentsBy[out.key] ?? []).length) void this.attach(out.files, out.key);
+    this.restoreKnowledge(out.key, out.picks);
+    this.lastError = String(err);
+  }
+
+  private async dispatchTrack(out: Queued): Promise<boolean> {
+    const { key, target: track, agent, text: typed, files, picks } = out;
+    this.lastError = "";
     const typedWithKb = withKnowledge(typed, picks);
     const text = withAttachments(typedWithKb, files);
 
@@ -2238,11 +2719,12 @@ class Store {
       // The conductor now runs on this agent; keep the track's record in step.
       const tr = this.tracks.find((t) => t.id === track);
       if (tr && tr.agent !== agent) tr.agent = agent;
+      return true;
     } catch (err) {
       this.runs = this.runs.filter((r) => r.id !== pendingId);
-      if (!(this.attachmentsBy[key] ?? []).length) void this.attach(files, key);
-      this.restoreKnowledge(key, picks);
-      this.lastError = String(err);
+      if (this.stillAnswering(err)) return false;
+      this.returnToComposer(out, err);
+      return true;
     }
   }
 
@@ -2285,19 +2767,22 @@ class Store {
     if (env.session === "conductor" && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
       void this.refreshConductor();
     }
-    fold(run, env.at_ms, env.event);
-    // The conductor answered, or its turn failed. A turn the human stopped
-    // themselves (ACP's "cancelled", `Cancelled` as the core writes it) is
-    // no news to them.
-    const stopped = env.event.kind === "finished" && env.event.stop_reason.toLowerCase() === "cancelled";
-    if (env.session === "conductor" && !stopped && (env.event.kind === "finished" || env.event.kind === "failed")) {
-      const track = this.tracks.find((x) => x.id === env.track)?.name ?? "";
-      if (env.event.kind === "finished") notify("reply", t("notify.reply", { track }), run.message.trim() || t("notify.replyEmpty"), env.track);
-      else notify("failed", t("notify.failed", { track }), env.event.error, env.track);
+    // A worker began or ended a turn: the list's dots and its menu follow.
+    if (env.session !== "conductor" && env.session !== ARTIFACT_SESSION && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
+      void this.refreshWorkerSessions();
     }
+    fold(run, env.at_ms, env.event);
+    // The conductor answering, or its turn failing, makes no notice: the
+    // bell is only for decision cards, and the conversation shows both
+    // where the human is already looking.
     // A finished run may have written files: the open panel catches up.
     if (this.panelOpen && env.track === this.track && (env.event.kind === "finished" || env.event.kind === "failed")) {
       void this.refreshWorkspace();
+    }
+    // The turn is over (answered, failed, or stopped by the human): whatever
+    // was typed meanwhile goes out now, in the order it was typed.
+    if (liveQueued(this.queued).length && (env.event.kind === "finished" || env.event.kind === "failed")) {
+      void this.pumpQueue();
     }
   }
 
@@ -2529,6 +3014,7 @@ export async function connectEvents() {
     listen<DownloadProgress>("agent_download", (e) => store.progress(e.payload)),
     listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
     listen<{ track: string; from: string; to: string; writing: boolean }>("conductor_handoff", (e) => store.takeHandoff(e.payload)),
+    listen<WaitingDelivery>("parked", (e) => store.takeParked(e.payload)),
     listen<DesignDelta>("design", (e) => store.takeDesign(e.payload)),
     listen<string>("design_extract", (e) => {
       if (e.payload === store.artifact) void store.loadExtracts(e.payload);
