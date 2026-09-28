@@ -128,19 +128,9 @@
     <!-- Where and on what, above the words: the same order the form asks a
          person to think in, and it is never hidden behind a menu. -->
     <div class="grid">
-      <label class="f">
+      <label class="f wide">
         <span class="flab">{t("routines.name")}</span>
         <input bind:value={name} placeholder={t("routines.namePlaceholder")} />
-      </label>
-
-      <label class="f">
-        <span class="flab">{t("routines.agent")}</span>
-        <select bind:value={agent}>
-          {#if !store.readyAgents.length}<option value="">{t("routines.noAgents")}</option>{/if}
-          {#each store.readyAgents as a (a.kind)}
-            <option value={a.kind}>{agentLabel(a.kind)}</option>
-          {/each}
-        </select>
       </label>
 
       <div class="f wide">
@@ -152,6 +142,16 @@
           </button>
         </div>
       </div>
+
+      <label class="f">
+        <span class="flab">{t("routines.agent")}</span>
+        <select bind:value={agent}>
+          {#if !store.readyAgents.length}<option value="">{t("routines.noAgents")}</option>{/if}
+          {#each store.readyAgents as a (a.kind)}
+            <option value={a.kind}>{agentLabel(a.kind)}</option>
+          {/each}
+        </select>
+      </label>
 
       {#if modelOption}
         <label class="f">
@@ -178,11 +178,6 @@
     <div class="block">
       <span class="flab">{t("routines.instruction")}</span>
       <textarea bind:value={instruction} rows="9" placeholder={t("routines.instructionPlaceholder")}></textarea>
-      <p class="hint">{t("routines.instructionHint")}</p>
-      <!-- The instruction reaches the agent as written, so an agent that
-           takes slash commands takes them from here too. Worth a line:
-           nothing else in the app says a routine can call a skill. -->
-      <p class="hint">{t("routines.skillHint")}</p>
     </div>
 
     <div class="erow">
