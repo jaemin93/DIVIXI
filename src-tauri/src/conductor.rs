@@ -748,7 +748,7 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
         ),
         Tool::new(
             "run_routine",
-            &format!("Run a saved routine now. Returns at once with the run id; its report reaches you later as a {REPORT_PREFIX} message, as a worker's does. Every run starts on a clean session, so the routine does not read its own earlier runs."),
+            &format!("Run a saved routine now. Returns at once with the run id; its report reaches you later as a {REPORT_PREFIX} message, as a worker's does. Every run starts its worker on a CLEAN session, so the routine does not read its own earlier runs — and neither does it keep any conversation you were having with a worker of that name. Where that matters, say so before running it."),
             json!({
                 "type": "object",
                 "properties": { "routine": { "type": "string", "description": "Routine id from list_routines." } },

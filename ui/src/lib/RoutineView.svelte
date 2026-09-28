@@ -93,6 +93,10 @@
           · {t("routines.worker")}: <code>{routine.worker}</code>
           · {t("routines.agent")}: <code>{agentLabel(routine.agent || track?.worker_agent || track?.agent || "")}</code>
         </p>
+        <!-- Said where the button is, not only in the docs: running this
+             opens the worker anew, and a conversation the conductor was
+             keeping with a worker of the same name ends there. -->
+        <p class="warn">{t("routines.freshNote", { worker: routine.worker })}</p>
       </div>
       <div class="acts">
         <button class="del" class:armed onclick={remove} onblur={() => (armed = false)}>
@@ -116,6 +120,11 @@
         {#if editing}
           <textarea bind:value={draft} rows="8" aria-label={t("routines.instruction")}></textarea>
           <p class="hint">{t("routines.instructionHint")}</p>
+          <!-- The instruction reaches the worker as written, so an agent
+               that takes slash commands takes them from here too. Worth a
+               line: nothing else in the app says a routine can call a
+               skill the agent already has. -->
+          <p class="hint">{t("routines.skillHint")}</p>
           <div class="erow">
             <button class="ghost" onclick={cancel}>{t("routines.cancel")}</button>
             <button class="save" disabled={!dirty} onclick={save}>{t("routines.save")}</button>
@@ -197,6 +206,13 @@
 
   .meta code {
     font-size: 11px;
+  }
+
+  .warn {
+    margin: 6px 0 0;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--lab);
   }
 
   .acts {

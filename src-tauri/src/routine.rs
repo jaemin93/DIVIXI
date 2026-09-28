@@ -42,11 +42,11 @@ use tauri::Manager;
 /// standing — so a caller can say what it started. The report arrives later,
 /// at the track's conductor, by the ordinary path.
 pub async fn run(app: AppHandle, id: &str) -> Result<Value, String> {
-    let (routine, track, worker, agent, instruction) = {
+    let (routine, label, track, worker, agent, instruction) = {
         let state = app.state::<AppState>();
         let r = read(&state, id)?;
         let agent = (!r.agent.is_empty()).then(|| r.agent.clone());
-        (r.id.clone(), r.track.clone(), r.worker.clone(), agent, r.instruction.clone())
+        (r.id, r.name, r.track, r.worker, agent, r.instruction)
     };
 
     // Refuse in the routine's own words. `start_worker_turn` refuses a busy
@@ -59,7 +59,7 @@ pub async fn run(app: AppHandle, id: &str) -> Result<Value, String> {
         let mut workers = state.sessions.workers.lock().await;
         match workers.get(&key) {
             Some(live) if live.running.is_some() => {
-                return Err(format!("'{}' is already running. Wait for it to report.", read(&state, id)?.name));
+                return Err(format!("'{label}' is already running. Wait for it to report."));
             }
             // An idle session from the last run is closed before this one
             // opens, for the two reasons in the module note: `spawn_worker`
