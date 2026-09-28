@@ -417,6 +417,30 @@ impl Doc {
         self.edges.iter().find(|e| e.id == id).map(|e| Entity::Edge(e.clone()))
     }
 
+    /// The answer to an edit that wrote words: the item's id and the words
+    /// the board now holds for it.
+    ///
+    /// `{ok, id}` alone reads the same whether the words arrived whole or
+    /// with a syllable replaced somewhere before they got here, and the
+    /// writer has nothing to hold them against until the next turn's
+    /// outline — which it then reads as the truth. Sending the words back
+    /// closes that loop while the writer still remembers what it meant.
+    ///
+    /// Only edits that wrote words answer this way, and the words are the
+    /// ones the call itself carried, so the answer is never larger than the
+    /// call. A link's page title and a file's name are left out: they are
+    /// short, and they are the page's words or the disk's, not the agent's.
+    fn wrote(&self, id: &str) -> Value {
+        let words = self
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.text.as_str())
+            .or_else(|| self.edges.iter().find(|e| e.id == id).map(|e| e.label.as_str()))
+            .unwrap_or_default();
+        json!({ "ok": true, "id": id, "text": words })
+    }
+
     /// Put an item back as it was, or take it away when it was not there.
     fn restore(&mut self, target: &str, what: Option<&Entity>) {
         match what {
@@ -539,7 +563,7 @@ impl Doc {
                     if let Some(a) = alias {
                         aliases.insert(a, id.clone());
                     }
-                    Ok(json!({ "ok": true, "id": id }))
+                    Ok(self.wrote(&id))
                 }
                 Op::AddStroke { stroke } => {
                     if matches!(actor, Actor::Agent { .. }) {
@@ -650,6 +674,9 @@ impl Doc {
                 Op::Update { id, text, tag, answer, url, title } => {
                     let id = resolve(&aliases, &id);
                     let before = self.entity(&id);
+                    // An update that only retags or repoints has no words to
+                    // read back, and a note can be 4,000 characters.
+                    let words = text.is_some();
                     let tag = tag.map(|t| check_tag(&t)).transpose()?;
                     if let Some(t) = &text {
                         check_text(t, MAX_TEXT, "a note")?;
@@ -688,7 +715,7 @@ impl Doc {
                         node.name = t;
                     }
                     self.record(actor, &id, before);
-                    Ok(json!({ "ok": true, "id": id }))
+                    Ok(if words { self.wrote(&id) } else { json!({ "ok": true, "id": id }) })
                 }
                 Op::CreateFrame { x, y, w, h, title, alias } => {
                     check_text(&title, MAX_LABEL, "a frame's title")?;
@@ -713,7 +740,7 @@ impl Doc {
                     if let Some(a) = alias {
                         aliases.insert(a, id.clone());
                     }
-                    Ok(json!({ "ok": true, "id": id }))
+                    Ok(self.wrote(&id))
                 }
                 Op::CreateQuestion { x, y, w, h, text, alias } => {
                     check_text(&text, MAX_TEXT, "a question")?;
@@ -741,7 +768,7 @@ impl Doc {
                     if let Some(a) = alias {
                         aliases.insert(a, id.clone());
                     }
-                    Ok(json!({ "ok": true, "id": id }))
+                    Ok(self.wrote(&id))
                 }
                 Op::CreateLink { x, y, url, title, text, alias } => {
                     let url = check_url(&url)?;
@@ -769,7 +796,7 @@ impl Doc {
                     if let Some(a) = alias {
                         aliases.insert(a, id.clone());
                     }
-                    Ok(json!({ "ok": true, "id": id }))
+                    Ok(self.wrote(&id))
                 }
                 Op::AddFile { x, y, w, h, src, name, mime } => {
                     if matches!(actor, Actor::Agent { .. }) {
@@ -881,7 +908,7 @@ impl Doc {
                     let id = edge.id.clone();
                     self.edges.push(edge);
                     self.record(actor, &id, None);
-                    Ok(json!({ "ok": true, "id": id }))
+                    Ok(self.wrote(&id))
                 }
             })();
             out.push(result.unwrap_or_else(|error| json!({ "ok": false, "error": error })));
@@ -1349,6 +1376,7 @@ pub fn preamble(lang: &str, title: &str) -> String {
 - 파일 카드의 path(files/…)는 당신의 작업 폴더 안에 있습니다. 이미지와 PDF, 문서는 당신의 파일 읽기 도구로 직접 읽으세요. 링크 카드와 문서 카드에 text_file(extracted/…)이 있으면 앱이 그 웹 페이지나 문서(Word·PowerPoint·Excel·PDF)에서 꺼낸 글이니 그것을 읽으세요. text_error는 꺼내지 못한 이유입니다. 레퍼런스를 읽고 핵심을 메모로 정리하고, 관련된 것끼리 화살표로 잇거나 틀로 묶습니다.
 - 사람에게 물어야 할 것은 create_question으로 보드에 올립니다. 사람이 적은 답은 개요의 answer에 옵니다. 답을 대신 적지 않습니다.
 - 보드를 바꿀 때는 `board_write`를 씁니다. 한 번에 여러 명령을 보낼 수 있고, create_note에 ref를 주면 같은 호출 안에서 "$ref"로 가리킬 수 있습니다. 최신 상태가 필요하면 `board_read`.
+- 글을 쓴 명령은 결과에 보드가 담은 글을 함께 돌려줍니다. 그것을 읽어 보내려던 것과 맞춰 보세요. 글자가 어긋났으면 그 항목을 한 번 다시 씁니다. 다시 써도 어긋나면 사람에게 말하고 멈춥니다.
 - 당신이 바꾼 것은 사람이 유지하거나 되돌리기 전까지 "제안"으로 표시됩니다. 되돌려진 것을 다시 밀어붙이지 마세요.
 
 일하는 법:
@@ -1369,6 +1397,7 @@ The board:
 - A file card's path (files/…) is in your working folder: read images, PDFs and documents with your own file tools. A link or document card with a text_file (extracted/…) has the text the app took from that web page or document (Word, PowerPoint, Excel, PDF): read it. text_error says why there is none. Read the references, sum up what matters in notes, connect related things with arrows or group them in frames.
 - Put what you need to ask the human on the board with create_question; their answer comes as the question's answer in the outline. Never write answers yourself.
 - Change the board with `board_write`: several commands per call; give create_note a ref to point at it as "$ref" later in the same call. Call `board_read` for the latest state.
+- A command that wrote words answers with the words the board now holds. Read them against what you sent; if a word came out wrong, write that item once more, and if it comes out wrong again, tell the human and stop.
 - What you change shows as a suggestion until the human keeps or reverts it. Do not push back what was reverted.
 
 How to work:
@@ -1386,7 +1415,7 @@ How to work:
 pub const BOARD_READ: &str = "board_read";
 pub const BOARD_READ_DESC: &str = "Read the design's board: every note (id, tag, text, position, size, who made it), sketch, reference file (name, media type, path in your working folder), link (url, title), each link or document card's text_file (its text, taken by the app, in your working folder) or text_error, frame (title, what it holds), question (text, the human's answer) and arrow, and which items are suggestions still waiting on the human.";
 pub const BOARD_WRITE: &str = "board_write";
-pub const BOARD_WRITE_DESC: &str = "Change the design's board with a list of commands, applied in order. Each result says ok with the item id, or the error. create_note {x, y, text, tag?, w?, h?, ref?} (tag: goal | constraint | question | idea); create_question {x, y, text, w?, h?, ref?} (a card the human answers); create_link {x, y, url, title?, text?, ref?} (a web page as a reference); create_frame {x, y, w, h, title?, ref?} (a titled area; what lies inside moves with it); update {id, text?, tag?, url?, title?}; move {id, x, y, w?, h?}; delete {ids}; connect {from, to, label?}. Ids may be \"$ref\" for an item made earlier in the same call. Files come only from the human. Your changes show as suggestions the human keeps or reverts.";
+pub const BOARD_WRITE_DESC: &str = "Change the design's board with a list of commands, applied in order. Each result says ok with the item id, or the error. A command that wrote words answers with them too, as the board now holds them: read them against what you sent. create_note {x, y, text, tag?, w?, h?, ref?} (tag: goal | constraint | question | idea); create_question {x, y, text, w?, h?, ref?} (a card the human answers); create_link {x, y, url, title?, text?, ref?} (a web page as a reference); create_frame {x, y, w, h, title?, ref?} (a titled area; what lies inside moves with it); update {id, text?, tag?, url?, title?}; move {id, x, y, w?, h?}; delete {ids}; connect {from, to, label?}. Ids may be \"$ref\" for an item made earlier in the same call. Files come only from the human. Your changes show as suggestions the human keeps or reverts.";
 
 /// Arguments of `board_write`: a list of commands.
 pub fn board_write_schema() -> Value {
@@ -1449,6 +1478,12 @@ pub fn tools(app: AppHandle, id: String) -> Vec<Tool> {
         Tool::new(BOARD_WRITE, BOARD_WRITE_DESC, board_write_schema(), move |args| {
             let (app, id) = write.clone();
             async move {
+                // The words as they arrived, before anything here touches
+                // them. When a note lands wrong this is what says whether it
+                // was already wrong when it got here — and it takes
+                // `orchestra_app=debug` to see, not the whole protocol at
+                // trace, which is half a gigabyte an afternoon.
+                tracing::debug!(design = %id, commands = %args, "board_write");
                 let ops = parse_commands(&args)?;
                 let run = crate::artifact::running(&app, &id).await;
                 let results = apply(&app, &id, ops, Actor::Agent { run })?;
@@ -1721,5 +1756,56 @@ mod tests {
         let all: Vec<u64> = d.changes.iter().map(|c| c.id).collect();
         d.review(&all, false);
         assert_eq!((d.nodes.len(), d.edges.len()), (2, 1));
+    }
+
+    /// An edit that wrote words answers with the words the board kept, so a
+    /// writer whose text arrived wrong can see that at once instead of
+    /// reading it back as the truth on its next turn. An edit that wrote no
+    /// words says nothing: a note holds up to 4,000 characters and a move
+    /// has no reason to carry them.
+    #[test]
+    fn an_edit_that_wrote_words_answers_with_them() {
+        let mut d = Doc::default();
+        let agent = Actor::Agent { run: None };
+        let out = d.apply(
+            ops(json!([
+                { "op": "create_note", "x": 0, "y": 0, "text": "같은 결정문이 미리 문을 열어 둔다", "ref": "n" },
+                { "op": "create_frame", "x": -40, "y": -40, "w": 800, "h": 400, "title": "Airflow 로 옮길 수 있는 근거" },
+                { "op": "create_question", "x": 400, "y": 0, "text": "주기는 hourly 로 할까요?", "ref": "q" },
+                { "op": "create_link", "x": 0, "y": 300, "url": "https://example.com/a", "title": "Example", "text": "왜 중요한가" },
+                { "op": "connect", "from": "$n", "to": "$q", "label": "놓친 것은" }
+            ])),
+            &agent,
+        );
+        assert!(out.iter().all(|r| r["ok"] == true), "{out:?}");
+        assert_eq!(out[0]["text"], "같은 결정문이 미리 문을 열어 둔다");
+        assert_eq!(out[1]["text"], "Airflow 로 옮길 수 있는 근거", "a frame answers with its title");
+        assert_eq!(out[2]["text"], "주기는 hourly 로 할까요?");
+        assert_eq!(out[3]["text"], "왜 중요한가", "a link answers with its note");
+        assert_eq!(out[4]["text"], "놓친 것은", "an arrow answers with its label");
+
+        // The words come from the board, not from the command: whatever the
+        // board kept is what the writer is shown.
+        let note = out[0]["id"].as_str().unwrap().to_string();
+        for r in &out {
+            let id = r["id"].as_str().unwrap();
+            let kept = d
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| n.text.clone())
+                .unwrap_or_else(|| d.edges.iter().find(|e| e.id == id).unwrap().label.clone());
+            assert_eq!(r["text"], kept, "{id}");
+        }
+
+        let moved = d.apply(ops(json!([{ "op": "move", "id": note.clone(), "x": 60, "y": 0 }])), &agent);
+        assert_eq!(moved[0]["ok"], true);
+        assert!(moved[0].get("text").is_none(), "a move wrote no words: {moved:?}");
+
+        let tagged = d.apply(ops(json!([{ "op": "update", "id": note.clone(), "tag": "goal" }])), &agent);
+        assert!(tagged[0].get("text").is_none(), "retagging wrote no words: {tagged:?}");
+
+        let rewritten = d.apply(ops(json!([{ "op": "update", "id": note, "text": "같은 결정문이 미리 문을 열어 두었다" }])), &agent);
+        assert_eq!(rewritten[0]["text"], "같은 결정문이 미리 문을 열어 두었다");
     }
 }
