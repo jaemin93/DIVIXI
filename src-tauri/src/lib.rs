@@ -11,7 +11,10 @@ use std::time::Duration;
 use orchestra_acp::{AgentSpec, ConfigOptionInfo};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
 use orchestra_core::{AgentEnvelope, AgentEvent};
-use orchestra_store::{ArtifactInfo, ArtifactPatch, Decision, RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
+use orchestra_store::{
+    ArtifactInfo, ArtifactPatch, Decision, Routine, RoutinePatch, RoutineRun, RunSummary, SearchHit, Store, StoredEvent, TrackInfo,
+    TrackPatch,
+};
 use parking_lot::Mutex;
 use tauri::{Emitter, Manager, State};
 
@@ -40,6 +43,7 @@ mod logging;
 mod mask;
 mod metrics;
 mod preview;
+mod routine;
 mod terminal;
 mod remote;
 mod update;
@@ -110,6 +114,9 @@ pub struct AppState {
     pub(crate) worktrees_dir: PathBuf,
     /// Artifacts' agent sessions.
     pub(crate) artifacts: artifact::Artifacts,
+    /// The sessions of routines with a turn in flight. A routine keeps none
+    /// between runs, so an entry is "this one is running".
+    pub(crate) routines: routine::Routines,
     /// Designs' boards, cached from the store.
     pub(crate) boards: design::Boards,
     /// Last detection result, mirrored from the store for quick lookups.
@@ -513,6 +520,73 @@ async fn conductor_prompt(
 }
 
 // ----- artifacts: designs (and knowledge, later) -----
+
+/// Every routine, most recently touched first.
+#[tauri::command(async)]
+fn list_routines(state: State<'_, AppState>) -> Result<Vec<Routine>, String> {
+    state.store.routines().map_err(|e| e.to_string())
+}
+
+/// Which routines have a turn in flight right now.
+#[tauri::command]
+async fn running_routines(app: AppHandle) -> Result<Vec<String>, String> {
+    Ok(app.state::<AppState>().routines.running().await)
+}
+
+/// Save a routine. It runs alone, so it needs its own folder and agent —
+/// there is no track to borrow either from.
+#[tauri::command(async)]
+fn create_routine(state: State<'_, AppState>, patch: RoutinePatch) -> Result<Routine, String> {
+    check_routine(&state, &patch)?;
+    state.store.create_routine(&patch).map_err(|e| e.to_string())
+}
+
+/// Rewrite a routine: its name, what it tells its agent, the folder, the
+/// agent, its options, or the track it tells when it has run.
+#[tauri::command(async)]
+fn update_routine(state: State<'_, AppState>, id: String, patch: RoutinePatch) -> Result<Routine, String> {
+    check_routine(&state, &patch)?;
+    state.store.update_routine(&id, &patch).map_err(|e| e.to_string())
+}
+
+/// The agent must be one this machine has, and the folder a real directory:
+/// both are checked here rather than at run time, so a routine that cannot
+/// work is refused while the human is still looking at the form.
+fn check_routine(state: &AppState, patch: &RoutinePatch) -> Result<(), String> {
+    if let Some(agent) = patch.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+        state.spec_for(agent)?;
+    }
+    if let Some(cwd) = patch.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        if !std::path::Path::new(cwd).is_dir() {
+            return Err(format!("{cwd} is not a folder"));
+        }
+    }
+    Ok(())
+}
+
+/// Forget a routine, and the runs it made. Nothing else holds them.
+#[tauri::command(async)]
+fn delete_routine(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.store.delete_routine(&id).map_err(|e| e.to_string())
+}
+
+/// A routine's runs, newest first.
+#[tauri::command(async)]
+fn routine_runs(state: State<'_, AppState>, id: String, limit: Option<u32>) -> Result<Vec<RoutineRun>, String> {
+    state.store.routine_runs(&id, limit.unwrap_or(50)).map_err(|e| e.to_string())
+}
+
+/// Run a routine now. Returns as soon as its agent has the work.
+#[tauri::command(async)]
+async fn run_routine(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    routine::run(app, &id).await
+}
+
+/// Stop a routine's turn in flight.
+#[tauri::command]
+async fn routine_cancel(app: AppHandle, id: String) {
+    routine::cancel(&app, &id).await;
+}
 
 /// Artifacts of one kind, or of every kind, most recently touched first.
 #[tauri::command(async)]
@@ -1555,6 +1629,14 @@ pub fn run() {
             list_runs,
             run_events,
             list_decisions,
+            list_routines,
+            create_routine,
+            update_routine,
+            delete_routine,
+            routine_runs,
+            run_routine,
+            routine_cancel,
+            running_routines,
             list_artifacts,
             create_artifact,
             update_artifact,
@@ -1688,6 +1770,7 @@ pub fn run() {
                 artifacts_dir,
                 worktrees_dir,
                 artifacts: artifact::Artifacts::default(),
+                routines: routine::Routines::default(),
                 boards: design::Boards::default(),
                 agents: Mutex::new(None),
                 sessions: conductor::Sessions::default(),

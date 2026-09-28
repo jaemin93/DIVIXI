@@ -13,6 +13,8 @@
   import TrackHeader from "./lib/TrackHeader.svelte";
   import DesignView from "./lib/DesignView.svelte";
   import KnowledgeView from "./lib/KnowledgeView.svelte";
+  import RoutineList from "./lib/RoutineList.svelte";
+  import RoutineView from "./lib/RoutineView.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
   import Unreachable from "./lib/Unreachable.svelte";
   import ErrorToasts from "./lib/ErrorToasts.svelte";
@@ -27,7 +29,7 @@
   const side = { axis: "x" as const, duration: reduced ? 0 : 200, easing: cubicOut };
 
   /** The track list sits beside every view but settings, once a track exists. */
-  const listShown = $derived(store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.trackListOpen && store.tracks.length > 0);
+  const listShown = $derived(store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.view !== "routines" && store.trackListOpen && store.tracks.length > 0);
 
   // Browser-style zoom keys, app-wide.
   function onKey(e: KeyboardEvent) {
@@ -93,6 +95,9 @@
       <DesignView />
     {:else if store.view === "knowledge"}
       <KnowledgeView />
+    {:else if store.view === "routines"}
+      <RoutineList />
+      <RoutineView />
     {:else if store.view === "worker"}
       <WorkerView />
     {:else if store.view === "new-track" || !store.currentTrack}
