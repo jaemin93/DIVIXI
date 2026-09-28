@@ -52,6 +52,27 @@ updates:
       # Lift this when a svelte-check release widens that peer range to include
       # 7 -- then delete these lines and let the group carry it.
       - dependency-name: "typescript"
+      # The ACP adapters. Dependabot can only ever make half of this change.
+      #
+      # The version lives in three places and nothing compares them:
+      #   package.json                    devDependencies
+      #   crates/acp/src/lib.rs:71        CLAUDE_ADAPTER
+      #   crates/agents/src/lib.rs:108    CODEX_ADAPTER
+      #
+      # The Rust constants are the ones that matter -- they decide which
+      # adapter the app installs and launches. Dependabot edits only
+      # package.json, and CI stays green: the test at
+      # crates/agents/src/lib.rs:852 checks how a name splits from a version
+      # using a literal written into the test, not the constant, so a manifest
+      # that disagrees with the constant passes every check.
+      #
+      # Nothing spawns an adapter in the test suite either, so even a complete
+      # bump is unverified until someone runs the app.
+      #
+      # Upgrading, when it is wanted, is one deliberate commit: package.json,
+      # both constants, the test literal, then launch the app and watch a turn
+      # run. See #22.
+      - dependency-name: "@agentclientprotocol/*"
     groups:
       npm:
         patterns: ["*"]
