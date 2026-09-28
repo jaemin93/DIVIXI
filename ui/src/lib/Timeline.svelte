@@ -6,6 +6,7 @@
   import Working from "./Working.svelte";
   import Markdown from "./Markdown.svelte";
   import { t } from "./i18n.svelte";
+  import { untrack } from "svelte";
   import { FOLLOWING, followed, resized, scrolled, type Stick } from "./scroll";
 
   // ----- sticking to the bottom -----
@@ -34,10 +35,17 @@
   /** Put the view at the foot, and remember that it was us who did it. */
   function follow() {
     if (!scroller) return;
-    scroller.scrollTop = scroller.scrollHeight;
+    const box = scroller;
+    box.scrollTop = box.scrollHeight;
     // Read back rather than assume: the browser clamps, and under page
     // zoom it clamps to a fraction.
-    stick = followed(stick, scroller.scrollTop);
+    //
+    // `untrack` because this is called from inside effects (a conversation
+    // opening, a message sent), and `followed` reads `stick` only to replace
+    // it wholesale. Tracked, that read makes those effects depend on what
+    // they themselves write, and Svelte tears the component down with
+    // `effect_update_depth_exceeded`.
+    stick = untrack(() => followed(stick, box.scrollTop));
   }
 
   /**
