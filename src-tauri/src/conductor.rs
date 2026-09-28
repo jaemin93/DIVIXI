@@ -2002,10 +2002,14 @@ fn own_dir(state: &AppState, track: &str, track_dir: &str, name: &str) -> Result
             let dir = if worked_here {
                 root.join(&base)
             } else {
-                (1..)
+                // Bounded, and an error rather than a panic if it runs out:
+                // this is the one place a worker's folder name comes from
+                // the folders that happen to be there, so it is the one
+                // that could in principle find none free.
+                (1..1000)
                     .map(|n| root.join(if n == 1 { base.clone() } else { format!("{base}-{n}") }))
                     .find(|d| !d.exists())
-                    .expect("some name is free")
+                    .ok_or_else(|| format!("no free folder name for worker {name} under {track_dir}"))?
             };
             if let Err(err) = state.store.set_meta(&key, &dir.to_string_lossy()) {
                 tracing::warn!(%err, "could not remember a worker's folder");
