@@ -5,7 +5,7 @@
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
   import { untrack } from "svelte";
-  import { FOLLOWING, followed, resized, scrolled, type Stick } from "./scroll";
+  import { FOLLOWING, followed, reached, resized, scrolled, type Stick } from "./scroll";
 
   /**
    * A worker worker's session, read like a conversation: what the conductor
@@ -39,6 +39,51 @@
   function onScroll() {
     if (scroller) stick = scrolled(stick, scroller);
   }
+
+  // The human reaching back is read from their own input, not inferred from
+  // the scroll event it causes: a scroll event cannot say who moved the view,
+  // and while a turn streams, guessing from the position loses the gesture.
+  // See `reached` in scroll.ts.
+  //
+  // Listeners rather than handler attributes: they are passive -- nothing here
+  // calls preventDefault, and saying so keeps scrolling off the main thread --
+  // and a plain scroll box has no ARIA role that would justify the attributes.
+  $effect(() => {
+    const box = scroller;
+    if (!box) return;
+    const pull = () => {
+      stick = reached(stick, box, true);
+    };
+
+    const wheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) pull();
+    };
+    const keys = (e: KeyboardEvent) => {
+      if (e.key === "PageUp" || e.key === "ArrowUp" || e.key === "Home") pull();
+    };
+    let touchY = 0;
+    const start = (e: TouchEvent) => {
+      touchY = e.touches[0]?.clientY ?? 0;
+    };
+    // A finger travelling down the screen pulls the conversation back up.
+    const move = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY ?? touchY;
+      if (y > touchY) pull();
+      touchY = y;
+    };
+
+    const passive = { passive: true } as const;
+    box.addEventListener("wheel", wheel, passive);
+    box.addEventListener("keydown", keys);
+    box.addEventListener("touchstart", start, passive);
+    box.addEventListener("touchmove", move, passive);
+    return () => {
+      box.removeEventListener("wheel", wheel);
+      box.removeEventListener("keydown", keys);
+      box.removeEventListener("touchstart", start);
+      box.removeEventListener("touchmove", move);
+    };
+  });
 
   $effect(() => {
     const inner = content;

@@ -6,15 +6,20 @@
  * component supplies the DOM; every decision is made here, so the rules
  * can be read and tested without a browser.
  *
- * Two events drive it, and only two:
+ * Three events drive it, and only three:
  *
  *   - the content (or the box around it) changed size  -> `resized`
  *   - the view moved                                   -> `scrolled`
+ *   - the human reached for it                         -> `reached`
  *
  * Everything that puts something in a conversation — a streamed word, a
  * tool line, a decision card, a waiting-report line, the report card that
  * replaces it, the track header folding — changes a height, so `resized`
  * sees all of them without being told about any of them.
+ *
+ * The third exists because the first two cannot be told apart by position:
+ * a scroll event does not say who caused it. `reached` is the human's hand
+ * on the wheel, which nothing we do can imitate.
  */
 
 /** How near the foot still counts as being at it, in CSS pixels. */
@@ -72,9 +77,45 @@ export const FOLLOWING: Stick = { stuck: true, missed: false, lastTop: 0 };
  * has been read), and the event for step one arrives after step three.
  */
 export function scrolled(s: Stick, el: ScrollMetrics, slack = BOTTOM_SLACK): Stick {
-  if (Math.abs(el.scrollTop - s.lastTop) < MOVED_SLOP) return s;
-  const stuck = atBottom(el, slack);
+  const moved = el.scrollTop - s.lastTop;
+  if (Math.abs(moved) < MOVED_SLOP) return s;
+  // Taking the foot back is something the human does by scrolling *down* to
+  // it. Merely being near it is not enough once it has been let go of: while
+  // a turn streams, an upward nudge lands inside the slack, and re-arming
+  // there would hand the view straight back to `follow` — which is how the
+  // conversation used to be impossible to scroll up at all. Above the foot,
+  // only a downward move takes it back.
+  //
+  // Landing *on* the foot takes it back whichever way the view got there: the
+  // content shrinking under someone reading back (a card they folded) clamps
+  // them to it, and there is no downward move left to make from there.
+  const onFoot = fromBottom(el) < MOVED_SLOP;
+  const stuck = s.stuck ? atBottom(el, slack) : (moved > 0 || onFoot) && atBottom(el, slack);
   return { stuck, missed: stuck ? false : s.missed, lastTop: el.scrollTop };
+}
+
+/**
+ * The human reached for the view — a wheel, a finger, a paging key — and
+ * pulled it back from the newest.
+ *
+ * This is the one signal that cannot be mistaken for our own following:
+ * `follow` moves a view, it never turns a wheel. Position alone cannot tell
+ * the two apart — that is what `scrolled` has to be careful about, and the
+ * care costs the slack. An upward nudge of a few dozen pixels still reads as
+ * "at the foot", and while we count as following, the next thing to arrive
+ * puts the view back; the gesture never accumulates past the slack, so under
+ * a stream the conversation cannot be scrolled up at all.
+ *
+ * Reading the gesture from the input event closes that gap. The event arrives
+ * before the scroll it causes, so the foot is let go of before anything that
+ * arrives can follow it.
+ */
+export function reached(s: Stick, el: ScrollMetrics, up: boolean): Stick {
+  // Not reaching back, already reading back, or nowhere to go: leave it be.
+  // In particular leave `lastTop` alone, so a gesture in progress keeps the
+  // position its scroll events are measured against.
+  if (!up || !s.stuck || bottomOf(el) <= 0) return s;
+  return { stuck: false, missed: false, lastTop: el.scrollTop };
 }
 
 /**
