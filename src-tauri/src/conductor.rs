@@ -65,15 +65,6 @@ pub(crate) fn with_attachments(prompt: &str, files: &[PathBuf]) -> String {
     format!("{prompt}\n\n{ATTACH_MARK}\n{}", list.join("\n"))
 }
 
-/// What a routine's permission card records as its asker, so the answer
-/// finds its way back to the session that is waiting.
-pub const ROUTINE_ASK: &str = "routine";
-
-/// Heads a turn carrying what a routine did. Deliberately not
-/// [`REPORT_PREFIX`]: a routine is not a worker, there is no session to send
-/// it a follow-up, and a conductor that mistook one for the other would try.
-pub const ROUTINE_PREFIX: &str = "[routine-report]";
-
 /// First line of a turn that carries the human's answer to a decision card.
 pub const DECISION_PREFIX: &str = "[decision]";
 /// First line of a turn that hands the conductor a worker's permission
@@ -339,7 +330,6 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
 - 사람이 골라야 할 일(여러 갈래 중 선택, 되돌리기 어려운 변경, 취향이나 우선순위)은 스스로 정하지 않습니다. 선택지를 본문에 A/B/C로 늘어놓지 말고 `request_decision`을 부르세요. 앱이 선택지를 버튼이 있는 결정 카드로 보여 줍니다. 부른 뒤에는 무엇을 물었는지 한 문장만 말하고 턴을 끝냅니다. 사람의 답은 `{DECISION_PREFIX}`로 시작하는 메시지로 옵니다. 작업자 보고에 사람이 정해야 할 질문이 있으면 그것도 `request_decision`으로 올립니다. 사람이 대화 중에 직접 정한 것은 `record_decision`으로 남깁니다.
 - 사람은 작업자와 직접 이야기하지 않습니다. 작업자가 무언가를 해도 되는지 물으면 `{PERMISSION_PREFIX}`로 시작하는 메시지로 당신에게 옵니다. 사람의 지시와 맡긴 일의 범위 안이면 당신이 직접 골라 `answer_worker`로 답합니다(허용할 때는 보통 이번만 허용). 되돌리기 어렵거나 맡긴 범위를 벗어나거나 사람이 정해야 할 일이면 `request_decision`으로 사람에게 묻고, 답이 오면 그대로 `answer_worker`로 전합니다. 작업자는 답을 받을 때까지 기다리므로 미루지 않습니다.
 - 사람이 앞으로도 여러 번 하게 될 일이라고 말하면("되풀이로 만들자", "다음에도 이렇게", "매번 이 작업을") `save_routine`으로 저장합니다. 당신이 하는 일은 **지시문을 쓰는 것**입니다. 되풀이는 작업자가 아니라 **자기 에이전트로 자기 폴더에서 혼자 도는 것**이라, 작업자 세션도 이 대화도 함께 넘어가지 않습니다. 그러니 방금 작업자에게 준 말을 그대로 옮기지 말고, **이 대화 없이 몇 주 뒤에 읽어도 뜻이 통하도록 다시 씁니다** — "아까 그 파일", "앞서 말한 대로"를 빼고 파일 경로와 명령과 기준을 그대로 적고, 무엇이 좋은 답인지도 적습니다. 폴더와 에이전트는 비워 두면 이 트랙의 것을 씁니다. 저장한 뒤 이름과 함께 어디서 무엇으로 돌게 되는지, 그 셋 다 사이드바의 되풀이에서 사람이 바꿀 수 있다는 것을 한 문장으로 알립니다. 같은 일을 두 번 적지 않도록 `list_routines`로 먼저 봅니다. 지금 돌리려면 `run_routine`입니다.
-- 되풀이가 끝나면 `{ROUTINE_PREFIX}`로 시작하는 메시지가 옵니다. 작업자 보고가 아니므로 이어서 물을 세션이 없습니다. 무엇을 찾았는지 사람에게 말하고, 뒤이어 할 일이 있으면 그것은 평범한 작업이니 작업자를 엽니다.
 - 사람이 고른 문서가 모인 지식 라이브러리가 있습니다. 사람이 "우리가 아는 것", 자기 문서·노트, 이름으로 특정 문서를 언급하거나, 맡기려는 일이 라이브러리가 다루는 주제에 닿으면 `knowledge_search`로 찾습니다(무엇이 있는지는 `knowledge_list_sources`). 일반적인 코딩 질문이나 작업 폴더만 봐도 되는 일에는 부르지 않습니다. 작업자는 라이브러리를 볼 수 없으므로, 작업자에게 필요한 내용은 핵심 사실과 읽을 파일 경로를 task에 직접 담아 넘깁니다. 라이브러리에서 가져온 내용은 출처(파일)를 밝힙니다.
 - 한국어로 말합니다. 짧게, 명확하게.
 
@@ -375,7 +365,6 @@ Rules:
 - Choices that belong to the human (a choice between directions, hard-to-undo changes, taste or priorities) are not yours to make. Do not list options as A/B/C in prose: call `request_decision`, and the app shows them as a decision card with buttons. After calling it, say in one sentence what you asked and end your turn. The human's answer arrives as a message starting with `{DECISION_PREFIX}`. If a worker report raises a question only the human can answer, put that to them with `request_decision` too. Decisions the human makes in conversation are recorded with `record_decision`.
 - The human does not talk to workers. When a worker asks whether it may do something, the question reaches you as a message starting with `{PERMISSION_PREFIX}`. If it is within the human's instructions and the task you gave, choose yourself and answer with `answer_worker` (usually allow once). If it is hard to undo, outside the task, or the human's call, ask them with `request_decision` and pass their answer on with `answer_worker`. The worker waits until answered, so do not leave it.
 - When the human says a job is one they will want again ("make this a routine", "we will do this every release", "save this for next time"), save it with `save_routine`. Your part is the WORDS. A routine is not a worker: it runs **on its own agent, in its own folder**, and neither a worker session nor this conversation goes with it. So do not copy the task you just gave a worker — **rewrite it to stand alone, read weeks from now with none of this around it**: drop "the file we just looked at" and "as before", name the paths, the commands and the standards outright, and say what a good answer looks like. Leaving the folder and the agent out takes this track's. Afterwards say in one sentence what you saved, where and on what it will run, and that all three are theirs to change under Routines in the sidebar. Read `list_routines` first so the same job is not written down twice. To run a saved one now, use `run_routine`.
-- When a routine finishes, a message starting with `{ROUTINE_PREFIX}` reaches you. It is not a worker report: there is no session to ask a follow-up of. Tell the human what it found, and if something needs doing about it, that is ordinary work — open a worker for it.
 - There is a knowledge library of documents the human chose. When the human asks what we know about something, refers to their docs or notes or to a document by name, or when work you are about to delegate touches a topic the library covers, search it with `knowledge_search` (`knowledge_list_sources` shows what is there). Do not call it for general coding questions or what the working folder answers. Workers cannot see the library: put what they need from it (the key facts and the file paths to read) into their task. Name the file when you use something from the library.
 - Speak English. Short and clear.
 
@@ -742,9 +731,6 @@ The folder defaults to this track's and the agent to the one workers here use; s
                             cwd: Some(folder),
                             agent: Some(agent),
                             config: None,
-                            // Told here when it runs, because this is where
-                            // the human asked for it.
-                            track: Some(track.clone()),
                         })
                         .map_err(|e| e.to_string())?;
                     let _ = crate::routine::notify(&app);
@@ -754,7 +740,7 @@ The folder defaults to this track's and the agent to the one workers here use; s
                         "folder": saved.cwd,
                         "agent": saved.agent,
                         "note": format!(
-                            "Saved. Tell the human what it is called, that it will run on {} in {}, and that the instruction, the folder and the agent are all theirs to change under Routines in the sidebar.",
+                            "Saved. Tell the human what it is called, that it will run on {} in {}, and that the instruction, the folder and the agent are all theirs to change under Routines in the sidebar. When it runs, they are told on the bell — not here.",
                             saved.agent, saved.cwd
                         ),
                     }))
@@ -789,7 +775,7 @@ The folder defaults to this track's and the agent to the one workers here use; s
         ),
         Tool::new(
             "run_routine",
-            &format!("Run a saved routine now. Returns at once with the run id; what it found reaches you later as a {ROUTINE_PREFIX} message. It runs on its own agent in its own folder, on a session of its own that ends with the run — it is not a worker, and there is nothing of it to follow up with afterwards."),
+            "Run a saved routine now. Returns at once with the run id. It runs on its own agent in its own folder, on a session of its own that ends with the run — it is not a worker, and there is nothing of it to follow up with. What it found is NOT sent to you: the human is told on the bell and reads it on the Routines page. Say you started it and end your turn.",
             json!({
                 "type": "object",
                 "properties": { "routine": { "type": "string", "description": "Routine id from list_routines." } },
@@ -897,7 +883,7 @@ pub fn route_permission(app: &AppHandle, track: &str, session: &str, run: &str, 
                 session: if artifact {
                     "artifact".to_string()
                 } else if routine {
-                    ROUTINE_ASK.to_string()
+                    crate::routine::ASK_SESSION.to_string()
                 } else {
                     CONDUCTOR_SESSION.to_string()
                 },
@@ -987,9 +973,9 @@ async fn answer_asker(app: &AppHandle, decision: &Decision, ask: &PermissionAsk,
         let id = decision.track.strip_prefix("artifact:").unwrap_or(&decision.track);
         return crate::artifact::answer_permission(app, id, &ask.request, option).await;
     }
-    if ask.session == ROUTINE_ASK {
-        let id = decision.track.strip_prefix("routine:").unwrap_or(&decision.track);
-        return crate::routine::answer_permission(app, id, &ask.request, option).await;
+    if ask.session == crate::routine::ASK_SESSION && decision.track.starts_with("routine:") {
+        let run = decision.track.strip_prefix("routine:").unwrap_or(&decision.track);
+        return crate::routine::answer_permission(app, run, &ask.request, option).await;
     }
     let session = st.sessions.conductors.lock().await.get(&decision.track).map(|c| c.live.session.clone());
     let session = session.ok_or("the conductor's session is closed; the question went with it")?;
@@ -2254,56 +2240,6 @@ async fn report_to_conductor(app: AppHandle, track: String, worker: String, run:
         keep: true,
         worker: Some(worker),
         run: Some(run),
-    };
-    deliver(app.clone(), hand).await;
-}
-
-/// Hand a finished routine to a track's conductor as a new turn.
-///
-/// Beside [`report_to_conductor`] on purpose: the two are the same gesture
-/// and must not drift. What differs is what the conductor is told it can do
-/// next. A worker is a session it can `ask_worker`; a routine is a thing
-/// that ran and finished, with no session left to reach, so the text says so
-/// rather than leaving the conductor to infer it from a missing name.
-pub(crate) async fn report_routine_to_conductor(
-    app: AppHandle,
-    track: String,
-    name: String,
-    routine: String,
-    run: String,
-    report: Report,
-) {
-    let state = app.state::<AppState>();
-    let summary = match state.store.run(&run) {
-        Ok(Some(s)) => s,
-        _ => {
-            tracing::warn!(%run, "routine run vanished before reporting");
-            return;
-        }
-    };
-    let text = format!(
-        "{ROUTINE_PREFIX} routine={routine} name={name} run={run} status={} tools={} duration_ms={}{}
-
-{}
-
-(A routine ran on its own agent, in its own folder. It is not a worker: there is no session to follow up with and nothing of it is running now. Tell the human what it found. If something needs doing about it, that is ordinary work — open a worker for it.)",
-        summary.status.as_str(),
-        summary.tool_count,
-        summary.duration_ms.unwrap_or(0),
-        summary.error.as_ref().map(|e| format!(" error={e}")).unwrap_or_default(),
-        report.for_conductor(&run),
-    );
-
-    let hand = Hand {
-        track,
-        text,
-        open: false,
-        what: format!("report of routine {name} run {run}"),
-        keep: true,
-        // No worker and no worker run: the parked list must not offer to
-        // reopen a session that never existed.
-        worker: None,
-        run: None,
     };
     deliver(app.clone(), hand).await;
 }

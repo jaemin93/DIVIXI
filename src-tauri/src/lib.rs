@@ -12,7 +12,7 @@ use orchestra_acp::{AgentSpec, ConfigOptionInfo};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
 use orchestra_core::{AgentEnvelope, AgentEvent};
 use orchestra_store::{
-    ArtifactInfo, ArtifactPatch, Decision, Routine, RoutinePatch, RunSummary, SearchHit, Store, StoredEvent, TrackInfo,
+    ArtifactInfo, ArtifactPatch, Decision, Routine, RoutinePatch, RoutineRun, RunSummary, SearchHit, Store, StoredEvent, TrackInfo,
     TrackPatch,
 };
 use parking_lot::Mutex;
@@ -543,7 +543,7 @@ fn delete_routine(state: State<'_, AppState>, id: String) -> Result<(), String> 
 
 /// A routine's runs, newest first.
 #[tauri::command(async)]
-fn routine_runs(state: State<'_, AppState>, id: String, limit: Option<u32>) -> Result<Vec<RunSummary>, String> {
+fn routine_runs(state: State<'_, AppState>, id: String, limit: Option<u32>) -> Result<Vec<RoutineRun>, String> {
     state.store.routine_runs(&id, limit.unwrap_or(50)).map_err(|e| e.to_string())
 }
 

@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { store, agentLabel, NEW_ROUTINE, type Run, type OptionConfig } from "./store.svelte";
+  import { store, agentLabel, NEW_ROUTINE, type RoutineRun, type OptionConfig } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import Working from "./Working.svelte";
-  import ReportCard from "./ReportCard.svelte";
+  import Markdown from "./Markdown.svelte";
   import { t } from "./i18n.svelte";
   import { whenFull } from "./time";
 
@@ -30,7 +30,6 @@
   let cwd = $state("");
   let agent = $state("");
   let config = $state<OptionConfig>({});
-  let track = $state("");
   /** The routine these fields were filled from, so a reload does not stamp
    *  on what is being typed. */
   let filledFrom = $state("");
@@ -51,14 +50,12 @@
       cwd = "";
       agent = store.readyAgents[0]?.kind ?? "";
       config = {};
-      track = "";
     } else if (saved) {
       name = saved.name;
       instruction = saved.instruction;
       cwd = saved.cwd;
       agent = saved.agent;
       config = { ...saved.config };
-      track = saved.track;
     }
   });
 
@@ -75,7 +72,6 @@
           instruction.trim() !== saved.instruction ||
           cwd.trim() !== saved.cwd ||
           agent !== saved.agent ||
-          track !== saved.track ||
           JSON.stringify(config) !== JSON.stringify(saved.config))),
   );
 
@@ -87,7 +83,7 @@
   async function save() {
     if (!complete) return;
     failed = "";
-    const patch = { name: name.trim(), instruction: instruction.trim(), cwd: cwd.trim(), agent, config, track };
+    const patch = { name: name.trim(), instruction: instruction.trim(), cwd: cwd.trim(), agent, config };
     const ok = making ? await store.createRoutine(patch) : await store.saveRoutine(saved!.id, patch);
     if (!ok) failed = store.lastError;
     else filledFrom = "";
@@ -102,16 +98,6 @@
     await store.deleteRoutine(saved.id);
   }
 
-  /** A run's standing in a word. A run the human stopped is recorded `done`
-   *  with a stop reason, so that is read before the status: "it finished"
-   *  and "it was cut short" are not the same thing to someone deciding
-   *  whether to run the routine again. */
-  function statusWord(run: Run): string {
-    if (run.status === "running" || run.status === "connecting") return t("routines.running");
-    if (run.status === "failed") return t("routines.status.failed");
-    if (run.stopReason) return t("routines.status.stopped");
-    return t("routines.status.done");
-  }
 </script>
 
 <section>
@@ -161,7 +147,9 @@
         <span class="flab">{t("routines.folder")}</span>
         <div class="frow">
           <input bind:value={cwd} placeholder={t("routines.folderPlaceholder")} spellcheck="false" />
-          <button class="ghost" onclick={browse}><Icon name="folder" size={13} /> {t("routines.browse")}</button>
+          <button class="ghost" onclick={browse} title={t("routines.browse")} aria-label={t("routines.browse")}>
+            <Icon name="folder" size={14} />
+          </button>
         </div>
       </div>
 
@@ -185,16 +173,6 @@
           </select>
         </label>
       {/if}
-
-      <label class="f">
-        <span class="flab">{t("routines.tell")}</span>
-        <select bind:value={track}>
-          <option value="">{t("routines.tellNobody")}</option>
-          {#each store.tracks as tr (tr.id)}
-            <option value={tr.id}>{tr.name}</option>
-          {/each}
-        </select>
-      </label>
     </div>
 
     <div class="block">
@@ -224,11 +202,22 @@
             {#each store.routineRuns as run (run.id)}
               <li>
                 <div class="rrow">
-                  <span class="rwhen">{whenFull(run.startedAt, store.lang)}</span>
-                  <span class="rstat" class:bad={run.status === "failed"}>{statusWord(run)}</span>
+                  <span class="rwhen">{whenFull(run.started_at, store.lang)}</span>
+                  <span class="rstat" class:bad={run.status === "failed"}>{t(`routines.status.${run.status}`)}</span>
+                  {#if run.tools}<span class="rtools">{t("routines.tools", { n: run.tools })}</span>{/if}
                   <span class="rid mono">{run.id}</span>
                 </div>
-                <ReportCard run={run.id} worker={saved.name} compact={true} />
+                {#if run.error}
+                  <p class="rerr">{run.error}</p>
+                {:else if run.report?.summary}
+                  <p class="rsum">{run.report.summary}</p>
+                {/if}
+                {#if run.output}
+                  <details class="rout">
+                    <summary>{t("routines.fullReply")}</summary>
+                    <Markdown source={run.output} />
+                  </details>
+                {/if}
               </li>
             {/each}
           </ul>
@@ -441,9 +430,36 @@
     color: var(--deltx);
   }
 
+  .rtools {
+    font-size: 11px;
+  }
+
   .rid {
     margin-left: auto;
     font-size: 11px;
     opacity: 0.6;
+  }
+
+  .rsum,
+  .rerr {
+    margin: 2px 0 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--txt);
+  }
+
+  .rerr {
+    color: var(--deltx);
+  }
+
+  .rout {
+    margin-top: 4px;
+    font-size: 12px;
+  }
+
+  .rout summary {
+    cursor: pointer;
+    color: var(--lab);
+    font-size: 11px;
   }
 </style>

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -190,6 +190,33 @@ const MIGRATIONS: &[&str] = &[
     DROP TABLE IF EXISTS routine_runs;
     DROP INDEX IF EXISTS routines_by_track;
     CREATE INDEX IF NOT EXISTS routines_by_time ON routines(updated_at);",
+    // 17 -> 18: a routine's runs get a table of their own. Keeping them in
+    // `runs` under a made-up track key was a leak: every query that reads
+    // runs without naming a track saw them, and a routine's work appeared
+    // in a track's history. The ones already written are removed with
+    // everything they left in `events` and the search index -- they are not
+    // worth migrating into the new shape, and leaving them is the bug.
+    // The `track` a routine was told to report to goes as well: a finished
+    // run says so on the bell now, so there is nothing to choose.
+    "CREATE TABLE IF NOT EXISTS routine_runs (
+        id          TEXT    PRIMARY KEY,
+        routine     TEXT    NOT NULL,
+        agent       TEXT    NOT NULL,
+        cwd         TEXT    NOT NULL,
+        instruction TEXT    NOT NULL,
+        status      TEXT    NOT NULL,
+        started_at  INTEGER NOT NULL,
+        ended_at    INTEGER,
+        output      TEXT    NOT NULL DEFAULT '',
+        error       TEXT    NOT NULL DEFAULT '',
+        tools       INTEGER NOT NULL DEFAULT 0,
+        report      TEXT    NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS routine_runs_by_routine ON routine_runs(routine, started_at);
+    DELETE FROM runs_fts WHERE run_id IN (SELECT id FROM runs WHERE track LIKE 'routine:%');
+    DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE track LIKE 'routine:%');
+    DELETE FROM runs WHERE track LIKE 'routine:%';
+    ALTER TABLE routines DROP COLUMN track;",
 ];
 
 const SCHEMA: &str = r#"
@@ -286,11 +313,34 @@ CREATE TABLE IF NOT EXISTS routines (
     cwd         TEXT    NOT NULL,
     agent       TEXT    NOT NULL,
     config      TEXT    NOT NULL DEFAULT '{}',
-    track       TEXT    NOT NULL DEFAULT '',
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS routines_by_time ON routines(updated_at);
+
+-- A routine's runs are its own, in their own table. They were kept in
+-- `runs` once, under a made-up track key, and that leaked: a query that
+-- reached for runs without naming a track found them, and a routine's work
+-- turned up in a track's history. Nothing here is reachable from `runs`,
+-- `events` or `runs_fts` at all, which is the only way to be sure.
+CREATE TABLE IF NOT EXISTS routine_runs (
+    id          TEXT    PRIMARY KEY,
+    routine     TEXT    NOT NULL,
+    agent       TEXT    NOT NULL,
+    cwd         TEXT    NOT NULL,
+    -- What was sent, as it read then: editing the routine afterwards must
+    -- not rewrite what an earlier run was asked to do.
+    instruction TEXT    NOT NULL,
+    status      TEXT    NOT NULL,
+    started_at  INTEGER NOT NULL,
+    ended_at    INTEGER,
+    output      TEXT    NOT NULL DEFAULT '',
+    error       TEXT    NOT NULL DEFAULT '',
+    tools       INTEGER NOT NULL DEFAULT 0,
+    -- The checked report, as JSON; empty when there was none to check.
+    report      TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS routine_runs_by_routine ON routine_runs(routine, started_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS runs_fts USING fts5(
     run_id UNINDEXED,
@@ -510,10 +560,6 @@ pub struct Routine {
     /// terms (`model`, `mode`, `reasoning_effort`, ...), as a track's and an
     /// artifact's are. Absent options keep the agent's default.
     pub config: BTreeMap<String, String>,
-    /// A track to tell when it has run, so the human hears about it where
-    /// they hear about everything else. Empty means tell no one: the run is
-    /// still on the routine's own list.
-    pub track: String,
     /// Unix milliseconds.
     pub created_at: i64,
     /// Unix milliseconds of its last run, or its creation.
@@ -524,16 +570,6 @@ pub struct Routine {
     pub last_run: Option<String>,
 }
 
-/// Runs of a routine are kept under this track key, apart from tracks and
-/// from artifacts. Nothing that lists a track's runs can see them, which is
-/// what keeps a routine out of the worker list.
-pub fn routine_run_key(id: &str) -> String {
-    format!("routine:{id}")
-}
-
-/// The session name a routine's runs are recorded under.
-pub const ROUTINE_SESSION: &str = "routine";
-
 /// What a routine change may touch; `None` keeps a field.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutinePatch {
@@ -542,8 +578,6 @@ pub struct RoutinePatch {
     pub cwd: Option<String>,
     pub agent: Option<String>,
     pub config: Option<BTreeMap<String, String>>,
-    /// `Some("")` clears it: tell no one.
-    pub track: Option<String>,
 }
 
 fn row_to_routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<Routine> {
@@ -554,22 +588,108 @@ fn row_to_routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<Routine> {
         cwd: r.get(3)?,
         agent: r.get(4)?,
         config: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
-        track: r.get(6)?,
-        created_at: r.get(7)?,
-        updated_at: r.get(8)?,
-        runs: r.get(9)?,
-        last_run: r.get(10)?,
+        created_at: r.get(6)?,
+        updated_at: r.get(7)?,
+        runs: r.get(8)?,
+        last_run: r.get(9)?,
     })
 }
 
 /// Columns of a routine, in the order `row_to_routine` reads them. The run
 /// count and the newest run are folded from the runs kept under its key.
-const ROUTINE_SELECT: &str = "SELECT r.id, r.name, r.instruction, r.cwd, r.agent, r.config, r.track,
+const ROUTINE_SELECT: &str = "SELECT r.id, r.name, r.instruction, r.cwd, r.agent, r.config,
                                      r.created_at, r.updated_at,
-                                     (SELECT COUNT(*) FROM runs x WHERE x.track = 'routine:' || r.id),
-                                     (SELECT x.id FROM runs x WHERE x.track = 'routine:' || r.id
-                                      ORDER BY x.n DESC LIMIT 1)
+                                     (SELECT COUNT(*) FROM routine_runs x WHERE x.routine = r.id),
+                                     (SELECT x.id FROM routine_runs x WHERE x.routine = r.id
+                                      ORDER BY x.started_at DESC LIMIT 1)
                               FROM routines r";
+
+/// Where one run of a routine stands.
+///
+/// Its own words, not a worker run's. A worker run ends `done` with a stop
+/// reason the agent gives for every ordinary turn, which read as "stopped"
+/// the moment it was shown to someone. Here, `Stopped` means a person
+/// stopped it, and nothing else sets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineStatus {
+    /// The agent has the work and has not finished.
+    Running,
+    /// It finished by itself.
+    Done,
+    /// It could not finish: the agent failed, or the app closed under it.
+    Failed,
+    /// A person stopped it part-way.
+    Stopped,
+}
+
+impl RoutineStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RoutineStatus::Running => "running",
+            RoutineStatus::Done => "done",
+            RoutineStatus::Failed => "failed",
+            RoutineStatus::Stopped => "stopped",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "running" => RoutineStatus::Running,
+            "done" => RoutineStatus::Done,
+            "failed" => RoutineStatus::Failed,
+            "stopped" => RoutineStatus::Stopped,
+            _ => return None,
+        })
+    }
+}
+
+/// One run of a routine, whole: there is no second table to join for the
+/// rest of it, and none of it is in `runs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutineRun {
+    /// `rr` and sixteen hex digits. Never a worker run's `t001`: the two
+    /// belong to different tables and must not look alike.
+    pub id: String,
+    pub routine: String,
+    pub agent: String,
+    pub cwd: String,
+    /// The instruction as it read when this run was started.
+    pub instruction: String,
+    pub status: RoutineStatus,
+    /// Unix milliseconds.
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    /// What the agent said, its visible text.
+    pub output: String,
+    pub error: String,
+    pub tools: u32,
+    /// The checked report, when the run left one.
+    pub report: Option<serde_json::Value>,
+}
+
+fn row_to_routine_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRun> {
+    let status: String = r.get(5)?;
+    let report: String = r.get(11)?;
+    Ok(RoutineRun {
+        id: r.get(0)?,
+        routine: r.get(1)?,
+        agent: r.get(2)?,
+        cwd: r.get(3)?,
+        instruction: r.get(4)?,
+        status: RoutineStatus::parse(&status).unwrap_or(RoutineStatus::Failed),
+        started_at: r.get(6)?,
+        ended_at: r.get(7)?,
+        output: r.get(8)?,
+        error: r.get(9)?,
+        tools: r.get(10)?,
+        report: serde_json::from_str(&report).ok(),
+    })
+}
+
+const ROUTINE_RUN_SELECT: &str = "SELECT id, routine, agent, cwd, instruction, status, started_at,
+                                         ended_at, output, error, tools, report
+                                  FROM routine_runs";
 
 const ARTIFACT_SELECT: &str = "SELECT id, kind, title, agent, config, color, tags, created_at, updated_at FROM artifacts";
 
@@ -751,6 +871,7 @@ impl Store {
 
         let store = Self { conn: Mutex::new(conn) };
         store.close_interrupted_runs()?;
+        store.close_interrupted_routine_runs()?;
         Ok(store)
     }
 
@@ -969,9 +1090,9 @@ impl Store {
             let id = format!("ro{next:03}");
             let now = now_ms();
             conn.execute(
-                "INSERT INTO routines(id, name, instruction, cwd, agent, config, track, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-                params![id, name, instruction, cwd, agent, config, patch.track.as_deref().unwrap_or(""), now],
+                "INSERT INTO routines(id, name, instruction, cwd, agent, config, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![id, name, instruction, cwd, agent, config, now],
             )?;
             id
         };
@@ -986,7 +1107,7 @@ impl Store {
             let changed = conn.execute(
                 "UPDATE routines SET name = COALESCE(?2, name), instruction = COALESCE(?3, instruction),
                  cwd = COALESCE(?4, cwd), agent = COALESCE(?5, agent), config = COALESCE(?6, config),
-                 track = COALESCE(?7, track), updated_at = ?8
+                 updated_at = ?7
                  WHERE id = ?1",
                 params![
                     id,
@@ -995,8 +1116,6 @@ impl Store {
                     patch.cwd.as_deref().map(str::trim).filter(|v| !v.is_empty()),
                     patch.agent.as_deref().map(str::trim).filter(|v| !v.is_empty()),
                     config,
-                    // Not filtered on empty: "" is how a track is cleared.
-                    patch.track.as_deref().map(str::trim),
                     now_ms(),
                 ],
             )?;
@@ -1011,12 +1130,9 @@ impl Store {
     /// worker's, a routine's runs belong to no track, so nothing else is
     /// left holding them.
     pub fn delete_routine(&self, id: &str) -> anyhow::Result<()> {
-        let key = routine_run_key(id);
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM runs_fts WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![key])?;
-        tx.execute("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![key])?;
-        tx.execute("DELETE FROM runs WHERE track = ?1", params![key])?;
+        tx.execute("DELETE FROM routine_runs WHERE routine = ?1", params![id])?;
         let changed = tx.execute("DELETE FROM routines WHERE id = ?1", params![id])?;
         if changed == 0 {
             anyhow::bail!("no routine {id}");
@@ -1026,11 +1142,73 @@ impl Store {
     }
 
     /// A routine's runs, newest first.
-    pub fn routine_runs(&self, id: &str, limit: u32) -> anyhow::Result<Vec<RunSummary>> {
+    pub fn routine_runs(&self, id: &str, limit: u32) -> anyhow::Result<Vec<RoutineRun>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(&format!("{RUN_SELECT} WHERE track = ?1 ORDER BY n DESC LIMIT ?2"))?;
-        let rows = stmt.query_map(params![routine_run_key(id), limit], row_to_summary)?;
+        let mut stmt = conn
+            .prepare(&format!("{ROUTINE_RUN_SELECT} WHERE routine = ?1 ORDER BY started_at DESC, id DESC LIMIT ?2"))?;
+        let rows = stmt.query_map(params![id, limit], row_to_routine_run)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// One run of a routine by id.
+    pub fn routine_run(&self, id: &str) -> anyhow::Result<Option<RoutineRun>> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(&format!("{ROUTINE_RUN_SELECT} WHERE id = ?1"), params![id], row_to_routine_run)
+            .optional()?)
+    }
+
+    /// Open a run of a routine and return its id.
+    ///
+    /// The id is random rather than the next number: these are a routine's
+    /// own, nothing reads them in order, and they must never be mistaken for
+    /// a worker run's `t001` — which is exactly what happened while the two
+    /// shared a table.
+    pub fn begin_routine_run(&self, routine: &str, agent: &str, cwd: &str, instruction: &str) -> anyhow::Result<String> {
+        let id = format!("rr{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO routine_runs(id, routine, agent, cwd, instruction, status, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6)",
+            params![id, routine, agent, cwd, instruction, now_ms()],
+        )?;
+        Ok(id)
+    }
+
+    /// Close a run of a routine with what it left behind.
+    pub fn end_routine_run(
+        &self,
+        id: &str,
+        status: RoutineStatus,
+        output: &str,
+        error: &str,
+        tools: u32,
+        report: Option<&serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let report = report.map(serde_json::to_string).transpose()?.unwrap_or_default();
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE routine_runs SET status = ?2, ended_at = ?3, output = ?4, error = ?5, tools = ?6, report = ?7
+             WHERE id = ?1",
+            params![id, status.as_str(), now_ms(), output, error, tools, report],
+        )?;
+        conn.execute(
+            "UPDATE routines SET updated_at = ?2 WHERE id = (SELECT routine FROM routine_runs WHERE id = ?1)",
+            params![id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Close runs of routines that were live when the app last closed, as
+    /// [`Store::close_interrupted_runs`] does for a track's.
+    fn close_interrupted_routine_runs(&self) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE routine_runs SET status = 'failed', ended_at = COALESCE(ended_at, started_at), error = ?1
+             WHERE status = 'running'",
+            params![INTERRUPTED],
+        )?;
+        Ok(())
     }
 
     /// One track by id.
@@ -1949,7 +2127,6 @@ mod tests {
     #[test]
     fn routines_stand_alone_with_their_own_folder_agent_and_runs() {
         let store = Store::in_memory().unwrap();
-        let track = store.create_track(&new_track("Ops", "", "C:/repo", "claude_code")).unwrap();
 
         let made = || RoutinePatch {
             name: Some("  Dependency check  ".into()),
@@ -1957,13 +2134,11 @@ mod tests {
             cwd: Some("C:/ops".into()),
             agent: Some("claude_code".into()),
             config: None,
-            track: None,
         };
         let a = store.create_routine(&made()).unwrap();
         assert_eq!((a.id.as_str(), a.name.as_str()), ("ro001", "Dependency check"), "ids run on, names are trimmed");
         assert_eq!(a.instruction, "list the stale dependencies", "and so is the instruction");
         assert_eq!((a.cwd.as_str(), a.agent.as_str()), ("C:/ops", "claude_code"), "its own folder and agent");
-        assert!(a.track.is_empty(), "a routine belongs to no track until one is named");
         assert_eq!((a.runs, a.last_run.as_deref()), (0, None), "a new routine has never run");
 
         // Every part it needs to run alone is required.
@@ -1972,43 +2147,88 @@ mod tests {
         assert!(store.create_routine(&RoutinePatch { cwd: None, ..made() }).is_err());
         assert!(store.create_routine(&RoutinePatch { agent: None, ..made() }).is_err(), "there is no track to borrow an agent from");
 
-        // The human rewrites what was saved, and may name a track to tell.
+        // The human rewrites what was saved.
         let edited = store
             .update_routine(&a.id, &RoutinePatch {
                 instruction: Some("read package.json and report".into()),
-                track: Some(track.id.clone()),
                 config: Some(BTreeMap::from([("model".to_string(), "opus".to_string())])),
                 ..RoutinePatch::default()
             })
             .unwrap();
         assert_eq!(edited.instruction, "read package.json and report");
         assert_eq!(edited.name, "Dependency check", "an absent field is kept");
-        assert_eq!(edited.track, track.id, "and a named track is told when it runs");
         assert_eq!(edited.config.get("model").map(String::as_str), Some("opus"));
-        let cleared = store.update_routine(&a.id, &RoutinePatch { track: Some(String::new()), ..RoutinePatch::default() }).unwrap();
-        assert!(cleared.track.is_empty(), "an empty track clears it rather than keeping the old one");
         assert!(store.update_routine("ro999", &RoutinePatch::default()).is_err());
 
-        // Runs live under the routine's own key, so nothing that lists a
-        // track's runs — the timeline, the worker list — can see them.
-        let r1 = store.begin_run(&routine_run_key(&a.id), ROUTINE_SESSION, "claude_code", "check", "C:/ops").unwrap();
-        let r2 = store.begin_run(&routine_run_key(&a.id), ROUTINE_SESSION, "claude_code", "check", "C:/ops").unwrap();
+        // Runs are the routine's own, whole, with ids of their own shape.
+        let r1 = store.begin_routine_run(&a.id, "claude_code", "C:/ops", "check").unwrap();
+        assert!(r1.starts_with("rr") && r1.len() == 18, "rr and sixteen hex: {r1}");
+        assert_eq!(store.routine_run(&r1).unwrap().unwrap().status, RoutineStatus::Running);
+        store
+            .end_routine_run(&r1, RoutineStatus::Done, "all fine", "", 3, Some(&serde_json::json!({"status": "done"})))
+            .unwrap();
+        let done = store.routine_run(&r1).unwrap().unwrap();
+        assert_eq!((done.status, done.tools, done.output.as_str()), (RoutineStatus::Done, 3, "all fine"));
+        assert_eq!(done.report.unwrap()["status"], "done");
+        assert!(done.ended_at.is_some());
+
+        let r2 = store.begin_routine_run(&a.id, "claude_code", "C:/ops", "check").unwrap();
+        assert_ne!(r1, r2, "two runs never share an id");
         let seen = store.routine(&a.id).unwrap().unwrap();
-        assert_eq!((seen.runs, seen.last_run.as_deref()), (2, Some(r2.as_str())));
-        assert!(store.sessions(&track.id).unwrap().is_empty(), "a routine is not one of the track's workers");
-        assert!(
-            store.runs().unwrap().iter().all(|r| r.track != track.id),
-            "and its runs belong to no track, so nothing listing one can show them"
-        );
+        assert_eq!(seen.runs, 2);
         let history = store.routine_runs(&a.id, 10).unwrap();
-        assert_eq!((history.len(), history[0].id.as_str()), (2, r2.as_str()), "newest first");
+        assert_eq!(history.len(), 2);
         assert_eq!(store.routine_runs(&a.id, 1).unwrap().len(), 1, "the limit holds");
 
-        // Deleting takes its runs with it: no track is left holding them.
+        // Deleting takes its runs with it.
         store.delete_routine(&a.id).unwrap();
         assert!(store.routine(&a.id).unwrap().is_none());
-        assert!(store.run(&r1).unwrap().is_none() && store.run(&r2).unwrap().is_none());
+        assert!(store.routine_run(&r1).unwrap().is_none() && store.routine_run(&r2).unwrap().is_none());
         assert!(store.delete_routine(&a.id).is_err(), "deleting what is gone says so");
+    }
+
+    /// The bug this table exists for: a routine ran on the agent a track
+    /// used, and its work turned up in that track's history. Every way the
+    /// app reaches for runs is asked here, because it only takes one that
+    /// does not name a track.
+    #[test]
+    fn a_routines_run_is_invisible_to_every_track_query() {
+        let store = Store::in_memory().unwrap();
+        let track = store.create_track(&new_track("Ops", "", "C:/repo", "copilot")).unwrap();
+        let worker = store.begin_run(&track.id, "scan", "copilot", "look at the deps", "C:/repo").unwrap();
+
+        let routine = store
+            .create_routine(&RoutinePatch {
+                name: Some("Dependency check".into()),
+                instruction: Some("look at the deps".into()),
+                cwd: Some("C:/repo".into()),
+                // Deliberately the same agent and folder as the track: that
+                // is the case that broke, and nothing about it may match.
+                agent: Some("copilot".into()),
+                config: None,
+            })
+            .unwrap();
+        let rr = store.begin_routine_run(&routine.id, "copilot", "C:/repo", "look at the deps").unwrap();
+        store.end_routine_run(&rr, RoutineStatus::Done, "found two", "", 1, None).unwrap();
+
+        // Everything that reads runs.
+        let all = store.runs().unwrap();
+        assert_eq!(all.len(), 1, "only the worker's run is a run at all");
+        assert_eq!(all[0].id, worker);
+        assert!(all.iter().all(|r| !r.track.starts_with("routine:")), "no made-up track key survives");
+        assert_eq!(all.iter().filter(|r| r.track == track.id).count(), 1, "the track owns exactly its own run");
+        let sessions = store.sessions(&track.id).unwrap();
+        assert_eq!(sessions.len(), 1, "one worker, and no routine among them");
+        assert_eq!(sessions[0].name, "scan");
+        assert!(store.run(&rr).unwrap().is_none(), "a routine run is not findable as a run");
+        // Search reads an index with no track column at all, so it is the
+        // easiest of these to leak through.
+        let hits = store.search("deps").unwrap();
+        assert!(hits.iter().all(|h| h.run == worker), "search finds the worker's run and nothing of the routine's");
+
+        // And the routine still has its own, whole.
+        let mine = store.routine_runs(&routine.id, 10).unwrap();
+        assert_eq!((mine.len(), mine[0].id.as_str(), mine[0].output.as_str()), (1, rr.as_str(), "found two"));
     }
 
     #[test]
