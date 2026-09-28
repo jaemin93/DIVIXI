@@ -65,6 +65,52 @@ cargo run -p orchestra-agents --example prompt -- codex "…"   # one run on one
 cargo run -p orchestra-agents --example adapters -- <folder>  # install the npm adapters
 ```
 
+## The dev app beside the installed one
+
+`npm run app` starts a debug build that runs **alongside** an installed
+Divixi. Nothing to set up: start it with the app already open and a second
+window comes up, titled **Divixi (dev)**.
+
+Two things make that work, and both are debug-only — a release build behaves
+exactly as it always did.
+
+- **No single-instance handover.** A release build hands over to the running
+  Divixi and exits (`one_instance_only` in `src-tauri/src/lib.rs`), which is
+  what a second launch of an app that lives in the tray should do. It is also
+  what made `npm run app` look like it did nothing at all: it started, found
+  the installed app, showed *that* window and quit.
+- **Its own data folder.** A debug build works in `<app data>-dev`, beside
+  the installed app's folder rather than in it:
+
+  | | installed | dev |
+  | --- | --- | --- |
+  | Windows | `%APPDATA%\app.divixi` | `%APPDATA%\app.divixi-dev` |
+  | macOS | `~/Library/Application Support/app.divixi` | `…/app.divixi-dev` |
+  | Linux | `~/.local/share/app.divixi` | `…/app.divixi-dev` |
+
+  Everything hangs off that one path, so all of it is separate: the store
+  (`divixi.db`), the logs and the crash file (`logs/`), the downloaded ACP
+  adapters, the workers' checkouts, the knowledge library and the
+  remote-access keys. Two instances on one folder would share a SQLite file
+  and interleave their lines in one log.
+
+A dev instance therefore starts empty — no tracks, no agent detection, no
+settings. That is the point: it cannot touch the work in the installed app.
+To try a change against real data, copy the folder across first (with both
+apps closed), or point the dev build at a copy:
+
+```bash
+DIVIXI_DATA_DIR=/path/to/a/copy npm run app     # bash
+$env:DIVIXI_DATA_DIR = "C:\tmp\divixi-try"; npm run app   # PowerShell
+```
+
+`DIVIXI_DATA_DIR` overrides the folder outright, in release builds too, and
+the `divixi-server` subcommands read the same setting. `DIVIXI_DB` still
+moves just the store, on top of whichever folder is chosen.
+
+Two Divixis will happily run the same agent CLIs at the same time. Watch the
+disk: each worker checkout is a full copy of the repository.
+
 ## Things to know
 
 - **Running inside a Claude Code session breaks Claude Code workers.** Claude Code treats

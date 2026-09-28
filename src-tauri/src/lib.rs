@@ -56,6 +56,35 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(40);
 /// Overrides where the event store lives. `:memory:` gives a throwaway store.
 const DB_ENV: &str = "DIVIXI_DB";
 
+/// Overrides the folder this instance keeps everything in.
+const DATA_DIR_ENV: &str = "DIVIXI_DATA_DIR";
+
+/// The folder this instance keeps everything in: the store, the logs, the
+/// crash file, the downloaded adapters, the workers' checkouts, the
+/// knowledge library, the remote-access keys.
+///
+/// Everything else hangs off this one path, so separating it separates the
+/// lot — two instances sharing it would share a SQLite file and interleave
+/// their lines in one log.
+///
+/// - `DIVIXI_DATA_DIR` wins outright, for running a second instance on
+///   purpose or pointing one at a scratch folder.
+/// - Otherwise a **debug build** works in `<app data>-dev`, beside the
+///   installed app's folder rather than in it. That is what lets
+///   `npm run app` come up while an installed Divixi is running.
+/// - A release build gets exactly what it always got.
+fn instance_data_dir(default: PathBuf) -> PathBuf {
+    if let Some(chosen) = std::env::var_os(DATA_DIR_ENV).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty()) {
+        return chosen;
+    }
+    if cfg!(debug_assertions) {
+        let mut name = default.file_name().map(|n| n.to_os_string()).unwrap_or_else(|| std::ffi::OsString::from("app.divixi"));
+        name.push("-dev");
+        return default.with_file_name(name);
+    }
+    default
+}
+
 /// Store key holding the last agent detection result (JSON).
 const AGENTS_META: &str = "agents";
 
@@ -1437,11 +1466,29 @@ fn install_signal_shutdown(app: AppHandle) {
 }
 
 pub fn run() {
+    // WebView2 keeps localStorage in a folder of its own, chosen from the
+    // executable's path rather than from anything above — and the
+    // notification inbox is in localStorage. A dev build points it inside
+    // the dev data folder so the two apps cannot share a bell.
+    //
+    // Before any window is made, which is why it is here and not in
+    // `setup`. Only when nobody has chosen one, and only if the folder can
+    // be made: a bad path here would stop the webview starting at all, and
+    // falling back to today's behaviour is much the lesser evil.
+    #[cfg(all(windows, debug_assertions, not(feature = "server")))]
+    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
+        if let Some(root) = app_data_root() {
+            let webview = instance_data_dir(root).join("webview");
+            if std::fs::create_dir_all(&webview).is_ok() {
+                std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &webview);
+            }
+        }
+    }
+
     #[cfg(not(feature = "server"))]
     let builder = tauri::Builder::default()
-        // Opening Divixi again while it runs (hidden in the tray) shows the
-        // one that runs instead of starting a second. First, as the plugin asks.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        // First, as the plugin asks.
+        .plugin(one_instance_only())
         .plugin(tauri_plugin_dialog::init())
         // Closing the window hides it: conductors and workers go on working,
         // and the tray icon brings it back. Quit (the tray menu) ends the app.
@@ -1593,7 +1640,7 @@ pub fn run() {
             tauri::async_runtime::spawn_blocking(move || responder.respond(preview::handle_board(&app, request)));
         })
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
+            let data_dir = instance_data_dir(app.path().app_data_dir()?);
             std::fs::create_dir_all(&data_dir)?;
             // Before anything else logs. It waits until here because only
             // an app can say where this platform keeps an app's files.
@@ -1669,7 +1716,10 @@ pub fn run() {
             #[cfg(not(feature = "server"))]
             {
                 if let Some(window) = app.get_window("main") {
-                    let _ = window.set_title("Divixi");
+                    // Two Divixis side by side while a change is checked:
+                    // the title bar is the one place both are always
+                    // labelled, whichever has focus.
+                    let _ = window.set_title(if cfg!(debug_assertions) { "Divixi (dev)" } else { "Divixi" });
                 }
                 tray(app.handle())?;
             }
@@ -1755,7 +1805,11 @@ pub fn set_listen(how: Option<&str>) -> anyhow::Result<String> {
     Ok(format!("listen {how}: restart divixi-server for it to apply"))
 }
 
-fn data_dir_offline() -> anyhow::Result<PathBuf> {
+/// The platform's app-data folder for Divixi, before [`instance_data_dir`]
+/// has had its say. Worked out rather than asked of Tauri, for the two
+/// places that need it before there is an app to ask: the `divixi-server`
+/// subcommands, and the webview folder chosen at the top of `run`.
+fn app_data_root() -> Option<PathBuf> {
     const ID: &str = "app.divixi";
     let home = || std::env::var_os("HOME").map(PathBuf::from);
     let base = if cfg!(windows) {
@@ -1765,11 +1819,35 @@ fn data_dir_offline() -> anyhow::Result<PathBuf> {
     } else {
         std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".local/share")))
     };
-    let dir = base.ok_or_else(|| anyhow::anyhow!("no home folder"))?.join(ID);
+    Some(base?.join(ID))
+}
+
+fn data_dir_offline() -> anyhow::Result<PathBuf> {
+    let dir = instance_data_dir(app_data_root().ok_or_else(|| anyhow::anyhow!("no home folder"))?);
     if !dir.is_dir() {
         anyhow::bail!("{} does not exist: start divixi-server once first", dir.display());
     }
     Ok(dir)
+}
+
+/// Opening Divixi again while it runs (hidden in the tray) shows the one
+/// that runs instead of starting a second.
+///
+/// A debug build does not: it comes up beside an installed Divixi instead
+/// of handing over to it and quietly exiting, which is what made
+/// `npm run app` look like it did nothing. The two share no data —
+/// see [`instance_data_dir`] — so there is nothing for one instance to
+/// protect from the other.
+#[cfg(not(feature = "server"))]
+fn one_instance_only() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    #[cfg(debug_assertions)]
+    {
+        tauri::plugin::Builder::new("single-instance-off").build()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app))
+    }
 }
 
 /// Bring the main window back: shown, restored if minimised, in front.
