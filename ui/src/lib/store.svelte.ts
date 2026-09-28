@@ -250,7 +250,7 @@ export type AgentStatus = {
     config_options?: ConfigOption[];
     modes?: ModeInfo[];
     default_mode?: string | null;
-    /** The mode Orchestra picks when none is chosen. */
+    /** The mode Divixi picks when none is chosen. */
     autonomous_mode?: string | null;
   } | null;
   error: string | null;
@@ -405,7 +405,7 @@ export function withDelta(doc: DesignDoc, d: DesignDelta): DesignDoc {
 export const artifactKey = (id: string) => `artifact:${id}`;
 const EMPTY_DOC: DesignDoc = { version: 0, nodes: [], edges: [], changes: [], next: 0 };
 
-/** Prefix of conductor prompts Orchestra injects itself (worker reports). Language-neutral. */
+/** Prefix of conductor prompts Divixi injects itself (worker reports). Language-neutral. */
 export const REPORT_PREFIX = "[worker-report]";
 /** How the app's second ask for a missing report starts (conductor.rs, report::reminder). */
 export const REPORT_REMINDER = "Your reply did not end with a usable report";
@@ -2057,7 +2057,7 @@ class Store {
     return (this.agents?.find((a) => a.kind === agent)?.probe?.config_options ?? []).filter((o) => o.choices.length > 0);
   }
 
-  /** The mode Orchestra picks for an agent when the track chooses none. */
+  /** The mode Divixi picks for an agent when the track chooses none. */
   autonomousModeOf(agent: string): string {
     const status = this.agents?.find((a) => a.kind === agent);
     return status?.probe?.autonomous_mode ?? status?.probe?.config_options?.find((o) => o.category === "mode")?.current ?? "";
@@ -2785,7 +2785,7 @@ class Store {
       if (run) run.id = env.run;
     }
     if (!run) {
-      // A worker the conductor opened, or a report turn Orchestra injected:
+      // A worker the conductor opened, or a report turn Divixi injected:
       // the core registered it, we have not. Show it now; the prompt text
       // comes with the summary right after.
       run = {

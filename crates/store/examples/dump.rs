@@ -10,7 +10,7 @@
 use orchestra_store::Store;
 
 fn main() -> anyhow::Result<()> {
-    let path = std::env::args().nth(1).ok_or_else(|| anyhow::anyhow!("usage: dump <orchestra.db>"))?;
+    let path = std::env::args().nth(1).ok_or_else(|| anyhow::anyhow!("usage: dump <divixi.db>"))?;
     let store = Store::open(&path)?;
     println!("schema_version: {}", store.get_meta("schema_version")?.unwrap_or_default());
     for track in store.tracks()? {
