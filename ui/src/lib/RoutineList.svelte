@@ -1,37 +1,22 @@
 <script lang="ts">
-  import { store } from "./store.svelte";
+  import { store, NEW_ROUTINE } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
 
   /**
-   * Second column: every routine, grouped under the track it belongs to.
-   * A routine is a saved instruction the human runs again when they want
-   * it — never on a clock — so the row carries what they need to decide
-   * that: whether it is running, when it last did and how it went.
+   * Second column: every routine, newest activity first. A routine belongs
+   * to no track and is nobody's worker, so this is a flat list — there is
+   * no owner to group it under.
    *
-   * There is no "new routine" button here. A routine is made by telling the
-   * conductor, which is the one place that has the instruction to save; the
-   * empty state says so rather than offering a form that would start with a
-   * blank box the human has to fill from memory.
+   * Two ways in, and both are here: the button at the top opens a blank
+   * form for the human to fill, and a routine the conductor wrote appears
+   * in the list beside it. Neither is the "real" one.
    */
   const now = Date.now();
 
-  const groups = $derived(
-    store.tracks
-      .map((tr) => ({
-        id: tr.id,
-        name: tr.name,
-        items: store.routines.filter((r) => r.track === tr.id),
-      }))
-      .filter((g) => g.items.length > 0),
-  );
-
-  /** Routines whose track is gone: shown, so nothing disappears silently. */
-  const orphans = $derived(store.routines.filter((r) => !store.tracks.some((tr) => tr.id === r.track)));
-
-  function lastLabel(r: { last_run: string | null; updated_at: number; runs: number }): string {
+  function last(r: { updated_at: number; runs: number }): string {
     if (!r.runs) return t("routines.never");
     return t("routines.lastRun", { when: whenLabel(r.updated_at, now, store.lang) });
   }
@@ -43,36 +28,36 @@
     <span class="title">{t("rail.routines")}</span>
   </div>
 
+  <div class="newrow">
+    <button class="new" class:on={store.routine === NEW_ROUTINE} onclick={() => store.newRoutine()}>
+      + {t("routines.new")}
+    </button>
+  </div>
+
   <div class="scroll">
     {#if !store.routines.length}
       <p class="empty">{t("routines.empty")}</p>
     {:else}
-      {#each [...groups, ...(orphans.length ? [{ id: "", name: t("routines.trackGone"), items: orphans }] : [])] as g (g.id)}
-        <div class="group">
-          <div class="gname">{g.name}</div>
-          {#each g.items as r (r.id)}
-            {@const live = store.routineLive(r)}
-            <div class="row" class:on={store.routine === r.id}>
-              <button class="pick" onclick={() => store.openRoutine(r.id)}>
-                <span class="mark">
-                  {#if live}<Working size={11} />{:else}<span class="dot"></span>{/if}
-                </span>
-                <span class="text">
-                  <span class="name">{r.name}</span>
-                  <span class="sub">{live ? t("routines.running") : lastLabel(r)}</span>
-                </span>
-              </button>
-              <button
-                class="go"
-                disabled={live}
-                title={live ? t("routines.running") : t("routines.runNow")}
-                aria-label={t("routines.runNow")}
-                onclick={() => store.runRoutine(r.id)}
-              >
-                <Icon name="play" size={13} />
-              </button>
-            </div>
-          {/each}
+      {#each store.routines as r (r.id)}
+        {@const live = store.routineLive(r.id)}
+        <div class="row" class:on={store.routine === r.id}>
+          <button class="pick" onclick={() => store.openRoutine(r.id)}>
+            <span class="mark">
+              {#if live}<Working size={11} />{:else}<span class="dot"></span>{/if}
+            </span>
+            <span class="text">
+              <span class="name">{r.name}</span>
+              <span class="sub">{live ? t("routines.running") : last(r)}</span>
+            </span>
+          </button>
+          <button
+            class="go"
+            title={live ? t("routines.stop") : t("routines.runNow")}
+            aria-label={live ? t("routines.stop") : t("routines.runNow")}
+            onclick={() => (live ? store.cancelRoutine(r.id) : store.runRoutine(r.id))}
+          >
+            <Icon name={live ? "close" : "play"} size={13} />
+          </button>
         </div>
       {/each}
     {/if}
@@ -108,25 +93,37 @@
     color: var(--hi);
   }
 
+  .newrow {
+    flex-shrink: 0;
+    padding: 10px 12px 6px;
+  }
+
+  .new {
+    width: 100%;
+    height: 32px;
+    background: var(--inp);
+    border: 1px solid var(--line);
+    color: var(--lab);
+    font-size: 13px;
+  }
+
+  .new:hover,
+  .new.on {
+    color: var(--hi);
+    border-color: var(--acc);
+  }
+
   .scroll {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 6px 0 12px;
+    padding: 2px 0 12px;
   }
 
   .empty {
-    margin: 14px 16px;
+    margin: 10px 16px;
     font-size: 12px;
     line-height: 1.6;
-    color: var(--lab);
-  }
-
-  .gname {
-    padding: 10px 16px 4px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
     color: var(--lab);
   }
 
@@ -203,11 +200,7 @@
     color: var(--lab);
   }
 
-  .go:hover:not(:disabled) {
+  .go:hover {
     color: var(--hi);
-  }
-
-  .go:disabled {
-    opacity: 0.35;
   }
 </style>

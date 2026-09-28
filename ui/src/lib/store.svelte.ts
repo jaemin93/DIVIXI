@@ -331,20 +331,26 @@ export type ArtifactInfo = {
   created_at: number;
   updated_at: number;
 };
-// ----- routines: a track's saved instructions, run again when wanted.
-// Not a schedule — nothing fires on a clock; a routine runs when the human
-// presses it or the conductor calls run_routine. -----
+// ----- routines: saved work, run on its own whenever it is wanted.
+// Not a schedule (nothing fires on a clock) and not a worker: a routine has
+// its own folder and its own agent, and its runs are kept apart from every
+// track's, so it never shows up in a worker list. -----
+/** The id the panel holds while the blank form is open. */
+export const NEW_ROUTINE = "new";
+
 export type Routine = {
   id: string;
-  /** The track it belongs to: its folder, its worker settings, its conductor. */
-  track: string;
   name: string;
-  /** What the worker is told. Written to stand alone, and the human's to edit. */
+  /** What the agent is told. Written to stand alone, and the human's to edit. */
   instruction: string;
-  /** The worker its runs are recorded under, and whose folder it works in. */
-  worker: string;
-  /** Empty means the track's worker agent. */
+  /** The folder it works in. Its own, not a track's. */
+  cwd: string;
+  /** The agent it runs on. Its own, and required. */
   agent: string;
+  /** Its session options in the agent's own terms, as a track's are. */
+  config: OptionConfig;
+  /** A track to tell when it has run; empty means tell no one. */
+  track: string;
   created_at: number;
   updated_at: number;
   runs: number;
@@ -1622,31 +1628,33 @@ class Store {
 
   // ----- routines -----
 
-  /** Every track's routines, most recently touched first. */
+  /** Every routine, most recently touched first. */
   routines = $state<Routine[]>([]);
-  /** The one open in the panel, by id. */
+  /** The one open in the panel, by id. `new` is the blank form. */
   routine = $state("");
   /** The open routine's runs, newest first. */
   routineRuns = $state<Run[]>([]);
-  /** Routines whose worker this window has just started, by id, so the row
-   *  says so before the first run event arrives. */
-  routineStarting = $state<Record<string, boolean>>({});
+  /** Routine ids with a turn in flight, as the core last said. A routine's
+   *  runs are kept out of `runs`, so this is how the list knows. */
+  routineRunning = $state<string[]>([]);
 
   async loadRoutines() {
     try {
-      this.routines = await invoke<Routine[]>("list_routines", { track: null });
+      this.routines = await invoke<Routine[]>("list_routines");
+      this.routineRunning = await invoke<string[]>("running_routines");
     } catch (err) {
       this.lastError = String(err);
     }
   }
 
-  /** Show the routines: the last one open, else the newest. */
+  /** Show the routines: the last one open, else the newest, else the form. */
   async showRoutines() {
     this.view = "routines";
     await this.loadRoutines();
+    if (this.routine === NEW_ROUTINE) return;
     const pick = this.routines.find((r) => r.id === this.routine) ?? this.routines[0];
     if (pick) await this.openRoutine(pick.id);
-    else this.routine = "";
+    else this.routine = NEW_ROUTINE;
   }
 
   async openRoutine(id: string) {
@@ -1655,8 +1663,15 @@ class Store {
     await this.loadRoutineRuns(id);
   }
 
+  /** Open the blank form: the human's own way in, beside the conductor's. */
+  newRoutine() {
+    this.routine = NEW_ROUTINE;
+    this.routineRuns = [];
+    this.view = "routines";
+  }
+
   async loadRoutineRuns(id = this.routine) {
-    if (!id) {
+    if (!id || id === NEW_ROUTINE) {
       this.routineRuns = [];
       return;
     }
@@ -1668,42 +1683,55 @@ class Store {
     }
   }
 
-  /** Whether a routine's worker has a turn in flight right now. */
-  routineLive(r: Routine): boolean {
-    if (this.routineStarting[r.id]) return true;
-    return this.runs.some(
-      (run) => run.track === r.track && run.session === r.worker && (run.status === "running" || run.status === "connecting"),
-    );
+  routineLive(id: string): boolean {
+    return this.routineRunning.includes(id);
   }
 
   async runRoutine(id: string) {
-    this.routineStarting = { ...this.routineStarting, [id]: true };
+    // Shown as running at once: the core is asked next, and its answer is
+    // what keeps it that way.
+    if (!this.routineRunning.includes(id)) this.routineRunning = [...this.routineRunning, id];
     try {
       await invoke("run_routine", { id });
       await this.loadRoutineRuns(id);
     } catch (err) {
       this.lastError = String(err);
-    } finally {
-      const { [id]: _gone, ...rest } = this.routineStarting;
-      this.routineStarting = rest;
+      this.routineRunning = this.routineRunning.filter((r) => r !== id);
     }
   }
 
-  /** Open a routine's run where every other run is read: its worker's
-   *  session in the track it belongs to. A routine's runs are the track's,
-   *  so this leaves the routines view rather than showing a transcript
-   *  twice in two places. */
-  async openRoutineRun(run: Run) {
-    await this.selectTrack(run.track);
-    await this.openWorkerView(run.session);
+  async cancelRoutine(id: string) {
+    try {
+      await invoke("routine_cancel", { id });
+    } catch (err) {
+      this.lastError = String(err);
+    }
   }
 
-  async saveRoutine(id: string, patch: { name?: string; instruction?: string; worker?: string; agent?: string }) {
+  /** Save the blank form as a new routine, and open it. */
+  async createRoutine(patch: { name: string; instruction: string; cwd: string; agent: string; config?: OptionConfig; track?: string }) {
+    try {
+      const made = await invoke<Routine>("create_routine", { patch });
+      await this.loadRoutines();
+      await this.openRoutine(made.id);
+      return true;
+    } catch (err) {
+      this.lastError = String(err);
+      return false;
+    }
+  }
+
+  async saveRoutine(
+    id: string,
+    patch: { name?: string; instruction?: string; cwd?: string; agent?: string; config?: OptionConfig; track?: string },
+  ) {
     try {
       await invoke<Routine>("update_routine", { id, patch });
       await this.loadRoutines();
+      return true;
     } catch (err) {
       this.lastError = String(err);
+      return false;
     }
   }
 
@@ -1716,8 +1744,8 @@ class Store {
     }
     if (this.routine === id) this.routine = "";
     await this.loadRoutines();
-    if (!this.routine && this.routines.length) await this.openRoutine(this.routines[0].id);
-    else if (!this.routines.length) this.routineRuns = [];
+    if (this.routines.length) await this.openRoutine(this.routines[0].id);
+    else this.newRoutine();
   }
 
   /** Show the designs: the last one open, else the newest. */
@@ -3187,13 +3215,12 @@ export async function connectEvents() {
     listen<string>("design_extract", (e) => {
       if (e.payload === store.artifact) void store.loadExtracts(e.payload);
     }),
-    // A routine was saved (by the conductor) or has just run: the list's
-    // counts and last-run times have moved.
+    // A routine was saved (by the conductor), started, or finished. The
+    // running set is read even off the page, so the rail's count and a
+    // later visit are right without waiting for a reload.
     listen("routines", () => {
-      if (store.view === "routines") {
-        void store.loadRoutines();
-        void store.loadRoutineRuns();
-      }
+      void store.loadRoutines();
+      if (store.view === "routines") void store.loadRoutineRuns();
     }),
   ]);
 }

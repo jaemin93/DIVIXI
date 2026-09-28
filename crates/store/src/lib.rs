@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -177,6 +177,19 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (routine, run)
     );
     CREATE INDEX IF NOT EXISTS routine_runs_by_routine ON routine_runs(routine, at);",
+    // 16 -> 17: a routine is its own thing, not a worker. It carries the
+    // folder it works in and the agent it runs on rather than borrowing a
+    // track's, and its runs are found by their own key, so the table that
+    // linked them goes. A routine made under the old shape keeps its words
+    // and takes the folder and agent its track was lending it.
+    "ALTER TABLE routines ADD COLUMN cwd TEXT NOT NULL DEFAULT '';
+    ALTER TABLE routines ADD COLUMN config TEXT NOT NULL DEFAULT '{}';
+    UPDATE routines SET cwd = COALESCE((SELECT t.cwd FROM tracks t WHERE t.id = routines.track), '') WHERE cwd = '';
+    UPDATE routines SET agent = COALESCE((SELECT CASE WHEN t.worker_agent <> '' THEN t.worker_agent ELSE t.agent END
+                                          FROM tracks t WHERE t.id = routines.track), '') WHERE agent = '';
+    DROP TABLE IF EXISTS routine_runs;
+    DROP INDEX IF EXISTS routines_by_track;
+    CREATE INDEX IF NOT EXISTS routines_by_time ON routines(updated_at);",
 ];
 
 const SCHEMA: &str = r#"
@@ -268,23 +281,16 @@ CREATE INDEX IF NOT EXISTS artifacts_by_kind ON artifacts(kind, updated_at);
 
 CREATE TABLE IF NOT EXISTS routines (
     id          TEXT    PRIMARY KEY,
-    track       TEXT    NOT NULL,
     name        TEXT    NOT NULL,
     instruction TEXT    NOT NULL,
-    worker      TEXT    NOT NULL,
-    agent       TEXT    NOT NULL DEFAULT '',
+    cwd         TEXT    NOT NULL,
+    agent       TEXT    NOT NULL,
+    config      TEXT    NOT NULL DEFAULT '{}',
+    track       TEXT    NOT NULL DEFAULT '',
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS routines_by_track ON routines(track, updated_at);
-
-CREATE TABLE IF NOT EXISTS routine_runs (
-    routine TEXT    NOT NULL,
-    run     TEXT    NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    at      INTEGER NOT NULL,
-    PRIMARY KEY (routine, run)
-);
-CREATE INDEX IF NOT EXISTS routine_runs_by_routine ON routine_runs(routine, at);
+CREATE INDEX IF NOT EXISTS routines_by_time ON routines(updated_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS runs_fts USING fts5(
     run_id UNINDEXED,
@@ -479,28 +485,35 @@ pub struct ArtifactPatch {
     pub tags: Option<Vec<String>>,
 }
 
-/// A saved instruction a track runs again whenever it is wanted.
+/// A saved instruction, run on its own whenever it is wanted.
 ///
-/// A routine is not a schedule. It is the thing a human would otherwise have
-/// to dictate to the conductor a second time: what to do, as which worker,
-/// on which agent. Running one opens that worker with a clean session — the
-/// same work done twice must not read the first time's conversation.
+/// A routine is not a schedule, and it is not a worker. It is the work a
+/// human would otherwise dictate a second time — and a third — written down
+/// with everything it needs to run alone: what to do, the folder to do it
+/// in, and the agent to do it on. Running one opens an agent session of its
+/// own. It borrows no conversation, holds no place in a track's worker list,
+/// and nothing it does reaches a worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Routine {
     pub id: String,
-    /// The track it belongs to: its folder, its worker settings, and the
-    /// conductor its reports reach.
-    pub track: String,
     /// What the human calls it.
     pub name: String,
-    /// What the worker is told. Written to stand alone: it is read again
+    /// What the agent is told. Written to stand alone: it is read again
     /// weeks later with none of the conversation that produced it.
     pub instruction: String,
-    /// The worker name its runs are recorded under, and whose folder it
-    /// works in.
-    pub worker: String,
-    /// Agent to run it on; empty means the track's worker agent.
+    /// The folder it works in. Its own, not a track's.
+    pub cwd: String,
+    /// The agent it runs on. Its own, and required — there is no track to
+    /// fall back to.
     pub agent: String,
+    /// Its session options, `option id -> value id`, in the agent's own
+    /// terms (`model`, `mode`, `reasoning_effort`, ...), as a track's and an
+    /// artifact's are. Absent options keep the agent's default.
+    pub config: BTreeMap<String, String>,
+    /// A track to tell when it has run, so the human hears about it where
+    /// they hear about everything else. Empty means tell no one: the run is
+    /// still on the routine's own list.
+    pub track: String,
     /// Unix milliseconds.
     pub created_at: i64,
     /// Unix milliseconds of its last run, or its creation.
@@ -511,33 +524,52 @@ pub struct Routine {
     pub last_run: Option<String>,
 }
 
-/// What a routine change may touch; `None` keeps a field. The track is not
-/// here: a routine cannot move to another track, because its worker's folder
-/// and its conductor are that track's.
+/// Runs of a routine are kept under this track key, apart from tracks and
+/// from artifacts. Nothing that lists a track's runs can see them, which is
+/// what keeps a routine out of the worker list.
+pub fn routine_run_key(id: &str) -> String {
+    format!("routine:{id}")
+}
+
+/// The session name a routine's runs are recorded under.
+pub const ROUTINE_SESSION: &str = "routine";
+
+/// What a routine change may touch; `None` keeps a field.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutinePatch {
-    /// Only read when creating.
-    pub track: Option<String>,
     pub name: Option<String>,
     pub instruction: Option<String>,
-    pub worker: Option<String>,
+    pub cwd: Option<String>,
     pub agent: Option<String>,
+    pub config: Option<BTreeMap<String, String>>,
+    /// `Some("")` clears it: tell no one.
+    pub track: Option<String>,
 }
 
 fn row_to_routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<Routine> {
     Ok(Routine {
         id: r.get(0)?,
-        track: r.get(1)?,
-        name: r.get(2)?,
-        instruction: r.get(3)?,
-        worker: r.get(4)?,
-        agent: r.get(5)?,
-        created_at: r.get(6)?,
-        updated_at: r.get(7)?,
-        runs: r.get(8)?,
-        last_run: r.get(9)?,
+        name: r.get(1)?,
+        instruction: r.get(2)?,
+        cwd: r.get(3)?,
+        agent: r.get(4)?,
+        config: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+        track: r.get(6)?,
+        created_at: r.get(7)?,
+        updated_at: r.get(8)?,
+        runs: r.get(9)?,
+        last_run: r.get(10)?,
     })
 }
+
+/// Columns of a routine, in the order `row_to_routine` reads them. The run
+/// count and the newest run are folded from the runs kept under its key.
+const ROUTINE_SELECT: &str = "SELECT r.id, r.name, r.instruction, r.cwd, r.agent, r.config, r.track,
+                                     r.created_at, r.updated_at,
+                                     (SELECT COUNT(*) FROM runs x WHERE x.track = 'routine:' || r.id),
+                                     (SELECT x.id FROM runs x WHERE x.track = 'routine:' || r.id
+                                      ORDER BY x.n DESC LIMIT 1)
+                              FROM routines r";
 
 const ARTIFACT_SELECT: &str = "SELECT id, kind, title, agent, config, color, tags, created_at, updated_at FROM artifacts";
 
@@ -899,18 +931,11 @@ impl Store {
 
     // ── Routines ──
 
-    /// Every routine of a track, most recently touched first.
-    pub fn routines(&self, track: Option<&str>) -> anyhow::Result<Vec<Routine>> {
+    /// Every routine, most recently touched first.
+    pub fn routines(&self) -> anyhow::Result<Vec<Routine>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT r.id, r.track, r.name, r.instruction, r.worker, r.agent, r.created_at, r.updated_at,
-                    (SELECT COUNT(*) FROM routine_runs rr WHERE rr.routine = r.id),
-                    (SELECT rr.run FROM routine_runs rr WHERE rr.routine = r.id ORDER BY rr.at DESC LIMIT 1)
-             FROM routines r
-             WHERE ?1 IS NULL OR r.track = ?1
-             ORDER BY r.updated_at DESC, r.id DESC",
-        )?;
-        let rows = stmt.query_map(params![track], row_to_routine)?;
+        let mut stmt = conn.prepare(&format!("{ROUTINE_SELECT} ORDER BY r.updated_at DESC, r.id DESC"))?;
+        let rows = stmt.query_map([], row_to_routine)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -918,28 +943,22 @@ impl Store {
     pub fn routine(&self, id: &str) -> anyhow::Result<Option<Routine>> {
         let conn = self.conn.lock();
         Ok(conn
-            .query_row(
-                "SELECT r.id, r.track, r.name, r.instruction, r.worker, r.agent, r.created_at, r.updated_at,
-                        (SELECT COUNT(*) FROM routine_runs rr WHERE rr.routine = r.id),
-                        (SELECT rr.run FROM routine_runs rr WHERE rr.routine = r.id ORDER BY rr.at DESC LIMIT 1)
-                 FROM routines r WHERE r.id = ?1",
-                params![id],
-                row_to_routine,
-            )
+            .query_row(&format!("{ROUTINE_SELECT} WHERE r.id = ?1"), params![id], row_to_routine)
             .optional()?)
     }
 
-    /// Save a new routine. The worker name is what its runs are recorded
-    /// under, so it is taken as given and only checked for being there.
+    /// Save a routine. It needs everything it takes to run alone: a name, an
+    /// instruction, a folder and an agent. A track is optional — it only
+    /// decides who is told afterwards.
     pub fn create_routine(&self, patch: &RoutinePatch) -> anyhow::Result<Routine> {
-        let name = patch.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
-        let instruction = patch.instruction.as_deref().map(str::trim).filter(|i| !i.is_empty());
-        let worker = patch.worker.as_deref().map(str::trim).filter(|w| !w.is_empty());
-        let (Some(track), Some(name), Some(instruction), Some(worker)) =
-            (patch.track.as_deref(), name, instruction, worker)
-        else {
-            anyhow::bail!("a routine needs a track, a name, an instruction and a worker");
+        let name = patch.name.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let instruction = patch.instruction.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let cwd = patch.cwd.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let agent = patch.agent.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let (Some(name), Some(instruction), Some(cwd), Some(agent)) = (name, instruction, cwd, agent) else {
+            anyhow::bail!("a routine needs a name, an instruction, a folder and an agent");
         };
+        let config = serde_json::to_string(&patch.config.clone().unwrap_or_default())?;
         let id = {
             let conn = self.conn.lock();
             let next: i64 = conn.query_row(
@@ -950,31 +969,34 @@ impl Store {
             let id = format!("ro{next:03}");
             let now = now_ms();
             conn.execute(
-                "INSERT INTO routines(id, track, name, instruction, worker, agent, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-                params![id, track, name, instruction, worker, patch.agent.as_deref().unwrap_or(""), now],
+                "INSERT INTO routines(id, name, instruction, cwd, agent, config, track, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                params![id, name, instruction, cwd, agent, config, patch.track.as_deref().unwrap_or(""), now],
             )?;
             id
         };
         Ok(self.routine(&id)?.expect("just written"))
     }
 
-    /// Change a routine's fields; `None` in the patch keeps a field. The
-    /// track is not among them: a routine belongs to the track it was made
-    /// in, and its worker's folder is that track's.
+    /// Change a routine's fields; `None` in the patch keeps a field.
     pub fn update_routine(&self, id: &str, patch: &RoutinePatch) -> anyhow::Result<Routine> {
+        let config = patch.config.as_ref().map(serde_json::to_string).transpose()?;
         {
             let conn = self.conn.lock();
             let changed = conn.execute(
                 "UPDATE routines SET name = COALESCE(?2, name), instruction = COALESCE(?3, instruction),
-                 worker = COALESCE(?4, worker), agent = COALESCE(?5, agent), updated_at = ?6
+                 cwd = COALESCE(?4, cwd), agent = COALESCE(?5, agent), config = COALESCE(?6, config),
+                 track = COALESCE(?7, track), updated_at = ?8
                  WHERE id = ?1",
                 params![
                     id,
-                    patch.name.as_deref().map(str::trim).filter(|n| !n.is_empty()),
-                    patch.instruction.as_deref().map(str::trim).filter(|i| !i.is_empty()),
-                    patch.worker.as_deref().map(str::trim).filter(|w| !w.is_empty()),
-                    patch.agent.as_deref(),
+                    patch.name.as_deref().map(str::trim).filter(|v| !v.is_empty()),
+                    patch.instruction.as_deref().map(str::trim).filter(|v| !v.is_empty()),
+                    patch.cwd.as_deref().map(str::trim).filter(|v| !v.is_empty()),
+                    patch.agent.as_deref().map(str::trim).filter(|v| !v.is_empty()),
+                    config,
+                    // Not filtered on empty: "" is how a track is cleared.
+                    patch.track.as_deref().map(str::trim),
                     now_ms(),
                 ],
             )?;
@@ -985,12 +1007,16 @@ impl Store {
         Ok(self.routine(id)?.expect("just updated"))
     }
 
-    /// Remove a routine. Its runs stay in the record — they are ordinary
-    /// worker runs and the track's timeline has them; only the link goes.
+    /// Remove a routine and everything its runs left behind. Unlike a
+    /// worker's, a routine's runs belong to no track, so nothing else is
+    /// left holding them.
     pub fn delete_routine(&self, id: &str) -> anyhow::Result<()> {
+        let key = routine_run_key(id);
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM routine_runs WHERE routine = ?1", params![id])?;
+        tx.execute("DELETE FROM runs_fts WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![key])?;
+        tx.execute("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![key])?;
+        tx.execute("DELETE FROM runs WHERE track = ?1", params![key])?;
         let changed = tx.execute("DELETE FROM routines WHERE id = ?1", params![id])?;
         if changed == 0 {
             anyhow::bail!("no routine {id}");
@@ -999,25 +1025,11 @@ impl Store {
         Ok(())
     }
 
-    /// Note that a run came from a routine.
-    pub fn link_routine_run(&self, routine: &str, run: &str) -> anyhow::Result<()> {
+    /// A routine's runs, newest first.
+    pub fn routine_runs(&self, id: &str, limit: u32) -> anyhow::Result<Vec<RunSummary>> {
         let conn = self.conn.lock();
-        conn.execute(
-            "INSERT OR IGNORE INTO routine_runs(routine, run, at) VALUES (?1, ?2, ?3)",
-            params![routine, run, now_ms()],
-        )?;
-        conn.execute("UPDATE routines SET updated_at = ?2 WHERE id = ?1", params![routine, now_ms()])?;
-        Ok(())
-    }
-
-    /// A routine's runs, newest first, as the track timeline knows them.
-    pub fn routine_runs(&self, routine: &str, limit: u32) -> anyhow::Result<Vec<RunSummary>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(&format!(
-            "{RUN_SELECT} WHERE id IN (SELECT run FROM routine_runs WHERE routine = ?1)
-             ORDER BY started_at DESC, n DESC LIMIT ?2"
-        ))?;
-        let rows = stmt.query_map(params![routine, limit], row_to_summary)?;
+        let mut stmt = conn.prepare(&format!("{RUN_SELECT} WHERE track = ?1 ORDER BY n DESC LIMIT ?2"))?;
+        let rows = stmt.query_map(params![routine_run_key(id), limit], row_to_summary)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -1604,7 +1616,11 @@ mod tests {
             let other = store.begin_run("tr001", "conductor", "claude_code", "tell me about [lane-report] lane=x", "/w").unwrap();
             store.set_meta("schema_version", "12").unwrap();
             // What v12 did not have yet.
-            store.conn.lock().execute_batch("ALTER TABLE tracks DROP COLUMN worker_folder;").unwrap();
+            store
+                .conn
+                .lock()
+                .execute_batch("ALTER TABLE tracks DROP COLUMN worker_folder; DROP TABLE routines;")
+                .unwrap();
             (old, other)
         };
         let store = Store::open(&path).unwrap();
@@ -1861,6 +1877,9 @@ mod tests {
             conn.execute("ALTER TABLE decisions DROP COLUMN permission", []).unwrap();
             // Artifacts came at v10 (drafts at v7); the migrations make them.
             conn.execute("DROP TABLE artifacts", []).unwrap();
+            // Routines came at v16, and the replace above took their `track`
+            // column with the runs one; the migrations make the table.
+            conn.execute("DROP TABLE routines", []).unwrap();
             conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')", []).unwrap();
             conn.execute(
                 "INSERT INTO runs(n, id, lane, prompt, cwd, status, started_at) VALUES (1, 't001', 'conductor', 'old', 'C:/old', 'done', 5)",
@@ -1928,60 +1947,67 @@ mod tests {
     }
 
     #[test]
-    fn routines_are_saved_edited_run_and_deleted() {
+    fn routines_stand_alone_with_their_own_folder_agent_and_runs() {
         let store = Store::in_memory().unwrap();
         let track = store.create_track(&new_track("Ops", "", "C:/repo", "claude_code")).unwrap();
-        let other = store.create_track(&new_track("Docs", "", "C:/repo", "codex")).unwrap();
 
-        let made = |name: &str, worker: &str| RoutinePatch {
-            track: Some(track.id.clone()),
-            name: Some(name.into()),
+        let made = || RoutinePatch {
+            name: Some("  Dependency check  ".into()),
             instruction: Some("  list the stale dependencies  ".into()),
-            worker: Some(worker.into()),
-            agent: None,
+            cwd: Some("C:/ops".into()),
+            agent: Some("claude_code".into()),
+            config: None,
+            track: None,
         };
-        let a = store.create_routine(&made("  Dependency check  ", "dep-check")).unwrap();
+        let a = store.create_routine(&made()).unwrap();
         assert_eq!((a.id.as_str(), a.name.as_str()), ("ro001", "Dependency check"), "ids run on, names are trimmed");
         assert_eq!(a.instruction, "list the stale dependencies", "and so is the instruction");
+        assert_eq!((a.cwd.as_str(), a.agent.as_str()), ("C:/ops", "claude_code"), "its own folder and agent");
+        assert!(a.track.is_empty(), "a routine belongs to no track until one is named");
         assert_eq!((a.runs, a.last_run.as_deref()), (0, None), "a new routine has never run");
-        assert!(a.agent.is_empty(), "an empty agent means the track's worker agent");
 
-        // A routine needs all four of its parts.
-        assert!(store.create_routine(&RoutinePatch { name: Some("  ".into()), ..made("x", "w") }).is_err());
-        assert!(store.create_routine(&RoutinePatch { instruction: Some("".into()), ..made("x", "w") }).is_err());
-        assert!(store.create_routine(&RoutinePatch { worker: None, ..made("x", "w") }).is_err());
+        // Every part it needs to run alone is required.
+        assert!(store.create_routine(&RoutinePatch { name: Some("  ".into()), ..made() }).is_err());
+        assert!(store.create_routine(&RoutinePatch { instruction: Some("".into()), ..made() }).is_err());
+        assert!(store.create_routine(&RoutinePatch { cwd: None, ..made() }).is_err());
+        assert!(store.create_routine(&RoutinePatch { agent: None, ..made() }).is_err(), "there is no track to borrow an agent from");
 
-        // Listed by track, so one track's routines never show in another's.
-        store.create_routine(&made("Link check", "link-check")).unwrap();
-        assert_eq!(store.routines(Some(&track.id)).unwrap().len(), 2);
-        assert!(store.routines(Some(&other.id)).unwrap().is_empty());
-        assert_eq!(store.routines(None).unwrap().len(), 2, "no track means every routine");
-
-        // The human can rewrite what the conductor saved.
+        // The human rewrites what was saved, and may name a track to tell.
         let edited = store
-            .update_routine(&a.id, &RoutinePatch { instruction: Some("read package.json and report".into()), ..RoutinePatch::default() })
+            .update_routine(&a.id, &RoutinePatch {
+                instruction: Some("read package.json and report".into()),
+                track: Some(track.id.clone()),
+                config: Some(BTreeMap::from([("model".to_string(), "opus".to_string())])),
+                ..RoutinePatch::default()
+            })
             .unwrap();
         assert_eq!(edited.instruction, "read package.json and report");
         assert_eq!(edited.name, "Dependency check", "an absent field is kept");
+        assert_eq!(edited.track, track.id, "and a named track is told when it runs");
+        assert_eq!(edited.config.get("model").map(String::as_str), Some("opus"));
+        let cleared = store.update_routine(&a.id, &RoutinePatch { track: Some(String::new()), ..RoutinePatch::default() }).unwrap();
+        assert!(cleared.track.is_empty(), "an empty track clears it rather than keeping the old one");
         assert!(store.update_routine("ro999", &RoutinePatch::default()).is_err());
 
-        // Runs are ordinary worker runs; the routine only points at them.
-        let r1 = store.begin_run(&track.id, "dep-check", "claude_code", "list the stale dependencies", "C:/repo").unwrap();
-        store.link_routine_run(&a.id, &r1).unwrap();
-        let r2 = store.begin_run(&track.id, "dep-check", "claude_code", "list the stale dependencies", "C:/repo").unwrap();
-        store.link_routine_run(&a.id, &r2).unwrap();
-        store.link_routine_run(&a.id, &r2).unwrap(); // linking twice is not two runs
+        // Runs live under the routine's own key, so nothing that lists a
+        // track's runs — the timeline, the worker list — can see them.
+        let r1 = store.begin_run(&routine_run_key(&a.id), ROUTINE_SESSION, "claude_code", "check", "C:/ops").unwrap();
+        let r2 = store.begin_run(&routine_run_key(&a.id), ROUTINE_SESSION, "claude_code", "check", "C:/ops").unwrap();
         let seen = store.routine(&a.id).unwrap().unwrap();
         assert_eq!((seen.runs, seen.last_run.as_deref()), (2, Some(r2.as_str())));
+        assert!(store.sessions(&track.id).unwrap().is_empty(), "a routine is not one of the track's workers");
+        assert!(
+            store.runs().unwrap().iter().all(|r| r.track != track.id),
+            "and its runs belong to no track, so nothing listing one can show them"
+        );
         let history = store.routine_runs(&a.id, 10).unwrap();
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].id, r2, "newest first");
+        assert_eq!((history.len(), history[0].id.as_str()), (2, r2.as_str()), "newest first");
         assert_eq!(store.routine_runs(&a.id, 1).unwrap().len(), 1, "the limit holds");
 
-        // Deleting a routine keeps its runs: they are the track's record.
+        // Deleting takes its runs with it: no track is left holding them.
         store.delete_routine(&a.id).unwrap();
         assert!(store.routine(&a.id).unwrap().is_none());
-        assert!(store.run(&r2).unwrap().is_some(), "the run outlives the routine that started it");
+        assert!(store.run(&r1).unwrap().is_none() && store.run(&r2).unwrap().is_none());
         assert!(store.delete_routine(&a.id).is_err(), "deleting what is gone says so");
     }
 
@@ -2037,6 +2063,7 @@ mod tests {
                  ALTER TABLE decisions DROP COLUMN permission;
                  ALTER TABLE tracks DROP COLUMN worker_folder;
                  DROP TABLE artifacts;
+                 DROP TABLE routines;
                  CREATE TABLE drafts (id TEXT PRIMARY KEY, title TEXT NOT NULL, agent TEXT NOT NULL,
                    doc TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
                    config TEXT NOT NULL DEFAULT '{}', color TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]');
