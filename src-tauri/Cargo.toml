@@ -54,7 +54,7 @@ hmac = "0.12"
 sha2 = "0.10"
 ignore = "0.4"
 # The remote instance's event socket, from this app (axum's own WebSocket crate).
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
