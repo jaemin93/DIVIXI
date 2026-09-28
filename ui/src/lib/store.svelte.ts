@@ -315,7 +315,7 @@ export type Run = {
   segments: Segment[];
 };
 
-export type View = "track" | "settings" | "worker" | "new-track" | "edit-track" | "design" | "knowledge";
+export type View = "track" | "settings" | "worker" | "new-track" | "edit-track" | "design" | "knowledge" | "routines";
 
 // ----- artifacts: what the human keeps beside tracks and attaches to them —
 // designs (a sketch board worked out with an agent), knowledge later -----
@@ -331,6 +331,26 @@ export type ArtifactInfo = {
   created_at: number;
   updated_at: number;
 };
+// ----- routines: a track's saved instructions, run again when wanted.
+// Not a schedule — nothing fires on a clock; a routine runs when the human
+// presses it or the conductor calls run_routine. -----
+export type Routine = {
+  id: string;
+  /** The track it belongs to: its folder, its worker settings, its conductor. */
+  track: string;
+  name: string;
+  /** What the worker is told. Written to stand alone, and the human's to edit. */
+  instruction: string;
+  /** The worker its runs are recorded under, and whose folder it works in. */
+  worker: string;
+  /** Empty means the track's worker agent. */
+  agent: string;
+  created_at: number;
+  updated_at: number;
+  runs: number;
+  last_run: string | null;
+};
+
 export type Stroke = { points: [number, number, number][]; color: string; size: number };
 export type DesignTag = "" | "goal" | "constraint" | "question" | "idea";
 export type DesignNode = {
@@ -1598,6 +1618,106 @@ class Store {
       return;
     }
     this.pruneQueued("artifact:", new Set(this.artifacts.map((a) => artifactKey(a.id))));
+  }
+
+  // ----- routines -----
+
+  /** Every track's routines, most recently touched first. */
+  routines = $state<Routine[]>([]);
+  /** The one open in the panel, by id. */
+  routine = $state("");
+  /** The open routine's runs, newest first. */
+  routineRuns = $state<Run[]>([]);
+  /** Routines whose worker this window has just started, by id, so the row
+   *  says so before the first run event arrives. */
+  routineStarting = $state<Record<string, boolean>>({});
+
+  async loadRoutines() {
+    try {
+      this.routines = await invoke<Routine[]>("list_routines", { track: null });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Show the routines: the last one open, else the newest. */
+  async showRoutines() {
+    this.view = "routines";
+    await this.loadRoutines();
+    const pick = this.routines.find((r) => r.id === this.routine) ?? this.routines[0];
+    if (pick) await this.openRoutine(pick.id);
+    else this.routine = "";
+  }
+
+  async openRoutine(id: string) {
+    this.routine = id;
+    this.view = "routines";
+    await this.loadRoutineRuns(id);
+  }
+
+  async loadRoutineRuns(id = this.routine) {
+    if (!id) {
+      this.routineRuns = [];
+      return;
+    }
+    try {
+      const rows = await invoke<RunSummary[]>("routine_runs", { id, limit: 50 });
+      this.routineRuns = rows.map(fromSummary);
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Whether a routine's worker has a turn in flight right now. */
+  routineLive(r: Routine): boolean {
+    if (this.routineStarting[r.id]) return true;
+    return this.runs.some(
+      (run) => run.track === r.track && run.session === r.worker && (run.status === "running" || run.status === "connecting"),
+    );
+  }
+
+  async runRoutine(id: string) {
+    this.routineStarting = { ...this.routineStarting, [id]: true };
+    try {
+      await invoke("run_routine", { id });
+      await this.loadRoutineRuns(id);
+    } catch (err) {
+      this.lastError = String(err);
+    } finally {
+      const { [id]: _gone, ...rest } = this.routineStarting;
+      this.routineStarting = rest;
+    }
+  }
+
+  /** Open a routine's run where every other run is read: its worker's
+   *  session in the track it belongs to. A routine's runs are the track's,
+   *  so this leaves the routines view rather than showing a transcript
+   *  twice in two places. */
+  async openRoutineRun(run: Run) {
+    await this.selectTrack(run.track);
+    await this.openWorkerView(run.session);
+  }
+
+  async saveRoutine(id: string, patch: { name?: string; instruction?: string; worker?: string; agent?: string }) {
+    try {
+      await invoke<Routine>("update_routine", { id, patch });
+      await this.loadRoutines();
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  async deleteRoutine(id: string) {
+    try {
+      await invoke("delete_routine", { id });
+    } catch (err) {
+      this.lastError = String(err);
+      return;
+    }
+    if (this.routine === id) this.routine = "";
+    await this.loadRoutines();
+    if (!this.routine && this.routines.length) await this.openRoutine(this.routines[0].id);
+    else if (!this.routines.length) this.routineRuns = [];
   }
 
   /** Show the designs: the last one open, else the newest. */
@@ -3066,6 +3186,14 @@ export async function connectEvents() {
     listen<DesignDelta>("design", (e) => store.takeDesign(e.payload)),
     listen<string>("design_extract", (e) => {
       if (e.payload === store.artifact) void store.loadExtracts(e.payload);
+    }),
+    // A routine was saved (by the conductor) or has just run: the list's
+    // counts and last-run times have moved.
+    listen("routines", () => {
+      if (store.view === "routines") {
+        void store.loadRoutines();
+        void store.loadRoutineRuns();
+      }
     }),
   ]);
 }

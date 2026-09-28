@@ -288,7 +288,7 @@ impl Sessions {
 }
 
 /// Key of a worker in [`Sessions::workers`] and in the store's memory.
-fn worker_key(track: &str, worker: &str) -> String {
+pub(crate) fn worker_key(track: &str, worker: &str) -> String {
     format!("{track}/{worker}")
 }
 
@@ -329,6 +329,7 @@ fn preamble(lang: &str, track: &TrackInfo) -> String {
 - 도구가 오류를 돌려주면 오류 문구에 적힌 대로 한 번만 다시 시도하고, 그래도 안 되면 사람에게 무엇이 막혔는지 말합니다. 같은 도구를 반복해서 부르지 않습니다.
 - 사람이 골라야 할 일(여러 갈래 중 선택, 되돌리기 어려운 변경, 취향이나 우선순위)은 스스로 정하지 않습니다. 선택지를 본문에 A/B/C로 늘어놓지 말고 `request_decision`을 부르세요. 앱이 선택지를 버튼이 있는 결정 카드로 보여 줍니다. 부른 뒤에는 무엇을 물었는지 한 문장만 말하고 턴을 끝냅니다. 사람의 답은 `{DECISION_PREFIX}`로 시작하는 메시지로 옵니다. 작업자 보고에 사람이 정해야 할 질문이 있으면 그것도 `request_decision`으로 올립니다. 사람이 대화 중에 직접 정한 것은 `record_decision`으로 남깁니다.
 - 사람은 작업자와 직접 이야기하지 않습니다. 작업자가 무언가를 해도 되는지 물으면 `{PERMISSION_PREFIX}`로 시작하는 메시지로 당신에게 옵니다. 사람의 지시와 맡긴 일의 범위 안이면 당신이 직접 골라 `answer_worker`로 답합니다(허용할 때는 보통 이번만 허용). 되돌리기 어렵거나 맡긴 범위를 벗어나거나 사람이 정해야 할 일이면 `request_decision`으로 사람에게 묻고, 답이 오면 그대로 `answer_worker`로 전합니다. 작업자는 답을 받을 때까지 기다리므로 미루지 않습니다.
+- 사람이 앞으로도 여러 번 하게 될 일이라고 말하면("되풀이로 만들자", "다음에도 이렇게", "매번 이 작업을") `save_routine`으로 저장합니다. 방금 작업자에게 준 지시문을 그대로 쓰지 말고, **이 대화 없이 몇 주 뒤에 읽어도 뜻이 통하도록 고쳐 씁니다** — "아까 그 파일", "앞서 말한 대로" 같은 말을 빼고 파일 경로와 명령과 기준을 그대로 적습니다. 저장한 뒤 무엇을 어떤 이름으로 저장했는지, 사이드바의 되풀이에서 실행할 수 있고 지시문은 사람이 거기서 고칠 수 있다는 것을 한 문장으로 알립니다. 이미 있는 것을 또 만들지 않도록 `list_routines`로 먼저 봅니다. 저장된 되풀이를 지금 돌리려면 `run_routine`입니다.
 - 사람이 고른 문서가 모인 지식 라이브러리가 있습니다. 사람이 "우리가 아는 것", 자기 문서·노트, 이름으로 특정 문서를 언급하거나, 맡기려는 일이 라이브러리가 다루는 주제에 닿으면 `knowledge_search`로 찾습니다(무엇이 있는지는 `knowledge_list_sources`). 일반적인 코딩 질문이나 작업 폴더만 봐도 되는 일에는 부르지 않습니다. 작업자는 라이브러리를 볼 수 없으므로, 작업자에게 필요한 내용은 핵심 사실과 읽을 파일 경로를 task에 직접 담아 넘깁니다. 라이브러리에서 가져온 내용은 출처(파일)를 밝힙니다.
 - 한국어로 말합니다. 짧게, 명확하게.
 
@@ -363,6 +364,7 @@ Rules:
 - If a tool returns an error, retry once as the message suggests; if that fails, tell the human what is blocked. Never call the same tool repeatedly.
 - Choices that belong to the human (a choice between directions, hard-to-undo changes, taste or priorities) are not yours to make. Do not list options as A/B/C in prose: call `request_decision`, and the app shows them as a decision card with buttons. After calling it, say in one sentence what you asked and end your turn. The human's answer arrives as a message starting with `{DECISION_PREFIX}`. If a worker report raises a question only the human can answer, put that to them with `request_decision` too. Decisions the human makes in conversation are recorded with `record_decision`.
 - The human does not talk to workers. When a worker asks whether it may do something, the question reaches you as a message starting with `{PERMISSION_PREFIX}`. If it is within the human's instructions and the task you gave, choose yourself and answer with `answer_worker` (usually allow once). If it is hard to undo, outside the task, or the human's call, ask them with `request_decision` and pass their answer on with `answer_worker`. The worker waits until answered, so do not leave it.
+- When the human says a job is one they will want again ("make this a routine", "we will do this every release", "save this for next time"), save it with `save_routine`. Do not reuse the task you just gave the worker word for word: **rewrite it to stand alone, read weeks from now with none of this conversation around it** — drop "the file we just looked at" and "as before", and name the paths, the commands and the standards outright. Afterwards say in one sentence what you saved and under what name, that they can run it from Routines in the sidebar, and that the instruction is theirs to edit there. Read `list_routines` first so the same job is not saved twice. To run a saved one now, use `run_routine`.
 - There is a knowledge library of documents the human chose. When the human asks what we know about something, refers to their docs or notes or to a document by name, or when work you are about to delegate touches a topic the library covers, search it with `knowledge_search` (`knowledge_list_sources` shows what is there). Do not call it for general coding questions or what the working folder answers. Workers cannot see the library: put what they need from it (the key facts and the file paths to read) into their task. Name the file when you use something from the library.
 - Speak English. Short and clear.
 
@@ -391,6 +393,9 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
     let answer = (app.clone(), track.clone());
     let search = app.clone();
     let list = app.clone();
+    let save_routine = (app.clone(), track.clone());
+    let list_routines = (app.clone(), track.clone());
+    let run_routine = (app.clone(), track.clone());
     let decide = (app, track);
 
     vec![
@@ -676,6 +681,94 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                         .map_err(|e| e.to_string())?
                         .map_err(|e| e.to_string())?;
                     Ok(Value::String(orchestra_knowledge::format_sources(&sources, &stats)))
+                }
+            },
+        ),
+        Tool::new(
+            "save_routine",
+            "Save work as a routine: a named instruction this track runs again whenever the human wants it, without dictating it to you a second time. Use when they say a job is one they will want repeatedly (\"make this a routine\", \"we will do this every release\", \"save this for next time\"). The instruction is read again weeks later with NONE of this conversation around it, so write it to stand alone: no \"the file we just discussed\", no \"as before\" — name the files, the commands and the standards outright. It runs as its own worker, on a clean session each time.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "What the human calls it, e.g. 'Dependency check'." },
+                    "instruction": { "type": "string", "description": "What the worker is told, written to stand alone." },
+                    "worker": { "type": "string", "description": "Short worker name, lowercase, e.g. dep-check. Its runs are recorded under this and it works in this folder." },
+                    "agent": { "type": "string", "description": "Agent id to run it on. Omit for the track's worker agent." }
+                },
+                "required": ["name", "instruction", "worker"]
+            }),
+            move |args| {
+                let (app, track) = save_routine.clone();
+                async move {
+                    let state = app.state::<AppState>();
+                    let patch = orchestra_store::RoutinePatch {
+                        track: Some(track.clone()),
+                        name: Some(str_arg(&args, "name")?),
+                        instruction: Some(str_arg(&args, "instruction")?),
+                        worker: Some(str_arg(&args, "worker")?),
+                        agent: args.get("agent").and_then(Value::as_str).map(str::to_owned),
+                    };
+                    if let Some(agent) = patch.agent.as_deref().filter(|a| !a.is_empty()) {
+                        state.spec_for(agent)?;
+                    }
+                    let saved = state.store.create_routine(&patch).map_err(|e| e.to_string())?;
+                    let _ = crate::routine::notify(&app);
+                    Ok(json!({
+                        "routine": saved.id,
+                        "name": saved.name,
+                        "note": "Saved. Tell the human what it is called and that they can run it from Routines in the sidebar, and that the instruction is theirs to edit there.",
+                    }))
+                }
+            },
+        ),
+        Tool::new(
+            "list_routines",
+            "Every routine saved on this track: its id, name, the worker it runs as, how many times it has run and when it last did. Read it before saving one, so the same job is not saved twice under two names.",
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            move |_args| {
+                let (app, track) = list_routines.clone();
+                async move {
+                    let state = app.state::<AppState>();
+                    let saved = state.store.routines(Some(&track)).map_err(|e| e.to_string())?;
+                    let rows: Vec<Value> = saved
+                        .iter()
+                        .map(|r| {
+                            json!({
+                                "routine": r.id,
+                                "name": r.name,
+                                "worker": r.worker,
+                                "runs": r.runs,
+                                "last_run": r.last_run,
+                            })
+                        })
+                        .collect();
+                    Ok(json!({ "routines": rows }))
+                }
+            },
+        ),
+        Tool::new(
+            "run_routine",
+            &format!("Run a saved routine now. Returns at once with the run id; its report reaches you later as a {REPORT_PREFIX} message, as a worker's does. Every run starts on a clean session, so the routine does not read its own earlier runs."),
+            json!({
+                "type": "object",
+                "properties": { "routine": { "type": "string", "description": "Routine id from list_routines." } },
+                "required": ["routine"]
+            }),
+            move |args| {
+                let (app, track) = run_routine.clone();
+                async move {
+                    let id = str_arg(&args, "routine")?;
+                    {
+                        let state = app.state::<AppState>();
+                        match state.store.routine(&id).map_err(|e| e.to_string())? {
+                            // Scoped to this track's own, like every other
+                            // tool here: a conductor never names its track
+                            // and must not reach another's routines.
+                            Some(r) if r.track == track => {}
+                            _ => return Err(format!("no routine {id} on this track")),
+                        }
+                    }
+                    crate::routine::run(app, &id).await
                 }
             },
         ),
@@ -1433,7 +1526,7 @@ fn track_info(state: &AppState, track: &str) -> Result<TrackInfo, String> {
 /// session is reopened with it, unless `fresh` says to forget. The turn
 /// runs in the background; when it ends, its report is handed to the
 /// conductor as a new turn.
-async fn start_worker_turn(
+pub(crate) async fn start_worker_turn(
     app: AppHandle,
     track: String,
     name: String,

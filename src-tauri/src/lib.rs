@@ -11,7 +11,10 @@ use std::time::Duration;
 use orchestra_acp::{AgentSpec, ConfigOptionInfo};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
 use orchestra_core::{AgentEnvelope, AgentEvent};
-use orchestra_store::{ArtifactInfo, ArtifactPatch, Decision, RunSummary, SearchHit, Store, StoredEvent, TrackInfo, TrackPatch};
+use orchestra_store::{
+    ArtifactInfo, ArtifactPatch, Decision, Routine, RoutinePatch, RunSummary, SearchHit, Store, StoredEvent, TrackInfo,
+    TrackPatch,
+};
 use parking_lot::Mutex;
 use tauri::{Emitter, Manager, State};
 
@@ -40,6 +43,7 @@ mod logging;
 mod mask;
 mod metrics;
 mod preview;
+mod routine;
 mod terminal;
 mod remote;
 mod update;
@@ -484,6 +488,50 @@ async fn conductor_prompt(
 }
 
 // ----- artifacts: designs (and knowledge, later) -----
+
+/// Routines of one track, or of every track, most recently touched first.
+#[tauri::command(async)]
+fn list_routines(state: State<'_, AppState>, track: Option<String>) -> Result<Vec<Routine>, String> {
+    state.store.routines(track.as_deref()).map_err(|e| e.to_string())
+}
+
+/// Save a routine. The agent, when given, must be one this machine has.
+#[tauri::command(async)]
+fn create_routine(state: State<'_, AppState>, patch: RoutinePatch) -> Result<Routine, String> {
+    if let Some(agent) = patch.agent.as_deref().filter(|a| !a.is_empty()) {
+        state.spec_for(agent)?;
+    }
+    state.store.create_routine(&patch).map_err(|e| e.to_string())
+}
+
+/// Rewrite a routine: its name, what it tells the worker, which worker it
+/// runs as, or which agent. What the conductor saved is the human's to fix.
+#[tauri::command(async)]
+fn update_routine(state: State<'_, AppState>, id: String, patch: RoutinePatch) -> Result<Routine, String> {
+    if let Some(agent) = patch.agent.as_deref().filter(|a| !a.is_empty()) {
+        state.spec_for(agent)?;
+    }
+    state.store.update_routine(&id, &patch).map_err(|e| e.to_string())
+}
+
+/// Forget a routine. Its runs stay in the track's record.
+#[tauri::command(async)]
+fn delete_routine(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.store.delete_routine(&id).map_err(|e| e.to_string())
+}
+
+/// A routine's runs, newest first.
+#[tauri::command(async)]
+fn routine_runs(state: State<'_, AppState>, id: String, limit: Option<u32>) -> Result<Vec<RunSummary>, String> {
+    state.store.routine_runs(&id, limit.unwrap_or(50)).map_err(|e| e.to_string())
+}
+
+/// Run a routine now. Returns as soon as its worker has the task; the
+/// report reaches the track's conductor later, as any worker's does.
+#[tauri::command(async)]
+async fn run_routine(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    routine::run(app, &id).await
+}
 
 /// Artifacts of one kind, or of every kind, most recently touched first.
 #[tauri::command(async)]
@@ -1508,6 +1556,12 @@ pub fn run() {
             list_runs,
             run_events,
             list_decisions,
+            list_routines,
+            create_routine,
+            update_routine,
+            delete_routine,
+            routine_runs,
+            run_routine,
             list_artifacts,
             create_artifact,
             update_artifact,
