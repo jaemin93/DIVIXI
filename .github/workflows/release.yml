@@ -38,6 +38,13 @@
 # than ship something that looks signed and is not. See the guard steps in the
 # bundle job for the secret names.
 #
+# Those guards are also where the signing environment is created, and that is
+# not tidiness: an environment variable that exists and is empty asks Tauri to
+# sign with an empty certificate, so the unsigned path has to leave the
+# variables uncreated rather than pass them through blank. The nightly of
+# 2026-09-28 failed on exactly that. The long note above the tauri-action step
+# has the mechanism.
+#
 # ## Draft, then published by the workflow itself
 #
 # The release is created as a draft, every job attaches its assets to that one
@@ -442,10 +449,15 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+
+          # One list, read twice below: counted first, then handed to the build.
+          # Two copies of it would be two things to keep in step.
+          names="APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
+                 APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID"
+
           set=0
           missing=""
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
-                      APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+          for name in $names; do
             if [ -n "${!name:-}" ]; then
               set=$((set + 1))
             else
@@ -455,6 +467,24 @@ jobs:
 
           if [ "$set" -eq 6 ]; then
             echo "macOS signing: Developer ID + notarization (6/6 secrets set)."
+            # Hand the Apple environment to the build HERE, and only in this
+            # branch. That placement is the whole fix: the bundler reads every
+            # one of these with `var_os`, so a variable that exists and is
+            # empty asks it to sign with an empty certificate. A variable that
+            # was never created is the only thing it reads as "not signing".
+            #
+            # Written with the multi-line delimiter form rather than KEY=VALUE:
+            # APPLE_CERTIFICATE is base64 and may arrive wrapped across lines,
+            # and a single-line write would truncate it at the first newline
+            # and leave the rest of the file being parsed as more variables.
+            for name in $names; do
+              {
+                echo "${name}<<__DIVIXI_SIGNING_ENV__"
+                printf '%s\n' "${!name}"
+                echo "__DIVIXI_SIGNING_ENV__"
+              } >> "$GITHUB_ENV"
+            done
+            echo "handed 6 Apple variables to the build via \$GITHUB_ENV"
           elif [ "$set" -eq 0 ]; then
             echo "::warning title=Unsigned macOS bundle::No Apple secrets are set, so the .app and .dmg go out unsigned. Gatekeeper will refuse them on any machine that did not build them."
           else
@@ -487,7 +517,13 @@ jobs:
           echo "secrets set: $set/2 | tauri.conf.json signing configured: $configured"
 
           if [ "$set" -eq 2 ] && [ "$configured" = "yes" ]; then
-            echo "Windows signing: on."
+            echo "Windows signing: configured -- but read the note below before trusting it."
+            # Unreachable today (no secrets), and left honest rather than
+            # tidied: Tauri reads NEITHER of these two names. Neither occurs
+            # anywhere in tauri or tauri-action. Signing happens through
+            # bundle.windows.certificateThumbprint, which needs the certificate
+            # already in the machine store -- and no step here puts it there.
+            echo "::warning title=Windows signing needs an import step::tauri.conf.json asks signtool for a certificate by thumbprint, but Tauri never reads WINDOWS_CERTIFICATE or WINDOWS_CERTIFICATE_PASSWORD (neither name exists in tauri or tauri-action). Add a step that imports the .pfx into the machine store before this build, or the installer ships unsigned."
           elif [ "$set" -eq 0 ] && [ "$configured" = "no" ]; then
             echo "::warning title=Unsigned Windows installer::No signing certificate, so SmartScreen will warn users until one is added."
           elif [ "$set" -eq 2 ] && [ "$configured" = "no" ]; then
@@ -510,20 +546,43 @@ jobs:
       # omitting it is where `latest.json` points, and Divixi has no updater so
       # no `latest.json` is produced.
       #
-      # The Apple secrets are handed over unconditionally; unset ones arrive as
-      # empty strings, which tauri-action treats as absent. The guard step above
-      # is what makes a half-filled set impossible to reach.
+      # There is deliberately no signing environment in this step.
+      #
+      # This file used to pass all eight secrets here and say that "unset ones
+      # arrive as empty strings, which tauri-action treats as absent". That was
+      # wrong, and it is what broke the nightly of 2026-09-28: the macOS bundle
+      # failed in `security import` with an empty certificate while the guard
+      # step three above it had correctly reported 0/6 and warned.
+      #
+      # Nothing treats "" as absent. The bundler reads the Apple variables with
+      # `std::env::var_os` (crates/tauri-bundler/src/bundle/macos/sign.rs), and
+      # `var_os` returns Some("") for a variable that is set and empty, which is
+      # indistinguishable from a real value:
+      #
+      #   security: SecKeychainItemImport: One or more parameters passed to a
+      #   function were not valid.
+      #   failed to bundle project: failed codesign application: failed to run
+      #   command security import: failed to import keychain certificate
+      #
+      # APPLE_SIGNING_IDENTITY is a second, independent way in: the CLI does
+      # `match var_os("APPLE_SIGNING_IDENTITY")` and only falls back to
+      # bundle.macOS.signingIdentity for None, so an empty one asks for signing
+      # under a nameless identity even with no certificate anywhere.
+      #
+      # So the guard step writes the six to $GITHUB_ENV inside its 6/6 branch
+      # and nowhere else. On the unsigned path the variables do not exist, which
+      # is the only state that means "do not sign". The guard must also stay
+      # ABOVE this step: $GITHUB_ENV only reaches later steps.
+      #
+      # WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD are gone for a
+      # different reason -- nothing reads them. Neither name occurs anywhere in
+      # tauri or in tauri-action. They come from Tauri's Windows signing guide,
+      # where a separate step imports the certificate into the machine store and
+      # Tauri finds it through bundle.windows.certificateThumbprint. Listing
+      # them here only made them look load bearing.
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2, 2026-03-14
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           # Which release this binary came from, for the app's update check.
           # src-tauri/build.rs bakes it in; without it a build calls itself a
           # development build, which is the honest answer for a working copy.
@@ -541,9 +600,17 @@ jobs:
   # divixi-server has no bundler: it is a bare binary a Linux box runs.
   # docs/divixi-server.md tells people to build it from source, so this is a
   # convenience, not the documented path.
+  #
+  # It does not wait for `bundle`, deliberately. It consumes nothing from it --
+  # no outputs, no artifacts -- and only ever needed the draft's id, which comes
+  # from `create-release`. The dependency was left from when this job was the
+  # last one to attach an asset, and all it did on the night of 2026-09-28 was
+  # make a broken macOS bundle cost the Linux server binary too. Nothing about
+  # publishing gets looser: `publish` still names all four jobs, so a release
+  # with a missing bundle still stays a draft.
   server:
     name: divixi-server (linux)
-    needs: [prepare, create-release, bundle]
+    needs: [prepare, create-release]
     if: needs.prepare.outputs.skip == 'false'
     # Writes: uploads the server binary to the draft.
     permissions:
@@ -622,8 +689,10 @@ jobs:
   # for a second approval here would only add a button nobody benefits from
   # pressing. The draft is a staging area for assets, not a review gate.
   #
-  # It has to come after `server`, which is the only point where every asset is
-  # attached -- the three platform bundles and the Linux server binary.
+  # It has to come after every job that attaches an asset -- the three platform
+  # bundles and the Linux server binary -- which is why it names both `bundle`
+  # and `server`. They no longer run one after the other (`server` stopped
+  # waiting for `bundle`), so `needs` is the only thing ordering this job now.
   #
   # Note there is NO `always()` here, and that is the safety property. A job
   # whose `needs` failed or was cancelled is skipped by default, so a night
