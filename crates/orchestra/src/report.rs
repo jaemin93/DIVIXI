@@ -126,6 +126,28 @@ pub struct Report {
     /// block was parsed; without one the reason is in `problem`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupted: Option<String>,
+    /// What the worker actually ran on, when that is worth saying: it was
+    /// put on something other than its track's default, or an option it was
+    /// given did not take.
+    ///
+    /// The worker cannot report this — it has no idea what it was opened
+    /// with, or that a model it was asked for was refused. Only the app
+    /// knows, so only the app can say it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ran_on: Option<RanOn>,
+}
+
+/// The agent and model a worker ran on, and anything that did not take.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RanOn {
+    /// Agent id, e.g. `codex`.
+    pub agent: String,
+    /// Model value id, when one was chosen. Empty means the agent's own.
+    #[serde(default)]
+    pub model: String,
+    /// Options the agent would not take, each as `option=value: why`.
+    #[serde(default)]
+    pub refused: Vec<String>,
 }
 
 const MAX_SUMMARY: usize = 800;
@@ -229,6 +251,7 @@ pub fn parse(reply: &str) -> Result<Report, String> {
         outside: Vec::new(),
         reminder_run: None,
         interrupted: None,
+        ran_on: None,
     })
 }
 
@@ -252,6 +275,7 @@ impl Report {
             // No block was read, so there is nothing for this to qualify;
             // `problem` already says how the turn went.
             interrupted: None,
+            ran_on: None,
         }
     }
 
@@ -271,6 +295,20 @@ impl Report {
                 "(The worker gave no report block: {}. The summary above is the start of its reply; read_report(\"{run}\") has it all.)\n",
                 self.problem.as_deref().unwrap_or("unknown")
             ));
+        }
+        // What it ran on, when that is not the track's plain default. A
+        // refusal goes to the human: they chose the model, and only they
+        // can decide whether the work is worth keeping without it.
+        if let Some(ran) = &self.ran_on {
+            let model = if ran.model.is_empty() { String::new() } else { format!(" · {}", ran.model) };
+            out.push_str(&format!("ran on: {}{model}\n", ran.agent));
+            if !ran.refused.is_empty() {
+                out.push_str("NOTE: the agent would not take an option this worker was opened with, so it did NOT run on what was asked for:\n");
+                for r in &ran.refused {
+                    out.push_str(&format!("- {r}\n"));
+                }
+                out.push_str("Tell the human this plainly, and that the work above was done on the agent's own setting instead.\n");
+            }
         }
         if !self.changes.is_empty() {
             out.push_str("changes:\n");
@@ -449,6 +487,32 @@ mod tests {
         let u = Report::unstructured(true, "some reply", "no block");
         assert!(!u.structured);
         assert!(u.for_conductor("t1").contains("read_report(\"t1\")"));
+    }
+
+    /// A worker cannot know it was opened on something other than what was
+    /// asked for, so a refusal reaching the conductor is the app's job
+    /// alone. Running quietly on a model nobody picked is the worst of the
+    /// ways this can go wrong, so the note has to be unmissable.
+    #[test]
+    fn what_a_worker_ran_on_reaches_the_conductor() {
+        let mut r = parse("```divixi-report\n{\"status\":\"done\",\"summary\":\"x\"}\n```").unwrap();
+        // Nothing to say while it ran on the track's own choice.
+        assert!(!r.for_conductor("t1").contains("ran on:"));
+
+        r.ran_on = Some(RanOn { agent: "codex".into(), model: "gpt-5.2".into(), refused: Vec::new() });
+        let said = r.for_conductor("t1");
+        assert!(said.contains("ran on: codex · gpt-5.2"));
+        assert!(!said.contains("NOTE:"), "nothing went wrong, so nothing is flagged");
+
+        r.ran_on = Some(RanOn {
+            agent: "codex".into(),
+            model: "gpt-5.2".into(),
+            refused: vec!["model=gpt-5.2: unknown model".into()],
+        });
+        let said = r.for_conductor("t1");
+        assert!(said.contains("did NOT run on what was asked for"));
+        assert!(said.contains("model=gpt-5.2: unknown model"));
+        assert!(said.contains("Tell the human"));
     }
 
     #[test]

@@ -77,6 +77,8 @@ export type WorkerState = {
   running: boolean;
   run: string | null;
   agent: string;
+  /** Model value id it is running on; empty means the agent's own. */
+  model: string;
 };
 
 /** Mirrors `conductor::WaitingItem`: one turn a conductor has not taken yet. */
@@ -120,6 +122,8 @@ export type Track = {
   worker_config: OptionConfig;
   /** Where workers work: a folder of their own under the track's, a git worktree, or the track folder. */
   worker_folder: WorkerFolder;
+  /** Whether the conductor may propose another agent or model for a worker. */
+  worker_choice: WorkerChoice;
   /** `#rrggbb` for the list, or empty. */
   color: string;
   tags: string[];
@@ -138,6 +142,7 @@ export type TrackPatch = Partial<{
   worker_agent: string;
   worker_config: OptionConfig;
   worker_folder: WorkerFolder;
+  worker_choice: WorkerChoice;
   color: string;
   tags: string[];
 }>;
@@ -145,6 +150,15 @@ export type TrackPatch = Partial<{
 /** orchestra_store::WORKER_FOLDERS. */
 export type WorkerFolder = "subfolder" | "worktree" | "shared";
 export const WORKER_FOLDERS: WorkerFolder[] = ["subfolder", "worktree", "shared"];
+
+/**
+ * orchestra_store::WORKER_CHOICES: who picks a worker's agent and model.
+ *
+ * `follow`: this track's, always. `propose`: the conductor may ask for
+ * something else and the human approves it on a decision card.
+ */
+export type WorkerChoice = "follow" | "propose";
+export const WORKER_CHOICES: WorkerChoice[] = ["follow", "propose"];
 
 /** How the track list is narrowed, ordered and folded. Persisted as the `tracks_filter` setting. */
 export type TrackSort = "recent" | "oldest" | "created-desc" | "created-asc" | "az" | "za";

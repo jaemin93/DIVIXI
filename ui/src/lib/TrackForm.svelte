@@ -1,7 +1,7 @@
 <script lang="ts">
   import { local } from "./ipc.svelte";
   import FolderPicker from "./FolderPicker.svelte";
-  import { store, agentLabel, type AgentId, type ConfigOption, type OptionConfig, type Track, type TrackPatch, WORKER_FOLDERS, type WorkerFolder } from "./store.svelte";
+  import { store, agentLabel, type AgentId, type ConfigOption, type OptionConfig, type Track, type TrackPatch, WORKER_CHOICES, WORKER_FOLDERS, type WorkerChoice, type WorkerFolder } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
@@ -40,6 +40,7 @@
   let workerConfig = $state<OptionConfig>({ ...(seed?.worker_config ?? {}) });
   let tab = $state<"conductor" | "worker">("conductor");
   let workerFolder = $state<WorkerFolder>(seed?.worker_folder ?? "subfolder");
+  let workerChoice = $state<WorkerChoice>(seed?.worker_choice ?? "follow");
 
   function setApart() {
     if (workerApart) return;
@@ -115,6 +116,7 @@
         worker_agent: workerApart ? shownWorkerAgent : "",
         worker_config: workerApart ? prune(workerConfig, workerOptions) : {},
         worker_folder: workerFolder,
+        worker_choice: workerChoice,
       };
       const ok = track ? await store.updateTrack(track.id, patch) : await store.createTrack(patch);
       if (ok && track) store.view = "track";
@@ -234,6 +236,20 @@
             },
             shownWorkerAgent,
           )}
+          <!-- Whether the conductor may ask for a worker on something else.
+               `follow` is what every track did before this existed, so a
+               track only starts raising cards once the human says so here. -->
+          <div class="field">
+            <span class="mlab-sm">{t("newtrack.workerChoice")}</span>
+            <div class="wfolders" role="radiogroup" aria-label={t("newtrack.workerChoice")}>
+              {#each WORKER_CHOICES as c (c)}
+                <button type="button" class="wf" class:on={workerChoice === c} role="radio" aria-checked={workerChoice === c} onclick={() => (workerChoice = c)}>
+                  <span class="wft">{t(`newtrack.wc.${c}`)}</span>
+                  <span class="wfd">{t(`newtrack.wc.${c}.desc`)}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
         {/if}
       {/if}
 

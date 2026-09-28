@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -157,6 +157,10 @@ const MIGRATIONS: &[&str] = &[
     // "<name>-2" folder after a restart; their records go, so each works in
     // its own folder again.
     "DELETE FROM meta WHERE key LIKE 'worker_dir:%';",
+    // 15 -> 16: whether the conductor may put a worker on something other
+    // than the track's default. `follow` is what every track did until now,
+    // so an existing track keeps its behaviour exactly.
+    "ALTER TABLE tracks ADD COLUMN worker_choice TEXT NOT NULL DEFAULT 'follow';",
 ];
 
 const SCHEMA: &str = r#"
@@ -178,7 +182,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     worker_config    TEXT    NOT NULL DEFAULT '{}',
     color            TEXT    NOT NULL DEFAULT '',
     tags             TEXT    NOT NULL DEFAULT '[]',
-    worker_folder    TEXT    NOT NULL DEFAULT 'subfolder'
+    worker_folder    TEXT    NOT NULL DEFAULT 'subfolder',
+    worker_choice    TEXT    NOT NULL DEFAULT 'follow'
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -479,6 +484,11 @@ pub struct TrackInfo {
     /// track's), `worktree` (a git checkout of their own; the human merges)
     /// or `shared` (the track folder itself). See [`WORKER_FOLDERS`].
     pub worker_folder: String,
+    /// Whether the conductor may put a worker on an agent or model other
+    /// than this track's: `follow` (never; what every track did before this
+    /// setting existed) or `propose` (it may ask, and the human approves on
+    /// a decision card). See [`WORKER_CHOICES`].
+    pub worker_choice: String,
     /// A colour for the list, `#rrggbb`; empty means none.
     pub color: String,
     /// Free-form labels for the list and its search.
@@ -499,6 +509,13 @@ impl TrackInfo {
         } else {
             &self.worker_config
         }
+    }
+
+    /// Whether the conductor may ask for a worker on something other than
+    /// this track's agent and options. When it may not, a worker's agent is
+    /// this track's, whoever opened it.
+    pub fn proposes_worker_choice(&self) -> bool {
+        self.worker_choice == "propose"
     }
 
     /// The agent workers run on.
@@ -524,6 +541,7 @@ pub struct TrackPatch {
     pub color: Option<String>,
     pub tags: Option<Vec<String>>,
     pub worker_folder: Option<String>,
+    pub worker_choice: Option<String>,
 }
 
 /// The ways a track's workers can work, the first the default.
@@ -534,6 +552,20 @@ fn worker_folder(patch: &TrackPatch) -> anyhow::Result<Option<&str>> {
         None => Ok(None),
         Some(f) if WORKER_FOLDERS.contains(&f) => Ok(Some(f)),
         Some(f) => anyhow::bail!("worker_folder must be one of {WORKER_FOLDERS:?}, not {f:?}"),
+    }
+}
+
+/// Who picks a worker's agent and model, the first the default.
+///
+/// `follow`: the track's own choice, always. `propose`: the conductor may
+/// ask for something else, and the human approves it on a decision card.
+pub const WORKER_CHOICES: [&str; 2] = ["follow", "propose"];
+
+fn worker_choice(patch: &TrackPatch) -> anyhow::Result<Option<&str>> {
+    match patch.worker_choice.as_deref() {
+        None => Ok(None),
+        Some(c) if WORKER_CHOICES.contains(&c) => Ok(Some(c)),
+        Some(c) => anyhow::bail!("worker_choice must be one of {WORKER_CHOICES:?}, not {c:?}"),
     }
 }
 
@@ -682,8 +714,9 @@ impl Store {
             let now = now_ms();
             conn.execute(
                 "INSERT INTO tracks(id, name, intent, cwd, agent, created_at, updated_at,
-                                    conductor_config, worker_agent, worker_config, color, tags, worker_folder)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                    conductor_config, worker_agent, worker_config, color, tags, worker_folder,
+                                    worker_choice)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     id,
                     name,
@@ -697,6 +730,7 @@ impl Store {
                     patch.color.as_deref().unwrap_or(""),
                     tags_json(patch.tags.as_ref())?,
                     worker_folder(patch)?.unwrap_or(WORKER_FOLDERS[0]),
+                    worker_choice(patch)?.unwrap_or(WORKER_CHOICES[0]),
                 ],
             )?;
             id
@@ -816,7 +850,8 @@ impl Store {
                         worker_agent = COALESCE(?7, worker_agent),
                         worker_config = COALESCE(?8, worker_config),
                         color = COALESCE(?9, color), tags = COALESCE(?10, tags),
-                        worker_folder = COALESCE(?11, worker_folder)
+                        worker_folder = COALESCE(?11, worker_folder),
+                        worker_choice = COALESCE(?12, worker_choice)
                  WHERE id = ?1",
                 params![
                     id,
@@ -830,6 +865,7 @@ impl Store {
                     patch.color.as_deref(),
                     patch.tags.as_ref().map(|t| tags_json(Some(t))).transpose()?,
                     worker_folder(patch)?,
+                    worker_choice(patch)?,
                 ],
             )?;
             if changed == 0 {
@@ -1291,7 +1327,7 @@ const RUN_SELECT: &str = "SELECT id, session, prompt, cwd, status, started_at, d
 const TRACK_SELECT: &str = "SELECT t.id, t.name, t.intent, t.cwd, t.agent, t.created_at, t.updated_at,
                                    (SELECT COUNT(*) FROM runs r WHERE r.track = t.id),
                                    t.conductor_config, t.worker_agent, t.worker_config, t.color, t.tags,
-                                   t.worker_folder
+                                   t.worker_folder, t.worker_choice
                             FROM tracks t";
 
 fn row_to_track(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackInfo> {
@@ -1313,6 +1349,7 @@ fn row_to_track(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackInfo> {
         color: r.get(11)?,
         tags: serde_json::from_str(&tags).unwrap_or_default(),
         worker_folder: r.get(13)?,
+        worker_choice: r.get(14)?,
     })
 }
 
@@ -1380,7 +1417,14 @@ mod tests {
             let other = store.begin_run("tr001", "conductor", "claude_code", "tell me about [lane-report] lane=x", "/w").unwrap();
             store.set_meta("schema_version", "12").unwrap();
             // What v12 did not have yet.
-            store.conn.lock().execute_batch("ALTER TABLE tracks DROP COLUMN worker_folder;").unwrap();
+            store
+                .conn
+                .lock()
+                .execute_batch(
+                    "ALTER TABLE tracks DROP COLUMN worker_folder;
+                     ALTER TABLE tracks DROP COLUMN worker_choice;",
+                )
+                .unwrap();
             (old, other)
         };
         let store = Store::open(&path).unwrap();
@@ -1441,6 +1485,12 @@ mod tests {
         let w = store.update_track(&a.id, &TrackPatch { worker_folder: Some("worktree".into()), ..TrackPatch::default() }).unwrap();
         assert_eq!(w.worker_folder, "worktree");
         store.update_track(&a.id, &TrackPatch { worker_folder: Some("subfolder".into()), ..TrackPatch::default() }).unwrap();
+        assert_eq!(a.worker_choice, "follow", "a track keeps its own agent for workers by default");
+        assert!(!a.proposes_worker_choice());
+        assert!(store.update_track(&a.id, &TrackPatch { worker_choice: Some("whatever".into()), ..TrackPatch::default() }).is_err());
+        let p = store.update_track(&a.id, &TrackPatch { worker_choice: Some("propose".into()), ..TrackPatch::default() }).unwrap();
+        assert!(p.proposes_worker_choice(), "the conductor may ask once the human turns it on");
+        store.update_track(&a.id, &TrackPatch { worker_choice: Some("follow".into()), ..TrackPatch::default() }).unwrap();
         assert_eq!(a.effective_worker_agent(), "claude_code", "workers follow the conductor by default");
         assert!(store.create_track(&TrackPatch { name: Some("  ".into()), ..new_track("x", "", ".", "codex") }).is_err());
 
@@ -1754,6 +1804,7 @@ mod tests {
                 "ALTER TABLE runs RENAME COLUMN session TO lane;
                  ALTER TABLE decisions DROP COLUMN permission;
                  ALTER TABLE tracks DROP COLUMN worker_folder;
+                 ALTER TABLE tracks DROP COLUMN worker_choice;
                  DROP TABLE artifacts;
                  CREATE TABLE drafts (id TEXT PRIMARY KEY, title TEXT NOT NULL, agent TEXT NOT NULL,
                    doc TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,

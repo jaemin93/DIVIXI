@@ -81,6 +81,23 @@ struct Turn {
 struct Ready {
     session_id: String,
     resumed: bool,
+    refused: Vec<RefusedOption>,
+}
+
+/// A session option the agent would not take, with what it said.
+///
+/// Setting an option is a separate request from opening the session, so a
+/// refusal arrives after the session already exists: it cannot be turned
+/// into "the session failed to open". It has to be carried out instead, or
+/// the session runs on a model nobody chose and says nothing about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedOption {
+    /// The option id as the agent advertised it, e.g. `model`.
+    pub option: String,
+    /// The value that was asked for.
+    pub value: String,
+    /// What the agent said, for the human to read.
+    pub error: String,
 }
 
 /// Permission questions the agent is waiting on, by Divixi's request id.
@@ -161,6 +178,8 @@ pub struct AgentSession {
     cancel: mpsc::UnboundedSender<()>,
     session_id: String,
     resumed: bool,
+    /// Options the agent refused when the session opened.
+    refused: Vec<RefusedOption>,
     /// The latest slash-command list the agent sent.
     commands: Arc<Mutex<Vec<SlashCommand>>>,
     /// Permission questions waiting for an answer.
@@ -299,6 +318,10 @@ impl AgentSession {
                             }
                         }
                     }
+                    // A refused option is carried out to the caller, not just
+                    // logged: the session is already open, so the only honest
+                    // thing left is to say which choice did not take.
+                    let mut refused = Vec::new();
                     for (option, value) in &opts_for_task.config {
                         tracing::info!(option, value, "setting session option");
                         let request = SetSessionConfigOptionRequest::new(
@@ -307,7 +330,12 @@ impl AgentSession {
                             SessionConfigOptionValue::ValueId { value: value.clone().into() },
                         );
                         if let Err(err) = session.connection().send_request_to(Agent, request).block_task().await {
-                            tracing::info!(option, value, %err, "agent rejected session option");
+                            tracing::warn!(option, value, %err, "agent rejected session option");
+                            refused.push(RefusedOption {
+                                option: option.clone(),
+                                value: value.clone(),
+                                error: err.to_string(),
+                            });
                         }
                     }
 
@@ -324,6 +352,7 @@ impl AgentSession {
                         let _ = ready.send(Ok(Ready {
                             session_id: format!("{session_id}"),
                             resumed,
+                            refused: std::mem::take(&mut refused),
                         }));
                     }
 
@@ -371,6 +400,7 @@ impl AgentSession {
                 cancel: cancel_tx,
                 session_id: ready.session_id,
                 resumed: ready.resumed,
+                refused: ready.refused,
                 commands,
                 pending,
                 task,
@@ -394,6 +424,15 @@ impl AgentSession {
     /// Whether this session was brought back from an earlier one.
     pub fn resumed(&self) -> bool {
         self.resumed
+    }
+
+    /// Session options the agent would not take when this session opened.
+    ///
+    /// Empty is the normal case. When it is not, the session is running on
+    /// something other than what was asked for -- most often a model -- and
+    /// whoever opened it has to say so rather than let it pass.
+    pub fn refused_options(&self) -> &[RefusedOption] {
+        &self.refused
     }
 
     /// The slash commands the agent last advertised for this session.
