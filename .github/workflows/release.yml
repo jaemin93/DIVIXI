@@ -580,7 +580,7 @@ jobs:
       # where a separate step imports the certificate into the machine store and
       # Tauri finds it through bundle.windows.certificateThumbprint. Listing
       # them here only made them look load bearing.
-      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2, 2026-03-14
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v0.6.2, 2026-03-14
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Which release this binary came from, for the app's update check.
