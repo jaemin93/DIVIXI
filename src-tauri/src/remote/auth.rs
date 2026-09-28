@@ -17,7 +17,8 @@ use std::path::Path;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use hmac::{Hmac, Mac};
+// hmac 0.13 moved `new_from_slice` from `Mac` to `KeyInit`; both are needed.
+use hmac::{Hmac, KeyInit, Mac};
 use orchestra_store::Store;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
