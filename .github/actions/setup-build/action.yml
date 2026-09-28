@@ -27,7 +27,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@v7
       with:
         # Matches the `engines` field in package.json (>=22.18). The binding
         # constraint is not vite but `npm test`, which runs node --test over
