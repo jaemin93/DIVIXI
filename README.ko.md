@@ -70,7 +70,7 @@ npx tauri build                                 # 설치 파일이 target/releas
 당신의 GitHub 계정으로 특정 주소에서 여기에 닿습니다. 서버가 떠 있지 않으면 앱이 SSH로
 서버를 시작시킵니다.
 
-빌드·설치·연결·상시 구동·업데이트는 **[docs/divixi-server.md](docs/divixi-server.md)**
+빌드·설치·연결·상시 구동·업데이트는 **[docs/divixi-server.ko.md](docs/divixi-server.ko.md)**
 를 보세요.
 
 ## 데이터와 프라이버시
@@ -131,8 +131,8 @@ Divixi 인터페이스의 상당 부분은 [Kiro Crew](https://github.com/kirodo
 거기서 가져온 것:
 
 - **레이아웃과 상호작용.** 왼쪽 레일과 세션 패널, 오른쪽 작업 폴더 패널, 에이전트 선택기,
-  제목 표시줄의 인스턴스 스위처, 알림 벨, 세션 필터와 컨텍스트 메뉴, 터미널 패널. 전부
-  Kiro Crew의 것을 본떴습니다. 이들은 아이디어와 배치이며, Svelte와 Rust로 처음부터 다시
+  제목 표시줄의 인스턴스 스위처, 알림 벨, 세션 필터와 컨텍스트 메뉴, 터미널 패널,
+  되풀이 목록과 그 실행 이력. 전부 Kiro Crew의 것을 본떴습니다. 이들은 아이디어와 배치이며, Svelte와 Rust로 처음부터 다시
   구현했습니다. 코드도, 스타일시트도, 아이콘도, 폰트도, 이미지도 복사하지 않았습니다.
 - **지식 라이브러리.** `crates/knowledge/`의 청킹 전략, 검색 결과 융합, LLM 추출
   프롬프트는 Kiro Crew의 `knowledge` 모듈을 따릅니다. 추출 프롬프트는 Apache License

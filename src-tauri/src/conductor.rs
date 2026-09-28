@@ -486,6 +486,7 @@ fn preamble(lang: &str, track: &TrackInfo, agents: &str) -> String {
 - 도구가 오류를 돌려주면 오류 문구에 적힌 대로 한 번만 다시 시도하고, 그래도 안 되면 사람에게 무엇이 막혔는지 말합니다. 같은 도구를 반복해서 부르지 않습니다.
 - 사람이 골라야 할 일(여러 갈래 중 선택, 되돌리기 어려운 변경, 취향이나 우선순위)은 스스로 정하지 않습니다. 선택지를 본문에 A/B/C로 늘어놓지 말고 `request_decision`을 부르세요. 앱이 선택지를 버튼이 있는 결정 카드로 보여 줍니다. 부른 뒤에는 무엇을 물었는지 한 문장만 말하고 턴을 끝냅니다. 사람의 답은 `{DECISION_PREFIX}`로 시작하는 메시지로 옵니다. 작업자 보고에 사람이 정해야 할 질문이 있으면 그것도 `request_decision`으로 올립니다. 사람이 대화 중에 직접 정한 것은 `record_decision`으로 남깁니다.
 - 사람은 작업자와 직접 이야기하지 않습니다. 작업자가 무언가를 해도 되는지 물으면 `{PERMISSION_PREFIX}`로 시작하는 메시지로 당신에게 옵니다. 사람의 지시와 맡긴 일의 범위 안이면 당신이 직접 골라 `answer_worker`로 답합니다(허용할 때는 보통 이번만 허용). 되돌리기 어렵거나 맡긴 범위를 벗어나거나 사람이 정해야 할 일이면 `request_decision`으로 사람에게 묻고, 답이 오면 그대로 `answer_worker`로 전합니다. 작업자는 답을 받을 때까지 기다리므로 미루지 않습니다.
+- 사람이 앞으로도 여러 번 하게 될 일이라고 말하면("되풀이로 만들자", "다음에도 이렇게", "매번 이 작업을") `save_routine`으로 저장합니다. 당신이 하는 일은 **지시문을 쓰는 것**입니다. 되풀이는 작업자가 아니라 **자기 에이전트로 자기 폴더에서 혼자 도는 것**이라, 작업자 세션도 이 대화도 함께 넘어가지 않습니다. 그러니 방금 작업자에게 준 말을 그대로 옮기지 말고, **이 대화 없이 몇 주 뒤에 읽어도 뜻이 통하도록 다시 씁니다** — "아까 그 파일", "앞서 말한 대로"를 빼고 파일 경로와 명령과 기준을 그대로 적고, 무엇이 좋은 답인지도 적습니다. 폴더와 에이전트는 비워 두면 이 트랙의 것을 씁니다. 저장한 뒤 이름과 함께 어디서 무엇으로 돌게 되는지, 그 셋 다 사이드바의 되풀이에서 사람이 바꿀 수 있다는 것을 한 문장으로 알립니다. 같은 일을 두 번 적지 않도록 `list_routines`로 먼저 봅니다. 지금 돌리려면 `run_routine`입니다.
 - 사람이 고른 문서가 모인 지식 라이브러리가 있습니다. 사람이 "우리가 아는 것", 자기 문서·노트, 이름으로 특정 문서를 언급하거나, 맡기려는 일이 라이브러리가 다루는 주제에 닿으면 `knowledge_search`로 찾습니다(무엇이 있는지는 `knowledge_list_sources`). 일반적인 코딩 질문이나 작업 폴더만 봐도 되는 일에는 부르지 않습니다. 작업자는 라이브러리를 볼 수 없으므로, 작업자에게 필요한 내용은 핵심 사실과 읽을 파일 경로를 task에 직접 담아 넘깁니다. 라이브러리에서 가져온 내용은 출처(파일)를 밝힙니다.
 - 한국어로 말합니다. 짧게, 명확하게.
 {agents}
@@ -525,6 +526,7 @@ Rules:
 - If a tool returns an error, retry once as the message suggests; if that fails, tell the human what is blocked. Never call the same tool repeatedly.
 - Choices that belong to the human (a choice between directions, hard-to-undo changes, taste or priorities) are not yours to make. Do not list options as A/B/C in prose: call `request_decision`, and the app shows them as a decision card with buttons. After calling it, say in one sentence what you asked and end your turn. The human's answer arrives as a message starting with `{DECISION_PREFIX}`. If a worker report raises a question only the human can answer, put that to them with `request_decision` too. Decisions the human makes in conversation are recorded with `record_decision`.
 - The human does not talk to workers. When a worker asks whether it may do something, the question reaches you as a message starting with `{PERMISSION_PREFIX}`. If it is within the human's instructions and the task you gave, choose yourself and answer with `answer_worker` (usually allow once). If it is hard to undo, outside the task, or the human's call, ask them with `request_decision` and pass their answer on with `answer_worker`. The worker waits until answered, so do not leave it.
+- When the human says a job is one they will want again ("make this a routine", "we will do this every release", "save this for next time"), save it with `save_routine`. Your part is the WORDS. A routine is not a worker: it runs **on its own agent, in its own folder**, and neither a worker session nor this conversation goes with it. So do not copy the task you just gave a worker — **rewrite it to stand alone, read weeks from now with none of this around it**: drop "the file we just looked at" and "as before", name the paths, the commands and the standards outright, and say what a good answer looks like. Leaving the folder and the agent out takes this track's. Afterwards say in one sentence what you saved, where and on what it will run, and that all three are theirs to change under Routines in the sidebar. Read `list_routines` first so the same job is not written down twice. To run a saved one now, use `run_routine`.
 - There is a knowledge library of documents the human chose. When the human asks what we know about something, refers to their docs or notes or to a document by name, or when work you are about to delegate touches a topic the library covers, search it with `knowledge_search` (`knowledge_list_sources` shows what is there). Do not call it for general coding questions or what the working folder answers. Workers cannot see the library: put what they need from it (the key facts and the file paths to read) into their task. Name the file when you use something from the library.
 - Speak English. Short and clear.
 {agents}
@@ -558,6 +560,9 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
     let answer = (app.clone(), track.clone());
     let search = app.clone();
     let list = app.clone();
+    let save_routine = (app.clone(), track.clone());
+    let list_routines = app.clone();
+    let run_routine = app.clone();
     let decide = (app, track);
 
     vec![
@@ -857,6 +862,111 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
             },
         ),
         Tool::new(
+            "save_routine",
+            "Write work down as a routine: a named instruction the human runs again whenever they want it, without dictating it to you a second time. Use when they say a job is one they will want repeatedly (\"make this a routine\", \"we will do this every release\", \"save this for next time\").
+
+Your part is the WORDS. A routine runs on its own agent in its own folder — not as a worker, not in a worker's session, and nothing of the conversation you had goes with it. So the instruction is read again weeks later with NONE of this around it: write it to stand alone. No \"the file we just discussed\", no \"as before\" — name the files, the commands and the standards outright, and say what a good answer looks like.
+
+The folder defaults to this track's and the agent to the one workers here use; say so in your reply, because the human can change both on the Routines page.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "What the human calls it, e.g. 'Dependency check'." },
+                    "instruction": { "type": "string", "description": "What the routine's agent is told, written to stand alone with no reference to this conversation." },
+                    "folder": { "type": "string", "description": "Absolute path the routine works in. Omit for this track's folder." },
+                    "agent": { "type": "string", "description": "Agent id to run it on: claude_code, codex, copilot, antigravity. Omit for the agent this track's workers use." }
+                },
+                "required": ["name", "instruction"]
+            }),
+            move |args| {
+                let (app, track) = save_routine.clone();
+                async move {
+                    let state = app.state::<AppState>();
+                    let info = track_info(&state, &track)?;
+                    let agent = match args.get("agent").and_then(Value::as_str).map(str::trim).filter(|a| !a.is_empty()) {
+                        Some(a) => {
+                            state.spec_for(a)?;
+                            a.to_string()
+                        }
+                        // A routine has no track to fall back to at run time,
+                        // so what the track would have lent it is resolved
+                        // now and written down.
+                        None => info.effective_worker_agent().to_string(),
+                    };
+                    let folder = args
+                        .get("folder")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|f| !f.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| info.cwd.clone());
+                    let saved = state
+                        .store
+                        .create_routine(&orchestra_store::RoutinePatch {
+                            name: Some(str_arg(&args, "name")?),
+                            instruction: Some(str_arg(&args, "instruction")?),
+                            cwd: Some(folder),
+                            agent: Some(agent),
+                            config: None,
+                        })
+                        .map_err(|e| e.to_string())?;
+                    let _ = crate::routine::notify(&app);
+                    Ok(json!({
+                        "routine": saved.id,
+                        "name": saved.name,
+                        "folder": saved.cwd,
+                        "agent": saved.agent,
+                        "note": format!(
+                            "Saved. Tell the human what it is called, that it will run on {} in {}, and that the instruction, the folder and the agent are all theirs to change under Routines in the sidebar. When it runs, they are told on the bell — not here.",
+                            saved.agent, saved.cwd
+                        ),
+                    }))
+                }
+            },
+        ),
+        Tool::new(
+            "list_routines",
+            "Every routine saved on this machine: its id, name, the agent and folder it runs on, how many times it has run and when it last did. Read it before saving one, so the same job is not written down twice under two names.",
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            move |_args| {
+                let app = list_routines.clone();
+                async move {
+                    let state = app.state::<AppState>();
+                    let saved = state.store.routines().map_err(|e| e.to_string())?;
+                    let rows: Vec<Value> = saved
+                        .iter()
+                        .map(|r| {
+                            json!({
+                                "routine": r.id,
+                                "name": r.name,
+                                "agent": r.agent,
+                                "folder": r.cwd,
+                                "runs": r.runs,
+                                "last_run": r.last_run,
+                            })
+                        })
+                        .collect();
+                    Ok(json!({ "routines": rows }))
+                }
+            },
+        ),
+        Tool::new(
+            "run_routine",
+            "Run a saved routine now. Returns at once with the run id. It runs on its own agent in its own folder, on a session of its own that ends with the run — it is not a worker, and there is nothing of it to follow up with. What it found is NOT sent to you: the human is told on the bell and reads it on the Routines page. Say you started it and end your turn.",
+            json!({
+                "type": "object",
+                "properties": { "routine": { "type": "string", "description": "Routine id from list_routines." } },
+                "required": ["routine"]
+            }),
+            move |args| {
+                let app = run_routine.clone();
+                async move {
+                    let id = str_arg(&args, "routine")?;
+                    crate::routine::run(app, &id).await
+                }
+            },
+        ),
+        Tool::new(
             "record_decision",
             "Record a decision the human made in conversation: the question, the options, the choice and the rationale. Use after the human decides, never to decide for them. Answers given on a decision card are recorded already.",
             json!({
@@ -916,13 +1026,18 @@ pub fn route_permission(app: &AppHandle, track: &str, session: &str, run: &str, 
     };
     let state = app.state::<AppState>();
     let artifact = track.starts_with("artifact:");
-    if artifact || session == CONDUCTOR_SESSION {
+    // A routine has no conductor to decide for the human, so its agent asks
+    // them directly — the same way an artifact's does.
+    let routine = track.starts_with("routine:");
+    if artifact || routine || session == CONDUCTOR_SESSION {
         let ko = state.store.get_meta("setting:language").ok().flatten().as_deref() != Some("en");
-        let who = match (artifact, ko) {
-            (true, true) => "디자인 에이전트",
-            (true, false) => "The design agent",
-            (false, true) => "지휘자",
-            (false, false) => "The conductor",
+        let who = match (artifact, routine, ko) {
+            (true, _, true) => "디자인 에이전트",
+            (true, _, false) => "The design agent",
+            (_, true, true) => "되풀이",
+            (_, true, false) => "The routine",
+            (_, _, true) => "지휘자",
+            (_, _, false) => "The conductor",
         };
         let question = if ko { format!("{who}가 허락을 구합니다: {title}") } else { format!("{who} asks to: {title}") };
         let mut context = tool_kind.clone();
@@ -942,7 +1057,13 @@ pub fn route_permission(app: &AppHandle, track: &str, session: &str, run: &str, 
             recommended: None,
             allow_other: false,
             permission: Some(PermissionAsk {
-                session: if artifact { "artifact".to_string() } else { CONDUCTOR_SESSION.to_string() },
+                session: if artifact {
+                    "artifact".to_string()
+                } else if routine {
+                    crate::routine::ASK_SESSION.to_string()
+                } else {
+                    CONDUCTOR_SESSION.to_string()
+                },
                 request: request.clone(),
             }),
         });
@@ -1051,6 +1172,10 @@ async fn answer_asker(app: &AppHandle, decision: &Decision, ask: &PermissionAsk,
     if ask.session == "artifact" {
         let id = decision.track.strip_prefix("artifact:").unwrap_or(&decision.track);
         return crate::artifact::answer_permission(app, id, &ask.request, option).await;
+    }
+    if ask.session == crate::routine::ASK_SESSION && decision.track.starts_with("routine:") {
+        let run = decision.track.strip_prefix("routine:").unwrap_or(&decision.track);
+        return crate::routine::answer_permission(app, run, &ask.request, option).await;
     }
     let session = st.sessions.conductors.lock().await.get(&decision.track).map(|c| c.live.session.clone());
     let session = session.ok_or("the conductor's session is closed; the question went with it")?;
@@ -2730,10 +2855,14 @@ fn own_dir(state: &AppState, track: &str, track_dir: &str, name: &str) -> Result
             let dir = if worked_here {
                 root.join(&base)
             } else {
-                (1..)
+                // Bounded, and an error rather than a panic if it runs out:
+                // this is the one place a worker's folder name comes from
+                // the folders that happen to be there, so it is the one
+                // that could in principle find none free.
+                (1..1000)
                     .map(|n| root.join(if n == 1 { base.clone() } else { format!("{base}-{n}") }))
                     .find(|d| !d.exists())
-                    .expect("some name is free")
+                    .ok_or_else(|| format!("no free folder name for worker {name} under {track_dir}"))?
             };
             if let Err(err) = state.store.set_meta(&key, &dir.to_string_lossy()) {
                 tracing::warn!(%err, "could not remember a worker's folder");

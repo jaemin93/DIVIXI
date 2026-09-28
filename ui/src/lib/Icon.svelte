@@ -24,6 +24,8 @@
     | "terminal"
     | "book"
     | "home"
+    | "routines"
+    | "play"
     | "bell";
 </script>
 
@@ -92,6 +94,13 @@
     <path d="M2.5 4.5h11M4.5 8h7M6.5 11.5h3" />
   {:else if name === "remote"}
     <rect x="4.5" y="1.5" width="7" height="13" rx="1" /><path d="M7 12.5h2" />
+    <!-- Routines: work that comes round again. An arrow closing a loop,
+         not a clock — nothing here fires on time. -->
+  {:else if name === "routines"}
+    <path d="M2.5 8a5.5 5.5 0 0 1 9.4-3.9" /><path d="M13.5 8a5.5 5.5 0 0 1-9.4 3.9" />
+    <path d="M12.5 1.5v3h-3" /><path d="M3.5 14.5v-3h3" />
+  {:else if name === "play"}
+    <path d="M5 3.5l7 4.5-7 4.5z" />
   {/if}
 </svg>
 

@@ -33,6 +33,7 @@
     },
     { id: "design", icon: "draft", label: "rail.design", go: () => void store.showDesigns() },
     { id: "knowledge", icon: "book", label: "rail.knowledge", go: () => void kb.show() },
+    { id: "routines", icon: "routines", label: "rail.routines", go: () => void store.showRoutines() },
   ];
 
   const secondary: Item[] = [
@@ -45,9 +46,11 @@
   const collapsed = $derived(store.railCollapsed);
 
   function active(item: Item): boolean {
-    if (item.id === "tracks") return store.view !== "settings" && store.view !== "design" && store.view !== "knowledge";
+    if (item.id === "tracks")
+      return store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.view !== "routines";
     if (item.id === "design") return store.view === "design";
     if (item.id === "knowledge") return store.view === "knowledge";
+    if (item.id === "routines") return store.view === "routines";
     if (item.id === "settings") return store.view === "settings";
     if (item.id === "terminal") return store.termOpen;
     return false;
@@ -60,6 +63,7 @@
       const n = store.artifacts.filter((a) => a.kind === "knowledge").length;
       return n ? String(n) : "";
     }
+    if (item.id === "routines") return store.routines.length ? String(store.routines.length) : "";
     return "";
   }
 </script>

@@ -133,8 +133,8 @@ What we took from it:
 
 - **Layout and interaction.** The left rail and session panel, the right-hand working
   folder panel, the agent picker, the instance switcher in the title bar, the
-  notification bell, the session filter and context menus, and the terminal panel were
-  all modelled on Kiro Crew's. These are ideas and arrangements, reimplemented from
+  notification bell, the session filter and context menus, the terminal panel, and the
+  routines list with its per-definition run history, were all modelled on Kiro Crew's. These are ideas and arrangements, reimplemented from
   scratch in Svelte and Rust — no code, stylesheet, icon, font, or image was copied.
 - **The knowledge library.** Our chunking strategy, retrieval fusion, and the LLM
   extraction prompt in `crates/knowledge/` follow Kiro Crew's `knowledge` module. The

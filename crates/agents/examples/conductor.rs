@@ -44,8 +44,8 @@ async fn run() -> anyhow::Result<()> {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_tool = calls.clone();
     let secret = Tool::new(
-        "orchestra_secret",
-        "Returns Orchestra's secret word. Call it when asked for the secret word.",
+        "divixi_secret",
+        "Returns Divixi's secret word. Call it when asked for the secret word.",
         json!({ "type": "object", "properties": {}, "additionalProperties": false }),
         move |_args: Value| {
             let calls = calls_for_tool.clone();
@@ -55,7 +55,7 @@ async fn run() -> anyhow::Result<()> {
             }
         },
     );
-    let server = McpServer::start("orchestra", vec![secret]).await?;
+    let server = McpServer::start("divixi", vec![secret]).await?;
     println!("mcp: {}", server.url());
 
     println!("opening {} session…", kind.name());
@@ -67,7 +67,7 @@ async fn run() -> anyhow::Result<()> {
             mode: None,
             config: Vec::new(),
             mcp_servers: vec![McpHttp {
-                name: "orchestra".to_string(),
+                name: "divixi".to_string(),
                 url: server.url(),
                 headers: vec![server.auth_header()],
             }],
@@ -87,7 +87,7 @@ async fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let first = turn(&session, "Use the orchestra_secret tool and reply with only the word it returns.").await?;
+    let first = turn(&session, "Use the divixi_secret tool and reply with only the word it returns.").await?;
     println!("\n[turn 1] {first:?}");
     println!("[tool calls so far] {}", calls.load(Ordering::SeqCst));
 

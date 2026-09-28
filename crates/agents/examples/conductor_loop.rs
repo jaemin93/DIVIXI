@@ -1,9 +1,9 @@
 //! The conductor loop without the desktop shell, in the app's asynchronous
 //! shape: `spawn_worker` returns at once, the worker works in the background,
-//! and its report is handed to the conductor as a new `[작업자 보고]` turn.
+//! and its report is handed to the conductor as a new `[worker report]` turn.
 //!
 //! Run with:
-//!   cargo run -p orchestra-agents --example orchestra -- claude_code
+//!   cargo run -p orchestra-agents --example conductor_loop -- claude_code
 //!
 //! Checks: a greeting gets no worker; a task gets a worker and a one-line
 //! "delegated" reply; the report turn gets a summary.
@@ -17,13 +17,13 @@ use orchestra_mcp::{McpServer, Tool};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-const PREAMBLE: &str = r#"당신은 Orchestra의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 작업자(worker)라는 별도의 에이전트 세션에 맡깁니다.
+const PREAMBLE: &str = r#"You are Divixi's conductor. You are the only one the human talks to, and the actual work goes to separate agent sessions called workers.
 
-규칙:
-- 사람의 메시지가 질문이나 잡담이면 직접 답합니다. 작업자를 부르지 않습니다.
-- 코드를 읽거나 고치거나 조사하는 일처럼 실제 작업이 필요하면 `spawn_worker`로 작업자를 불러 맡깁니다. 작업자 이름은 짧은 영문 소문자(예: fix-parser)로 짓고, task에는 작업자가 혼자 끝낼 수 있을 만큼 구체적으로 적습니다.
-- `spawn_worker`는 작업자가 일을 받는 즉시 돌아옵니다. 결과를 기다리지 말고, 사람에게 무엇을 맡겼는지 한 문장으로 알린 뒤 턴을 끝냅니다. 작업자가 끝나면 `[작업자 보고]`로 시작하는 메시지가 당신에게 옵니다. 그때 무슨 일이 있었는지 한두 문단으로 사람에게 설명합니다.
-- 한국어로 말합니다. 짧게, 명확하게.
+Rules:
+- If the human's message is a question or small talk, answer it yourself. Do not open a worker.
+- If it needs real work — reading, changing or investigating code — call `spawn_worker` and hand it over. Name the worker in short lowercase latin letters (fix-parser, say), and write the task specifically enough that the worker can finish it alone.
+- `spawn_worker` returns as soon as the worker has the task. Do not wait for the result: tell the human in one sentence what you delegated, and end your turn. When the worker finishes, a message beginning with `[worker report]` arrives. Explain what happened to the human then, in a paragraph or two.
+- Keep it short and clear.
 "#;
 
 fn main() -> anyhow::Result<()> {
@@ -52,7 +52,7 @@ async fn run() -> anyhow::Result<()> {
     let spawn_cwd = cwd.clone();
     let spawn = Tool::new(
         "spawn_worker",
-        "Open a new worker and give it a task. Returns at once; the worker's report arrives later as a [작업자 보고] message.",
+        "Open a new worker and give it a task. Returns at once; the worker's report arrives later as a [worker report] message.",
         json!({ "type": "object", "properties": { "name": { "type": "string" }, "task": { "type": "string" } }, "required": ["name", "task"] }),
         move |args: Value| {
             let spec = spawn_spec.clone();
@@ -74,8 +74,8 @@ async fn run() -> anyhow::Result<()> {
                     }
                     .await;
                     let report = match outcome {
-                        Ok(out) => format!("[작업자 보고] worker={name} status=done duration_ms={}\n\n{out}", started.elapsed().as_millis()),
-                        Err(err) => format!("[작업자 보고] worker={name} status=failed error={err}"),
+                        Ok(out) => format!("[worker report] worker={name} status=done duration_ms={}\n\n{out}", started.elapsed().as_millis()),
+                        Err(err) => format!("[worker report] worker={name} status=failed error={err}"),
                     };
                     println!("    ◂ worker {name} finished in {}ms", started.elapsed().as_millis());
                     let _ = report_tx.send(report);
@@ -84,7 +84,7 @@ async fn run() -> anyhow::Result<()> {
             }
         },
     );
-    let server = McpServer::start("orchestra", vec![spawn]).await?;
+    let server = McpServer::start("divixi", vec![spawn]).await?;
 
     println!("opening conductor on {}…", kind.name());
     let conductor = Arc::new(
@@ -92,18 +92,18 @@ async fn run() -> anyhow::Result<()> {
             &spec,
             SessionOptions {
                 cwd: cwd.clone(),
-                mcp_servers: vec![McpHttp { name: "orchestra".into(), url: server.url(), headers: vec![server.auth_header()] }],
+                mcp_servers: vec![McpHttp { name: "divixi".into(), url: server.url(), headers: vec![server.auth_header()] }],
                 ..Default::default()
             },
         )
         .await?,
     );
 
-    for (i, msg) in ["안녕하세요", "이 저장소 README.md의 첫 번째 제목 줄이 뭔지 알려줘"].iter().enumerate() {
+    for (i, msg) in ["hello there", "tell me the first heading line of README.md in this repository"].iter().enumerate() {
         let text = if i == 0 { format!("{PREAMBLE}\n\n---\n\n{msg}") } else { msg.to_string() };
-        println!("\n[나] {msg}");
+        println!("\n[human] {msg}");
         let (reply, tools) = turn(&conductor, &text).await?;
-        println!("[지휘자] {reply}");
+        println!("[conductor] {reply}");
         println!("[tools used] {tools:?}");
     }
 
@@ -112,9 +112,9 @@ async fn run() -> anyhow::Result<()> {
     let report = tokio::time::timeout(std::time::Duration::from_secs(600), report_rx.recv())
         .await?
         .ok_or_else(|| anyhow::anyhow!("no report"))?;
-    println!("[보고] {}", report.lines().next().unwrap_or(""));
+    println!("[report] {}", report.lines().next().unwrap_or(""));
     let (reply, tools) = turn(&conductor, &report).await?;
-    println!("[지휘자] {reply}");
+    println!("[conductor] {reply}");
     println!("[tools used] {tools:?}");
     Ok(())
 }

@@ -1,8 +1,8 @@
 import { invoke, listen, inTauri, local, bring, boardBase } from "./ipc.svelte";
 import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { i18n, systemLang, t, type Lang, type LangPref } from "./i18n.svelte";
-import { notifyDecision, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
+import { i18n, systemLang, t, type Key, type Lang, type LangPref } from "./i18n.svelte";
+import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
 import {
   dropQueued,
   liveQueued,
@@ -264,7 +264,7 @@ export type AgentStatus = {
     config_options?: ConfigOption[];
     modes?: ModeInfo[];
     default_mode?: string | null;
-    /** The mode Orchestra picks when none is chosen. */
+    /** The mode Divixi picks when none is chosen. */
     autonomous_mode?: string | null;
   } | null;
   error: string | null;
@@ -329,7 +329,7 @@ export type Run = {
   segments: Segment[];
 };
 
-export type View = "track" | "settings" | "worker" | "new-track" | "edit-track" | "design" | "knowledge";
+export type View = "track" | "settings" | "worker" | "new-track" | "edit-track" | "design" | "knowledge" | "routines";
 
 // ----- artifacts: what the human keeps beside tracks and attaches to them —
 // designs (a sketch board worked out with an agent), knowledge later -----
@@ -345,6 +345,57 @@ export type ArtifactInfo = {
   created_at: number;
   updated_at: number;
 };
+// ----- routines: saved work, run on its own whenever it is wanted.
+// Not a schedule (nothing fires on a clock) and not a worker: a routine has
+// its own folder and its own agent, and its runs are kept apart from every
+// track's, so it never shows up in a worker list. -----
+/** The id the panel holds while the blank form is open. */
+export const NEW_ROUTINE = "new";
+
+/** Mirrors `routine::Finished`: what the core says when a routine ends. */
+export type RoutineDone = { routine: string; name: string; run: string; status: RoutineRunStatus; summary: string };
+
+export type Routine = {
+  id: string;
+  name: string;
+  /** What the agent is told. Written to stand alone, and the human's to edit. */
+  instruction: string;
+  /** The folder it works in. Its own, not a track's. */
+  cwd: string;
+  /** The agent it runs on. Its own, and required. */
+  agent: string;
+  /** Its session options in the agent's own terms, as a track's are. */
+  config: OptionConfig;
+  created_at: number;
+  updated_at: number;
+  runs: number;
+  last_run: string | null;
+};
+
+/** Where one run of a routine stands. Its own words: a worker run's `done`
+ *  carries a stop reason for every ordinary turn, which read as "stopped". */
+export type RoutineRunStatus = "running" | "done" | "failed" | "stopped";
+
+/** Mirrors `orchestra_store::RoutineRun`: one run of a routine, whole.
+ *  Nothing of it is in the runs table, which is the point. */
+export type RoutineRun = {
+  /** `rr` and sixteen hex digits — never a worker run's `t001`. */
+  id: string;
+  routine: string;
+  agent: string;
+  cwd: string;
+  /** The instruction as it read when this run was started. */
+  instruction: string;
+  status: RoutineRunStatus;
+  started_at: number;
+  ended_at: number | null;
+  output: string;
+  error: string;
+  tools: number;
+  /** The checked report, when the run left one. */
+  report: WorkerReport | null;
+};
+
 export type Stroke = { points: [number, number, number][]; color: string; size: number };
 export type DesignTag = "" | "goal" | "constraint" | "question" | "idea";
 export type DesignNode = {
@@ -419,7 +470,7 @@ export function withDelta(doc: DesignDoc, d: DesignDelta): DesignDoc {
 export const artifactKey = (id: string) => `artifact:${id}`;
 const EMPTY_DOC: DesignDoc = { version: 0, nodes: [], edges: [], changes: [], next: 0 };
 
-/** Prefix of conductor prompts Orchestra injects itself (worker reports). Language-neutral. */
+/** Prefix of conductor prompts Divixi injects itself (worker reports). Language-neutral. */
 export const REPORT_PREFIX = "[worker-report]";
 /** How the app's second ask for a missing report starts (conductor.rs, report::reminder). */
 export const REPORT_REMINDER = "Your reply did not end with a usable report";
@@ -1614,6 +1665,134 @@ class Store {
     this.pruneQueued("artifact:", new Set(this.artifacts.map((a) => artifactKey(a.id))));
   }
 
+  // ----- routines -----
+
+  /** Every routine, most recently touched first. */
+  routines = $state<Routine[]>([]);
+  /** The one open in the panel, by id. `new` is the blank form. */
+  routine = $state("");
+  /** The open routine's runs, newest first. */
+  routineRuns = $state<RoutineRun[]>([]);
+  /** Routine ids with a turn in flight, as the core last said. A routine's
+   *  runs are kept out of `runs`, so this is how the list knows. */
+  routineRunning = $state<string[]>([]);
+
+  async loadRoutines() {
+    try {
+      this.routines = await invoke<Routine[]>("list_routines");
+      this.routineRunning = await invoke<string[]>("running_routines");
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Show the routines: the last one open, else the newest, else the form. */
+  async showRoutines() {
+    this.view = "routines";
+    await this.loadRoutines();
+    if (this.routine === NEW_ROUTINE) return;
+    const pick = this.routines.find((r) => r.id === this.routine) ?? this.routines[0];
+    if (pick) await this.openRoutine(pick.id);
+    else this.routine = NEW_ROUTINE;
+  }
+
+  async openRoutine(id: string) {
+    this.routine = id;
+    this.view = "routines";
+    await this.loadRoutineRuns(id);
+  }
+
+  /** Open the blank form: the human's own way in, beside the conductor's. */
+  newRoutine() {
+    this.routine = NEW_ROUTINE;
+    this.routineRuns = [];
+    this.view = "routines";
+  }
+
+  async loadRoutineRuns(id = this.routine) {
+    if (!id || id === NEW_ROUTINE) {
+      this.routineRuns = [];
+      return;
+    }
+    try {
+      this.routineRuns = await invoke<RoutineRun[]>("routine_runs", { id, limit: 50 });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  routineLive(id: string): boolean {
+    return this.routineRunning.includes(id);
+  }
+
+  /** A routine ended: off the running list, and onto the bell. */
+  routineFinished(done: RoutineDone) {
+    this.routineRunning = this.routineRunning.filter((r) => r !== done.routine);
+    const how = t(`routines.notice.${done.status}` as Key);
+    notifyRoutine(done.routine, done.run, done.status, `${done.name} — ${how}`, done.summary);
+  }
+
+  async runRoutine(id: string) {
+    // Shown as running at once: the core is asked next, and its answer is
+    // what keeps it that way.
+    if (!this.routineRunning.includes(id)) this.routineRunning = [...this.routineRunning, id];
+    try {
+      await invoke("run_routine", { id });
+      await this.loadRoutineRuns(id);
+    } catch (err) {
+      this.lastError = String(err);
+      this.routineRunning = this.routineRunning.filter((r) => r !== id);
+    }
+  }
+
+  async cancelRoutine(id: string) {
+    try {
+      await invoke("routine_cancel", { id });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Save the blank form as a new routine, and open it. */
+  async createRoutine(patch: { name: string; instruction: string; cwd: string; agent: string; config?: OptionConfig }) {
+    try {
+      const made = await invoke<Routine>("create_routine", { patch });
+      await this.loadRoutines();
+      await this.openRoutine(made.id);
+      return true;
+    } catch (err) {
+      this.lastError = String(err);
+      return false;
+    }
+  }
+
+  async saveRoutine(
+    id: string,
+    patch: { name?: string; instruction?: string; cwd?: string; agent?: string; config?: OptionConfig },
+  ) {
+    try {
+      await invoke<Routine>("update_routine", { id, patch });
+      await this.loadRoutines();
+      return true;
+    } catch (err) {
+      this.lastError = String(err);
+      return false;
+    }
+  }
+
+  async deleteRoutine(id: string) {
+    try {
+      await invoke("delete_routine", { id });
+    } catch (err) {
+      this.lastError = String(err);
+      return;
+    }
+    if (this.routine === id) this.routine = "";
+    await this.loadRoutines();
+    if (this.routines.length) await this.openRoutine(this.routines[0].id);
+    else this.newRoutine();
+  }
+
   /** Show the designs: the last one open, else the newest. */
   async showDesigns() {
     if (this.view === "design") {
@@ -2071,7 +2250,7 @@ class Store {
     return (this.agents?.find((a) => a.kind === agent)?.probe?.config_options ?? []).filter((o) => o.choices.length > 0);
   }
 
-  /** The mode Orchestra picks for an agent when the track chooses none. */
+  /** The mode Divixi picks for an agent when the track chooses none. */
   autonomousModeOf(agent: string): string {
     const status = this.agents?.find((a) => a.kind === agent);
     return status?.probe?.autonomous_mode ?? status?.probe?.config_options?.find((o) => o.category === "mode")?.current ?? "";
@@ -2799,7 +2978,7 @@ class Store {
       if (run) run.id = env.run;
     }
     if (!run) {
-      // A worker the conductor opened, or a report turn Orchestra injected:
+      // A worker the conductor opened, or a report turn Divixi injected:
       // the core registered it, we have not. Show it now; the prompt text
       // comes with the summary right after.
       run = {
@@ -3081,5 +3260,15 @@ export async function connectEvents() {
     listen<string>("design_extract", (e) => {
       if (e.payload === store.artifact) void store.loadExtracts(e.payload);
     }),
+    // A routine was saved (by the conductor), started, or finished. The
+    // running set is read even off the page, so the rail's count and a
+    // later visit are right without waiting for a reload.
+    listen("routines", () => {
+      void store.loadRoutines();
+      if (store.view === "routines") void store.loadRoutineRuns();
+    }),
+    // A routine finished. It reports into no conversation, so the bell is
+    // where the human learns it is done.
+    listen<RoutineDone>("routine_done", (e) => store.routineFinished(e.payload)),
   ]);
 }

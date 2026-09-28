@@ -289,6 +289,12 @@
     border-color: var(--warn);
   }
 
+  /* This card's boxes are amber, so its focus edge is too (tokens.css). */
+  .own,
+  .note {
+    --field-focus: var(--warn);
+  }
+
   .foot {
     display: flex;
     align-items: center;

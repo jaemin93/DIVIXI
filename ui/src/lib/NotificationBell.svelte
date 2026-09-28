@@ -1,18 +1,25 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { instanceId, switchInstance } from "./ipc.svelte";
-  import { inbox, remove, clearAll, GOTO, type Notice } from "./notify.svelte";
+  import { inbox, remove, clearAll, GOTO, isDecision, isRoutine, type Notice } from "./notify.svelte";
   import { store } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
 
   /**
-   * The bell at the top right: the decision cards that wait for an answer,
-   * and nothing else. The badge is how many there are, so a number on it
-   * always means that many questions are unanswered; answering one takes it
-   * out of the list. One opens its card, on the Divixi it came from (another
-   * webview is told through localStorage, `GOTO`).
+   * The bell at the top right: what the human has not dealt with. A
+   * decision card waiting for an answer, or a routine that finished while
+   * nobody was watching — a routine reports into no conversation, so this is
+   * the only place its ending shows.
+   *
+   * The badge is how many there are, so a number on it always means that
+   * many things want reading or answering. Answering a card takes its notice
+   * out; opening a routine's result takes that one out.
+   *
+   * A card opens on the Divixi it came from (another webview is told through
+   * localStorage, `GOTO`). A routine is this PC's by nature — it runs where
+   * its folder is — so it just opens.
    */
   let open = $state(false);
   let query = $state("");
@@ -60,9 +67,15 @@
     if (left > 0) setTimeout(() => reveal(decision, left - 1), 100);
   }
 
-  /** Open a notice's decision card where it lives. */
+  /** Open what a notice is about: a decision card, or a routine's run. */
   function go(n: Notice) {
     open = false;
+    if (isRoutine(n)) {
+      // Reading it is what deals with it, so the notice goes now.
+      remove(n.id);
+      void store.openRoutine(n.routine);
+      return;
+    }
     if (n.instance === instanceId) {
       if (n.track) void store.selectTrack(n.track).then(() => reveal(n.decision));
       else reveal(n.decision);

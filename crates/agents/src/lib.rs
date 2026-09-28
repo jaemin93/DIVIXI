@@ -1,12 +1,12 @@
 //! Agent catalog and detection.
 //!
-//! Orchestra drives four agents over ACP. This crate knows how each one is
+//! Divixi drives four agents over ACP. This crate knows how each one is
 //! installed, how its ACP surface is launched, and how to find out whether
 //! it is ready, without prompting the user for anything:
 //!
 //! 1. **Locate** the agent's CLI executable. The process PATH is not enough:
 //!    an installer updates the registry, not running processes, so a user who
-//!    installs an agent while Orchestra is open would never see it. The search
+//!    installs an agent while Divixi is open would never see it. The search
 //!    re-reads the registry PATH on Windows and checks known install
 //!    directories on every platform.
 //! 2. **Resolve** the ACP launch: an npm adapter kept in the app's adapter
@@ -29,7 +29,7 @@ use std::time::Duration;
 use orchestra_acp::{authenticate, find_local_script, probe, AgentSpec, ProbeReport, SessionProbe};
 use serde::{Deserialize, Serialize};
 
-/// The agents Orchestra knows how to drive.
+/// The agents Divixi knows how to drive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentKind {
@@ -105,7 +105,7 @@ impl AgentKind {
 /// The Codex ACP adapter, published under the ACP org. It bundles
 /// `@openai/codex`, so it does not need the Codex CLI to run, but it shares
 /// the CLI's login state (`~/.codex/auth.json`).
-pub const CODEX_ADAPTER: &str = "@agentclientprotocol/codex-acp@1.12.0";
+pub const CODEX_ADAPTER: &str = "@agentclientprotocol/codex-acp@1.13.1";
 const CODEX_ADAPTER_SCRIPT: &str = "node_modules/@agentclientprotocol/codex-acp/dist/index.js";
 
 /// Google's ACP server for Antigravity, as registered in the ACP registry.
@@ -849,12 +849,40 @@ mod tests {
     fn npm_adapters_have_a_folder_per_version() {
         let root = Path::new("/data/adapters");
         assert_eq!(
-            npm_adapter_dir(root, "@agentclientprotocol/claude-agent-acp@0.79.0"),
-            root.join("claude-agent-acp").join("0.79.0")
+            npm_adapter_dir(root, "@agentclientprotocol/claude-agent-acp@0.81.2"),
+            root.join("claude-agent-acp").join("0.81.2")
         );
         assert_eq!(npm_adapter_dir(root, "plain@1.2.3"), root.join("plain").join("1.2.3"));
         assert!(npm_adapter(AgentKind::ClaudeCode).is_some() && npm_adapter(AgentKind::Codex).is_some());
         assert!(npm_adapter(AgentKind::Copilot).is_none());
         assert_eq!(installed_npm_adapter(Path::new("/nowhere"), AgentKind::Codex), None);
+    }
+
+    /// The version `package.json` installs and the version these constants
+    /// launch have to be the same string. npm decides what lands in
+    /// `node_modules`; the constants decide what gets run -- and a dependency
+    /// bump touches only the first of the two. Drift is silent either way it
+    /// falls: a session runs an adapter older than the one installed, or it
+    /// pays ten seconds to `npx` a version that was sitting on disk already.
+    ///
+    /// `include_str!` rather than reading the file at run time: the path is
+    /// resolved against this source file when the test is compiled, so it does
+    /// not depend on the working directory cargo happens to be invoked from.
+    #[test]
+    fn npm_adapter_versions_match_package_json() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../../package.json")).expect("package.json parses");
+        for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
+            let (package, _) = npm_adapter(kind).expect("an npm adapter");
+            let (name, pinned) = package.rsplit_once('@').expect("the constant reads name@version");
+            let declared = manifest["devDependencies"][name]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name} is not in package.json devDependencies"));
+            assert_eq!(
+                declared.trim_start_matches(|c| matches!(c, '^' | '~' | '=')),
+                pinned,
+                "{kind:?}: package.json installs {declared}, the adapter constant launches {pinned}"
+            );
+        }
     }
 }
