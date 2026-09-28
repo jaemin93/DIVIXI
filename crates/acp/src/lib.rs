@@ -68,7 +68,7 @@ impl std::fmt::Debug for AgentSpec {
 /// Note the package name: `@zed-industries/claude-code-acp` was renamed and
 /// its last release (0.16.2, Feb 2026) is stale. Pinning that one silently
 /// freezes the session on a months-old agent SDK.
-pub const CLAUDE_ADAPTER: &str = "@agentclientprotocol/claude-agent-acp@0.79.0";
+pub const CLAUDE_ADAPTER: &str = "@agentclientprotocol/claude-agent-acp@0.81.2";
 
 /// Where the locally installed Claude adapter's entry point lives, relative to
 /// a directory that has a `node_modules`.
