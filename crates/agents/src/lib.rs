@@ -1,12 +1,12 @@
 //! Agent catalog and detection.
 //!
-//! Orchestra drives four agents over ACP. This crate knows how each one is
+//! Divixi drives four agents over ACP. This crate knows how each one is
 //! installed, how its ACP surface is launched, and how to find out whether
 //! it is ready, without prompting the user for anything:
 //!
 //! 1. **Locate** the agent's CLI executable. The process PATH is not enough:
 //!    an installer updates the registry, not running processes, so a user who
-//!    installs an agent while Orchestra is open would never see it. The search
+//!    installs an agent while Divixi is open would never see it. The search
 //!    re-reads the registry PATH on Windows and checks known install
 //!    directories on every platform.
 //! 2. **Resolve** the ACP launch: an npm adapter kept in the app's adapter
@@ -29,7 +29,7 @@ use std::time::Duration;
 use orchestra_acp::{authenticate, find_local_script, probe, AgentSpec, ProbeReport, SessionProbe};
 use serde::{Deserialize, Serialize};
 
-/// The agents Orchestra knows how to drive.
+/// The agents Divixi knows how to drive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentKind {

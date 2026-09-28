@@ -1,6 +1,6 @@
 //! An in-process MCP server over HTTP.
 //!
-//! This is how the conductor gets hands: Orchestra registers its app API as
+//! This is how the conductor gets hands: Divixi registers its app API as
 //! MCP tools, listens on a random localhost port with a random bearer
 //! token, and hands the URL to the conductor's ACP session in
 //! `session/new` → `mcpServers`. Tool calls land directly in this process,

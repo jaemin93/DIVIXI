@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
 async fn run() -> anyhow::Result<()> {
     let prompt = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "Reply with exactly: ORCHESTRA OK".to_string());
+        .unwrap_or_else(|| "Reply with exactly: DIVIXI OK".to_string());
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 

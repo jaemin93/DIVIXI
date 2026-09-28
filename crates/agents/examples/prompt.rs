@@ -1,7 +1,7 @@
 //! Run one prompt in a session on a chosen agent.
 //!
 //! Run with:
-//!   cargo run -p orchestra-agents --example prompt -- codex "Reply with exactly: ORCHESTRA OK"
+//!   cargo run -p orchestra-agents --example prompt -- codex "Reply with exactly: DIVIXI OK"
 //!
 //! Agent ids: claude_code, codex, copilot, antigravity. The Antigravity
 //! server must already be downloaded (see the `detect` example).
@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
 async fn run() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let id = args.next().unwrap_or_else(|| "claude_code".to_string());
-    let prompt = args.next().unwrap_or_else(|| "Reply with exactly: ORCHESTRA OK".to_string());
+    let prompt = args.next().unwrap_or_else(|| "Reply with exactly: DIVIXI OK".to_string());
     // Optional third argument: a model value id for the agent's `model` option.
     let config: Vec<(String, String)> = args.next().map(|m| vec![("model".to_string(), m)]).unwrap_or_default();
     let kind = AgentKind::parse(&id).ok_or_else(|| anyhow::anyhow!("unknown agent {id}"))?;

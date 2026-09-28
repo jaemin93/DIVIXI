@@ -173,7 +173,7 @@ pub struct PromptSpec {
     pub prompt: String,
     /// Session mode to request before prompting, e.g. `bypassPermissions`.
     ///
-    /// Orchestra surfaces deliberate escalations, not tool-approval prompts,
+    /// Divixi surfaces deliberate escalations, not tool-approval prompts,
     /// so sessions run without per-tool permission round-trips. `None` picks the
     /// most autonomous mode the agent advertises.
     pub mode: Option<String>,
@@ -188,7 +188,7 @@ pub struct PromptSpec {
 /// A session's agent must not inherit them. Claude Code refuses to start a nested
 /// session, so an agent spawned from inside one dies during `session/new` with
 /// `Query closed before response received` — an error that names nothing
-/// useful. Orchestra is frequently launched from exactly such a terminal.
+/// useful. Divixi is frequently launched from exactly such a terminal.
 const INHERITED_SESSION_VARS: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
@@ -336,7 +336,7 @@ pub struct ProbeReport {
     /// The mode a fresh session starts in, when the agent has modes.
     #[serde(default)]
     pub default_mode: Option<String>,
-    /// The mode Orchestra picks when none is chosen: the most autonomous
+    /// The mode Divixi picks when none is chosen: the most autonomous
     /// one offered (see [`pick_autonomous_mode`]), else the default.
     #[serde(default)]
     pub autonomous_mode: Option<String>,
@@ -641,7 +641,7 @@ pub fn pick_restricted_mode(available: &[(String, String)]) -> Option<String> {
 
 /// The most autonomous mode among `(id, name)` pairs the agent offers.
 ///
-/// Sessions run without per-tool approval by design: Orchestra surfaces the
+/// Sessions run without per-tool approval by design: Divixi surfaces the
 /// escalations a session raises on purpose, not permission prompts. When an
 /// agent offers nothing recognizable, its default mode is kept.
 pub fn pick_autonomous_mode(available: &[(String, String)]) -> Option<String> {

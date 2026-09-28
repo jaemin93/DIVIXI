@@ -70,7 +70,7 @@ npx tauri build                                 # 설치 파일이 target/releas
 당신의 GitHub 계정으로 특정 주소에서 여기에 닿습니다. 서버가 떠 있지 않으면 앱이 SSH로
 서버를 시작시킵니다.
 
-빌드·설치·연결·상시 구동·업데이트는 **[docs/divixi-server.md](docs/divixi-server.md)**
+빌드·설치·연결·상시 구동·업데이트는 **[docs/divixi-server.ko.md](docs/divixi-server.ko.md)**
 를 보세요.
 
 ## 데이터와 프라이버시

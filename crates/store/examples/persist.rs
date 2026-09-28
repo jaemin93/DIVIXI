@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
 async fn run() -> anyhow::Result<()> {
     let prompt = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "Reply with exactly: ORCHESTRA OK".to_string());
+        .unwrap_or_else(|| "Reply with exactly: DIVIXI OK".to_string());
 
     let (path, ephemeral) = match std::env::var_os("DIVISI_DB") {
         Some(p) => (std::path::PathBuf::from(p), false),
@@ -99,8 +99,8 @@ async fn run() -> anyhow::Result<()> {
         println!("[{:>6}ms] {}", e.at_ms, e.event.kind());
     }
 
-    let hits = store.search("ORCHESTRA")?;
-    println!("\n--- search \"ORCHESTRA\" ---");
+    let hits = store.search("DIVIXI")?;
+    println!("\n--- search \"DIVIXI\" ---");
     for h in &hits {
         println!("{}  {}", h.run, h.snippet);
     }

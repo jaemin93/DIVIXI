@@ -4,7 +4,7 @@
 //! its teardown only kills the direct child, after a grace period, and only
 //! when the protocol ends cleanly. Agents that ignore stdin EOF (Antigravity's
 //! ACP server does) or that launch a real worker behind a wrapper outlive
-//! the session. Orchestra spawns agents here instead, so that:
+//! the session. Divixi spawns agents here instead, so that:
 //!
 //! - the child is killed on drop, always;
 //! - the tree it started goes with it, by the means each platform offers:
