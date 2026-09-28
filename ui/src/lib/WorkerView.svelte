@@ -4,6 +4,7 @@
   import ReportCard from "./ReportCard.svelte";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
+  import { untrack } from "svelte";
   import { FOLLOWING, followed, resized, scrolled, type Stick } from "./scroll";
 
   /**
@@ -27,8 +28,12 @@
   /** Put the view at the foot, and remember that it was us who did it. */
   function follow() {
     if (!scroller) return;
-    scroller.scrollTop = scroller.scrollHeight;
-    stick = followed(stick, scroller.scrollTop);
+    const box = scroller;
+    box.scrollTop = box.scrollHeight;
+    // `untrack`: called from inside effects, and `followed` reads `stick`
+    // only to replace it. Tracked, the effect depends on its own write and
+    // Svelte fails it with `effect_update_depth_exceeded`. See Timeline.
+    stick = untrack(() => followed(stick, box.scrollTop));
   }
 
   function onScroll() {
