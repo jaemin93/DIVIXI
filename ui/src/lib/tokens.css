@@ -138,9 +138,7 @@ button {
 /* Where the keyboard is.
  *
  * `:focus-visible`, never `:focus`: a control clicked with the mouse is
- * not ringed, one reached with Tab always is. (A text field is ringed
- * either way — that is what the selector is specified to do, and a caret
- * alone is a thin thing to hunt for.)
+ * not ringed, one reached with Tab always is.
  *
  * The ring is the palette's highest-contrast ink: near-white on the dark
  * theme, near-black on the light one, around 17:1 against every surface
@@ -155,6 +153,36 @@ button {
 :focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 1px;
+}
+
+/* Except where you type, which says it another way.
+ *
+ * A text field matches `:focus-visible` on a plain mouse click too — that
+ * is what the selector is specified to do — so the ring on the composer
+ * was showing almost all of the time, on top of the accent border the box
+ * already turns. Two indicators, one of them permanent, for the one
+ * control that is focused by default.
+ *
+ * So: the accent, drawn exactly where the field's own border is
+ * (`-1px`, so it is the border rather than a second edge outside it), and
+ * no ring. Fields that already turn accent on focus look exactly as they
+ * did; the five that had no focus rule of their own (the code editor, the
+ * library and routine searches, the settings boxes) gain the same accent
+ * edge instead of the ring, rather than losing an indicator.
+ *
+ * Measured, both themes: the accent reads 4.2–5.9 against the inside of a
+ * field and what is behind it, and the change from an unfocused border
+ * (`--line`, `--lines`) to it is 3.2–4.4. WCAG asks 3.0 of a control's
+ * boundary. `--field-focus` so a field with its own colour can say so;
+ * the decision card's boxes are amber, not accent.
+ *
+ * Buttons, rows, the board, the splitters and everything else keep the
+ * ring: none of them has an indicator of its own. */
+input:not([type="button"], [type="submit"], [type="reset"], [type="checkbox"], [type="radio"]):focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 1px solid var(--field-focus, var(--acc));
+  outline-offset: -1px;
 }
 
 /* Said to a screen reader, shown to nobody: the keys a control answers to
