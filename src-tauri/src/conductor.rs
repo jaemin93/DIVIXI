@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orchestra_acp::{AgentSession, AgentSpec, McpHttp, SessionOptions};
-use orchestra_agents::{AgentKind, Readiness};
+use orchestra_agents::{AgentKind, AgentStatus, Readiness};
 use orchestra_core::report::{self, RanOn, Report};
 use orchestra_core::{AgentEvent, RunStatus};
 use orchestra_mcp::{McpServer, Tool};
@@ -206,6 +206,12 @@ pub struct Sessions {
     /// already ended its turn and is not waiting on anything. It goes here,
     /// to the task holding the worker back, which then opens it.
     proposals: parking_lot::Mutex<HashMap<i64, oneshot::Sender<Option<usize>>>>,
+    /// Cards the human answered in their own words, by decision id, holding
+    /// the worker each was about. The conductor reads the answer, works out
+    /// which agent and model it means, and spawns again quoting the id;
+    /// [`Sessions::take_settled`] is what lets that one call through the
+    /// card, once.
+    settled: parking_lot::Mutex<HashMap<i64, String>>,
     /// Workers whose record is being deleted, by `track/worker` key.
     ///
     /// Deleting takes a while — a git call reads the worker's checkout for
@@ -265,6 +271,22 @@ impl Sessions {
     /// Whether a spawn is still held back by this card.
     fn awaits_proposal(&self, decision: i64) -> bool {
         self.proposals.lock().contains_key(&decision)
+    }
+
+    /// Note that a card was answered in the human's own words, so the one
+    /// spawn carrying their answer back may pass the card.
+    fn mark_settled(&self, decision: i64, worker: &str) {
+        self.settled.lock().insert(decision, worker.to_string());
+    }
+
+    /// The worker such a card was about, without spending it.
+    fn settled_worker(&self, decision: i64) -> Option<String> {
+        self.settled.lock().get(&decision).cloned()
+    }
+
+    /// Spend that note: the worker it was about, if this is really one.
+    fn take_settled(&self, decision: i64) -> Option<String> {
+        self.settled.lock().remove(&decision)
     }
 
     fn mark_stopped(&self, run: &str) {
@@ -382,14 +404,23 @@ fn agent_facts(state: &AppState, lang: &str, track: &TrackInfo) -> String {
         return String::new();
     }
     let ko = lang.starts_with("ko");
-    let agents = state.load_agents().ok().flatten().unwrap_or_default();
     let mut lines: Vec<String> = Vec::new();
-    for status in agents.iter().filter(|a| a.readiness == Readiness::Ready) {
+    for status in agent_choices(state) {
         let options = state.config_options_for(status.kind.id());
         let models = options.iter().find(|o| o.category == "model");
         let detail = match models {
             Some(o) if !o.choices.is_empty() => {
-                let names: Vec<String> = o.choices.iter().map(|c| format!("{} ({})", c.id, c.name)).collect();
+                // The value id is what `spawn_worker` takes, so it leads;
+                // the name and the agent's own description follow, and the
+                // description is the agent's words, not the app's.
+                let names: Vec<String> = o
+                    .choices
+                    .iter()
+                    .map(|c| match c.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+                        Some(d) => format!("{} ({} — {d})", c.id, c.name),
+                        None => format!("{} ({})", c.id, c.name),
+                    })
+                    .collect();
                 if ko {
                     format!("모델: {}", names.join(", "))
                 } else {
@@ -414,12 +445,12 @@ fn agent_facts(state: &AppState, lang: &str, track: &TrackInfo) -> String {
     let default = describe(state, track.effective_worker_agent(), track.effective_worker_config());
     if ko {
         format!(
-            "\n쓸 수 있는 에이전트(설치·로그인 확인됨). 기본은 {default} 입니다.\n{}\n어느 에이전트가 무엇을 더 잘하는지는 앱이 말하지 않습니다. 당신이 판단할 것은 맡기려는 일의 성질이고, 에이전트 선택은 사람이 카드에서 정합니다.\n",
+            "\n쓸 수 있는 에이전트(설치·로그인 확인됨). 기본은 {default} 입니다. model에는 괄호 앞의 값을 그대로 넘깁니다.\n{}\n어느 에이전트가 무엇을 더 잘하는지, 그리고 **어느 모델이 얼마인지는 앱이 알지 못합니다.** 위 목록에 없는 것은 추측하지 마세요. 당신이 판단할 것은 맡기려는 일의 성질이고, 에이전트와 모델은 사람이 카드에서 정합니다.\n",
             lines.join("\n")
         )
     } else {
         format!(
-            "\nAgents you can use (installed and logged in). The default is {default}.\n{}\nDivixi does not tell you which agent is better at what. What you judge is the kind of work; the human decides the agent, on the card.\n",
+            "\nAgents you can use (installed and logged in). The default is {default}. Pass the value before the bracket as `model`.\n{}\nDivixi does not tell you which agent is better at what, and **it does not know what any model costs.** Do not guess at anything the list above does not say. What you judge is the kind of work; the human decides the agent and the model, on the card.\n",
             lines.join("\n")
         )
     }
@@ -464,7 +495,7 @@ fn preamble(lang: &str, track: &TrackInfo, agents: &str) -> String {
             agents = if agents.is_empty() {
                 String::new()
             } else {
-                format!("- 맡기려는 일의 성질이 기본 에이전트와 잘 맞지 않는다고 판단하면, `spawn_worker`에 agent(필요하면 model)와 함께 kind(일의 성질)와 why(왜 그 에이전트가 이 일에 맞는지)를 적습니다. 앱이 사람에게 결정 카드로 묻고, 사람이 정합니다. 확신이 없으면 적지 마세요 — 기본으로 조용히 진행하는 편이 낫습니다. 카드가 뜬 뒤에는 무엇을 제안했는지 한 문장만 말하고 턴을 끝냅니다. 작업자는 어느 쪽으로든 시작하며 보고는 평소대로 옵니다.\n{agents}")
+                format!("- **이 트랙에서는 작업자의 에이전트를 사람이 정합니다.** `spawn_worker`를 부를 때마다 앱이 결정 카드를 올리고, 사람이 고르기 전에는 작업자가 시작하지 않습니다. 당신이 고를지 말지를 판단하지 않습니다 — 카드는 항상 올라갑니다. `kind`(일의 성질)는 사람이 판단할 재료이므로 늘 적습니다. 특정 에이전트가 맞다고 보면 agent(필요하면 model)와 why를 함께 적어 제안으로 표시되게 하되, 그것도 제안일 뿐입니다. 카드를 올린 뒤에는 무엇을 물었는지 한 문장만 말하고 턴을 끝냅니다. 같은 작업자로 `spawn_worker`를 다시 부르지 않습니다.\n- 사람이 버튼 대신 직접 글로 답하면 그 말이 `{DECISION_PREFIX}` 메시지로 당신에게 옵니다. 그 말이 어느 에이전트와 어느 모델을 뜻하는지 해석해서 `spawn_worker(name=…, task=…, agent=…, model=…, decided=<카드 번호>)`로 엽니다. `decided`는 그 한 번만 카드 없이 통과시킵니다. 해석할 수 없거나, 그 에이전트가 실제로 제공하지 않는 모델을 가리키거나, 추측이 필요하면 고르지 말고 `request_decision`으로 되물으세요. **앱은 모델의 가격을 알지 못합니다** — \"가장 싼 모델\" 같은 말은 사람이 어느 모델을 뜻하는지 확인한 뒤에만 고릅니다.\n{agents}")
             },
             cwd = track.cwd,
             folders = match folders {
@@ -503,7 +534,7 @@ The working directory is {cwd}. {folders}
         agents = if agents.is_empty() {
             String::new()
         } else {
-            format!("- When the kind of work you are about to delegate does not suit the default agent, pass `agent` (and `model` if it helps) to `spawn_worker` together with `kind` (what kind of work it is) and `why` (what about this task calls for that agent). The app puts it to the human as a decision card and they decide. When you are not sure, leave them out — running on the default quietly is the better mistake. After a card goes up, say in one sentence what you proposed and end your turn; the worker starts either way and its report arrives as usual.\n{agents}")
+            format!("- **On this track the human picks every worker's agent.** Each `spawn_worker` raises a decision card and the worker does not start until they choose. You do not decide whether to ask — the card always goes up. Always pass `kind` (what kind of work it is): that is what they judge it on. When you do think a particular agent fits, pass `agent` (and `model`) with `why` and it is marked as your suggestion — but it is only a suggestion. After the card goes up, say in one sentence what you asked and end your turn. Do not call `spawn_worker` for that worker again.\n- When the human writes their own answer instead of taking a button, their words reach you as a `{DECISION_PREFIX}` message. Work out which agent and which model they mean and open the worker with `spawn_worker(name=…, task=…, agent=…, model=…, decided=<card number>)`. `decided` lets that one call through without another card, once. If you cannot tell what they mean, or they name a model no agent offers, or you would have to guess, do not pick for them: ask with `request_decision`. **The app does not know what any model costs** — for words like \"the cheapest model\", find out which model they mean before choosing one.\n{agents}")
         },
         cwd = track.cwd,
         folders = match folders {
@@ -538,10 +569,11 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                 "properties": {
                     "name": { "type": "string", "description": "Short worker name, lowercase, e.g. fix-parser. New, or the name of a closed worker to reopen." },
                     "task": { "type": "string", "description": "What the worker should do, specific enough to finish alone." },
-                    "agent": { "type": "string", "description": "Agent id to run the worker on: claude_code, codex, copilot, antigravity. Leave it out unless this task really suits another agent. Default: the worker's earlier agent if it has one, else the track's worker agent (which is the conductor's unless the human set one apart)." },
-                    "model": { "type": "string", "description": "Model value id, as listed for that agent in the agents section above. Leave it out to take the agent's own." },
-                    "kind": { "type": "string", "description": "What kind of work this is, in the human's language: research, implementation, review, docs, … Required with agent or model: it is what the human judges the choice on." },
-                    "why": { "type": "string", "description": "Why that agent or model suits this kind of work, one or two sentences in the human's language. Required with agent or model. Say what about the task calls for it, not that one agent is better than another." },
+                    "agent": { "type": "string", "description": "Agent id to run the worker on: claude_code, codex, copilot, antigravity. On a track where the human picks, this is a suggestion on their card, not the answer. Otherwise: the worker's earlier agent if it has one, else the track's worker agent (which is the conductor's unless the human set one apart)." },
+                    "model": { "type": "string", "description": "Model value id, exactly as listed for that agent in the agents section of your preamble. Leave it out to take the agent's own." },
+                    "kind": { "type": "string", "description": "What kind of work this is, in the human's language: research, implementation, review, docs, … Always give it on a track where the human picks the agent: it is what they judge the choice on." },
+                    "why": { "type": "string", "description": "Why that agent or model suits this kind of work, one or two sentences in the human's language. Give it whenever you name an agent. Say what about the task calls for it, not that one agent is better than another." },
+                    "decided": { "type": "integer", "description": "The number of the card the human answered in their own words, when you are opening the worker with what those words meant. Only use an id the app gave you for this worker; it works once." },
                     "fresh": { "type": "boolean", "description": "Start over without the closed worker's earlier conversation. Default false." }
                 },
                 "required": ["name", "task"]
@@ -556,12 +588,8 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                         model: args.get("model").and_then(Value::as_str).map(str::to_owned),
                         kind: args.get("kind").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
                         why: args.get("why").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
+                        decided: args.get("decided").and_then(Value::as_i64),
                     };
-                    // A card with no case on it is an interruption, not a
-                    // question: the human would have nothing to judge.
-                    if ask.names_something() && (ask.kind.is_empty() || ask.why.is_empty()) {
-                        return Err("naming an agent or model needs `kind` and `why` too: the human sees them on the card and has nothing to decide on without them.".to_string());
-                    }
                     let fresh = args.get("fresh").and_then(Value::as_bool).unwrap_or(false);
                     start_worker_turn(app, track, name, task, ask, true, fresh).await
                 }
@@ -1094,7 +1122,17 @@ pub async fn answer_decision(
     // A proposal card answers the spawn holding a worker back, not the
     // conductor: the conductor ended its turn when the card went up, and
     // handing it this would only invite it to open the worker a second time.
-    if st.sessions.resolve_proposal(id, choice) {
+    //
+    // Words instead of a button go on to the conductor all the same, but
+    // through that spawn, which knows which worker they are about — see
+    // [`propose_worker`]. An answer with no button and no words is a button
+    // that does not exist, and falls back like an unanswered card.
+    let outcome = match (choice, own.as_deref().map(str::trim).filter(|w| !w.is_empty())) {
+        (Some(i), _) => Some(i),
+        (None, Some(_)) => Some(OWN_ANSWER),
+        (None, None) => None,
+    };
+    if st.sessions.resolve_proposal(id, outcome) {
         return Ok(decision);
     }
     let text = decision_text(&decision);
@@ -1507,10 +1545,17 @@ pub(crate) struct Ask {
     agent: Option<String>,
     model: Option<String>,
     /// What kind of work this is, in the human's words: research,
-    /// implementation, review, docs… The human judges the proposal on this.
+    /// implementation, review, docs… The human judges the choice on this.
     kind: String,
     /// Why this agent or model suits that kind of work.
     why: String,
+    /// The card the human already answered in their own words, whose answer
+    /// the conductor has read and turned into an agent and model.
+    ///
+    /// This is the one way past the card on a `propose` track, and it is
+    /// spent when used: without it the conductor could answer its own card
+    /// by spawning again, and with it re-usable it could loop.
+    decided: Option<i64>,
 }
 
 impl Ask {
@@ -1710,11 +1755,15 @@ fn track_info(state: &AppState, track: &str) -> Result<TrackInfo, String> {
 
 /// Give a worker a turn and return at once.
 ///
-/// When the conductor asks for an agent or model other than the track's and
-/// the track lets it ask ([`TrackInfo::proposes_worker_choice`]), this is
-/// where the proposal card comes from: the worker is held back, the human
-/// decides, and the turn starts after. The call still returns at once —
-/// nothing about a card changes what the conductor may assume.
+/// On a track whose worker choice is `propose`, **every** worker opened here
+/// goes to the human on a card first. That is what turning it on means: not
+/// "ask when the conductor thinks it is worth asking", but "I pick the agent
+/// for each worker myself". A conductor deciding when to raise the card
+/// would be deciding the thing the human took for themselves — and in
+/// practice it simply never raised one.
+///
+/// The conductor's `agent`/`model`/`why` are a suggestion on that card, not
+/// a condition for it. The call still returns at once either way.
 async fn start_worker_turn(
     app: AppHandle,
     track: String,
@@ -1730,35 +1779,49 @@ async fn start_worker_turn(
     let (chosen, ignored) = {
         let state = app.state::<AppState>();
         let info = track_info(&state, &track)?;
-        if !ask.names_something() {
-            (None, None)
+        // The human already answered a card for this worker and the
+        // conductor is bringing their answer back. Checked against the
+        // record, and it is spent by the check, so it cannot re-card and
+        // cannot be replayed.
+        if let Some(decision) = ask.decided {
+            if state.sessions.settled_worker(decision).as_deref() != Some(name.as_str()) {
+                return Err(format!(
+                    "decision {decision} is not an answered card waiting for worker {name}. Do not pass `decided` unless the app gave you that id for this worker."
+                ));
+            }
+            // Spent only once the agent and model check out. A refused model
+            // here is the conductor misreading the human's words, and it must
+            // be able to try again — the alternative is their answer going
+            // nowhere and the worker never starting.
+            let (agent_id, config) = resolve_ask(&state, &info, &ask)?;
+            state.sessions.take_settled(decision);
+            (Some((agent_id, config)), None)
         } else if !open {
             // `ask_worker` continues a conversation; its session exists
             // already and its agent came with it.
-            (None, Some("a follow-up stays on the agent the worker is already open with; the agent and model you named were not used.".to_string()))
+            let ignored = ask
+                .names_something()
+                .then(|| "a follow-up stays on the agent the worker is already open with; the agent and model you named were not used.".to_string());
+            (None, ignored)
         } else if !info.proposes_worker_choice() {
-            (
-                None,
-                Some(format!(
+            let ignored = ask.names_something().then(|| {
+                format!(
                     "this track keeps every worker on {}, so the agent and model you named were not used. The human can let you propose others in the track's worker settings.",
                     describe(&state, info.effective_worker_agent(), info.effective_worker_config())
-                )),
-            )
+                )
+            });
+            (None, ignored)
         } else {
             // A bad id is answered now, to the conductor, rather than put to
             // the human as a card naming something that does not exist.
-            let (agent_id, config) = resolve_ask(&state, &info, &ask)?;
-            let default_agent = info.effective_worker_agent().to_string();
-            let default_config = info.effective_worker_config().clone();
-            let differs = agent_id != default_agent
-                || model_of(&state, &agent_id, &config) != model_of(&state, &default_agent, &default_config);
+            let suggestion = ask.names_something().then(|| resolve_ask(&state, &info, &ask)).transpose()?;
             // A worker that is already open keeps its session whatever is
             // asked for; the body below says so rather than a card.
             let live = state.sessions.workers.lock().await.contains_key(&worker_key(&track, &name));
-            if differs && !live {
-                return propose_worker(&app, &track, &name, &text, &ask, (agent_id, config), fresh).await;
+            if !live {
+                return propose_worker(&app, &track, &name, &text, &ask, suggestion, fresh).await;
             }
-            (Some((agent_id, config)), None)
+            (None, None)
         }
     };
     let mut result = run_worker_turn(app, track, name, text, chosen, open, fresh).await?;
@@ -1791,40 +1854,82 @@ async fn propose_worker(
     name: &str,
     text: &str,
     ask: &Ask,
-    proposed: (String, BTreeMap<String, String>),
+    suggestion: Option<(String, BTreeMap<String, String>)>,
     fresh: bool,
 ) -> Result<Value, String> {
-    let (decision, theirs, ours, minutes) = {
+    let (decision, ours, minutes, choices) = {
         let state = app.state::<AppState>();
         let info = track_info(&state, track)?;
         let fallback = (info.effective_worker_agent().to_string(), info.effective_worker_config().clone());
         let ko = state.store.get_meta("setting:language").ok().flatten().as_deref() != Some("en");
-        let theirs = describe(&state, &proposed.0, &proposed.1);
         let ours = describe(&state, &fallback.0, &fallback.1);
         let minutes = PROPOSAL_WAIT.as_secs() / 60;
+        let suggested = suggestion.as_ref().map(|s| s.0.clone());
+
+        // One button per agent that could actually take the work, each
+        // saying which models it offers. Agent times model as separate
+        // buttons would be dozens of them and unreadable; the models go in
+        // the line under the agent, and naming one is what the free answer
+        // at the bottom is for.
+        let mut options: Vec<DecisionOption> = Vec::new();
+        let mut settings: Vec<(String, BTreeMap<String, String>)> = Vec::new();
+        for status in agent_choices(&state) {
+            let id = status.kind.id().to_string();
+            let mut marks: Vec<String> = Vec::new();
+            if id == fallback.0 {
+                marks.push(if ko { "트랙 기본".to_string() } else { "track default".to_string() });
+            }
+            if suggested.as_deref() == Some(id.as_str()) {
+                marks.push(if ko { "지휘자 제안".to_string() } else { "the conductor suggests this".to_string() });
+            }
+            let label = match marks.is_empty() {
+                true => status.kind.name().to_string(),
+                false => format!("{} · {}", status.kind.name(), marks.join(" · ")),
+            };
+            let mut detail = model_line(&state, &id, ko);
+            // Why, when it is about this agent: the conductor's case belongs
+            // beside the button it argues for, not at the top of the card.
+            if suggested.as_deref() == Some(id.as_str()) && !ask.why.is_empty() {
+                detail = format!("{detail}\n{}", ask.why);
+            }
+            options.push(DecisionOption { label, detail, id: format!("{PROPOSAL_OPTION}{id}") });
+            // The track's options only mean anything on the track's agent;
+            // any other starts from that agent's own, or the suggestion when
+            // the conductor named a model on it.
+            let config = match (&suggestion, id == fallback.0) {
+                (Some((sug, cfg)), _) if *sug == id => cfg.clone(),
+                (_, true) => fallback.1.clone(),
+                _ => BTreeMap::new(),
+            };
+            settings.push((id, config));
+        }
+        if options.is_empty() {
+            return Err("no agent is ready, so there is nothing to open a worker on. Tell the human to check the agents in settings.".to_string());
+        }
 
         let question = if ko {
-            format!("작업자 {name}을(를) {theirs}(으)로 열까요?")
+            format!("작업자 {name}을(를) 어느 에이전트로 열까요?")
         } else {
-            format!("Open worker {name} on {theirs}?")
+            format!("Which agent should worker {name} run on?")
         };
-        // The case for it, in the conductor's words: what kind of work this
-        // is, and why this agent suits it. Without those the human has
-        // nothing to judge and the card is only an interruption.
+        // What the work is, so the choice can be made on something. The
+        // conductor's own view, when it has one, sits beside its button.
         let mut context = String::new();
         if !ask.kind.is_empty() {
             context.push_str(&if ko { format!("작업 성질: {}\n", ask.kind) } else { format!("Kind of work: {}\n", ask.kind) });
         }
-        if !ask.why.is_empty() {
-            context.push_str(&ask.why);
-            context.push('\n');
-        }
+        context.push_str(&clip_task(text));
+        context.push('\n');
         context.push_str(&if ko {
-            format!("\n{minutes}분 안에 답이 없으면 트랙 기본({ours})으로 시작합니다.")
+            format!("\n모델을 직접 고르려면 아래에 적으세요(예: codex 가장 싼 모델). {minutes}분 안에 답이 없으면 트랙 기본({ours})으로 시작합니다.")
         } else {
-            format!("\nWith no answer in {minutes} minutes it starts on this track's default ({ours}).")
+            format!("\nTo pick a model, write it below (e.g. codex, the cheapest model). With no answer in {minutes} minutes it starts on this track's default ({ours}).")
         });
 
+        let recommended = suggested
+            .as_deref()
+            .or(Some(fallback.0.as_str()))
+            .and_then(|want| settings.iter().position(|(id, _)| id == want));
         let decision = state
             .store
             .open_decision(&NewDecision {
@@ -1832,20 +1937,11 @@ async fn propose_worker(
                 run: conductor_run(&state, track).await,
                 question,
                 context,
-                options: vec![
-                    // The ids say what each button opens the worker on, and
-                    // are what [`is_proposal`] knows a proposal card by.
-                    DecisionOption { label: theirs.clone(), detail: ask.why.clone(), id: format!("{PROPOSAL_OPTION}{}", proposed.0) },
-                    DecisionOption {
-                        label: ours.clone(),
-                        detail: if ko { "이 트랙의 기본".to_string() } else { "This track's default".to_string() },
-                        id: format!("{PROPOSAL_OPTION}{}", fallback.0),
-                    },
-                ],
-                recommended: Some(0),
-                // An agent and a model cannot be named reliably in free text,
-                // and the fallback is one of the buttons already.
-                allow_other: false,
+                options,
+                recommended,
+                // A model is named in words, not in buttons: the answer goes
+                // to the conductor, which turns it into an agent and model.
+                allow_other: true,
                 permission: None,
             })
             .map_err(|e| e.to_string())?;
@@ -1854,14 +1950,39 @@ async fn propose_worker(
 
         let (app_t, track_t, name_t, text_t) = (app.clone(), track.to_string(), name.to_string(), text.to_string());
         let id = decision.id;
-        let proposed_t = proposed.clone();
+        let choices: Vec<String> = settings.iter().map(|(a, _)| a.clone()).collect();
         tauri::async_runtime::spawn(async move {
-            let took_it = matches!(tokio::time::timeout(PROPOSAL_WAIT, waiter).await, Ok(Ok(Some(0))));
+            let answered = tokio::time::timeout(PROPOSAL_WAIT, waiter).await;
             let st = app_t.state::<AppState>();
             // Forget the waiter however this ended, so an answer arriving
             // late is handled as an ordinary decision instead of being sent
             // to a channel nobody holds.
             st.sessions.resolve_proposal(id, None);
+            let picked = match answered {
+                Ok(Ok(choice)) => choice,
+                _ => None,
+            };
+            // Answered in the human's own words: the conductor reads it,
+            // works out what it means, and opens the worker itself. Nothing
+            // starts here — guessing at "the cheapest model" is exactly what
+            // this hands off rather than does.
+            if picked == Some(OWN_ANSWER) {
+                let words = st.store.decision(id).ok().flatten().and_then(|d| d.answer).unwrap_or_default();
+                st.sessions.mark_settled(id, &name_t);
+                let hand = Hand {
+                    track: track_t.clone(),
+                    text: format!(
+                        "{DECISION_PREFIX} #{id}\nThe human answered the card about worker {name_t} in their own words instead of taking a button:\n\n{words}\n\nWork out which agent and which model they mean and open the worker with spawn_worker(name=\"{name_t}\", task=…, agent=…, model=…, decided={id}). The task is the one you were about to give it. Agents and their models are listed in your preamble; `decided={id}` is what lets this one call through without another card, and it works once.\nIf their words do not name something an agent actually offers, or you would have to guess (the app does not know what any model costs), do not pick for them: ask with request_decision and pass their answer on afterwards."
+                    ),
+                    open: false,
+                    what: format!("own answer for {name_t}"),
+                    keep: true,
+                    worker: None,
+                    run: None,
+                };
+                deliver(app_t, hand).await;
+                return;
+            }
             // An unanswered card is closed rather than left open looking live.
             if let Ok(Some(d)) = st.store.decision(id) {
                 if d.status == DecisionStatus::Open {
@@ -1870,8 +1991,8 @@ async fn propose_worker(
                     }
                 }
             }
-            let chosen = if took_it { proposed_t } else { fallback };
-            tracing::info!(track = %track_t, worker = %name_t, agent = %chosen.0, took_it, "worker proposal settled");
+            let chosen = picked.and_then(|i| settings.get(i).cloned()).unwrap_or(fallback);
+            tracing::info!(track = %track_t, worker = %name_t, agent = %chosen.0, answered = picked.is_some(), "worker proposal settled");
             let outcome = run_worker_turn(app_t.clone(), track_t.clone(), name_t.clone(), text_t, Some(chosen), true, fresh).await;
             if let Err(err) = outcome {
                 // The conductor ended its turn when the card went up, so a
@@ -1890,17 +2011,77 @@ async fn propose_worker(
                 deliver(app_t, hand).await;
             }
         });
-        (decision.id, theirs, ours, minutes)
+        (decision.id, ours, minutes, choices)
     };
 
     Ok(json!({
         "worker": name,
         "status": "proposed",
         "decision": decision,
-        "proposed": theirs,
+        "offered": choices,
         "otherwise": ours,
-        "note": format!("The human was asked whether to open {name} on {theirs}. Say in one sentence what you proposed and why, then end your turn. The worker starts either way — on your proposal if they take it, on {ours} if they do not answer within {minutes} minutes — and its {REPORT_PREFIX} reaches you as usual. Do not call spawn_worker for {name} again."),
+        "note": format!("This track's human picks the agent for every worker, so {name} is waiting on card #{decision}. Say in one sentence what you asked and end your turn. If they take one of the buttons the worker starts by itself and its {REPORT_PREFIX} reaches you as usual; if they answer in their own words you get those words to act on. Either way, do not call spawn_worker for {name} again unless you are told to. With no answer in {minutes} minutes it starts on {ours}."),
     }))
+}
+
+/// The index a proposal card's own-words answer is reported under.
+///
+/// Options are answered by index and an own answer has none, so it needs a
+/// value of its own that no option can collide with.
+const OWN_ANSWER: usize = usize::MAX;
+
+/// Agents a worker could actually be opened on: detected, and ready.
+fn agent_choices(state: &AppState) -> Vec<AgentStatus> {
+    state
+        .load_agents()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.readiness == Readiness::Ready)
+        .collect()
+}
+
+/// What an agent offers as models, for the line under its button.
+///
+/// An agent that exposes none says so. Whether any given agent does is not
+/// something the app can know before it has been probed, so this reads what
+/// detection found rather than assuming.
+fn model_line(state: &AppState, agent: &str, ko: bool) -> String {
+    const SHOWN: usize = 6;
+    let options = state.config_options_for(agent);
+    let Some(model) = options.iter().find(|o| o.category == "model").filter(|o| !o.choices.is_empty()) else {
+        return if ko {
+            "모델 선택 불가 — 이 에이전트의 모델은 자체 CLI 설정을 따릅니다".to_string()
+        } else {
+            "no model choice — this agent takes its model from its own CLI settings".to_string()
+        };
+    };
+    let mut names: Vec<String> = model.choices.iter().take(SHOWN).map(|c| c.name.clone()).collect();
+    if model.choices.len() > SHOWN {
+        names.push(format!("… (+{})", model.choices.len() - SHOWN));
+    }
+    let current = model
+        .choices
+        .iter()
+        .find(|c| c.id == model.current)
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| model.current.clone());
+    if ko {
+        format!("모델: {} · 기본 {current}", names.join(", "))
+    } else {
+        format!("models: {} · default {current}", names.join(", "))
+    }
+}
+
+/// The task, short enough to read on a card.
+fn clip_task(text: &str) -> String {
+    const MAX: usize = 400;
+    let text = text.trim();
+    if text.chars().count() <= MAX {
+        return text.to_string();
+    }
+    format!("{}…", text.chars().take(MAX).collect::<String>())
 }
 
 /// Open or continue a worker and give it a turn, returning at once.
@@ -3847,13 +4028,41 @@ mod proposal_tests {
         assert!(!is_proposal(&card(&[])));
     }
 
-    /// A conductor that names an agent or model but makes no case for it
-    /// gets the question back rather than the human getting a bare card.
+    /// Naming an agent marks it as the conductor's suggestion on the card;
+    /// naming nothing still raises one. The card does not depend on this.
     #[test]
     fn an_ask_knows_whether_it_names_anything() {
         assert!(!Ask::default().names_something());
         assert!(Ask { agent: Some("codex".into()), ..Ask::default() }.names_something());
         assert!(Ask { model: Some("gpt-5.2".into()), ..Ask::default() }.names_something());
+    }
+
+    /// The way past a card is spent by using it. Without that the conductor
+    /// could carry one answer back twice, or answer its own card forever:
+    /// every spawn on such a track raises a card, so a `decided` that kept
+    /// working would be a loop with the human's name on it.
+    #[test]
+    fn the_way_past_a_card_works_once_and_only_for_its_own_worker() {
+        let s = Sessions::default();
+        s.mark_settled(7, "scan-acp");
+        assert_eq!(s.settled_worker(7).as_deref(), Some("scan-acp"), "peeking does not spend it");
+        assert_eq!(s.settled_worker(7).as_deref(), Some("scan-acp"));
+        assert_eq!(s.take_settled(7).as_deref(), Some("scan-acp"));
+        assert_eq!(s.take_settled(7), None, "a card lets exactly one spawn through");
+        assert_eq!(s.take_settled(9), None, "an id nobody handed out lets nothing through");
+    }
+
+    /// Words instead of a button are not a button that happens to be absent:
+    /// they go to the conductor to interpret, and must never be read as an
+    /// option index.
+    #[test]
+    fn an_own_answer_is_not_an_option_index() {
+        let s = Sessions::default();
+        let mut rx = s.await_proposal(3);
+        assert!(s.resolve_proposal(3, Some(OWN_ANSWER)));
+        // `usize::MAX`, so it is past any index a card's options could have
+        // and can never be mistaken for one of them.
+        assert_eq!(rx.try_recv().unwrap(), Some(OWN_ANSWER));
     }
 }
 
