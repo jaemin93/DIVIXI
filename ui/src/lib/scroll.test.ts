@@ -9,6 +9,7 @@ import {
   bottomOf,
   followed,
   fromBottom,
+  reached,
   resized,
   scrolled,
   type ScrollMetrics,
@@ -151,4 +152,81 @@ test("the jump-to-newest button ends where following begins", () => {
   // And the scroll event it causes does not immediately undo it, even if
   // the conversation grew again in the meantime.
   assert.equal(scrolled(s, view(2600, 1500)).stuck, true);
+});
+
+// ----- the human reaching back -----
+
+test("a wheel pulled back lets go of the foot at once, however small the nudge", () => {
+  // The bug: a nudge lands inside the slack, so the position still reads as
+  // "at the foot"; the next thing to arrive follows it and the nudge is
+  // undone. Fifty notches later the view has not moved at all. The wheel
+  // itself is the signal, so it does not have to clear the slack first.
+  const s = reached(followed({ ...FOLLOWING }, 1500), AT_FOOT, true);
+  assert.equal(s.stuck, false);
+  assert.equal(s.missed, false, "nothing has been missed at the moment they look up");
+});
+
+test("reaching back holds while the stream keeps arriving", () => {
+  let s = reached(followed({ ...FOLLOWING }, 1500), AT_FOOT, true);
+  let tall = 2000;
+  // The wheel moved the view 8px up; the event for it arrives after content has.
+  for (let i = 0; i < 50; i++) {
+    tall += 30;
+    const { next, follow } = resized(s, true);
+    assert.equal(follow, false, `followed the foot anyway at step ${i}`);
+    s = next;
+    s = scrolled(s, view(tall, 1492));
+  }
+  assert.equal(s.stuck, false, "still where they left it");
+  assert.equal(s.missed, true, "and told that there is more below");
+});
+
+test("scrolling down to the foot takes it back", () => {
+  let s = reached(followed({ ...FOLLOWING }, 1500), AT_FOOT, true);
+  s = scrolled(s, view(2000, 1400));
+  assert.equal(s.stuck, false);
+  s = scrolled(s, view(2000, 1500 - BOTTOM_SLACK + 4));
+  assert.equal(s.stuck, true, "near enough the foot, moving toward it");
+  assert.equal(s.missed, false);
+});
+
+test("above the foot, a nudge up does not take it back", () => {
+  // Reading back, 20px above the foot: inside the slack, but moving away
+  // from it. Re-arming here is what put the view back under the stream.
+  const reading: Stick = { stuck: false, missed: true, lastTop: 1490 };
+  const s = scrolled(reading, view(2000, 1470));
+  assert.equal(s.stuck, false);
+  assert.equal(s.missed, true);
+});
+
+test("a wheel pushed forward is not reaching back", () => {
+  const foot = followed({ ...FOLLOWING }, 1500);
+  assert.deepEqual(reached(foot, AT_FOOT, false), foot);
+});
+
+test("there is nothing to reach back to in a conversation shorter than the view", () => {
+  const foot = followed({ ...FOLLOWING }, 0);
+  assert.deepEqual(reached(foot, view(300, 0), true), foot, "and no jump button either");
+});
+
+test("reaching back twice in one gesture does not move the mark", () => {
+  const s = reached(followed({ ...FOLLOWING }, 1500), AT_FOOT, true);
+  assert.deepEqual(reached(s, view(2000, 1400), true), s, "the gesture is already theirs");
+});
+
+test("content shrinking under someone reading back leaves them following again", () => {
+  // They folded a long report card. The content is now shorter than where
+  // they were, so the browser clamps the view to the foot -- upward, and
+  // with no downward move left to make. Refusing the foot here would strand
+  // them: at the bottom, not following, with a jump button that goes nowhere.
+  const reading: Stick = { stuck: false, missed: true, lastTop: 1500 };
+  const s = scrolled(reading, view(1200, 700));
+  assert.equal(fromBottom(view(1200, 700)), 0, "clamped onto the foot");
+  assert.equal(s.stuck, true);
+  assert.equal(s.missed, false);
+});
+
+test("a shrink that stops short of the foot is still reading back", () => {
+  const reading: Stick = { stuck: false, missed: true, lastTop: 1500 };
+  assert.equal(scrolled(reading, view(3000, 1400)).stuck, false);
 });
