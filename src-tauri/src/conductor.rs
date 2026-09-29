@@ -3991,7 +3991,7 @@ mod pulse_tests {
     }
 
     fn update(id: &str, status: &str) -> AgentEvent {
-        AgentEvent::ToolUpdate { id: id.to_string(), status: status.to_string(), paths: Vec::new() }
+        AgentEvent::ToolUpdate { id: id.to_string(), status: status.to_string(), title: String::new(), paths: Vec::new() }
     }
 
     #[test]
@@ -4006,7 +4006,7 @@ mod pulse_tests {
         pulse.note(&update("c1", "inprogress"));
         assert!(!pulse.nothing_running());
         // Files named mid-call, no status: the call has not ended.
-        pulse.note(&AgentEvent::ToolUpdate { id: "c1".to_string(), status: String::new(), paths: vec!["a.rs".to_string()] });
+        pulse.note(&AgentEvent::ToolUpdate { id: "c1".to_string(), status: String::new(), title: String::new(), paths: vec!["a.rs".to_string()] });
         assert!(!pulse.nothing_running());
 
         pulse.note(&update("c1", "completed"));
