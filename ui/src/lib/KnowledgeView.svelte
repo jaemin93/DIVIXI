@@ -101,7 +101,7 @@
     </div>
 
     {#if kb.embedding.enabled && kb.embedding.error}
-      <div class="banner err">{t("kb.embedError", { error: kb.embedding.error })}</div>
+      <div class="banner err">{t("kb.embedError", { done: kb.embedding.embedded, total: kb.embedding.total, error: kb.embedding.error })}</div>
     {/if}
     <div class="banner" class:busy={!!kb.indexing.length}>
       {#if current}

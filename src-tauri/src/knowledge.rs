@@ -485,12 +485,28 @@ async fn embed_pending(app: &AppHandle) {
         *state.library.embed_error.lock() = err;
         let _ = app.emit(EMBED_EVENT, ());
     };
+    // Nothing left to embed: whatever went wrong last time is over, so the
+    // failure stops being shown.
+    //
+    // This has to be said here. The only other place that clears it is a
+    // batch landing, and a loop with nothing to do stores nothing -- so a
+    // rate limit hit on the last few items left "Embedding failed: 429" on
+    // screen for good once those items went through on a later pass. The
+    // human could not tell a stopped run from a finished one.
+    let caught_up = || {
+        let had = std::mem::take(&mut *state.library.embed_error.lock());
+        if !had.is_empty() {
+            tracing::info!("everything is embedded; the last failure no longer applies");
+            let _ = app.emit(EMBED_EVENT, ());
+        }
+    };
     loop {
         let (d, s) = (db.clone(), sig.clone());
         let batch = match tokio::task::spawn_blocking(move || d.to_embed(&s, after, embed::BATCH)).await {
             Ok(Ok(b)) if !b.is_empty() => b,
+            Ok(Ok(_)) => return caught_up(),
             Ok(Err(err)) => return fail(err.to_string()),
-            _ => break,
+            Err(err) => return fail(err.to_string()),
         };
         after = batch.last().map(|t| t.id).unwrap_or(after);
         let texts: Vec<String> = batch.iter().map(|t| t.text.clone()).collect();
