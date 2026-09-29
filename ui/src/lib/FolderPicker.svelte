@@ -106,7 +106,12 @@
           <span class="mono up">..</span>
         </button>
         {#each at.dirs as d (d)}
-          <button class="row" disabled={busy} ondblclick={() => at && go(join(at.path, d))} onclick={() => at && (typed = join(at.path, d))}>
+          <!-- One click, like the `..` row above. Asking for two here made
+               the two rows in one list behave differently, and a single click
+               looked like nothing happening: it only filled the path box, and
+               the way in was to reach for Go. Opening a folder also types it,
+               so "Choose this folder" then picks what is on screen. -->
+          <button class="row" disabled={busy} onclick={() => at && go(join(at.path, d))}>
             <Icon name="folder" size={14} />
             <span class="mono name">{d}</span>
           </button>
