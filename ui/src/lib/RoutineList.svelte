@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store, NEW_ROUTINE } from "./store.svelte";
   import Icon from "./Icon.svelte";
+  import SplitHandle from "./SplitHandle.svelte";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
@@ -22,7 +23,16 @@
   }
 </script>
 
-<aside>
+<aside style="width: {store.routineListWidth}px">
+  <SplitHandle
+    edge="right"
+    width={store.routineListWidth}
+    min={200}
+    max={480}
+    reset={260}
+    label={t("routines.width")}
+    onchange={(px, persist) => store.setRoutineListWidth(px, persist)}
+  />
   <div class="head">
     <Icon name="routines" size={15} />
     <span class="title">{t("rail.routines")}</span>
@@ -68,7 +78,6 @@
   aside {
     position: relative;
     flex-shrink: 0;
-    width: 260px;
     border-right: 1px solid var(--line);
     background: var(--rail);
     display: flex;
