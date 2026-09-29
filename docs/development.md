@@ -128,6 +128,11 @@ disk: each worker checkout is a full copy of the repository.
   - An installed one installs them into `<data>/adapters` and falls back to `npx` until
     then.
   - Antigravity's ACP server is a download.
+- **An app opened from Finder does not get your shell's PATH.** launchd starts it with
+  `/usr/bin:/bin:/usr/sbin:/sbin`, where there is no `node` for the adapters, so on macOS
+  the app takes the login shell's PATH at startup (`src-tauri/src/shell_path.rs`).
+  `npm run app`, and `open` from a terminal, hand the shell's PATH through: to see what a
+  user sees, open the bundle from Finder.
 - **Agents run in their most autonomous mode.** Humans see the escalations agents raise,
   not tool approvals. Per-track settings can choose otherwise.
 - **The event store.**

@@ -36,7 +36,7 @@ export type AgentEvent =
   | { kind: "message"; text: string }
   | { kind: "thought"; text: string }
   | { kind: "tool_call"; id: string; title: string; tool_kind: string; status: string }
-  | { kind: "tool_update"; id: string; status?: string; paths?: string[] }
+  | { kind: "tool_update"; id: string; status?: string; title?: string; paths?: string[] }
   | { kind: "plan"; entries: string[] }
   | { kind: "usage"; raw: unknown }
   | { kind: "commands"; commands: SlashCommand[] }
@@ -886,12 +886,19 @@ class Store {
 
   /** Width of the designs column. Persisted. */
   designListWidth = $state(240);
+  /** Width of the routines column. Persisted. */
+  routineListWidth = $state(260);
   /** Width of the settings column. Persisted. */
   settingsNavWidth = $state(232);
 
   setDesignListWidth(px: number, persist = false) {
     this.designListWidth = Math.min(480, Math.max(200, Math.round(px)));
     if (persist) this.persistWidth("designlist_width", this.designListWidth);
+  }
+
+  setRoutineListWidth(px: number, persist = false) {
+    this.routineListWidth = Math.min(480, Math.max(200, Math.round(px)));
+    if (persist) this.persistWidth("routinelist_width", this.routineListWidth);
   }
 
   setSettingsNavWidth(px: number, persist = false) {
@@ -2568,13 +2575,14 @@ class Store {
         this.lastError = String(err);
       }
       try {
-        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth] = await Promise.all([
+        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineListWidth] = await Promise.all([
           invoke<string | null>("get_setting", { key: "terminal" }),
           invoke<string | null>("get_setting", { key: "terminal_height" }),
           invoke<string | null>("get_setting", { key: "artifact_chat_width" }),
           invoke<string | null>("get_setting", { key: "designlist" }),
           invoke<string | null>("get_setting", { key: "designlist_width" }),
           invoke<string | null>("get_setting", { key: "settings_nav_width" }),
+          invoke<string | null>("get_setting", { key: "routinelist_width" }),
         ]);
         const dc = Number(artifactChat);
         if (Number.isFinite(dc) && dc > 0) this.setArtifactChatWidth(dc);
@@ -2582,6 +2590,8 @@ class Store {
         if (Number.isFinite(dl) && dl > 0) this.setDesignListWidth(dl);
         const sn = Number(settingsNavWidth);
         if (Number.isFinite(sn) && sn > 0) this.setSettingsNavWidth(sn);
+        const rl = Number(routineListWidth);
+        if (Number.isFinite(rl) && rl > 0) this.setRoutineListWidth(rl);
         this.designListOpen = designList !== "closed";
         const h = Number(termHeight);
         if (Number.isFinite(h) && h > 0) this.setTermHeight(h);
@@ -3151,12 +3161,15 @@ function fold(run: Run, ms: number, ev: AgentEvent) {
       break;
     }
     case "tool_update": {
-      // An update that only names files moves nothing here.
-      if (!ev.status) break;
+      // An update that only names files moves nothing here. One with a title
+      // replaces the placeholder the call started with ("Terminal").
       const tool = run.tools.find((t) => t.id === ev.id);
-      if (tool) tool.status = ev.status;
       const seg = run.segments.find((s) => s.kind === "tool" && s.tool.id === ev.id);
-      if (seg && seg.kind === "tool") seg.tool.status = ev.status;
+      for (const t of [tool, seg?.kind === "tool" ? seg.tool : undefined]) {
+        if (!t) continue;
+        if (ev.title) t.title = ev.title;
+        if (ev.status) t.status = ev.status;
+      }
       break;
     }
     case "plan":

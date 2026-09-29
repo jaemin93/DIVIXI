@@ -215,19 +215,24 @@ jobs:
       - name: tauri build (unsigned)
         run: npx tauri build --bundles ${{ matrix.bundles }}
 
-      # bundle.icon in tauri.conf.json does not list icons/icon.icns, so the
-      # .app is expected to carry no icon until that is fixed. Report it rather
-      # than fail: the bundle itself is still valid.
+      # Tauri builds the .app's icon from the PNGs in bundle.icon, one entry
+      # per size, so the largest PNG listed is the sharpest the Dock and
+      # Finder get. icons/icon.icns is not listed on purpose: it is from
+      # before the mark was redrawn per pixel (scripts/make-icon.mjs), and
+      # listing it would ship the old drawing. This checks the icon is there
+      # and says which sizes it holds.
       - name: Check .app carries an icon (macOS)
         if: runner.os == 'macOS'
         run: |
           app=$(find target/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)
           echo "bundle: $app"
-          if ls "$app/Contents/Resources/"*.icns >/dev/null 2>&1; then
-            echo "icon present: $(ls "$app/Contents/Resources/"*.icns)"
-          else
-            echo "NO .icns in the bundle -- add icons/icon.icns to bundle.icon in tauri.conf.json"
+          icns=$(ls "$app/Contents/Resources/"*.icns 2>/dev/null | head -1)
+          if [ -z "$icns" ]; then
+            echo "::error::no .icns in the bundle"
+            exit 1
           fi
+          iconutil -c iconset "$icns" -o "$RUNNER_TEMP/icon.iconset"
+          echo "icon sizes: $(ls "$RUNNER_TEMP/icon.iconset" | tr '\n' ' ')"
           plutil -p "$app/Contents/Info.plist" | grep -E 'CFBundleShortVersionString|CFBundleVersion|CFBundleIdentifier'
 
       - name: Upload bundle
