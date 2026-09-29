@@ -18,9 +18,11 @@
 //! is left alone.
 //!
 //! It changes this process's environment, so [`adopt`] runs at the top of
-//! `run`, before any thread exists. Logging has not started yet, so what it
-//! did waits in [`OUTCOME`] until [`log`] can say.
+//! `run`, before any thread that could read it exists. The one thread it
+//! starts itself reads the shell's output and nothing else. Logging has not
+//! started yet, so what it did waits in [`OUTCOME`] until [`log`] can say.
 
+use std::ffi::{OsStr, OsString};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -40,7 +42,8 @@ const MARKER: &str = "__DIVIXI_LOGIN_PATH__";
 /// shell that is still going after this is stuck, and the window is waiting.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// When `SHELL` is not set: the default login shell since macOS 10.15.
+/// When neither `SHELL` nor the account says: the default login shell since
+/// macOS 10.15.
 const FALLBACK_SHELL: &str = "/bin/zsh";
 
 /// What [`adopt`] did, for the log.
@@ -58,13 +61,13 @@ static OUTCOME: OnceLock<Outcome> = OnceLock::new();
 
 /// Take the login shell's PATH when this process has only launchd's.
 ///
-/// Call once, before any thread exists: it sets `PATH`.
+/// Call once, before any other thread exists: it sets `PATH`.
 pub fn adopt() {
-    let current = std::env::var("PATH").unwrap_or_default();
+    let current = std::env::var_os("PATH").unwrap_or_default();
     let outcome = if !is_launchd_default(&current) {
         Outcome::Kept
     } else {
-        let shell = std::env::var_os("SHELL").filter(|s| !s.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(FALLBACK_SHELL));
+        let shell = login_shell();
         match read(&shell, &[], TIMEOUT) {
             Ok(found) => {
                 let (path, added) = merge(&found, &current);
@@ -82,15 +85,38 @@ pub fn log() {
     match OUTCOME.get() {
         Some(Outcome::Adopted { shell, added }) => tracing::info!(%shell, added, "PATH taken from the login shell"),
         Some(Outcome::Failed { shell, error }) => {
-            tracing::warn!(%shell, %error, "the PATH is launchd's and the login shell's could not be read: agents that run under node will not start")
+            tracing::warn!(%shell, %error, "the PATH is launchd's and the login shell's could not be read: agents that run under node may not start")
         }
         Some(Outcome::Kept) | None => {}
     }
 }
 
+/// The user's login shell: `SHELL`, which launchd sets from the account, or
+/// else the account's own record, or else [`FALLBACK_SHELL`]. Running zsh for
+/// someone whose shell is bash or fish would miss the lines in their files.
+fn login_shell() -> PathBuf {
+    if let Some(shell) = std::env::var_os("SHELL").filter(|s| !s.is_empty()) {
+        return PathBuf::from(shell);
+    }
+    let user = std::env::var("USER").unwrap_or_default();
+    Command::new("/usr/bin/dscl")
+        .args([".", "-read", &format!("/Users/{user}"), "UserShell"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|out| account_shell(&String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or_else(|| PathBuf::from(FALLBACK_SHELL))
+}
+
+/// The shell out of `dscl . -read /Users/<name> UserShell`: `UserShell: /bin/bash`.
+fn account_shell(dscl: &str) -> Option<PathBuf> {
+    let shell = dscl.lines().find_map(|l| l.strip_prefix("UserShell:"))?.trim();
+    shell.starts_with('/').then(|| PathBuf::from(shell))
+}
+
 /// Whether `path` is launchd's: nothing in it but [`LAUNCHD_DIRS`]. An empty
 /// PATH counts, since it has even less.
-fn is_launchd_default(path: &str) -> bool {
+fn is_launchd_default(path: &OsStr) -> bool {
     std::env::split_paths(path).all(|dir| dir.as_os_str().is_empty() || LAUNCHD_DIRS.iter().any(|d| dir == Path::new(d)))
 }
 
@@ -106,15 +132,25 @@ fn is_launchd_default(path: &str) -> bool {
 /// the PATH has come: something a startup file starts in the background can
 /// keep the pipe open long after the shell is gone, and waiting for the end
 /// of it would wait for that. The shell is killed if it has not finished by
-/// then, and when `timeout` runs out.
+/// then. When `timeout` runs out, its whole process group goes: whatever
+/// a startup file was stuck in would otherwise be left running, once for
+/// every launch. It has a group of its own for that reason.
 fn read(shell: &Path, env: &[(&str, &str)], timeout: Duration) -> Result<String, String> {
+    use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(shell);
-    cmd.args(["-l", "-i", "-c", &format!("echo {MARKER}; /usr/bin/printenv PATH")])
+    let (args, script) = shell_args(shell);
+    cmd.args(args)
         .envs(env.iter().copied())
-        .stdin(Stdio::null())
+        .process_group(0)
+        .stdin(if script.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", shell.display()))?;
+    if let (Some(script), Some(mut stdin)) = (script, child.stdin.take()) {
+        // Dropped at the end of this block: the shell reads end-of-file after the
+        // script, and exits instead of waiting for more.
+        let _ = std::io::Write::write_all(&mut stdin, script.as_bytes());
+    }
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -137,13 +173,34 @@ fn read(shell: &Path, env: &[(&str, &str)], timeout: Duration) -> Result<String,
                     break Ok(path);
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => break Err(format!("{} gave no PATH within {}s", shell.display(), timeout.as_secs())),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // The shell leads its group, so the group's id is its pid.
+                let _ = Command::new("/bin/kill").args(["-KILL", "--", &format!("-{}", child.id())]).stderr(Stdio::null()).status();
+                break Err(format!("{} gave no PATH within {}s", shell.display(), timeout.as_secs()));
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break Err(format!("{} ended without printing a PATH", shell.display())),
         }
     };
     let _ = child.kill();
     let _ = child.wait();
     found
+}
+
+/// How to ask `shell` for its PATH: its arguments, and what to write to its
+/// stdin, if anything. The same startup files a terminal's new window reads,
+/// so the PATH is the one the user sees there.
+///
+/// csh and tcsh take `-l` only as their sole option, so they cannot be told
+/// a command with `-c` and still be login shells, which read `~/.login`.
+/// They get `-l` alone and the command on stdin instead.
+fn shell_args(shell: &Path) -> (Vec<String>, Option<String>) {
+    let command = format!("echo {MARKER}; /usr/bin/printenv PATH");
+    let name = shell.file_name().and_then(OsStr::to_str).unwrap_or_default();
+    if matches!(name, "csh" | "tcsh") {
+        (vec!["-l".into()], Some(format!("{command}\n")))
+    } else {
+        (vec!["-l".into(), "-i".into(), "-c".into(), command], None)
+    }
 }
 
 /// The PATH out of a login shell's output: the line after [`MARKER`], if it
@@ -157,8 +214,9 @@ fn parse(lines: &[String]) -> Option<String> {
 }
 
 /// The login shell's directories first, then this process's that it did not
-/// have, each once. Also how many are new to this process.
-fn merge(shell: &str, current: &str) -> (String, usize) {
+/// have, each once. Also how many are new to this process. `current` stays
+/// an `OsStr`, so a directory in it that is not UTF-8 is kept, not dropped.
+fn merge(shell: &str, current: &OsStr) -> (OsString, usize) {
     let before: Vec<PathBuf> = std::env::split_paths(current).collect();
     let mut dirs: Vec<PathBuf> = Vec::new();
     for dir in std::env::split_paths(shell).chain(before.iter().cloned()) {
@@ -169,7 +227,7 @@ fn merge(shell: &str, current: &str) -> (String, usize) {
     let added = dirs.iter().filter(|d| !before.contains(d)).count();
     // Every entry came out of a split on ':', so none of them holds one and
     // joining cannot fail.
-    let path = std::env::join_paths(&dirs).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| shell.to_string());
+    let path = std::env::join_paths(&dirs).unwrap_or_else(|_| OsString::from(shell));
     (path, added)
 }
 
@@ -192,11 +250,12 @@ mod tests {
 
     #[test]
     fn only_launchds_own_path_is_replaced() {
-        assert!(is_launchd_default("/usr/bin:/bin:/usr/sbin:/sbin"));
-        assert!(is_launchd_default("/bin:/usr/bin"));
-        assert!(is_launchd_default(""));
-        assert!(!is_launchd_default("/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"));
-        assert!(!is_launchd_default("/usr/local/bin:/usr/bin:/bin"));
+        let launchd = |p: &str| is_launchd_default(OsStr::new(p));
+        assert!(launchd("/usr/bin:/bin:/usr/sbin:/sbin"));
+        assert!(launchd("/bin:/usr/bin"));
+        assert!(launchd(""));
+        assert!(!launchd("/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"));
+        assert!(!launchd("/usr/local/bin:/usr/bin:/bin"));
     }
 
     #[test]
@@ -214,9 +273,24 @@ mod tests {
 
     #[test]
     fn the_shells_directories_go_first_and_none_twice() {
-        let (path, added) = merge("/opt/homebrew/bin:/usr/bin:/bin", "/usr/bin:/bin:/usr/sbin:/sbin");
+        let (path, added) = merge("/opt/homebrew/bin:/usr/bin:/bin", OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin"));
         assert_eq!(path, "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin");
         assert_eq!(added, 1);
+    }
+
+    #[test]
+    fn a_directory_that_is_not_utf8_survives_the_merge() {
+        use std::os::unix::ffi::OsStrExt;
+        let current = OsStr::from_bytes(b"/usr/bin:/Users/me/\xffbin");
+        let (path, _) = merge("/opt/homebrew/bin", current);
+        assert_eq!(path.as_bytes(), b"/opt/homebrew/bin:/usr/bin:/Users/me/\xffbin");
+    }
+
+    #[test]
+    fn the_accounts_shell_is_read_from_dscl() {
+        assert_eq!(account_shell("UserShell: /opt/homebrew/bin/fish\n"), Some(PathBuf::from("/opt/homebrew/bin/fish")));
+        assert_eq!(account_shell("No such key: UserShell\n"), None);
+        assert_eq!(account_shell(""), None);
     }
 
     /// The whole of it against a real zsh, with a `.zshrc` that greets and
@@ -229,11 +303,25 @@ mod tests {
     }
 
     #[test]
-    fn a_shell_that_never_finishes_starting_is_given_up_on() {
-        let home = zdotdir("sleep 10\n");
+    fn a_shell_that_never_finishes_starting_is_given_up_on_with_what_it_started() {
+        // An odd length, so the check below finds this test's sleep and no other.
+        let home = zdotdir("sleep 4613\n");
         let started = Instant::now();
         let err = read(Path::new("/bin/zsh"), &[("ZDOTDIR", home.to_str().unwrap())], Duration::from_millis(500)).unwrap_err();
         assert!(err.contains("gave no PATH"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+        std::thread::sleep(Duration::from_millis(200));
+        let left = Command::new("/usr/bin/pgrep").args(["-f", "sleep 4613"]).output().unwrap();
+        assert!(left.stdout.is_empty(), "the startup file's sleep outlived the shell");
+    }
+
+    #[test]
+    fn tcsh_is_asked_the_way_it_accepts() {
+        let home = zdotdir("");
+        std::fs::write(home.join(".cshrc"), "echo 'Welcome back!'\nsetenv PATH /opt/divixi-cshrc/bin:${PATH}\n").unwrap();
+        std::fs::write(home.join(".login"), "setenv PATH /opt/divixi-login/bin:${PATH}\n").unwrap();
+        let path = read(Path::new("/bin/tcsh"), &[("HOME", home.to_str().unwrap())], Duration::from_secs(20)).unwrap();
+        assert!(path.contains("/opt/divixi-cshrc/bin"), "{path}");
+        assert!(path.contains("/opt/divixi-login/bin"), "~/.login was not read: {path}");
     }
 }
