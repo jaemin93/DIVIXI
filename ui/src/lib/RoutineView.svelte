@@ -1,5 +1,7 @@
 <script lang="ts">
   import { store, agentLabel, NEW_ROUTINE, type RoutineRun, type OptionConfig } from "./store.svelte";
+  import { local } from "./ipc.svelte";
+  import FolderPicker from "./FolderPicker.svelte";
   import Icon from "./Icon.svelte";
   import Working from "./Working.svelte";
   import Markdown from "./Markdown.svelte";
@@ -75,7 +77,18 @@
           JSON.stringify(config) !== JSON.stringify(saved.config))),
   );
 
+  /** On a remote instance, its own folders in a picker the app draws. */
+  let remotePick = $state(false);
+
   async function browse() {
+    // The system picker only knows this PC's folders, and the bridge refuses
+    // it outright ("pick_folder is not available from another device"). A
+    // routine on a remote instance works in that instance's folders, so it
+    // browses them the same way a track does.
+    if (!local) {
+      remotePick = true;
+      return;
+    }
     const picked = await store.pickFolder(cwd);
     if (picked) cwd = picked;
   }
@@ -221,6 +234,17 @@
     {/if}
   </div>
 </section>
+
+{#if remotePick}
+  <FolderPicker
+    start={cwd}
+    onpick={(p) => {
+      cwd = p;
+      remotePick = false;
+    }}
+    onclose={() => (remotePick = false)}
+  />
+{/if}
 
 <style>
   section {
