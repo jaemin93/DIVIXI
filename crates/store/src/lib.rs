@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -221,6 +221,33 @@ const MIGRATIONS: &[&str] = &[
     // than the track's default. `follow` is what every track did until now,
     // so an existing track keeps its behaviour exactly.
     "ALTER TABLE tracks ADD COLUMN worker_choice TEXT NOT NULL DEFAULT 'follow';",
+    // 19 -> 20: `routines` as `SCHEMA` has it. The table was made at
+    // 15 -> 16 carrying `worker TEXT NOT NULL`, from when a routine ran as
+    // one. Two revisions later it runs on its own agent and nothing writes
+    // that column, but no step ever removed it -- so a database that came
+    // through the migrations kept a NOT NULL column with no default, and
+    // making a routine on it failed with "NOT NULL constraint failed:
+    // routines.worker" while a fresh install was fine.
+    //
+    // Rebuilt rather than `DROP COLUMN`, because both shapes are out there:
+    // a database first created while `SCHEMA` already omitted `worker` does
+    // not have the column to drop. Naming the columns to carry over says
+    // what the table is either way, and leaves nothing behind.
+    "CREATE TABLE routines_rebuilt (
+        id          TEXT    PRIMARY KEY,
+        name        TEXT    NOT NULL,
+        instruction TEXT    NOT NULL,
+        cwd         TEXT    NOT NULL,
+        agent       TEXT    NOT NULL,
+        config      TEXT    NOT NULL DEFAULT '{}',
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL
+    );
+    INSERT INTO routines_rebuilt(id, name, instruction, cwd, agent, config, created_at, updated_at)
+        SELECT id, name, instruction, cwd, agent, config, created_at, updated_at FROM routines;
+    DROP TABLE routines;
+    ALTER TABLE routines_rebuilt RENAME TO routines;
+    CREATE INDEX IF NOT EXISTS routines_by_time ON routines(updated_at);",
 ];
 
 const SCHEMA: &str = r#"
@@ -2086,6 +2113,117 @@ mod tests {
         store.set_meta("agents", "[2]").unwrap();
         assert_eq!(store.get_meta("agents").unwrap().as_deref(), Some("[2]"));
         assert_eq!(store.get_meta("schema_version").unwrap().as_deref(), Some(SCHEMA_VERSION.to_string().as_str()));
+    }
+
+    /// Every table and column SQLite reports, so two databases can be held
+    /// against each other.
+    fn shape(conn: &Connection) -> Vec<String> {
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let mut out = Vec::new();
+        for name in names {
+            let cols: Vec<String> = conn
+                .prepare(&format!("PRAGMA table_info({name})"))
+                .unwrap()
+                .query_map([], |r| {
+                    Ok(format!(
+                        "{} {} notnull={} default={:?} pk={}",
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, i64>(5)?
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            out.push(format!("{name}({})", cols.join(", ")));
+        }
+        out
+    }
+
+    /// A database that came through the migrations has the same tables as one
+    /// made from `SCHEMA` today.
+    ///
+    /// The two are written in different places and nothing tied them together:
+    /// `routines` was created at 15 -> 16 with a `worker TEXT NOT NULL` column
+    /// that later revisions stopped writing and no step ever removed, so
+    /// creating a routine failed on every migrated database while a fresh
+    /// install was fine. This is the check that was missing.
+    ///
+    /// It starts at 16 on purpose: `SCHEMA` no longer holds the shape the
+    /// routines table was born with, so the 15 -> 16 step itself has to build
+    /// it, exactly as it did on the databases in the wild.
+    ///
+    /// Column order counts here, and deliberately: `ALTER TABLE ADD COLUMN`
+    /// can only append, so a column added that way belongs at the end of its
+    /// table in `SCHEMA` as well. This fails until it is.
+    #[test]
+    fn a_migrated_database_ends_up_shaped_like_a_fresh_one() {
+        let dir = std::env::temp_dir().join(format!("orchestra-store-shape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v15.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            // Undo everything added after 15, then let the real steps redo it.
+            conn.execute_batch(
+                "DROP TABLE routines;
+                 DROP TABLE routine_runs;
+                 ALTER TABLE tracks DROP COLUMN worker_choice;
+                 INSERT INTO meta(key, value) VALUES ('schema_version', '15');",
+            )
+            .unwrap();
+            // The routines table as it was actually born, from the step itself
+            // rather than a copy of it that could drift. It is reached by
+            // index, so a step inserted ahead of it would point this at other
+            // SQL and quietly leave the test building a database nobody ever
+            // had. Checked rather than trusted.
+            let born = MIGRATIONS[14];
+            assert!(
+                born.contains("CREATE TABLE IF NOT EXISTS routines") && born.contains("worker      TEXT    NOT NULL"),
+                "MIGRATIONS[14] is no longer the step that creates routines; find it again"
+            );
+            conn.execute_batch(born).unwrap();
+            conn.execute("UPDATE meta SET value = '16' WHERE key = 'schema_version'", []).unwrap();
+            conn.execute(
+                "INSERT INTO routines(id, track, name, instruction, worker, agent, created_at, updated_at)
+                 VALUES ('ro001', 'tr001', 'nightly', 'check the deps', 'dep-pr', 'codex', 1, 2)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let migrated = Store::open(&path).unwrap();
+        let fresh = Store::in_memory().unwrap();
+        assert_eq!(
+            shape(&migrated.conn.lock()),
+            shape(&fresh.conn.lock()),
+            "a migrated database and a fresh one disagree about their tables"
+        );
+
+        // And the routine written under the old shape is still there, and a
+        // new one can be made beside it -- which is what actually broke.
+        let kept = migrated.routines().unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!((kept[0].name.as_str(), kept[0].agent.as_str()), ("nightly", "codex"));
+        migrated
+            .create_routine(&RoutinePatch {
+                name: Some("fresh one".into()),
+                instruction: Some("do the thing".into()),
+                cwd: Some("/w".into()),
+                agent: Some("claude_code".into()),
+                ..RoutinePatch::default()
+            })
+            .unwrap();
+        assert_eq!(migrated.routines().unwrap().len(), 2);
     }
 
     #[test]
