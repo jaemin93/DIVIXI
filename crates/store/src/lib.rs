@@ -1720,11 +1720,30 @@ fn fold(tx: &rusqlite::Transaction<'_>, run: &str) -> anyhow::Result<()> {
          WHERE run_id = ?1 AND kind IN ('message', 'plan', 'tool_call', 'tool_update') ORDER BY seq",
     )?;
     let rows = stmt.query_map(params![run], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    // Text an agent writes on either side of a tool call is two passages,
+    // not one: "It's an npm install, not Homebrew." then, after the call,
+    // "`check-claude-app` is gone". Joined as they came they read as one
+    // run-on line once the timeline shows `output`, which it does for every
+    // run it has not replayed.
+    let mut after_tool = false;
     for row in rows {
         let (kind, payload) = row?;
         let value: serde_json::Value = serde_json::from_str(&payload)?;
         match kind.as_str() {
-            "message" => output.push_str(value["text"].as_str().unwrap_or_default()),
+            "message" => {
+                let text = value["text"].as_str().unwrap_or_default();
+                if after_tool && !output.is_empty() {
+                    // A blank line between them -- and exactly one, however
+                    // many newlines the two sides already bring to the seam.
+                    let have = output.chars().rev().take_while(|c| *c == '\n').count()
+                        + text.chars().take_while(|c| *c == '\n').count();
+                    for _ in have..2 {
+                        output.push('\n');
+                    }
+                }
+                after_tool = false;
+                output.push_str(text);
+            }
             "plan" => {
                 plan = value["entries"]
                     .as_array()
@@ -1732,6 +1751,7 @@ fn fold(tx: &rusqlite::Transaction<'_>, run: &str) -> anyhow::Result<()> {
                     .unwrap_or_default();
             }
             "tool_call" => {
+                after_tool = true;
                 tools.push((value["id"].as_str().unwrap_or_default().to_owned(), value["title"].as_str().unwrap_or_default().to_owned()))
             }
             "tool_update" => {
@@ -2663,6 +2683,42 @@ mod tests {
 
         let snippet = store.search("tokenizer").unwrap().remove(0).snippet;
         assert!(snippet.contains("[tokenizer]"), "{snippet}");
+    }
+
+    /// What a conductor wrote before a tool call and after it are kept apart
+    /// in the stored output; chunks of one passage still join as they came.
+    ///
+    /// A line ending in a single newline counts as unseparated: a list item is
+    /// the everyday way that happens, and the renderer takes `breaks: true`, so
+    /// the sentence after the call would be read as part of the item above it.
+    #[test]
+    fn text_on_either_side_of_a_tool_call_stays_two_passages() {
+        let store = Store::in_memory().unwrap();
+        let run = store.begin_run(TR, "conductor", "claude_code", "clean up", ".").unwrap();
+        store.append(&run, 10, &AgentEvent::Message { text: "It's an npm global ".into() }).unwrap();
+        store.append(&run, 11, &AgentEvent::Message { text: "install, not Homebrew.".into() }).unwrap();
+        store.append(&run, 12, &tool("t1", "npm install -g tokscale@latest")).unwrap();
+        store.append(&run, 13, &AgentEvent::Message { text: "`check-claude-app` is gone.".into() }).unwrap();
+        store.append(&run, 90, &AgentEvent::Finished { stop_reason: "end_turn".into() }).unwrap();
+
+        let output = store.run(&run).unwrap().unwrap().output;
+        assert_eq!(output, "It's an npm global install, not Homebrew.\n\n`check-claude-app` is gone.");
+
+        // Ending on a newline is not ending on a blank line.
+        let listy = store.begin_run(TR, "conductor", "claude_code", "check", ".").unwrap();
+        store.append(&listy, 10, &AgentEvent::Message { text: "- reading the file\n".into() }).unwrap();
+        store.append(&listy, 11, &tool("t1", "cat notes.md")).unwrap();
+        store.append(&listy, 12, &AgentEvent::Message { text: "The file is empty.".into() }).unwrap();
+        store.append(&listy, 90, &AgentEvent::Finished { stop_reason: "end_turn".into() }).unwrap();
+        assert_eq!(store.run(&listy).unwrap().unwrap().output, "- reading the file\n\nThe file is empty.");
+
+        // A blank line already there is not doubled.
+        let spaced = store.begin_run(TR, "conductor", "claude_code", "check", ".").unwrap();
+        store.append(&spaced, 10, &AgentEvent::Message { text: "Looking now.\n\n".into() }).unwrap();
+        store.append(&spaced, 11, &tool("t2", "ls")).unwrap();
+        store.append(&spaced, 12, &AgentEvent::Message { text: "Nothing there.".into() }).unwrap();
+        store.append(&spaced, 90, &AgentEvent::Finished { stop_reason: "end_turn".into() }).unwrap();
+        assert_eq!(store.run(&spaced).unwrap().unwrap().output, "Looking now.\n\nNothing there.");
     }
 
     /// A call that started as "Terminal" and was named in an update is found
