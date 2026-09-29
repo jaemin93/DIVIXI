@@ -284,7 +284,7 @@
         {:else if !eSaved.on}
           {t("kb.emb.savedOff")}
         {:else if kb.embedding.error}
-          {t("kb.embedError", { error: kb.embedding.error })}
+          {t("kb.embedError", { done: kb.embedding.embedded, total: kb.embedding.total, error: kb.embedding.error })}
         {:else if kb.embedding.embedded + kb.embedding.failed < kb.embedding.total}
           <span class="pulse"></span>{t("kb.emb.working", { done: kb.embedding.embedded, total: kb.embedding.total })}
         {:else}
