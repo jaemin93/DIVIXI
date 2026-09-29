@@ -2160,6 +2160,10 @@ mod tests {
     /// It starts at 16 on purpose: `SCHEMA` no longer holds the shape the
     /// routines table was born with, so the 15 -> 16 step itself has to build
     /// it, exactly as it did on the databases in the wild.
+    ///
+    /// Column order counts here, and deliberately: `ALTER TABLE ADD COLUMN`
+    /// can only append, so a column added that way belongs at the end of its
+    /// table in `SCHEMA` as well. This fails until it is.
     #[test]
     fn a_migrated_database_ends_up_shaped_like_a_fresh_one() {
         let dir = std::env::temp_dir().join(format!("orchestra-store-shape-{}", std::process::id()));
@@ -2178,8 +2182,16 @@ mod tests {
             )
             .unwrap();
             // The routines table as it was actually born, from the step itself
-            // rather than a copy of it that could drift.
-            conn.execute_batch(MIGRATIONS[14]).unwrap();
+            // rather than a copy of it that could drift. It is reached by
+            // index, so a step inserted ahead of it would point this at other
+            // SQL and quietly leave the test building a database nobody ever
+            // had. Checked rather than trusted.
+            let born = MIGRATIONS[14];
+            assert!(
+                born.contains("CREATE TABLE IF NOT EXISTS routines") && born.contains("worker      TEXT    NOT NULL"),
+                "MIGRATIONS[14] is no longer the step that creates routines; find it again"
+            );
+            conn.execute_batch(born).unwrap();
             conn.execute("UPDATE meta SET value = '16' WHERE key = 'schema_version'", []).unwrap();
             conn.execute(
                 "INSERT INTO routines(id, track, name, instruction, worker, agent, created_at, updated_at)
