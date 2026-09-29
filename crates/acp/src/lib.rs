@@ -694,17 +694,19 @@ pub(crate) fn translate(update: SessionUpdate) -> Vec<AgentEvent> {
         }],
         // Most tool-call updates carry content (terminal output, diffs), not a
         // status change. Emitting those as `status: unknown` buries the real
-        // transitions, so only forward updates that move the state or name
-        // the files the call touches.
+        // transitions, so only forward updates that move the state, rename
+        // the call, or name the files it touches.
         SessionUpdate::ToolCallUpdate(update) => {
             let status = update.fields.status.map(|s| format!("{s:?}").to_lowercase()).unwrap_or_default();
+            let title = update.fields.title.clone().unwrap_or_default();
             let paths = touched(update.fields.locations.iter().flatten(), update.fields.content.iter().flatten());
-            if status.is_empty() && paths.is_empty() {
+            if status.is_empty() && title.is_empty() && paths.is_empty() {
                 Vec::new()
             } else {
                 vec![AgentEvent::ToolUpdate {
                     id: format!("{}", update.tool_call_id),
                     status,
+                    title,
                     paths,
                 }]
             }
@@ -793,5 +795,47 @@ mod spec_tests {
         assert!(shown.contains("ANTHROPIC_API_KEY"), "the name says enough to debug with: {shown}");
         assert!(!shown.contains("sk-secret"), "the value never goes in a log: {shown}");
         assert!(shown.contains("claude") && shown.contains("--acp"), "{shown}");
+    }
+}
+
+#[cfg(test)]
+mod translate_tests {
+    use super::translate;
+    use agent_client_protocol::schema::v1::SessionUpdate;
+    use orchestra_core::AgentEvent;
+
+    fn update(json: serde_json::Value) -> SessionUpdate {
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// What the Claude adapter sends for a Bash call: a `tool_call` while the
+    /// input is still streaming, then an update naming the command.
+    #[test]
+    fn an_update_that_names_the_call_carries_its_title() {
+        let started = translate(update(serde_json::json!({
+            "sessionUpdate": "tool_call", "toolCallId": "toolu_1", "title": "Terminal", "kind": "execute", "status": "pending"
+        })));
+        assert!(matches!(&started[..], [AgentEvent::ToolCall { title, .. }] if title == "Terminal"));
+
+        let named = translate(update(serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "toolu_1", "title": "cargo build --release -p tokscale-cli", "kind": "execute"
+        })));
+        match &named[..] {
+            [AgentEvent::ToolUpdate { id, status, title, .. }] => {
+                assert_eq!(id, "toolu_1");
+                assert_eq!(status, "", "naming a call does not move its state");
+                assert_eq!(title, "cargo build --release -p tokscale-cli");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_update_with_only_output_is_still_dropped() {
+        let out = translate(update(serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "toolu_1",
+            "content": [{ "type": "content", "content": { "type": "text", "text": "Compiling…" } }]
+        })));
+        assert!(out.is_empty(), "{out:?}");
     }
 }

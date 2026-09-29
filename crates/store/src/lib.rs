@@ -1685,11 +1685,12 @@ fn migrate(conn: &mut Connection, from: i64) -> anyhow::Result<()> {
 fn fold(tx: &rusqlite::Transaction<'_>, run: &str) -> anyhow::Result<()> {
     let mut output = String::new();
     let mut plan: Vec<String> = Vec::new();
-    let mut tools: Vec<String> = Vec::new();
+    // (id, title): an update can rename a call after it started.
+    let mut tools: Vec<(String, String)> = Vec::new();
 
     let mut stmt = tx.prepare(
         "SELECT kind, payload FROM events
-         WHERE run_id = ?1 AND kind IN ('message', 'plan', 'tool_call') ORDER BY seq",
+         WHERE run_id = ?1 AND kind IN ('message', 'plan', 'tool_call', 'tool_update') ORDER BY seq",
     )?;
     let rows = stmt.query_map(params![run], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     for row in rows {
@@ -1703,7 +1704,15 @@ fn fold(tx: &rusqlite::Transaction<'_>, run: &str) -> anyhow::Result<()> {
                     .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_owned)).collect())
                     .unwrap_or_default();
             }
-            "tool_call" => tools.push(value["title"].as_str().unwrap_or_default().to_owned()),
+            "tool_call" => {
+                tools.push((value["id"].as_str().unwrap_or_default().to_owned(), value["title"].as_str().unwrap_or_default().to_owned()))
+            }
+            "tool_update" => {
+                let (id, title) = (value["id"].as_str().unwrap_or_default(), value["title"].as_str().unwrap_or_default());
+                if let Some(tool) = tools.iter_mut().find(|(t, _)| !title.is_empty() && t == id) {
+                    tool.1 = title.to_owned();
+                }
+            }
             _ => {}
         }
     }
@@ -1717,7 +1726,7 @@ fn fold(tx: &rusqlite::Transaction<'_>, run: &str) -> anyhow::Result<()> {
     let prompt: String = tx.query_row("SELECT prompt FROM runs WHERE id = ?1", params![run], |r| r.get(0))?;
     tx.execute(
         "INSERT INTO runs_fts(run_id, prompt, output, tools) VALUES (?1, ?2, ?3, ?4)",
-        params![run, prompt, output, tools.join("\n")],
+        params![run, prompt, output, tools.iter().map(|(_, title)| title.as_str()).collect::<Vec<_>>().join("\n")],
     )?;
     Ok(())
 }
@@ -2516,6 +2525,23 @@ mod tests {
 
         let snippet = store.search("tokenizer").unwrap().remove(0).snippet;
         assert!(snippet.contains("[tokenizer]"), "{snippet}");
+    }
+
+    /// A call that started as "Terminal" and was named in an update is found
+    /// by the command, not by the placeholder.
+    #[test]
+    fn search_finds_a_tool_by_the_title_an_update_gave_it() {
+        let store = Store::in_memory().unwrap();
+        let run = store.begin_run(TR, "solo", "claude_code", "build it", ".").unwrap();
+        store.append(&run, 10, &tool("t1", "Terminal")).unwrap();
+        let named = AgentEvent::ToolUpdate { id: "t1".into(), status: String::new(), title: "cargo build --release -p tokscale-cli".into(), paths: vec![] };
+        store.append(&run, 11, &named).unwrap();
+        store.append(&run, 12, &AgentEvent::ToolUpdate { id: "t1".into(), status: "completed".into(), title: String::new(), paths: vec![] }).unwrap();
+        store.append(&run, 90, &AgentEvent::Finished { stop_reason: "end_turn".into() }).unwrap();
+
+        let hit = |q: &str| store.search(q).unwrap().into_iter().map(|h| h.run).collect::<Vec<_>>();
+        assert_eq!(hit("tokscale"), vec![run.clone()]);
+        assert_eq!(store.run(&run).unwrap().unwrap().tool_count, 1, "an update is not another call");
     }
 
     #[test]

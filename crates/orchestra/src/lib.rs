@@ -102,13 +102,19 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         paths: Vec<String>,
     },
-    /// A tool call changed status, or said which files it touches.
+    /// A tool call changed status, was named, or said which files it touches.
     ToolUpdate {
         /// Agent-assigned tool call id.
         id: String,
-        /// New lifecycle status; empty when only `paths` came.
+        /// New lifecycle status; empty when only `paths` or `title` came.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         status: String,
+        /// A better title than the call started with; empty when it did not
+        /// change. The Claude adapter starts a call while its input is still
+        /// streaming — "Terminal", "Read File" — and names the command or the
+        /// file in an update once the input is whole.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        title: String,
         /// Files the call touches, when the update says (some agents, e.g.
         /// Codex, name an edit's files only after it starts).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -290,8 +296,9 @@ mod tests {
                 status: "pending".into(),
                 paths: vec![],
             },
-            AgentEvent::ToolUpdate { id: "1".into(), status: "completed".into(), paths: vec![] },
-            AgentEvent::ToolUpdate { id: "1".into(), status: String::new(), paths: vec!["a.rs".into()] },
+            AgentEvent::ToolUpdate { id: "1".into(), status: "completed".into(), title: String::new(), paths: vec![] },
+            AgentEvent::ToolUpdate { id: "1".into(), status: String::new(), title: String::new(), paths: vec!["a.rs".into()] },
+            AgentEvent::ToolUpdate { id: "1".into(), status: String::new(), title: "cargo build".into(), paths: vec![] },
             AgentEvent::Plan { entries: vec![] },
             AgentEvent::Usage { raw: serde_json::Value::Null },
             AgentEvent::Commands { commands: vec![] },
