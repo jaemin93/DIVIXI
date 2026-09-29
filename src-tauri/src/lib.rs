@@ -149,7 +149,7 @@ impl AppState {
         Ok(statuses)
     }
 
-    fn load_agents(&self) -> Result<Option<Vec<AgentStatus>>, String> {
+    pub(crate) fn load_agents(&self) -> Result<Option<Vec<AgentStatus>>, String> {
         if let Some(cached) = self.agents.lock().clone() {
             return Ok(Some(cached));
         }
@@ -1790,6 +1790,7 @@ pub fn run() {
             conductor::sweep_parked(app.handle().clone());
             // Permission cards left from an earlier run of the app: their agents are gone.
             tauri::async_runtime::spawn(conductor::dismiss_stale_permissions(app.handle().clone(), None));
+            tauri::async_runtime::spawn(conductor::dismiss_stale_proposals(app.handle().clone()));
             // Library sync, and a watch on its files.
             knowledge::start(app.handle().clone());
             // A server is quit with a signal, not a window, so it has to be

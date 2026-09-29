@@ -28,7 +28,7 @@ mod process;
 mod session;
 pub use attach::{file_uri, mime_of};
 pub use process::{spawn as spawn_agent, AgentProcess};
-pub use session::{AgentSession, McpHttp, SessionOptions};
+pub use session::{AgentSession, McpHttp, RefusedOption, SessionOptions};
 
 /// How to launch an agent subprocess.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]

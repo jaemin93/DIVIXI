@@ -44,7 +44,8 @@
             return {
               name,
               track: tr.id,
-              agent: workerRuns.at(-1)?.agent ?? tr.agent,
+              agent: session?.agent ?? workerRuns.at(-1)?.agent ?? tr.agent,
+              model: session?.model ?? "",
               live: workerRuns.some(live) || !!session?.running,
               // Its agent process is alive, whether or not it has work.
               open: !!session?.open,
@@ -150,10 +151,26 @@
     }, 4000);
   }
 
+  /**
+   * What a worker is running on, for the tooltip and the menu head.
+   *
+   * This stays out of the list line on purpose. The line was carrying the
+   * agent name once and it was removed as noise, and mixing agents does not
+   * change that: a name repeated down ten rows says nothing, and showing it
+   * only on the odd one out would make labels appear and disappear as
+   * workers open, which reads worse than either. What does change is that
+   * the answer now has two parts, so both are here — where it is asked for
+   * rather than always on screen.
+   */
+  function workerAgent(w: Worker): string {
+    const model = w.model ? store.choiceName(store.optionsOf(w.agent).find((o) => o.category === "model"), w.model) : "";
+    return model ? `${agentLabel(w.agent)} · ${model}` : agentLabel(w.agent);
+  }
+
   /** The whole of a worker row, for the tooltip: name, agent, how it is doing. */
   function workerTitle(w: Worker): string {
     const state = w.live ? t("worker.working") : w.open ? t("worker.sessionOpen") : t("worker.sessionClosed");
-    return `${w.name} · ${agentLabel(w.agent)} · ${state}`;
+    return `${w.name} · ${workerAgent(w)} · ${state}`;
   }
 
   // ----- context menu -----
@@ -498,7 +515,7 @@
        rule, in the danger colour, behind a confirm step that says what goes
        and what stays. -->
   <div class="menu" bind:this={menuEl} style="left: {menu.x}px; top: {menu.y}px" role="menu" aria-label={t("worker.menu")}>
-    <div class="mono whead">{menuWorker.name}<span class="wagent">{agentLabel(menuWorker.agent)}</span></div>
+    <div class="mono whead">{menuWorker.name}<span class="wagent">{workerAgent(menuWorker)}</span></div>
     <button class="item" role="menuitem" disabled={!menuWorker.live} title={t("worker.stopNote")} onclick={stopWorker}>{t("worker.stop")}</button>
     <button class="item" role="menuitem" disabled={!menuWorker.open || menuWorker.live} title={t("worker.closeNote")} onclick={closeWorkerSession}>{t("worker.closeSession")}</button>
     <div class="rule"></div>
