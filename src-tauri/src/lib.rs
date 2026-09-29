@@ -44,6 +44,8 @@ mod mask;
 mod metrics;
 mod preview;
 mod routine;
+#[cfg(all(target_os = "macos", not(feature = "server")))]
+mod shell_path;
 mod terminal;
 mod remote;
 mod update;
@@ -1559,6 +1561,12 @@ pub fn run() {
         }
     }
 
+    // An app opened from Finder gets launchd's PATH, which has no `node` for
+    // the agents to run under: take the login shell's instead. Before any
+    // thread exists, since it sets PATH (src/shell_path.rs).
+    #[cfg(all(target_os = "macos", not(feature = "server")))]
+    shell_path::adopt();
+
     #[cfg(not(feature = "server"))]
     let builder = tauri::Builder::default()
         // First, as the plugin asks.
@@ -1732,6 +1740,8 @@ pub fn run() {
             let last_crash = crash::take_previous(&logs_dir);
             crash::install(&logs_dir);
             logging::banner(&logs_dir);
+            #[cfg(all(target_os = "macos", not(feature = "server")))]
+            shell_path::log();
             if let Some(crash) = &last_crash {
                 tracing::warn!(when = %crash.when, at = %crash.location, "the run before this one panicked: {}", crash.message);
             }
