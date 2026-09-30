@@ -8,12 +8,14 @@
    * the useful thing to do about it takes longer than four seconds. So it
    * stays until it is closed, like CrashBanner beside it.
    *
-   * The whole of an update can be done from here: press "update" and the
-   * download starts where you stand, the bytes are counted in the banner, and
-   * what comes out the far side is the button that opens the verified
-   * installer. Nobody is sent to settings to get it done -- the card is for
-   * the detail (where the file is, its folder, the check's own history), so
-   * "open settings" stays as a second, quieter link.
+   * The whole of an update is done from here: press "update" and the download
+   * starts where you stand, the bytes are counted in the banner, and what
+   * comes out the far side is the button that opens the verified installer.
+   * There is no way through to settings from here, on purpose -- every state
+   * offers the press that moves it on, and closing it is the other way out.
+   * The card in Settings -> About is still where the detail lives (the file's
+   * path, its folder, the switch for the check at startup); it is reached the
+   * way any settings are, from the rail.
    *
    * Because both can start a download, both read and write the same store
    * fields, and `store.downloadUpdate` is the only way either of them starts
@@ -60,12 +62,6 @@
     const got = store.updateGot;
     return got && UPDATE_DOWNLOAD_WRONG.has(got.kind) ? updateWrongText(got) : null;
   });
-
-  /** Where the log and the card are, for the detail this banner leaves out. */
-  function toUpdates() {
-    store.openSettings("about");
-    store.updateBannerClosed = true;
-  }
 </script>
 
 <!-- The region is in the page from the start, empty or not: a screen reader
@@ -119,7 +115,6 @@
         {:else if canDownload}
           <button class="btn btn-acc" type="button" disabled={busy} onclick={() => store.downloadUpdate()}>{t("update.banner.update")}</button>
         {/if}
-        <button class="btn" type="button" onclick={toUpdates}>{t("update.banner.details")}</button>
         <button class="close" type="button" onclick={() => (store.updateBannerClosed = true)} title={t("update.banner.dismiss")} aria-label={t("update.banner.dismiss")}>✕</button>
       </div>
     </div>
