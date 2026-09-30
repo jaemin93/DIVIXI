@@ -78,13 +78,20 @@ running, and update it.
 
 - **No telemetry.** Divixi sends nothing about you or your use anywhere — nothing
   reported, counted or phoned home. The only request Divixi makes of a server is the
-  update check below, and only when you ask for it.
-- **Checking for updates.** Pressing *Check for updates* in **Settings → About** asks the
-  public GitHub API for the newest published release of this repository. The request
+  update check below.
+- **Checking for updates.** Divixi asks the public GitHub API for the newest published
+  release of this repository in two cases: when you press *Check for updates* in
+  **Settings → About**, and once when the app opens, at most once a day. The request
   carries no sign-in, no version, no platform, and nothing that identifies you or this
-  machine. There is no check at startup and none on a timer. Divixi never downloads or
-  installs anything by itself: it tells you a release exists and opens its page in your
-  browser.
+  machine — what GitHub sees is an address reading a public page. The check at startup
+  has a switch beside that button and can be turned off; the button keeps working either
+  way. You are told only when there is a newer release: an up-to-date answer and a failed
+  check both pass in silence, and a failure is shown on that card and nowhere else.
+- **Updating is yours.** Downloading and installing only ever happen on a press. With a
+  release out, Divixi can fetch its installer (Windows for now), check it against the
+  SHA-256 GitHub published for that file, and offer to open it — you click through the
+  installer yourself. Divixi never installs anything on its own; it has no code-signing
+  certificate, so it will not run unsigned code it fetched without you asking.
 - **Where your data lives.** Tracks, conversations, boards and the knowledge library are
   in the app's data folder: `%APPDATA%\app.divixi` on Windows, `~/.local/share/app.divixi`
   on Linux.
