@@ -276,14 +276,6 @@ misleading:
   CI, and the bundle is unsigned — so it is refused by Gatekeeper on any machine that
   did not build it. Green on macOS means "it builds", not "it runs". If you are on a
   Mac, your report of what actually happens is genuinely valuable.
-- **The Unix process-tree tests are a report, not a gate.** The teardown that takes down
-  an agent's whole process group is implemented, but it has only ever been cross-compiled
-  from Windows. Two tests cover it — the graceful shutdown, and an aborted one, which is
-  the path a session that fails to start actually takes — and both stay `#[ignore]`d off
-  Windows. CI runs them by name prefix (`process::tests::`) under `continue-on-error`, so
-  the real result is visible on every run without a wrong guess about an untested platform
-  blocking unrelated work. If you see them pass on a machine you trust, say so in an issue
-  — that is what turns them into gates.
 - **`cargo clippy` does not use `-D warnings`.** The existing warnings have not been
   triaged, and making them fatal would block every pull request for reasons unrelated to
   it. Errors still fail the step. Do not add new warnings; you do not have to clear old

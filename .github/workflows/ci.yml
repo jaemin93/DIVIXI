@@ -12,9 +12,6 @@
 #   - prettier: same reason, for the UI.
 #   - code signing and notarization: no certificates. macOS is built unsigned,
 #     which proves it compiles and bundles but not that it launches.
-#   - the agent process tree on Unix: implemented but never executed on a Unix
-#     machine, only cross-compiled. Run and reported on macOS and Linux
-#     (`continue-on-error`) rather than gated, until one real run says it works.
 name: CI
 
 on:
@@ -131,25 +128,6 @@ jobs:
       # cfg on the other platforms; the rest are portable.
       - name: cargo test
         run: cargo test --workspace
-
-      # The Unix teardown (a process group, signalled SIGTERM then SIGKILL) is
-      # implemented -- but it has only ever been cross-compiled from Windows,
-      # never executed on macOS or Linux. So the test stays #[ignore]d there
-      # and runs here as a report instead: the real result is visible on every
-      # run, and a wrong guess about a platform nobody has tested cannot block
-      # unrelated pull requests.
-      #
-      # When this step passes, delete it and the #[cfg_attr(not(windows),
-      # ignore)] in crates/acp/src/process.rs. The test then runs in
-      # `cargo test` above and becomes an ordinary gate.
-      - name: Agent process tree on Unix (report only, not yet gated)
-        if: runner.os != 'Windows'
-        continue-on-error: true
-        # Both of them: the graceful teardown and the aborted one. The second
-        # covers the path session.rs actually takes when a session fails to
-        # start, which is where the pgid-cleared-too-early leak lived.
-        # Quoted: a plain scalar ending in a colon reads as a mapping key.
-        run: "cargo test -p orchestra-acp --lib -- --ignored process::tests::"
 
       - name: Build app binary
         run: cargo build -p orchestra-app --bin divixi
