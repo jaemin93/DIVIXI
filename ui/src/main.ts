@@ -16,6 +16,13 @@ void ready().then((ok) => {
     store.lastError = String(err);
   });
   store.restore();
+  // The one request divixi makes without being asked: which release is newest,
+  // once a launch, at most once a day, and only while the switch in
+  // Settings -> About is on (ui/src/lib/updateSchedule.ts). Not awaited and
+  // nothing waits on it -- it runs behind whatever is already on screen, and a
+  // machine with no network fails quietly where only the settings card shows
+  // it.
+  void store.checkAtStartup();
 });
 
 export default mount(App, { target: document.getElementById("app")! });

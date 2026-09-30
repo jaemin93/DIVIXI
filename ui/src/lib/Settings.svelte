@@ -2,6 +2,12 @@
   import {
     store,
     agentLabel,
+    UPDATE_WRONG,
+    UPDATE_DOWNLOAD_WRONG,
+    updateMb as mb,
+    updatePercent as percent,
+    updateProgressText as progressText,
+    updateWrongText,
     ZOOM_MIN,
     ZOOM_MAX,
     ZOOM_STEP,
@@ -46,7 +52,12 @@
     if (local) invoke<LogLevel>("log_level").then((l) => (level = l)).catch(() => {});
     // Which release this app is, for the update card. Reads a string compiled
     // into the binary; asks GitHub nothing (src-tauri/src/update.rs).
-    if (local) invoke<string | null>("update_release").then((r) => (release = r)).catch(() => {});
+    if (local) void store.loadRelease();
+    // And whether the check at startup is on, for the switch on that card.
+    // `checkAtStartup` reads the same setting; this is for the times it left
+    // early (the switch off, or a check made within the day) and so never got
+    // as far as putting it in the store.
+    if (local) void store.loadUpdateAuto();
   });
   function saveIdle() {
     const n = Math.max(0, Math.min(1440, Math.round(Number(idleMinutes) || 0)));
@@ -156,52 +167,10 @@
   }
 
   // ----- updates -----
-
-  /**
-   * What `update_check` answers. Every outcome is a named case, failures
-   * included, so there is a line to show for each of them and none of them
-   * can go by unsaid. Mirrors `Check` in src-tauri/src/update.rs.
-   */
-  type Check =
-    | { kind: "dev_build" }
-    | { kind: "up_to_date"; current: string }
-    | { kind: "ahead"; current: string; latest: string }
-    | { kind: "update"; current: string; latest: string; url: string }
-    | { kind: "offline"; detail: string }
-    | { kind: "rate_limited"; detail: string }
-    | { kind: "no_release" }
-    | { kind: "failed"; detail: string }
-    | { kind: "bad_build"; current: string };
-
-  /** The release this build came from, or null for a development build. */
-  let release = $state<string | null>(null);
-  /** The last check's answer, or null before the button has been pressed. */
-  let check = $state<Check | null>(null);
-  let checking = $state(false);
-
-  /** The cases that are something wrong rather than an answer. */
-  const WRONG = new Set(["offline", "rate_limited", "no_release", "failed", "bad_build"]);
-
-  /**
-   * Ask GitHub, on this press and on no other occasion.
-   *
-   * There is deliberately no check at startup and none on a timer: the README
-   * promises divixi sends nothing anywhere on its own, and a request made
-   * without being asked for would be the one exception. See the module header
-   * in src-tauri/src/update.rs.
-   */
-  async function checkUpdate() {
-    checking = true;
-    check = null;
-    try {
-      check = await invoke<Check>("update_check");
-    } catch (err) {
-      // The command names a case for every failure it knows, so getting here
-      // means the call itself never landed. Still shown, not swallowed.
-      check = { kind: "failed", detail: String(err) };
-    }
-    checking = false;
-  }
+  //
+  // The state lives in the store, because the banner outside every view shows
+  // the same thing (UpdateBanner.svelte). What is here is how this card draws
+  // it. Mirrors src-tauri/src/update.rs.
 
   /** The release's page in this PC's browser. Nothing is downloaded here. */
   async function openRelease(url: string) {
@@ -211,6 +180,7 @@
       store.lastError = t("settings.updateOpenFailed", { why: String(err) });
     }
   }
+
 
   $effect(() => {
     if (store.info === null) store.loadInfo();
@@ -397,16 +367,35 @@
             <div class="ftitle">{t("settings.updateCheck")}</div>
             <p class="fnote">{t("settings.updateNote")}</p>
             <p class="fnote now mono">
-              {release === null ? t("settings.updateDevBuild") : t("settings.updateRelease", { tag: release })}
+              {store.release === null ? t("settings.updateDevBuild") : t("settings.updateRelease", { tag: store.release })}
             </p>
             <div class="actions">
-              <button class="btn" disabled={checking} onclick={checkUpdate}>
-                {checking ? t("settings.updateChecking") : t("settings.updateCheck")}
+              <button class="btn" disabled={store.updateChecking} onclick={() => store.checkUpdate()}>
+                {store.updateChecking ? t("settings.updateChecking") : t("settings.updateCheck")}
               </button>
             </div>
-            {#if check}
-              {@const c = check}
-              {@const wrong = WRONG.has(c.kind)}
+
+            <!-- The check at startup, which is the only one nobody pressed.
+                 Off here means the app asks GitHub nothing on its own; the
+                 button above keeps working either way. -->
+            <div class="swrow">
+              <div class="swsays">
+                <div class="ftitle">{t("settings.updateAuto")}</div>
+                <p class="fnote">{t("settings.updateAutoNote")}</p>
+              </div>
+              <button
+                class="toggle"
+                class:on={store.updateAuto}
+                role="switch"
+                aria-checked={store.updateAuto}
+                aria-label={t("settings.updateAuto")}
+                onclick={() => store.setUpdateAuto(!store.updateAuto)}><span></span></button
+              >
+            </div>
+
+            {#if store.updateCheck}
+              {@const c = store.updateCheck}
+              {@const wrong = UPDATE_WRONG.has(c.kind)}
               <!-- A failure interrupts (role=alert); an answer is announced
                    when the reader gets to it (role=status). The pair is kept
                    in step, as in CrashBanner and ErrorToasts. -->
@@ -421,8 +410,69 @@
                   <p class="fnote found">{t("settings.updateFound", { tag: c.latest, current: c.current })}</p>
                   <div class="actions">
                     <button class="btn" onclick={() => openRelease(c.url)}>{t("settings.updateOpen")}</button>
+                    <!-- Windows only today. On macOS and Linux the release
+                         page above stays the whole of it: the app says which
+                         platforms it fetches for in one function
+                         (`installer` in src-tauri/src/update.rs) and this
+                         button follows that answer. -->
+                    {#if c.can_download && !store.updateReady}
+                      <button class="btn" disabled={store.updateProgress !== null} onclick={() => store.downloadUpdate()}>
+                        {store.updateGot && UPDATE_DOWNLOAD_WRONG.has(store.updateGot.kind) ? t("settings.updateRetry") : t("settings.updateDownload")}
+                      </button>
+                    {/if}
+                    {#if store.updateProgress !== null}
+                      <button class="btn" onclick={() => store.cancelUpdate()}>{t("settings.updateCancel")}</button>
+                    {/if}
                   </div>
+                  {#if c.can_download}
+                    <p class="fnote">{t("settings.updateDownloadNote")}</p>
+                  {:else}
+                    <p class="fnote">{t("settings.updateManualOnly")}</p>
+                  {/if}
                   <p class="fnote warn">{t("settings.updateUnsigned")}</p>
+
+                  {#if store.updateProgress}
+                    {@const p = store.updateProgress}
+                    {@const pct = percent(p)}
+                    <div class="dl">
+                      <div class="bar" class:indeterminate={pct === null}>
+                        <div class="fill" style="width: {pct ?? 30}%"></div>
+                      </div>
+                      <div class="mono dltext" role="status" aria-live="polite">{progressText(p)}</div>
+                    </div>
+                  {/if}
+
+                  {#if store.updateGot}
+                    {@const g = store.updateGot}
+                    {@const broke = UPDATE_DOWNLOAD_WRONG.has(g.kind)}
+                    <div class="ures" role={broke ? "alert" : "status"} aria-live={broke ? "assertive" : "polite"}>
+                      {#if g.kind === "ready"}
+                        <p class="fnote ok">{t("settings.updateVerified", { name: g.name, size: mb(g.size) })}</p>
+                        <p class="fnote why mono">{t("settings.updateAt", { path: g.path })}</p>
+                        <div class="actions">
+                          <button class="btn btn-acc" onclick={() => store.openInstaller()}>{t("settings.updateOpenInstaller")}</button>
+                          <button class="btn" onclick={() => store.revealUpdate()}>{t("settings.updateShowFolder")}</button>
+                        </div>
+                        <p class="fnote">{t("settings.updateBeforeInstall")}</p>
+                        <p class="fnote warn">{t("settings.updateWarnUnsigned")}</p>
+                      {:else if g.kind === "cancelled"}
+                        <p class="fnote">{t("settings.updateCancelled")}</p>
+                      {:else if g.kind === "busy"}
+                        <p class="fnote">{t("settings.updateBusy")}</p>
+                      {:else if g.kind === "nothing"}
+                        <p class="fnote">{t("settings.updateNothing")}</p>
+                      {:else if g.kind === "unsupported"}
+                        <p class="fnote">{t("settings.updateManualOnly")}</p>
+                      {:else}
+                        <!-- Everything left is one of `UPDATE_DOWNLOAD_WRONG`,
+                             and the banner has to say the same thing, so the
+                             wording lives once in store.svelte.ts. -->
+                        {@const w = updateWrongText(g)}
+                        <p class="fnote bad">{w.say}</p>
+                        {#if w.why}<p class="fnote why mono">{w.why}</p>{/if}
+                      {/if}
+                    </div>
+                  {/if}
                 {:else if c.kind === "offline"}
                   <p class="fnote bad">{t("settings.updateOffline")}</p>
                   <p class="fnote why mono">{c.detail}</p>
@@ -660,6 +710,100 @@
 
   .fnote.bad {
     color: var(--acct);
+  }
+
+  /* A setting with a switch beside it: the words take the width, the switch
+     keeps its size. Same switch as the knowledge settings use. */
+  .swrow {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+  }
+
+  .swsays {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .swsays .fnote {
+    margin-bottom: 0;
+  }
+
+  .toggle {
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    border: 1px solid var(--lines);
+    background: var(--inp);
+    position: relative;
+    padding: 0;
+    flex-shrink: 0;
+  }
+
+  .toggle span {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--dim);
+    transition: left 0.15s;
+  }
+
+  .toggle.on {
+    background: var(--acc);
+    border-color: var(--acc);
+  }
+
+  .toggle.on span {
+    left: 20px;
+    background: var(--accon);
+  }
+
+  /* The installer download's bar. Same shape as the agent download's
+     (AgentList.svelte): hairline track, accent fill, no radius. */
+  .dl {
+    margin: 12px 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .bar {
+    height: 3px;
+    background: var(--line);
+    overflow: hidden;
+  }
+
+  .fill {
+    height: 100%;
+    background: var(--acc);
+    transition: width 120ms linear;
+  }
+
+  /* No total to draw a fraction of: a sliver that moves, and the amount in
+     words beside it. */
+  .indeterminate .fill {
+    animation: slide 1.2s ease-in-out infinite;
+  }
+
+  @keyframes slide {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(340%);
+    }
+  }
+
+  .dltext {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--lab);
   }
 
   /* What GitHub or the network actually said. English, like the diagnostics

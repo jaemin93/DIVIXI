@@ -4,6 +4,15 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Key, type Lang, type LangPref } from "./i18n.svelte";
 import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
 import {
+  AUTO_KEY,
+  autoFrom,
+  autoTo,
+  dueForCheck,
+  LAST_CHECK_KEY,
+  lastCheckFrom,
+  lastCheckTo,
+} from "./updateSchedule";
+import {
   dropQueued,
   liveQueued,
   liveQueuedFor,
@@ -690,6 +699,114 @@ export type DownloadProgress = {
   received: number;
   total: number | null;
 };
+
+// ----- updates (src-tauri/src/update.rs) -----
+
+/**
+ * What `update_check` answers. Every outcome is a named case, failures
+ * included, so there is a line to show for each of them and none of them can
+ * go by unsaid. Mirrors `Check` in src-tauri/src/update.rs.
+ */
+export type UpdateCheck =
+  | { kind: "dev_build" }
+  | { kind: "up_to_date"; current: string }
+  | { kind: "ahead"; current: string; latest: string }
+  | { kind: "update"; current: string; latest: string; url: string; can_download: boolean }
+  | { kind: "offline"; detail: string }
+  | { kind: "rate_limited"; detail: string }
+  | { kind: "no_release" }
+  | { kind: "failed"; detail: string }
+  | { kind: "bad_build"; current: string };
+
+/** Mirrors the `update_download` event payload (`update::Progress`). */
+export type UpdateProgress = {
+  phase: "checking" | "downloading" | "verifying" | "ready";
+  received: number;
+  /** null when neither the server nor GitHub said: an amount, no percentage. */
+  total: number | null;
+};
+
+/** How `update_download` ended. Mirrors `update::Download`. */
+export type UpdateDownload =
+  | { kind: "ready"; tag: string; name: string; path: string; size: number }
+  | { kind: "unsupported"; platform: string; url: string }
+  | { kind: "nothing" }
+  | { kind: "no_asset"; tag: string; want: string; url: string }
+  | { kind: "no_digest"; tag: string; name: string; url: string }
+  | { kind: "corrupt"; expected: string; got: string }
+  | { kind: "cancelled" }
+  | { kind: "busy" }
+  | { kind: "offline"; detail: string }
+  | { kind: "rate_limited"; detail: string }
+  | { kind: "no_release" }
+  | { kind: "failed"; detail: string };
+
+/** The check cases that are something wrong rather than an answer. */
+export const UPDATE_WRONG = new Set(["offline", "rate_limited", "no_release", "failed", "bad_build"]);
+
+/** The download cases that are something wrong rather than an answer. */
+export const UPDATE_DOWNLOAD_WRONG = new Set(["no_asset", "no_digest", "corrupt", "offline", "rate_limited", "no_release", "failed"]);
+
+/** Bytes as a download shows them. */
+export function updateMb(n: number): string {
+  return `${(n / 1048576).toFixed(1)} MB`;
+}
+
+/** 0–100 when the total is known, null for an indeterminate bar. */
+export function updatePercent(p: UpdateProgress): number | null {
+  if (p.phase === "verifying" || p.phase === "ready") return 100;
+  if (!p.total) return null;
+  return Math.min(100, Math.round((p.received / p.total) * 100));
+}
+
+/**
+ * What a bar says in words: the phase always, and while bytes are arriving how
+ * many of them. A server that sent no length gets an amount and no percentage,
+ * rather than a percentage of a number nobody knows.
+ *
+ * Here and not in the card because the banner says the same thing.
+ */
+export function updateProgressText(p: UpdateProgress): string {
+  const phase =
+    p.phase === "downloading"
+      ? t("settings.updatePhase.downloading")
+      : p.phase === "verifying"
+        ? t("settings.updatePhase.verifying")
+        : p.phase === "ready"
+          ? t("settings.updatePhase.ready")
+          : t("settings.updatePhase.checking");
+  if (p.phase !== "downloading") return phase;
+  const pct = updatePercent(p);
+  if (pct === null) return `${phase} · ${t("settings.updateBytesOnly", { got: updateMb(p.received) })}`;
+  return `${phase} · ${pct}% · ${t("settings.updateBytes", { got: updateMb(p.received), all: updateMb(p.total ?? 0) })}`;
+}
+
+/**
+ * A download that went wrong, in words: what happened, and the detail that
+ * belongs under it in `mono` (empty when the sentence is the whole of it).
+ *
+ * For the `UPDATE_DOWNLOAD_WRONG` kinds. Here and not in the card because the
+ * banner says the same thing, and someone who never opens settings has to be
+ * told the same reason the card would have told them.
+ */
+export function updateWrongText(g: UpdateDownload): { say: string; why: string } {
+  switch (g.kind) {
+    case "no_asset":
+      return { say: t("settings.updateNoAsset", { tag: g.tag, want: g.want }), why: "" };
+    case "no_digest":
+      return { say: t("settings.updateNoDigest", { name: g.name }), why: "" };
+    case "corrupt":
+      return { say: t("settings.updateCorrupt"), why: t("settings.updateCorruptWhy", { expected: g.expected, got: g.got }) };
+    case "offline":
+      return { say: t("settings.updateOffline"), why: g.detail };
+    case "rate_limited":
+      return { say: t("settings.updateRateLimited"), why: g.detail };
+    case "no_release":
+      return { say: t("settings.updateNoRelease"), why: "" };
+    default:
+      return { say: t("settings.updateDownloadFailed"), why: "detail" in g ? g.detail : "" };
+  }
+}
 
 /** Everything above the membrane plus, per run, the detail kept below it. */
 class Store {
@@ -2672,6 +2789,240 @@ class Store {
     this.downloads = { ...this.downloads, [p.agent]: p };
   }
 
+  // ----- updates (src-tauri/src/update.rs) -----
+  //
+  // Kept here rather than in the settings card because two places show it: the
+  // card, and the banner outside every view. The app asks GitHub nothing until
+  // one of the buttons below is pressed.
+
+  /** The release this build came from, or null for a development build. */
+  release = $state<string | null>(null);
+  /** The last check's answer, or null before the button has been pressed. */
+  updateCheck = $state<UpdateCheck | null>(null);
+  updateChecking = $state(false);
+  /** Where the installer download is, while one runs; null otherwise. */
+  updateProgress = $state<UpdateProgress | null>(null);
+  /** How the last download ended, or null before one was asked for. */
+  updateGot = $state<UpdateDownload | null>(null);
+  /** Whether the banner has been closed for this run of the app. */
+  updateBannerClosed = $state(false);
+
+  /** The verified installer waiting to be opened, if there is one. */
+  get updateReady(): { tag: string; name: string; path: string; size: number } | null {
+    return this.updateGot?.kind === "ready" ? this.updateGot : null;
+  }
+
+  /**
+   * Whether the banner has something to interrupt anyone over: a release is
+   * out, a download is running, or one is verified and waiting.
+   */
+  get updateWorthSaying(): boolean {
+    if (this.updateBannerClosed) return false;
+    if (this.updateProgress !== null) return true;
+    if (this.updateGot !== null && this.updateGot.kind !== "cancelled" && this.updateGot.kind !== "nothing") return true;
+    return this.updateCheck?.kind === "update";
+  }
+
+  /** Which release this build is. Reads a string compiled into the binary. */
+  async loadRelease() {
+    try {
+      this.release = await invoke<string | null>("update_release");
+    } catch {
+      // A development build in a browser: the card says so anyway.
+    }
+  }
+
+  /**
+   * Ask GitHub which release is newest.
+   *
+   * Two things call this and no others: the button in the settings, and
+   * `checkAtStartup` once a launch while the switch is on. Both record when
+   * they asked, which is what the day's allowance is counted from -- see
+   * updateSchedule.ts.
+   *
+   * Nothing is downloaded here. The download is a second press
+   * (`downloadUpdate`), as the module header in src-tauri/src/update.rs says.
+   */
+  async checkUpdate() {
+    if (this.updateChecking) return;
+    this.updateChecking = true;
+    this.updateCheck = null;
+    // A new answer about a new release: whatever was downloaded for the last
+    // one is not what the card is about any more.
+    this.updateGot = null;
+    this.updateProgress = null;
+    try {
+      this.updateCheck = await invoke<UpdateCheck>("update_check");
+    } catch (err) {
+      // The command names a case for every failure it knows, so getting here
+      // means the call itself never landed. Still shown, not swallowed.
+      this.updateCheck = { kind: "failed", detail: String(err) };
+    }
+    this.updateChecking = false;
+    // The attempt is what the day's allowance counts, so the stamp moves even
+    // when the answer was a failure: a GitHub that is down must not be asked
+    // again at every launch. The button is never capped, so nobody is left
+    // waiting on it either (updateSchedule.ts).
+    await this.rememberChecked();
+    // A release found after the banner was closed is worth saying again.
+    if (this.updateCheck.kind === "update") this.updateBannerClosed = false;
+  }
+
+  /** Write down that a check has just been made. */
+  private async rememberChecked() {
+    try {
+      await invoke("set_setting", { key: LAST_CHECK_KEY, value: lastCheckTo(Date.now()) });
+    } catch (err) {
+      // Not worth a word in front of anyone: the cost of losing the stamp is
+      // one extra check at the next launch.
+      console.warn("could not record the update check", err);
+    }
+  }
+
+  /**
+   * Whether divixi checks for a release on its own. On unless turned off.
+   *
+   * Read from the settings at startup; the card in Settings → About writes it.
+   * Only the automatic check obeys it — the button there always works.
+   */
+  updateAuto = $state(true);
+
+  /**
+   * The one check divixi makes without being asked, once a launch.
+   *
+   * Called from main.ts and nowhere else, and deliberately not awaited: the
+   * request must not stand between anyone and their tracks. Everything in here
+   * happens after the window is up, and a machine with no network spends the
+   * whole of it failing quietly.
+   *
+   * Three things can stop it: the switch being off, a check inside the last
+   * twenty-four hours, and not being this PC's own Divixi. What it does not do
+   * is show anything unless there is something to show — an up-to-date answer
+   * and a failed one are both silent here, and the failure is on the settings
+   * card for whoever goes looking. Only a release that is actually out puts the
+   * banner up (`updateWorthSaying`).
+   *
+   * The rule itself is in updateSchedule.ts, which is where its tests are.
+   */
+  async checkAtStartup() {
+    // An update replaces this PC's app. A remote instance is updated where it
+    // runs, and its settings are the remote's, not this machine's.
+    if (!local) return;
+    let auto = true;
+    let last: number | null = null;
+    try {
+      const [rawAuto, rawLast] = await Promise.all([
+        invoke<string | null>("get_setting", { key: AUTO_KEY }),
+        invoke<string | null>("get_setting", { key: LAST_CHECK_KEY }),
+      ]);
+      auto = autoFrom(rawAuto);
+      last = lastCheckFrom(rawLast);
+    } catch (err) {
+      // The store could not be read. Not a thing to put in front of anyone,
+      // and not a reason to go to GitHub either: this launch stays quiet.
+      console.warn("could not read the update settings", err);
+      return;
+    }
+    this.updateAuto = auto;
+    const due = dueForCheck({ manual: false, auto, last, now: Date.now() });
+    if (!due.check) return;
+    await this.checkUpdate();
+  }
+
+  /**
+   * The switch, from the settings, for the card to draw.
+   *
+   * `checkAtStartup` reads the same key, but it leaves early in the two cases
+   * that matter here -- the switch off, and a check already made today -- and
+   * a card opened after that would otherwise show the default rather than the
+   * setting.
+   */
+  async loadUpdateAuto() {
+    try {
+      this.updateAuto = autoFrom(await invoke<string | null>("get_setting", { key: AUTO_KEY }));
+    } catch (err) {
+      console.warn("could not read the update switch", err);
+    }
+  }
+
+  /** Turn the check at startup on or off. Takes effect at the next launch. */
+  async setUpdateAuto(on: boolean) {
+    this.updateAuto = on;
+    try {
+      await invoke("set_setting", { key: AUTO_KEY, value: autoTo(on) });
+    } catch (err) {
+      this.lastError = String(err);
+      // Put the switch back where the store still has it, rather than leave
+      // it showing a setting that was not saved.
+      this.updateAuto = !on;
+    }
+  }
+
+  /**
+   * Fetch this platform's installer for the newest release and check it
+   * against the SHA-256 GitHub published. Progress arrives as events.
+   *
+   * Nothing is installed: what this ends with is a verified file and a button
+   * that opens it (src-tauri/src/update.rs).
+   */
+  async downloadUpdate() {
+    if (this.updateProgress !== null) return;
+    this.updateGot = null;
+    this.updateProgress = { phase: "checking", received: 0, total: null };
+    let got: UpdateDownload;
+    try {
+      got = await invoke<UpdateDownload>("update_download");
+    } catch (err) {
+      got = { kind: "failed", detail: String(err) };
+    }
+    this.updateGot = got;
+    // The bar goes when the answer arrives: from here on the card shows what
+    // happened, not where it got to.
+    this.updateProgress = null;
+    if (got.kind === "ready") this.updateBannerClosed = false;
+  }
+
+  /** Stop the download that is running. Takes effect within a chunk. */
+  async cancelUpdate() {
+    try {
+      await invoke("update_download_cancel");
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /** Fold a progress event in, while a download of ours is running. */
+  updateProgressed(p: UpdateProgress) {
+    if (this.updateProgress === null) return;
+    this.updateProgress = p;
+  }
+
+  /**
+   * Hand the verified installer to the system, on this press.
+   *
+   * The installer's own windows come up next and the person clicks through
+   * them; divixi has to be closed before it can be replaced, which is what the
+   * note beside the button says.
+   */
+  async openInstaller() {
+    const ready = this.updateReady;
+    if (!ready) return;
+    try {
+      await invoke("update_open", { path: ready.path });
+    } catch (err) {
+      this.lastError = t("settings.updateOpenInstallerFailed", { why: String(err) });
+    }
+  }
+
+  /** Show the folder the installer is in, to run it by hand. */
+  async revealUpdate() {
+    try {
+      await invoke("update_reveal");
+    } catch (err) {
+      this.lastError = t("settings.updateRevealFailed", { why: String(err) });
+    }
+  }
+
   private async workOn(agent: AgentId, label: string, op: () => Promise<AgentStatus>) {
     if (this.working[agent]) return;
     this.working = { ...this.working, [agent]: label };
@@ -3266,6 +3617,10 @@ export async function connectEvents() {
   await Promise.all([
     listen<Envelope>("agent", (e) => store.apply(e.payload)),
     listen<DownloadProgress>("agent_download", (e) => store.progress(e.payload)),
+    // The installer download is this PC's own app being replaced, and its
+    // card and banner are shown here only (`local`), so an instance's webview
+    // has nothing to draw and does not ask for the events.
+    ...(local ? [listen<UpdateProgress>("update_download", (e) => store.updateProgressed(e.payload))] : []),
     listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
     listen<{ track: string; from: string; to: string; writing: boolean }>("conductor_handoff", (e) => store.takeHandoff(e.payload)),
     listen<WaitingDelivery>("parked", (e) => store.takeParked(e.payload)),
