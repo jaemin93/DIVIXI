@@ -7,6 +7,7 @@
     updateMb as mb,
     updatePercent as percent,
     updateProgressText as progressText,
+    updateWrongText,
     ZOOM_MIN,
     ZOOM_MAX,
     ZOOM_STEP,
@@ -462,24 +463,13 @@
                         <p class="fnote">{t("settings.updateNothing")}</p>
                       {:else if g.kind === "unsupported"}
                         <p class="fnote">{t("settings.updateManualOnly")}</p>
-                      {:else if g.kind === "no_asset"}
-                        <p class="fnote bad">{t("settings.updateNoAsset", { tag: g.tag, want: g.want })}</p>
-                      {:else if g.kind === "no_digest"}
-                        <p class="fnote bad">{t("settings.updateNoDigest", { name: g.name })}</p>
-                      {:else if g.kind === "corrupt"}
-                        <p class="fnote bad">{t("settings.updateCorrupt")}</p>
-                        <p class="fnote why mono">{t("settings.updateCorruptWhy", { expected: g.expected, got: g.got })}</p>
-                      {:else if g.kind === "offline"}
-                        <p class="fnote bad">{t("settings.updateOffline")}</p>
-                        <p class="fnote why mono">{g.detail}</p>
-                      {:else if g.kind === "rate_limited"}
-                        <p class="fnote bad">{t("settings.updateRateLimited")}</p>
-                        <p class="fnote why mono">{g.detail}</p>
-                      {:else if g.kind === "no_release"}
-                        <p class="fnote bad">{t("settings.updateNoRelease")}</p>
                       {:else}
-                        <p class="fnote bad">{t("settings.updateDownloadFailed")}</p>
-                        <p class="fnote why mono">{g.detail}</p>
+                        <!-- Everything left is one of `UPDATE_DOWNLOAD_WRONG`,
+                             and the banner has to say the same thing, so the
+                             wording lives once in store.svelte.ts. -->
+                        {@const w = updateWrongText(g)}
+                        <p class="fnote bad">{w.say}</p>
+                        {#if w.why}<p class="fnote why mono">{w.why}</p>{/if}
                       {/if}
                     </div>
                   {/if}

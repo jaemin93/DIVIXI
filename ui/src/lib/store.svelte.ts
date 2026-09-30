@@ -781,6 +781,33 @@ export function updateProgressText(p: UpdateProgress): string {
   return `${phase} · ${pct}% · ${t("settings.updateBytes", { got: updateMb(p.received), all: updateMb(p.total ?? 0) })}`;
 }
 
+/**
+ * A download that went wrong, in words: what happened, and the detail that
+ * belongs under it in `mono` (empty when the sentence is the whole of it).
+ *
+ * For the `UPDATE_DOWNLOAD_WRONG` kinds. Here and not in the card because the
+ * banner says the same thing, and someone who never opens settings has to be
+ * told the same reason the card would have told them.
+ */
+export function updateWrongText(g: UpdateDownload): { say: string; why: string } {
+  switch (g.kind) {
+    case "no_asset":
+      return { say: t("settings.updateNoAsset", { tag: g.tag, want: g.want }), why: "" };
+    case "no_digest":
+      return { say: t("settings.updateNoDigest", { name: g.name }), why: "" };
+    case "corrupt":
+      return { say: t("settings.updateCorrupt"), why: t("settings.updateCorruptWhy", { expected: g.expected, got: g.got }) };
+    case "offline":
+      return { say: t("settings.updateOffline"), why: g.detail };
+    case "rate_limited":
+      return { say: t("settings.updateRateLimited"), why: g.detail };
+    case "no_release":
+      return { say: t("settings.updateNoRelease"), why: "" };
+    default:
+      return { say: t("settings.updateDownloadFailed"), why: "detail" in g ? g.detail : "" };
+  }
+}
+
 /** Everything above the membrane plus, per run, the detail kept below it. */
 class Store {
   /** Effective theme class on <html>. */
