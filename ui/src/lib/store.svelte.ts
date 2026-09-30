@@ -30,6 +30,7 @@ import {
 } from "./queue";
 
 import { addError, dropError, errorLife, type AppError } from "./errors";
+import { openKey, parseMemory, pruneOpen, remember, treeReply, underOpen, type WsEntry as WsEntryType } from "./fileTree";
 
 export { wasStopped, errorLife, type Queued, type AppError };
 
@@ -37,6 +38,8 @@ export { wasStopped, errorLife, type Queued, type AppError };
 const QUEUE_SETTING = "queued";
 /** Setting holding which tracks' headers are folded away. */
 const HEADERS_SETTING = "track_headers";
+/** Setting holding which folders the file browser has open, by track and folder. */
+const WS_OPEN_SETTING = "ws_open";
 
 /** Mirrors `orchestra_core::AgentEvent` — serde tags it with `kind`. */
 export type AgentEvent =
@@ -645,7 +648,7 @@ export const ZOOM_STEP = 10;
 export type SettingsSection = "overview" | "appearance" | "chat" | "agents" | "knowledge" | "remote" | "about";
 
 /** Mirrors `workspace::Entry`: one file or folder, path relative to the track folder. */
-export type WsEntry = { path: string; name: string; dir: boolean; size: number };
+export type { WsEntry } from "./fileTree";
 
 /** Mirrors `workspace::FileContent`. */
 export type WsFile = {
@@ -968,10 +971,36 @@ class Store {
   activeFile = $state("");
   /** The tree as a drawer over an open file, as Kiro has it; closed until asked for. */
   panelTree = $state(false);
-  tree = $state<WsEntry[]>([]);
+  /**
+   * The rows the file browser draws: the track folder's own children, and
+   * the children of the folders opened. A folder starts shut and is not
+   * read until it is opened, so a `.venv` of ten thousand files costs one
+   * row until someone asks for it.
+   */
+  tree = $state<WsEntryType[]>([]);
   /** The folder held more than the listing returns, so the tree is short of it. */
   treeCut = $state(false);
   treeLoading = $state(false);
+  /**
+   * The track a listing has come back for. Until it is the track showing,
+   * `tree` being empty means "not here yet", not "the folder is empty" --
+   * restoring open folders must not flash an empty browser.
+   */
+  private treeOf = $state("");
+  /**
+   * Every file under the track folder, which searching by name and the
+   * composer's `@` both need and neither needs until asked. Kept apart
+   * from `tree` so browsing never pays for the whole walk.
+   */
+  fileList = $state<WsEntryType[]>([]);
+  fileListLoading = $state(false);
+  /** The track a file list has been fetched for, so it is not fetched twice. */
+  private fileListOf = $state("");
+  /**
+   * Folders the file browser has open, by [`openKey`] -- a track and the
+   * folder it points at. Persisted, so a browser opens as it was left.
+   */
+  private wsOpen = $state<Record<string, string[]>>({});
   git = $state<WsGit | null>(null);
   gitLoading = $state(false);
   /** The change whose diff is shown. */
@@ -1082,10 +1111,65 @@ class Store {
     }
   }
 
+  /** Where this track's open folders are remembered: the track and its folder. */
+  private get wsKey(): string {
+    const track = this.track;
+    if (!track) return "";
+    return openKey(track, this.tracks.find((tr) => tr.id === track)?.cwd ?? "");
+  }
+
+  /** The folders the file browser has open on the track showing now. */
+  openDirs(): string[] {
+    return this.wsOpen[this.wsKey] ?? [];
+  }
+
+  /** The same, to ask about row by row without building a set each time. */
+  private openNow = $derived(new Set(this.wsOpen[this.wsKey] ?? []));
+
+  /** Whether a folder is open. A folder nobody opened is shut. */
+  isDirOpen(path: string): boolean {
+    return this.openNow.has(path);
+  }
+
+  /** Whether a row has somewhere to sit: every folder above it is open. */
+  isDirShown(path: string): boolean {
+    return underOpen(path, this.openNow);
+  }
+
+  /**
+   * Open a folder or shut it. Opening reads its children; shutting only
+   * hides rows already in hand, so nothing is read and nothing flickers.
+   */
+  async toggleDir(path: string) {
+    const open = this.openDirs();
+    const next = open.includes(path) ? open.filter((p) => p !== path) : [...open, path];
+    this.setOpenDirs(next);
+    if (next.includes(path)) await this.loadTree();
+  }
+
+  /** Set this track's open folders and write the memory back. */
+  private setOpenDirs(open: string[]) {
+    const key = this.wsKey;
+    if (!key) return;
+    this.wsOpen = remember(this.wsOpen, key, open, new Set(this.tracks.map((tr) => tr.id)));
+    invoke("set_setting", { key: WS_OPEN_SETTING, value: JSON.stringify(this.wsOpen) }).catch(tracing);
+  }
+
+  private async restoreWsOpen() {
+    try {
+      this.wsOpen = parseMemory(await invoke<string | null>("get_setting", { key: WS_OPEN_SETTING }));
+    } catch (err) {
+      tracing(err);
+    }
+  }
+
   /** Forget what the panel loaded; the next open track fills it again. */
   private clearWorkspace() {
     this.tree = [];
     this.treeCut = false;
+    this.treeOf = "";
+    this.fileList = [];
+    this.fileListOf = "";
     this.git = null;
     this.diffs = {};
     this.diffPath = "";
@@ -1098,24 +1182,75 @@ class Store {
   /** Reload the tree, the git status and every open file. */
   async refreshWorkspace() {
     if (!this.track) return;
-    await Promise.all([this.loadTree(), this.loadGit(), ...this.openFiles.map((p) => this.loadFile(p))]);
+    // The whole-folder list is read again only if something already asked
+    // for it; nothing here starts that walk on its own.
+    const hadFiles = this.fileListOf === this.track;
+    this.fileListOf = "";
+    await Promise.all([
+      this.loadTree(),
+      this.loadGit(),
+      ...(hadFiles ? [this.loadFileList()] : []),
+      ...this.openFiles.map((p) => this.loadFile(p)),
+    ]);
     if (this.diffPath) await this.loadDiff(this.diffPath);
   }
 
+  /**
+   * The rows for the file browser: the track folder's children and those
+   * of the folders it has open. Folders remembered from a previous run
+   * that are no longer on disk drop out of the memory here, quietly.
+   */
   async loadTree() {
     const track = this.track;
     if (!track) return;
+    // Opening one folder after another leaves more than one listing in
+    // flight; only the newest lands, so the rows cannot fall behind.
+    const seq = ++this.treeSeq;
+    const asked = this.openDirs();
     this.treeLoading = true;
     try {
-      const [entries, cut] = await invoke<[WsEntry[], boolean]>("workspace_tree", { track });
-      if (this.track === track) {
-        this.tree = entries;
-        this.treeCut = cut;
-      }
+      const [entries, cut] = treeReply(await invoke("workspace_tree", { track, open: asked }));
+      if (this.track !== track || seq !== this.treeSeq) return;
+      this.tree = entries;
+      this.treeCut = cut;
+      const left = pruneOpen(asked, entries, cut);
+      if (left.length !== asked.length) this.setOpenDirs(left);
     } catch (err) {
       this.lastError = String(err);
     } finally {
-      this.treeLoading = false;
+      if (seq === this.treeSeq) {
+        this.treeLoading = false;
+        this.treeOf = track;
+      }
+    }
+  }
+  private treeSeq = 0;
+
+  /** Whether the rows in hand are this track's, so "no files" can be believed. */
+  get treeReady(): boolean {
+    return !!this.track && this.treeOf === this.track;
+  }
+
+  /** The same for the whole-folder list the name filter draws. */
+  get fileListReady(): boolean {
+    return !!this.track && this.fileListOf === this.track;
+  }
+
+  /** Every file under the track folder, for searching by name and for `@`. */
+  async loadFileList() {
+    const track = this.track;
+    if (!track || this.fileListLoading || this.fileListOf === track) return;
+    this.fileListLoading = true;
+    try {
+      const [entries] = treeReply(await invoke("workspace_tree", { track, open: null }));
+      if (this.track === track) this.fileList = entries;
+    } catch (err) {
+      this.lastError = String(err);
+    } finally {
+      this.fileListLoading = false;
+      // Marked read even when it failed, so a filter does not set the
+      // whole walk going again on every keystroke; a refresh tries afresh.
+      if (this.track === track) this.fileListOf = track;
     }
   }
 
@@ -2645,6 +2780,7 @@ class Store {
       // was open. They come back held; nothing is sent by opening the app.
       await this.restoreQueue();
       await this.restoreHeaders();
+      await this.restoreWsOpen();
       setInterval(() => (this.now = Date.now()), 30_000);
       const cache: Record<string, SlashCommand[]> = {};
       AGENT_IDS.forEach((id, i) => {
