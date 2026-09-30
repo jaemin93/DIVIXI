@@ -15,8 +15,16 @@ The steps below were checked on Ubuntu 24.04 (x86_64) with Rust 1.96.
 
 Everything below is the manual path, and it still works. But for an **x86_64
 Linux** machine reached over SSH, the app installs and updates divixi-server
-itself, the way an editor's remote extension does: no apt packages, no Rust,
-no Node, and nothing built on that machine. It fetches the release binary.
+itself, the way an editor's remote extension does: no Rust, no Node, and
+nothing built on that machine. It fetches the release binary.
+
+The one thing the machine may still need is the WebKitGTK runtime that binary
+links (section 1). A fresh Ubuntu does not have it, and the app does not
+install system packages, so do this once there:
+
+```bash
+sudo apt install -y libwebkit2gtk-4.1-0
+```
 
 In the app, the instance's card in **Settings › Remote instances** says what it
 found on that machine, and so does the page shown when an instance could not be
@@ -53,8 +61,17 @@ only way to make its build match an app you built yourself).
 ## 1. What you need
 
 **System packages (for building).** Building the server compiles Tauri too, so Tauri's Linux build
-packages are needed. The executable itself only uses gtk3 at run time; no display (X, Wayland) is
-required.
+packages are needed. No display (X, Wayland) is required. At run time the executable links GTK 3
+and WebKitGTK; the build packages below bring both, so a machine that builds it can run it. A
+machine that only runs a binary built elsewhere needs the runtime package, which brings GTK 3,
+JavaScriptCore and libsoup with it:
+
+```bash
+sudo apt install -y libwebkit2gtk-4.1-0
+```
+
+Without it the server stops at once with `error while loading shared libraries:
+libwebkit2gtk-4.1.so.0`.
 
 ```bash
 sudo apt update
@@ -274,6 +291,7 @@ from that commit.
 | `ssh ended … Permission denied` | Whether you get in without a password (key, ssh-agent) |
 | `divixi-server token gave no link` | That the path is right (`~/.local/bin/divixi-server`) and that it is executable |
 | `did not answer through the tunnel` | Usually the server is not running: press **Start it** on that instance's card. If it will not come up, run `~/.local/bin/divixi-server serve` yourself (you will see the log) |
+| The server will not stay up after **Start it** or an install | Run the binary by hand to see why: `~/.divixi/server/current/divixi-server help` (or your own path). `error while loading shared libraries: libwebkit2gtk-4.1.so.0` means the WebKitGTK runtime is missing: `sudo apt install -y libwebkit2gtk-4.1-0` (section 1) |
 | An agent shows as "not installed" | PATH on the server. Add the CLI and node directories to "Remote PATH" in the instance settings, or to `Environment=PATH` in the systemd unit |
 | A direct address says "no owner yet" | Run `divixi-server owner <github login>` on the server |
 | A direct address says "… does not own this DIVIXI" | Whether the app's GitHub account is the same as the server's owner |

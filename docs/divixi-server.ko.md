@@ -13,8 +13,14 @@
 
 아래 내용은 손으로 하는 방법이고 그대로 유효합니다. 다만 SSH로 붙는 **x86_64 리눅스** 머신이라면
 앱이 divixi-server를 알아서 설치하고 업데이트합니다. 에디터의 원격 확장이 하는 것과 같습니다:
-apt 패키지도, Rust도, Node도 필요 없고, 그 머신에서 아무것도 빌드하지 않습니다. 릴리즈 바이너리를
-받아 옵니다.
+Rust도, Node도 필요 없고, 그 머신에서 아무것도 빌드하지 않습니다. 릴리즈 바이너리를 받아 옵니다.
+
+그 머신에 아직 필요할 수 있는 것은 하나, 그 바이너리가 쓰는 WebKitGTK 런타임입니다(1절). 새로 설치한
+Ubuntu에는 없고 앱은 시스템 패키지를 설치하지 않으니, 그 머신에서 한 번 해 두세요:
+
+```bash
+sudo apt install -y libwebkit2gtk-4.1-0
+```
 
 앱의 **설정 › 원격 인스턴스**에 있는 인스턴스 카드가 그 머신에서 무엇을 찾았는지 알려 주고,
 인스턴스에 연결하지 못했을 때 나오는 화면도 같은 것을 보여 줍니다. 무엇을 쓰기 전에 먼저 묻습니다 —
@@ -45,8 +51,16 @@ apt 패키지도, Rust도, Node도 필요 없고, 그 머신에서 아무것도 
 
 ## 1. 준비물
 
-**시스템 패키지(빌드용).** 서버 빌드도 Tauri를 컴파일하므로 Tauri의 Linux 빌드 패키지가 필요합니다. 실행
-파일이 실제로 쓰는 것은 gtk3뿐이고, 화면(X, Wayland)은 필요 없습니다.
+**시스템 패키지(빌드용).** 서버 빌드도 Tauri를 컴파일하므로 Tauri의 Linux 빌드 패키지가 필요합니다. 화면(X,
+Wayland)은 필요 없습니다. 실행 파일은 실행할 때 GTK 3와 WebKitGTK를 씁니다. 아래 빌드 패키지가 둘 다 깔아
+주므로 빌드한 머신에서는 그대로 돌아갑니다. 다른 곳에서 빌드한 바이너리만 돌리는 머신에는 런타임 패키지가
+필요하고, GTK 3·JavaScriptCore·libsoup도 함께 설치됩니다:
+
+```bash
+sudo apt install -y libwebkit2gtk-4.1-0
+```
+
+없으면 서버가 `error while loading shared libraries: libwebkit2gtk-4.1.so.0`를 내고 바로 멈춥니다.
 
 ```bash
 sudo apt update
@@ -251,6 +265,7 @@ Rust 코드 기준이라, 화면만 바뀐 앱 업데이트에서는 뜨지 않�
 | `ssh ended … Permission denied` | 암호 없이 들어가지는지(키, ssh-agent) |
 | `divixi-server token gave no link` | 경로가 맞는지(`~/.local/bin/divixi-server`), 실행 권한이 있는지 |
 | `did not answer through the tunnel` | 대개 서버가 꺼져 있습니다. 그 인스턴스 카드의 **서버 시작**을 누르세요. 그래도 안 뜨면 직접 돌려 보기: `~/.local/bin/divixi-server serve` (로그가 보임) |
+| **서버 시작**이나 설치 뒤에도 서버가 떠 있지 않음 | 바이너리를 직접 돌려 이유 보기: `~/.divixi/server/current/divixi-server help` (또는 직접 설치한 경로). `error while loading shared libraries: libwebkit2gtk-4.1.so.0`이면 WebKitGTK 런타임이 없는 것: `sudo apt install -y libwebkit2gtk-4.1-0` (1절) |
 | 에이전트가 "설치 안 됨" | 서버 쪽 PATH. 인스턴스 설정의 "원격 PATH"나 systemd의 `Environment=PATH`에 CLI·node 경로 추가 |
 | 직접 주소가 "no owner yet" | 서버에서 `divixi-server owner <GitHub 아이디>` |
 | 직접 주소가 "… does not own this DIVIXI" | 앱의 GitHub 로그인 계정과 서버 주인이 같은지 |
