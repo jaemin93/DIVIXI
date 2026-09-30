@@ -6,14 +6,16 @@
 //! first. That webview's commands, events and file previews go to its
 //! instance through this module (ui/src/lib/ipc.svelte.ts).
 //!
-//! Connecting, two ways. Over SSH: divixi-server is started there if it is
-//! not running, a pairing token is minted there (`divixi-server token`), an
-//! SSH tunnel is opened to it, and the token is exchanged for the device's
-//! access and refresh tokens. At an address (a Divixi that serves on its
-//! network, such as over Tailscale): this PC's GitHub token is shown to it,
-//! and it lets in its owner. The tokens stay here, in Rust; the page never
-//! holds them. Events come over one WebSocket per instance and are re-sent
-//! to the page as `instance-event`.
+//! Connecting, two ways. Over SSH: an SSH tunnel is opened to it, a pairing
+//! token is minted there (`divixi-server token`), and that token is
+//! exchanged for the device's access and refresh tokens. A divixi-server
+//! that is *not* running is not started by connecting -- see the note on
+//! [`connect`] -- so the interface offers that as a button of its own
+//! ([`super::install::remote_server_start`]). At an address (a Divixi that
+//! serves on its network, such as over Tailscale): this PC's GitHub token
+//! is shown to it, and it lets in its owner. The tokens stay here, in Rust;
+//! the page never holds them. Events come over one WebSocket per instance
+//! and are re-sent to the page as `instance-event`.
 //!
 //! SSH runs non-interactively (BatchMode): the host must be reachable with
 //! a key or an agent, as `ssh <host>` in a terminal would be. Its options
@@ -264,6 +266,11 @@ fn check_path(path: &str) -> Result<(), String> {
 
 /// The shell line run there: start divixi-server if this user has none
 /// running (detached, so it outlives the SSH session), then mint a link.
+///
+/// The first half never fires as things stand: [`connect`] only reaches this
+/// once the tunnel has already answered, and a tunnel that answers means a
+/// server is already up, so `pgrep` always finds one. See the note on
+/// [`connect`].
 fn remote_line(host: &Host) -> String {
     let path = if host.path.is_empty() { String::new() } else { format!("PATH={}:\"$PATH\"; export PATH; ", host.path) };
     let bin = &host.bin;
@@ -426,6 +433,21 @@ async fn live(app: &AppHandle, id: &str) -> Option<Arc<Conn>> {
     app.state::<AppState>().tunnels.open.lock().await.get(id).filter(|c| c.alive()).cloned()
 }
 
+/// Reach the instance: an SSH tunnel and a signed-in device, or the same at
+/// an address.
+///
+/// **A stopped divixi-server is not started here, though the order below
+/// reads as if it would be.** The tunnel is opened, [`wait_for`] polls
+/// `/api/health` for fifteen seconds, and only then does [`sign_in`] run
+/// [`remote_line`] -- the line carrying the `pgrep || setsid` that would
+/// have started one. Nothing is listening, so `wait_for` gives up first and
+/// that half is never reached.
+///
+/// Left as it is on purpose, to be fixed against a real remote machine
+/// rather than a guess. The fix moves the start ahead of the tunnel -- only
+/// the start half of [`remote_line`], since the token still has to be
+/// exchanged *through* the tunnel. Until then the interface offers a button
+/// ([`super::install::remote_server_start`]).
 async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
     if let Some(c) = live(app, id).await {
         return Ok(c);

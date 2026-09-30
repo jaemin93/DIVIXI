@@ -8,8 +8,9 @@
 
   /**
    * Settings › Remote instances: Divixis on other machines, shown in this
-   * window from the header's switcher. Reached over SSH (divixi-server
-   * started there if need be, a tunnel, a pairing token minted over SSH)
+   * window from the header's switcher. Reached over SSH (a tunnel and a
+   * pairing token minted over SSH; a divixi-server that is down is started
+   * by the button on its card, not by connecting -- see remote/client.rs)
    * or at an address (a Divixi serving on its network, which lets in this
    * PC's GitHub account if it is its owner's). Laid out as Kiro Crew's
    * page: a card per instance, then adding one; the form is a dialog.

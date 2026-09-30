@@ -154,7 +154,10 @@ divixi-server help
    - 원격 포트: `7488`
    - divixi-server 경로: `~/.local/bin/divixi-server`
    - 원격 PATH: 에이전트나 node를 못 찾을 때만 채웁니다. 예: `~/.local/bin:~/.nvm/versions/node/v20.20.2/bin`
-3. 왼쪽 위 메뉴에서 그 인스턴스를 고릅니다. 서버가 꺼져 있으면 앱이 SSH로 켜고, 토큰을 받고, 터널을 엽니다.
+3. 왼쪽 위 메뉴에서 그 인스턴스를 고릅니다. 앱이 터널을 열고, SSH로 페어링 토큰을 받고, 로그인합니다.
+   붙는 동안 꺼져 있는 서버를 켜 주지는 **않습니다**. 터널로 응답이 없었다고 알리고, 그 인스턴스 카드에
+   **서버 시작** 버튼을 보여 줍니다. 그걸 누르면 SSH로 서버를 켭니다. 아무것도 누르지 않아도 떠 있게
+   하려면 5절처럼 켜 두세요.
 
 ### B. 직접 주소 (Windows PC처럼 SSH 서버가 없을 때, GitHub 계정)
 
@@ -177,7 +180,8 @@ pkill -x divixi-server; setsid -f ~/.local/bin/divixi-server serve >/dev/null 2>
 
 ## 5. 켜 두기
 
-**직접 켜고 끄기.** SSH 터널 방식은 앱이 알아서 켜므로 보통은 필요 없습니다.
+**직접 켜고 끄기.** 연결만으로는 꺼진 서버가 켜지지 않습니다(4절 A). 그건 앱의 **서버 시작** 버튼이
+하는 일이고, 셸에서 직접 하려면 같은 명령 두 개입니다.
 
 ```bash
 setsid -f ~/.local/bin/divixi-server serve >/dev/null 2>&1 </dev/null   # 켜기 (SSH가 끊겨도 계속)
@@ -207,7 +211,8 @@ systemctl --user enable --now divixi-server
 sudo loginctl enable-linger "$USER"     # 로그인하지 않아도 부팅 때 켜지게
 ```
 
-- 앱은 이미 떠 있는 서버를 찾으면(`pgrep`) 새로 켜지 않습니다. 그래서 systemd로 켜 두어도 두 개가 뜨지 않습니다.
+- 앱이 서버를 두 개 띄우는 일은 없습니다. SSH로 돌리는 줄은 `pgrep`으로 먼저 확인하고, **서버 시작**
+  버튼도 확인부터 합니다. 그래서 systemd로 켜 두어도 두 개가 뜨지 않습니다.
 - `listen`이나 `owner`를 바꾼 뒤에는 `systemctl --user restart divixi-server`로 다시 켭니다.
 
 ---
@@ -245,7 +250,7 @@ Rust 코드 기준이라, 화면만 바뀐 앱 업데이트에서는 뜨지 않�
 | `ssh ended … Host key verification failed` | PC 터미널에서 `ssh user@server`를 한 번 해서 호스트 키를 받아 두기 |
 | `ssh ended … Permission denied` | 암호 없이 들어가지는지(키, ssh-agent) |
 | `divixi-server token gave no link` | 경로가 맞는지(`~/.local/bin/divixi-server`), 실행 권한이 있는지 |
-| `did not answer through the tunnel` | 서버가 뜨는지 직접 돌려 보기: `~/.local/bin/divixi-server serve` (로그가 보임) |
+| `did not answer through the tunnel` | 대개 서버가 꺼져 있습니다. 그 인스턴스 카드의 **서버 시작**을 누르세요. 그래도 안 뜨면 직접 돌려 보기: `~/.local/bin/divixi-server serve` (로그가 보임) |
 | 에이전트가 "설치 안 됨" | 서버 쪽 PATH. 인스턴스 설정의 "원격 PATH"나 systemd의 `Environment=PATH`에 CLI·node 경로 추가 |
 | 직접 주소가 "no owner yet" | 서버에서 `divixi-server owner <GitHub 아이디>` |
 | 직접 주소가 "… does not own this Divixi" | 앱의 GitHub 로그인 계정과 서버 주인이 같은지 |

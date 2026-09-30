@@ -245,8 +245,8 @@ pub enum Hasher {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Launch {
-    /// `setsid -f … serve`, as `client::remote_line` does when it finds no
-    /// server running. Nothing on the remote has to be set up for it.
+    /// `setsid -f … serve`: the same shell form `client::remote_line`
+    /// carries. Nothing on the remote has to be set up for it.
     Setsid,
     /// A systemd user service runs it. `exec_start` is the binary that unit
     /// names, which is what decides whether this app may install behind it.
