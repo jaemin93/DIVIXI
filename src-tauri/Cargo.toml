@@ -63,7 +63,9 @@ time.workspace = true
 uuid.workspace = true
 sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
 portable-pty = "0.9.0"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# "stream": the installer download reads the body chunk by chunk, for a
+# progress bar and so a cancel takes effect between chunks (src/update.rs).
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 base64 = "0.23.1"
 imagesize = "0.15"
 

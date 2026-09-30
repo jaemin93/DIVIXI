@@ -55,6 +55,16 @@ const OWN = new Set([
   "github_logout",
   "pick_files",
   "open_url",
+  // The app an update replaces is this PC's, so its installer is fetched,
+  // verified and opened here whatever is shown. An instance is updated where
+  // it runs, and its card is not drawn in this window at all
+  // (src-tauri/src/update.rs). `update_check` and `update_release` are older
+  // and stay out of this set: the card that calls them is `local`-only, so
+  // they are never reached from an instance's webview either way.
+  "update_download",
+  "update_download_cancel",
+  "update_open",
+  "update_reveal",
   // A fault in this webview happened on this PC, so it belongs in this
   // PC's log and in the report made from it — not in the log of whatever
   // Divixi the webview happens to be showing.
