@@ -54,7 +54,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 /// The repository the releases come from. Public: no token is used to read it.
-const REPO: &str = "jaemin93/divixi";
+pub(crate) const REPO: &str = "jaemin93/divixi";
 
 /// The release this binary was built from, or `None` for a build that is not
 /// a release.
@@ -77,7 +77,7 @@ pub fn release() -> Option<&'static str> {
 /// `Ord` is the right one. Numbers, not text: compared as strings, `v2026-9-9`
 /// would sort above `v2026-9-10`, and `.10` above `.2`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Release {
+pub(crate) struct Release {
     year: u16,
     month: u8,
     day: u8,
@@ -103,7 +103,7 @@ fn digits<T: std::str::FromStr>(s: &str) -> Option<T> {
 /// Strict on purpose. A tag this does not recognise is either a mistake in the
 /// workflow or a release named by hand, and comparing a date to something that
 /// is not a date can only produce an answer nobody should act on.
-fn parse(tag: &str) -> Option<Release> {
+pub(crate) fn parse(tag: &str) -> Option<Release> {
     let rest = tag.strip_prefix('v')?;
     // `2026-09-28` or `2026-09-28.2`: the date is fixed-width, the suffix is
     // whatever is left.
@@ -213,7 +213,7 @@ struct Latest {
 
 /// A client with no identity in it and a deadline, so a hung connection ends
 /// as an answer rather than a button that spins forever.
-fn http() -> Result<reqwest::Client, String> {
+pub(crate) fn http() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         // Required by the GitHub API of every caller. The bare app name: no
         // version, no platform, nothing that distinguishes one install from

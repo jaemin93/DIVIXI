@@ -71,6 +71,30 @@ fn default_bin() -> String {
     "~/.local/bin/divixi-server".to_string()
 }
 
+/// How an instance's build stands to this app's.
+///
+/// The three cases are three different sentences, and the app used to show
+/// one of them for all of them. An instance from before `/api/health`
+/// carried a build answers with an empty one, and comparing that to this
+/// app's hash says "built from other code" -- which reads as "someone built
+/// the wrong commit" when what happened is that the server there is older
+/// than the field itself. [`TooOld`](Freshness::TooOld) is that case, and
+/// what it asks of the user (update it) is not what
+/// [`Other`](Freshness::Other) asks (put the two on the same commit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Freshness {
+    /// Nothing is connected, so the instance has said nothing.
+    Unknown,
+    /// The same Rust sources as this app: every command matches.
+    Same,
+    /// Another build of them: some commands may not match.
+    Other,
+    /// It is answering and names no build at all, which only a
+    /// divixi-server from before that field does.
+    TooOld,
+}
+
 /// A host as the settings page and the switcher show it.
 #[derive(Serialize)]
 pub struct HostView {
@@ -84,12 +108,50 @@ pub struct HostView {
     /// Its version and build (a hash of its sources), once connected.
     pub version: Option<String>,
     pub build: Option<String>,
+    /// Which release it is, when it says (a newer divixi-server does).
+    pub release: Option<String>,
     /// Built from other code than this app: some commands may not match.
+    /// True for both [`Freshness::Other`] and [`Freshness::TooOld`], which
+    /// is why `freshness` is what says *why*.
     pub stale: bool,
+    /// Why it is (or is not) out of step.
+    pub freshness: Freshness,
 }
 
 /// This app's build (see build.rs): an instance with another is out of step.
 pub const BUILD: &str = env!("DIVIXI_BUILD");
+
+/// What an instance's build says, once it has answered.
+fn freshness(build: &str) -> Freshness {
+    if build.is_empty() {
+        Freshness::TooOld
+    } else if build == BUILD {
+        Freshness::Same
+    } else {
+        Freshness::Other
+    }
+}
+
+/// What the open connection's `/api/health` said, for [`super::install`] to
+/// weigh against the release it would put there. `None` when nothing is
+/// connected: then only the files on that machine can say anything.
+pub(super) async fn seen(app: &AppHandle, id: &str) -> Option<super::install::Seen> {
+    let conn = app.state::<AppState>().tunnels.open.lock().await.get(id).filter(|c| c.alive()).cloned()?;
+    Some(super::install::Seen { build: conn.build.clone(), release: conn.release.clone() })
+}
+
+/// Point the instance at another divixi-server there: the app has just
+/// installed one, and this is the path the next connection starts.
+pub(super) fn set_bin(app: &AppHandle, id: &str, bin: &str) -> Result<(), String> {
+    check_bin(bin)?;
+    let mut list = hosts(app);
+    let host = list.iter_mut().find(|h| h.id == id).ok_or("no such remote instance")?;
+    if host.bin == bin {
+        return Ok(());
+    }
+    host.bin = bin.to_string();
+    save(app, &list)
+}
 
 /// Open connections, by host id.
 #[derive(Default)]
@@ -126,6 +188,7 @@ struct Conn {
     /// What its /api/health said when connecting.
     version: String,
     build: String,
+    release: String,
 }
 
 /// The header's indicator: `instance-status` `{id, online}` whenever an
@@ -163,7 +226,7 @@ impl Conn {
     }
 }
 
-fn hosts(app: &AppHandle) -> Vec<Host> {
+pub(super) fn hosts(app: &AppHandle) -> Vec<Host> {
     app.state::<AppState>().store.get_meta(HOSTS_KEY).ok().flatten().and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
 }
 
@@ -209,7 +272,7 @@ fn remote_line(host: &Host) -> String {
     )
 }
 
-fn ssh() -> tokio::process::Command {
+pub(super) fn ssh() -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("ssh");
     #[cfg(windows)]
     {
@@ -246,6 +309,10 @@ struct Health {
     version: String,
     #[serde(default)]
     build: String,
+    /// Which release that divixi-server is, empty for one built from a
+    /// working copy -- and empty too from an instance older than this field.
+    #[serde(default)]
+    release: String,
 }
 
 /// The instance's /api/health, if it answers.
@@ -423,6 +490,7 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
         online: std::sync::atomic::AtomicBool::new(false),
         version: said.version,
         build: said.build,
+        release: said.release,
     });
     let pump = tauri::async_runtime::spawn(pump_events(app.clone(), conn.clone()));
     *conn.events.lock() = Some(pump);
@@ -661,10 +729,12 @@ pub async fn remote_hosts(app: AppHandle) -> Vec<HostView> {
                 online: c.online.load(std::sync::atomic::Ordering::Relaxed),
                 version: (!c.version.is_empty()).then(|| c.version.clone()),
                 build: (!c.build.is_empty()).then(|| c.build.clone()),
+                release: (!c.release.is_empty()).then(|| c.release.clone()),
                 stale: c.build != BUILD,
+                freshness: freshness(&c.build),
                 host: h,
             },
-            None => HostView { local_port: None, connected: false, online: false, version: None, build: None, stale: false, host: h },
+            None => HostView { local_port: None, connected: false, online: false, version: None, build: None, release: None, stale: false, freshness: Freshness::Unknown, host: h },
         })
         .collect()
 }

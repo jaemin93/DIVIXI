@@ -48,6 +48,13 @@ const OWN = new Set([
   "remote_server_status",
   "remote_server_set",
   "remote_server_drop",
+  // Installing divixi-server on a remote machine is this app's doing, even
+  // when the page asking is that instance's own webview (Unreachable.svelte).
+  "remote_server_check",
+  "remote_server_install",
+  "remote_server_start",
+  "remote_server_cancel",
+  "remote_server_mute",
   "github_account",
   "github_set_client_id",
   "github_login_start",
@@ -124,6 +131,28 @@ export function saveAs(track: string, path: string): Promise<string | null> {
 export function onInstanceStatus(handler: (s: { id: string; online: boolean }) => void): Promise<() => void> {
   return tauriListen<{ id: string; online: boolean }>("instance-status", (e) => handler(e.payload));
 }
+
+/**
+ * How an install of divixi-server on a remote machine is going (this app's
+ * event, whatever is shown -- as `onInstanceStatus`, not through the chosen
+ * instance's relay, which is exactly what may not be there yet).
+ */
+export function onServerInstall(handler: (p: ServerInstall) => void): Promise<() => void> {
+  return tauriListen<ServerInstall>("server_install", (e) => handler(e.payload));
+}
+
+/** Mirrors the `server_install` event payload (remote/install.rs). */
+export type ServerInstall = {
+  host: string;
+  phase: "checking" | "downloading" | "verifying" | "installing" | "starting" | "done" | "failed" | "cancelled";
+  /** Where it had got to, when `phase` is "failed". */
+  at: ServerInstall["phase"] | null;
+  received: number;
+  total: number | null;
+  route: "remote" | "ssh" | null;
+  release: string | null;
+  error: string | null;
+};
 
 /** Why the chosen instance could not be reached, if it could not. */
 export const instance = $state<{ error: string }>({ error: "" });

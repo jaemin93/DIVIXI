@@ -11,6 +11,45 @@ The steps below were checked on Ubuntu 24.04 (x86_64) with Rust 1.96.
 
 ---
 
+## 0. The app can do this for you (x86_64 Linux)
+
+Everything below is the manual path, and it still works. But for an **x86_64
+Linux** machine reached over SSH, the app installs and updates divixi-server
+itself, the way an editor's remote extension does: no apt packages, no Rust,
+no Node, and nothing built on that machine. It fetches the release binary.
+
+In the app, the instance's card in **Settings › Remote instances** says what it
+found on that machine, and so does the page shown when an instance could not be
+reached. It asks before it writes anything — the binary is about 207 MB — and an
+update can be told "don't ask again" per instance.
+
+What it does there:
+
+```bash
+~/.divixi/server/v2026-09-30/divixi-server   # the release binary
+~/.divixi/server/current -> v2026-09-30      # the pointer the app moves
+```
+
+- The machine fetches it from GitHub itself with `curl` or `wget` where it can;
+  where it cannot (no fetcher, or no route out) the app streams the bytes down
+  and pushes them over the SSH connection. Which of the two is happening is on
+  screen, because one is much slower than the other.
+- The download lands on `divixi-server.part` and is only renamed into place once
+  its **SHA-256** matches the digest GitHub keeps for that asset. A download that
+  drops halfway is deleted, never installed.
+- The old server is stopped, the new binary is renamed in, the pointer moves in
+  one step, and the server is started again — in that order.
+- The instance's **divixi-server path** setting is then pointed at
+  `~/.divixi/server/current/divixi-server`.
+- `systemd`: if a user service for divixi-server is enabled there, the app uses
+  it to stop and start. If that unit's `ExecStart` names some other binary, the
+  app **stops** and tells you to point it at the pointer above — installing
+  behind it would leave systemd launching the old one.
+
+The manual steps are the way for everything else: arm64, macOS, a machine with
+no SSH server, or a server you want built from your own checkout (which is the
+only way to make its build match an app you built yourself).
+
 ## 1. What you need
 
 **System packages (for building).** Building the server compiles Tauri too, so Tauri's Linux build

@@ -3,6 +3,7 @@
   import { invoke, onInstanceStatus } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import Icon from "./Icon.svelte";
+  import ServerInstall from "./ServerInstall.svelte";
   import { t } from "./i18n.svelte";
 
   /**
@@ -27,7 +28,9 @@
     online: boolean;
     version: string | null;
     build: string | null;
+    release: string | null;
     stale: boolean;
+    freshness: "unknown" | "same" | "other" | "too_old";
   };
 
   const PORT = 7488;
@@ -41,7 +44,7 @@
   let confirmDelete = $state("");
   let first = $state<HTMLInputElement>();
 
-  const blank = (): Host => ({ id: "", name: "", kind: "ssh", url: "", ssh: "", port: PORT, bin: BIN, path: "", local_port: null, connected: false, online: false, version: null, build: null, stale: false });
+  const blank = (): Host => ({ id: "", name: "", kind: "ssh", url: "", ssh: "", port: PORT, bin: BIN, path: "", local_port: null, connected: false, online: false, version: null, build: null, release: null, stale: false, freshness: "unknown" });
 
   onMount(() => {
     invoke<Host[]>("remote_hosts")
@@ -72,7 +75,7 @@
     if (!editing) return;
     formError = "";
     try {
-      const { local_port: _lp, connected: _c, online: _o, version: _v, build: _b, stale: _s, ...host } = editing;
+      const { local_port: _lp, connected: _c, online: _o, version: _v, build: _b, release: _r, stale: _s, freshness: _f, ...host } = editing;
       const port = Number(host.port) || PORT;
       // An empty name takes the one the field suggests.
       const name = host.name.trim() || t("remote.namePlaceholder", { n: hosts.length + 1 });
@@ -124,11 +127,12 @@
           <div class="name">{h.name}</div>
           <div class="meta mono">
             {#if h.kind === "direct"}<span class="tag">{t("remote.kindDirectTag")}</span>{h.url}
-            {:else}<span class="tag">SSH</span>{h.ssh} · {t("remote.remotePort", { port: h.port })}{/if}
+            {:else}<span class="tag">SSH</span>{h.ssh} · {t("remote.remotePort", { port: h.port })}{/if}{#if h.release} · {h.release}{/if}
           </div>
           <div class="state" class:on={h.online} class:trying={on && !h.online}>
-            <span class="dot"></span>{#if h.stale}<span class="stale">{t("instances.stale", { version: h.version ?? "?", build: h.build ?? "?" })}</span>{:else if !on}{t("remote.notConnected")}{:else if !h.online}{t("instances.link.trying")}{:else if h.local_port !== null}{t("remote.connected", { port: h.local_port })}{:else}{t("instances.link.online")}{/if}
+            <span class="dot"></span>{#if h.freshness === "too_old"}<span class="stale">{t("instances.tooOld", { version: h.version ?? "?" })}</span>{:else if h.stale}<span class="stale">{t("instances.stale", { version: h.version ?? "?", build: h.build ?? "?" })}</span>{:else if !on}{t("remote.notConnected")}{:else if !h.online}{t("instances.link.trying")}{:else if h.local_port !== null}{t("remote.connected", { port: h.local_port })}{:else}{t("instances.link.online")}{/if}
           </div>
+          <ServerInstall id={h.id} build={h.build} auto={h.stale} />
         </div>
         <div class="acts">
           <!-- Which one is on screen, and switching, are the header's (top left). -->
