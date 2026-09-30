@@ -224,7 +224,11 @@ jobs:
       - name: Check .app carries an icon (macOS)
         if: runner.os == 'macOS'
         run: |
-          app=$(find target/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)
+          app=$(find target/release/bundle/macos -maxdepth 1 -name '*.app' 2>/dev/null | head -1)
+          if [ -z "$app" ]; then
+            echo "::error::no .app in target/release/bundle/macos -- the build made no bundle, so there is no icon to check"
+            exit 1
+          fi
           echo "bundle: $app"
           icns=$(ls "$app/Contents/Resources/"*.icns 2>/dev/null | head -1)
           if [ -z "$icns" ]; then
@@ -235,7 +239,12 @@ jobs:
           echo "icon sizes: $(ls "$RUNNER_TEMP/icon.iconset" | tr '\n' ' ')"
           plutil -p "$app/Contents/Info.plist" | grep -E 'CFBundleShortVersionString|CFBundleVersion|CFBundleIdentifier'
 
+      # Uploaded whether or not the icon check passed: a bundle whose icon is
+      # wrong is still worth looking at, and the check exists to say what is
+      # wrong with it, not to hide it. Not on cancel, when there is nothing
+      # worth keeping.
       - name: Upload bundle
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: divixi-${{ matrix.name }}-unsigned
