@@ -496,6 +496,7 @@
               {/if}
             {/if}
           {/each}
+          {#if store.treeCut}<div class="mono empty">{t("ws.treeCut")}</div>{/if}
         {/if}
       </div>
     {/if}

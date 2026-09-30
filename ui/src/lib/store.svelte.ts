@@ -969,6 +969,8 @@ class Store {
   /** The tree as a drawer over an open file, as Kiro has it; closed until asked for. */
   panelTree = $state(false);
   tree = $state<WsEntry[]>([]);
+  /** The folder held more than the listing returns, so the tree is short of it. */
+  treeCut = $state(false);
   treeLoading = $state(false);
   git = $state<WsGit | null>(null);
   gitLoading = $state(false);
@@ -1083,6 +1085,7 @@ class Store {
   /** Forget what the panel loaded; the next open track fills it again. */
   private clearWorkspace() {
     this.tree = [];
+    this.treeCut = false;
     this.git = null;
     this.diffs = {};
     this.diffPath = "";
@@ -1104,8 +1107,11 @@ class Store {
     if (!track) return;
     this.treeLoading = true;
     try {
-      const entries = await invoke<WsEntry[]>("workspace_tree", { track });
-      if (this.track === track) this.tree = entries;
+      const [entries, cut] = await invoke<[WsEntry[], boolean]>("workspace_tree", { track });
+      if (this.track === track) {
+        this.tree = entries;
+        this.treeCut = cut;
+      }
     } catch (err) {
       this.lastError = String(err);
     } finally {

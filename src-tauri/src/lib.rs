@@ -1096,8 +1096,10 @@ fn track_root(state: &AppState, track: &str) -> Result<PathBuf, String> {
 }
 
 /// Every file and folder under the track's folder, `.gitignore` honoured.
+/// The second value says the listing was cut, so the panel can say so
+/// rather than pass a half listing off as the whole folder.
 #[tauri::command(async)]
-fn workspace_tree(state: State<'_, AppState>, track: String) -> Result<Vec<workspace::Entry>, String> {
+fn workspace_tree(state: State<'_, AppState>, track: String) -> Result<(Vec<workspace::Entry>, bool), String> {
     workspace::tree(&track_root(&state, &track)?)
 }
 
