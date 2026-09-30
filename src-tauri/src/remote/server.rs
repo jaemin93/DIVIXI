@@ -43,7 +43,11 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/auth/token", post(token))
         .route("/auth/github", post(github))
         .route("/auth/refresh", post(refresh))
-        .route("/api/health", get(|| async { axum::Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "build": env!("DIVIXI_BUILD") })) }))
+        // `release` joined `build` here so a connecting app can tell an
+        // instance it could update (an older release) from one it could not
+        // (a build from a working copy). An instance older than this field
+        // sends neither, which is itself the answer: it is too old to say.
+        .route("/api/health", get(|| async { axum::Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "build": env!("DIVIXI_BUILD"), "release": env!("DIVIXI_RELEASE") })) }))
         // An attachment (up to 50 MB) comes as base64 in a command.
         .route("/api/invoke/{cmd}", post(invoke).layer(axum::extract::DefaultBodyLimit::max(72 * 1024 * 1024)))
         .route("/api/events", get(events))

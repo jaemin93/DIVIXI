@@ -1710,7 +1710,6 @@ fn migrate(conn: &mut Connection, from: i64) -> anyhow::Result<()> {
 /// duplicate FTS row, which is why the callers guard on the status update
 /// having changed a row.
 fn fold(tx: &rusqlite::Transaction<'_>, run: &str) -> anyhow::Result<()> {
-    let mut output = String::new();
     let mut plan: Vec<String> = Vec::new();
     // (id, title): an update can rename a call after it started.
     let mut tools: Vec<(String, String)> = Vec::new();
@@ -1720,30 +1719,13 @@ fn fold(tx: &rusqlite::Transaction<'_>, run: &str) -> anyhow::Result<()> {
          WHERE run_id = ?1 AND kind IN ('message', 'plan', 'tool_call', 'tool_update') ORDER BY seq",
     )?;
     let rows = stmt.query_map(params![run], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-    // Text an agent writes on either side of a tool call is two passages,
-    // not one: "It's an npm install, not Homebrew." then, after the call,
-    // "`check-claude-app` is gone". Joined as they came they read as one
-    // run-on line once the timeline shows `output`, which it does for every
-    // run it has not replayed.
-    let mut after_tool = false;
+    // Put together as a routine's reply is: see `Reply`.
+    let mut reply = orchestra_core::Reply::default();
     for row in rows {
         let (kind, payload) = row?;
         let value: serde_json::Value = serde_json::from_str(&payload)?;
         match kind.as_str() {
-            "message" => {
-                let text = value["text"].as_str().unwrap_or_default();
-                if after_tool && !output.is_empty() {
-                    // A blank line between them -- and exactly one, however
-                    // many newlines the two sides already bring to the seam.
-                    let have = output.chars().rev().take_while(|c| *c == '\n').count()
-                        + text.chars().take_while(|c| *c == '\n').count();
-                    for _ in have..2 {
-                        output.push('\n');
-                    }
-                }
-                after_tool = false;
-                output.push_str(text);
-            }
+            "message" => reply.say(value["text"].as_str().unwrap_or_default()),
             "plan" => {
                 plan = value["entries"]
                     .as_array()
@@ -1751,7 +1733,7 @@ fn fold(tx: &rusqlite::Transaction<'_>, run: &str) -> anyhow::Result<()> {
                     .unwrap_or_default();
             }
             "tool_call" => {
-                after_tool = true;
+                reply.tool();
                 tools.push((value["id"].as_str().unwrap_or_default().to_owned(), value["title"].as_str().unwrap_or_default().to_owned()))
             }
             "tool_update" => {
@@ -1764,6 +1746,7 @@ fn fold(tx: &rusqlite::Transaction<'_>, run: &str) -> anyhow::Result<()> {
         }
     }
     drop(stmt);
+    let output = reply.into_string();
 
     tx.execute(
         "UPDATE runs SET output = ?2, plan = ?3, tool_count = ?4 WHERE id = ?1",

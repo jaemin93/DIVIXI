@@ -11,6 +11,45 @@ The steps below were checked on Ubuntu 24.04 (x86_64) with Rust 1.96.
 
 ---
 
+## 0. The app can do this for you (x86_64 Linux)
+
+Everything below is the manual path, and it still works. But for an **x86_64
+Linux** machine reached over SSH, the app installs and updates divixi-server
+itself, the way an editor's remote extension does: no apt packages, no Rust,
+no Node, and nothing built on that machine. It fetches the release binary.
+
+In the app, the instance's card in **Settings › Remote instances** says what it
+found on that machine, and so does the page shown when an instance could not be
+reached. It asks before it writes anything — the binary is about 207 MB — and an
+update can be told "don't ask again" per instance.
+
+What it does there:
+
+```bash
+~/.divixi/server/v2026-09-30/divixi-server   # the release binary
+~/.divixi/server/current -> v2026-09-30      # the pointer the app moves
+```
+
+- The machine fetches it from GitHub itself with `curl` or `wget` where it can;
+  where it cannot (no fetcher, or no route out) the app streams the bytes down
+  and pushes them over the SSH connection. Which of the two is happening is on
+  screen, because one is much slower than the other.
+- The download lands on `divixi-server.part` and is only renamed into place once
+  its **SHA-256** matches the digest GitHub keeps for that asset. A download that
+  drops halfway is deleted, never installed.
+- The old server is stopped, the new binary is renamed in, the pointer moves in
+  one step, and the server is started again — in that order.
+- The instance's **divixi-server path** setting is then pointed at
+  `~/.divixi/server/current/divixi-server`.
+- `systemd`: if a user service for divixi-server is enabled there, the app uses
+  it to stop and start. If that unit's `ExecStart` names some other binary, the
+  app **stops** and tells you to point it at the pointer above — installing
+  behind it would leave systemd launching the old one.
+
+The manual steps are the way for everything else: arm64, macOS, a machine with
+no SSH server, or a server you want built from your own checkout (which is the
+only way to make its build match an app you built yourself).
+
 ## 1. What you need
 
 **System packages (for building).** Building the server compiles Tauri too, so Tauri's Linux build
@@ -130,8 +169,11 @@ SSH is treated as the owner.
    - divixi-server path: `~/.local/bin/divixi-server`
    - Remote PATH: only when the agents or node cannot be found. For example:
      `~/.local/bin:~/.nvm/versions/node/v20.20.2/bin`
-3. Pick that instance from the menu at the top left. If the server is down, the app starts it over
-   SSH, takes a token, and opens the tunnel.
+3. Pick that instance from the menu at the top left. The app opens the tunnel, takes a pairing
+   token over SSH, and signs in. It does **not** start a server that is down while it connects: it
+   reports that nothing answered through the tunnel and shows a **Start it** button on that
+   instance's card, which starts the server over SSH. To have one up without pressing anything,
+   keep it running (section 5).
 
 ### B. A direct address (when there is no SSH server, as on a Windows PC; GitHub account)
 
@@ -157,8 +199,8 @@ pkill -x divixi-server; setsid -f ~/.local/bin/divixi-server serve >/dev/null 2>
 
 ## 5. Keeping it running
 
-**Starting and stopping it yourself.** With the SSH tunnel this is usually unnecessary, as the app
-starts it for you.
+**Starting and stopping it yourself.** Connecting does not start a stopped server (section 4A);
+the app shows a **Start it** button for that. These are the same two commands from a shell.
 
 ```bash
 setsid -f ~/.local/bin/divixi-server serve >/dev/null 2>&1 </dev/null   # start (survives the SSH session)
@@ -188,8 +230,9 @@ systemctl --user enable --now divixi-server
 sudo loginctl enable-linger "$USER"     # start at boot without signing in
 ```
 
-- When the app finds a server already running (`pgrep`) it does not start another. So a server kept
-  up by systemd does not end up with two of them.
+- Nothing the app does starts a second server: the line it runs over SSH is guarded by `pgrep`, and
+  the **Start it** button checks first too. So a server kept up by systemd does not end up with two
+  of them.
 - After changing `listen` or `owner`, restart it with `systemctl --user restart divixi-server`.
 
 ---
@@ -230,7 +273,7 @@ from that commit.
 | `ssh ended … Host key verification failed` | Run `ssh user@server` once in a terminal on your PC to take the host key |
 | `ssh ended … Permission denied` | Whether you get in without a password (key, ssh-agent) |
 | `divixi-server token gave no link` | That the path is right (`~/.local/bin/divixi-server`) and that it is executable |
-| `did not answer through the tunnel` | Whether the server comes up at all: run `~/.local/bin/divixi-server serve` yourself (you will see the log) |
+| `did not answer through the tunnel` | Usually the server is not running: press **Start it** on that instance's card. If it will not come up, run `~/.local/bin/divixi-server serve` yourself (you will see the log) |
 | An agent shows as "not installed" | PATH on the server. Add the CLI and node directories to "Remote PATH" in the instance settings, or to `Environment=PATH` in the systemd unit |
 | A direct address says "no owner yet" | Run `divixi-server owner <github login>` on the server |
 | A direct address says "… does not own this Divixi" | Whether the app's GitHub account is the same as the server's owner |

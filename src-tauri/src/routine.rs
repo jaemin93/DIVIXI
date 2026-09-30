@@ -202,12 +202,17 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
 /// streams — its thoughts, each tool's title — belongs to a transcript, and
 /// a routine has none to belong to.
 async fn collect(app: AppHandle, run: String, mut rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) -> (String, u32) {
-    let mut text = String::new();
+    // Put together as a track's run is, so a turn reads the same on the
+    // Routines page as in a timeline.
+    let mut reply = orchestra_core::Reply::default();
     let mut tools = 0u32;
     while let Some(event) = rx.recv().await {
         match &event {
-            AgentEvent::Message { text: chunk } => text.push_str(chunk),
-            AgentEvent::ToolCall { .. } => tools += 1,
+            AgentEvent::Message { text: chunk } => reply.say(chunk),
+            AgentEvent::ToolCall { .. } => {
+                reply.tool();
+                tools += 1
+            }
             // An agent asking before it acts: a routine has no conductor, so
             // it goes to the human on a card.
             AgentEvent::Permission { .. } => {
@@ -216,7 +221,7 @@ async fn collect(app: AppHandle, run: String, mut rx: tokio::sync::mpsc::Unbound
             _ => {}
         }
     }
-    (text, tools)
+    (reply.into_string(), tools)
 }
 
 /// The "track" a routine's permission card is filed under. A card needs one

@@ -9,6 +9,40 @@
 
 ---
 
+## 0. 앱이 알아서 해 주는 경우 (x86_64 리눅스)
+
+아래 내용은 손으로 하는 방법이고 그대로 유효합니다. 다만 SSH로 붙는 **x86_64 리눅스** 머신이라면
+앱이 divixi-server를 알아서 설치하고 업데이트합니다. 에디터의 원격 확장이 하는 것과 같습니다:
+apt 패키지도, Rust도, Node도 필요 없고, 그 머신에서 아무것도 빌드하지 않습니다. 릴리즈 바이너리를
+받아 옵니다.
+
+앱의 **설정 › 원격 인스턴스**에 있는 인스턴스 카드가 그 머신에서 무엇을 찾았는지 알려 주고,
+인스턴스에 연결하지 못했을 때 나오는 화면도 같은 것을 보여 줍니다. 무엇을 쓰기 전에 먼저 묻습니다 —
+바이너리가 약 207MB입니다 — 그리고 업데이트는 인스턴스별로 "다음부터 묻지 않기"를 둘 수 있습니다.
+
+그 머신에 만드는 것:
+
+```bash
+~/.divixi/server/v2026-09-30/divixi-server   # 릴리즈 바이너리
+~/.divixi/server/current -> v2026-09-30      # 앱이 옮기는 포인터
+```
+
+- 할 수 있으면 그 머신이 `curl`이나 `wget`으로 GitHub에서 직접 받습니다. 할 수 없으면(받는 도구가
+  없거나 바깥으로 나가지 못하면) 앱이 받아서 SSH 연결로 밀어 넣습니다. 둘 중 어느 쪽인지 화면에
+  나옵니다. 한쪽이 훨씬 느리기 때문입니다.
+- 받는 파일은 `divixi-server.part`로 들어오고, GitHub가 그 에셋에 대해 알려 주는 **SHA-256**과
+  맞을 때만 제자리로 옮겨집니다. 중간에 끊긴 파일은 지우고, 설치하지 않습니다.
+- 기존 서버를 멈추고, 새 바이너리를 제자리로 옮기고, 포인터를 한 번에 바꾸고, 서버를 다시 띄웁니다 —
+  이 순서입니다.
+- 그다음 인스턴스의 **divixi-server 경로** 설정이 `~/.divixi/server/current/divixi-server`를
+  가리키도록 바뀝니다.
+- `systemd`: 그 머신에 divixi-server 사용자 서비스가 켜져 있으면 앱이 그것으로 멈추고 띄웁니다.
+  그 유닛의 `ExecStart`가 다른 바이너리를 가리키고 있으면 앱은 **멈추고** 위 포인터를 가리키라고
+  알려 줍니다. 그대로 설치하면 systemd가 계속 예전 것을 띄우게 됩니다.
+
+그 밖의 경우는 손으로 하는 방법이 답입니다: arm64, macOS, SSH 서버가 없는 머신, 그리고 자기
+체크아웃으로 서버를 빌드하고 싶을 때(직접 빌드한 앱과 서버의 빌드를 맞추는 유일한 방법입니다).
+
 ## 1. 준비물
 
 **시스템 패키지(빌드용).** 서버 빌드도 Tauri를 컴파일하므로 Tauri의 Linux 빌드 패키지가 필요합니다. 실행
@@ -120,7 +154,10 @@ divixi-server help
    - 원격 포트: `7488`
    - divixi-server 경로: `~/.local/bin/divixi-server`
    - 원격 PATH: 에이전트나 node를 못 찾을 때만 채웁니다. 예: `~/.local/bin:~/.nvm/versions/node/v20.20.2/bin`
-3. 왼쪽 위 메뉴에서 그 인스턴스를 고릅니다. 서버가 꺼져 있으면 앱이 SSH로 켜고, 토큰을 받고, 터널을 엽니다.
+3. 왼쪽 위 메뉴에서 그 인스턴스를 고릅니다. 앱이 터널을 열고, SSH로 페어링 토큰을 받고, 로그인합니다.
+   붙는 동안 꺼져 있는 서버를 켜 주지는 **않습니다**. 터널로 응답이 없었다고 알리고, 그 인스턴스 카드에
+   **서버 시작** 버튼을 보여 줍니다. 그걸 누르면 SSH로 서버를 켭니다. 아무것도 누르지 않아도 떠 있게
+   하려면 5절처럼 켜 두세요.
 
 ### B. 직접 주소 (Windows PC처럼 SSH 서버가 없을 때, GitHub 계정)
 
@@ -143,7 +180,8 @@ pkill -x divixi-server; setsid -f ~/.local/bin/divixi-server serve >/dev/null 2>
 
 ## 5. 켜 두기
 
-**직접 켜고 끄기.** SSH 터널 방식은 앱이 알아서 켜므로 보통은 필요 없습니다.
+**직접 켜고 끄기.** 연결만으로는 꺼진 서버가 켜지지 않습니다(4절 A). 그건 앱의 **서버 시작** 버튼이
+하는 일이고, 셸에서 직접 하려면 같은 명령 두 개입니다.
 
 ```bash
 setsid -f ~/.local/bin/divixi-server serve >/dev/null 2>&1 </dev/null   # 켜기 (SSH가 끊겨도 계속)
@@ -173,7 +211,8 @@ systemctl --user enable --now divixi-server
 sudo loginctl enable-linger "$USER"     # 로그인하지 않아도 부팅 때 켜지게
 ```
 
-- 앱은 이미 떠 있는 서버를 찾으면(`pgrep`) 새로 켜지 않습니다. 그래서 systemd로 켜 두어도 두 개가 뜨지 않습니다.
+- 앱이 서버를 두 개 띄우는 일은 없습니다. SSH로 돌리는 줄은 `pgrep`으로 먼저 확인하고, **서버 시작**
+  버튼도 확인부터 합니다. 그래서 systemd로 켜 두어도 두 개가 뜨지 않습니다.
 - `listen`이나 `owner`를 바꾼 뒤에는 `systemctl --user restart divixi-server`로 다시 켭니다.
 
 ---
@@ -211,7 +250,7 @@ Rust 코드 기준이라, 화면만 바뀐 앱 업데이트에서는 뜨지 않�
 | `ssh ended … Host key verification failed` | PC 터미널에서 `ssh user@server`를 한 번 해서 호스트 키를 받아 두기 |
 | `ssh ended … Permission denied` | 암호 없이 들어가지는지(키, ssh-agent) |
 | `divixi-server token gave no link` | 경로가 맞는지(`~/.local/bin/divixi-server`), 실행 권한이 있는지 |
-| `did not answer through the tunnel` | 서버가 뜨는지 직접 돌려 보기: `~/.local/bin/divixi-server serve` (로그가 보임) |
+| `did not answer through the tunnel` | 대개 서버가 꺼져 있습니다. 그 인스턴스 카드의 **서버 시작**을 누르세요. 그래도 안 뜨면 직접 돌려 보기: `~/.local/bin/divixi-server serve` (로그가 보임) |
 | 에이전트가 "설치 안 됨" | 서버 쪽 PATH. 인스턴스 설정의 "원격 PATH"나 systemd의 `Environment=PATH`에 CLI·node 경로 추가 |
 | 직접 주소가 "no owner yet" | 서버에서 `divixi-server owner <GitHub 아이디>` |
 | 직접 주소가 "… does not own this Divixi" | 앱의 GitHub 로그인 계정과 서버 주인이 같은지 |
