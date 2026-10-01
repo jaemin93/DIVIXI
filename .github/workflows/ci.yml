@@ -189,9 +189,19 @@ jobs:
         with:
           cache-key: bundle-${{ matrix.name }}
 
-      # tauri build runs beforeBuildCommand (npm run build) itself.
+      # With updater metadata enabled in tauri.conf.json, `tauri build` insists
+      # on a private signing key whenever a public updater key is configured.
+      # CI bundle artifacts are non-release smoke outputs, so they use an
+      # ephemeral per-run key instead of release secrets.
       - name: tauri build (unsigned)
-        run: npx tauri build --bundles ${{ matrix.bundles }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/ci-updater.key"
+          npx tauri signer generate --ci -w "$key" -f >/dev/null
+          export TAURI_SIGNING_PRIVATE_KEY
+          TAURI_SIGNING_PRIVATE_KEY="$(cat "$key")"
+          npx tauri build --bundles ${{ matrix.bundles }}
 
       # Tauri builds the .app's icon from the PNGs in bundle.icon, one entry
       # per size, so the largest PNG listed is the sharpest the Dock and
