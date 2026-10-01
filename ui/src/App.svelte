@@ -18,9 +18,10 @@
   import RoutineView from "./lib/RoutineView.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
   import Unreachable from "./lib/Unreachable.svelte";
+  import NotPaired from "./lib/NotPaired.svelte";
   import ErrorToasts from "./lib/ErrorToasts.svelte";
   import CrashBanner from "./lib/CrashBanner.svelte";
-  import { inTauri, instance } from "./lib/ipc.svelte";
+  import { inTauri, instance, session } from "./lib/ipc.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
@@ -68,7 +69,11 @@
      one. It stays until it is closed: unlike an error, it is already over. -->
 <CrashBanner />
 
-{#if instance.error}
+{#if !session.ready}
+  <!-- A browser at this address with no pairing. Said plainly, instead of a
+       shell whose every pane fails to load. -->
+  <NotPaired />
+{:else if instance.error}
   <div class="shell">
     <WindowChrome />
     <Unreachable />

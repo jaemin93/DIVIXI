@@ -1,11 +1,16 @@
 //! The HTTP side of a remote instance: what another PC's Divixi app talks
 //! to (remote/client.rs), over an SSH tunnel or at this machine's address.
 //!
-//! Only the app comes here, never a browser: a device signs in for tokens
-//! (with a pairing token minted on this machine, or as the owner's GitHub
-//! account) and sends them as `Authorization: Bearer` with every request.
-//! Nothing rides on cookies, so a page elsewhere has nothing to borrow;
-//! requests that name a browser origin are refused all the same.
+//! Two things come here. Another PC's Divixi app, over an SSH tunnel or at
+//! this machine's address; and, since phone access, a phone's browser over
+//! `tailscale serve`, which is served the app itself from this same server.
+//!
+//! Both sign in for tokens (a pairing token minted on this machine, the
+//! owner's GitHub account, or a pairing link scanned from a code) and send
+//! them as `Authorization: Bearer` with every request. Nothing rides on
+//! cookies, so a page elsewhere has nothing to borrow even once a browser is
+//! allowed to speak here at all -- which is what makes narrowing the origin
+//! rule ([`guard`]) safe rather than merely narrow.
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
@@ -13,7 +18,7 @@ use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, Method, Request, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -43,7 +48,6 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/auth/token", post(token))
         .route("/auth/github", post(github))
         .route("/auth/refresh", post(refresh))
-        .route("/auth/pair", get(pair))
         .route("/api/health", get(|| async { axum::Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "build": env!("DIVIXI_BUILD") })) }))
         // An attachment (up to 50 MB) comes as base64 in a command.
         .route("/api/invoke/{cmd}", post(invoke).layer(axum::extract::DefaultBodyLimit::max(72 * 1024 * 1024)))
@@ -51,16 +55,38 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/preview/{*rest}", get(preview))
         .route("/board/{*rest}", get(board))
         .route("/raw/{*rest}", get(raw))
-        .fallback(|| async { (StatusCode::NOT_FOUND, "no such thing") })
-        .layer(axum::middleware::from_fn(guard))
+        // Anything else is the app: `/`, its assets, and whatever it routes
+        // to. Last, so no API path can be shadowed by a file.
+        .fallback(app_asset)
+        .layer(axum::middleware::from_fn_with_state(ctx.clone(), guard))
         .with_state(ctx)
 }
 
-/// Every request: not from a browser page (the app names no origin), and
-/// writes carry `X-Divixi`, which a page elsewhere cannot add unasked.
-async fn guard(request: Request<Body>, next: axum::middleware::Next) -> Response<Body> {
-    if request.headers().contains_key(header::ORIGIN) {
-        return (StatusCode::FORBIDDEN, "not for browsers").into_response();
+/// The origin a browser may name, or none.
+///
+/// Written when phone access publishes, from the MagicDNS name the daemon
+/// gave; cleared when it stops. It is **configuration, not the request**:
+/// comparing `Origin` to the request's own `Host` would let an attacker pick
+/// the host and pass their own check.
+fn allowed_origin(ctx: &Ctx) -> Option<String> {
+    super::setting(&ctx.app, "phone.origin").filter(|o| !o.is_empty())
+}
+
+/// Every request: from a page, only from our own; and writes carry
+/// `X-Divixi`, which a page elsewhere cannot add unasked.
+///
+/// Until phone access there were no browsers here at all and any `Origin`
+/// was refused. A phone is a browser, so the rule narrows instead: the one
+/// origin this machine publishes, and nothing else. What keeps that safe is
+/// that nothing rides on cookies — tokens are held in `localStorage` and sent
+/// as `Authorization`, so another page has no ambient credential to borrow
+/// even if it could reach the socket.
+async fn guard(State(ctx): State<Ctx>, request: Request<Body>, next: axum::middleware::Next) -> Response<Body> {
+    if let Some(origin) = request.headers().get(header::ORIGIN) {
+        let ours = allowed_origin(&ctx);
+        if !ours.as_deref().is_some_and(|o| origin.as_bytes() == o.as_bytes()) {
+            return (StatusCode::FORBIDDEN, "not for browsers").into_response();
+        }
     }
     let writes = request.method() != Method::GET && request.method() != Method::HEAD;
     if writes && request.headers().get("x-divixi").is_none() {
@@ -73,12 +99,73 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
     headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(|v| v.trim().to_string())
 }
 
+/// The subprotocol that marks our own event socket.
+const WS_PROTOCOL: &str = "divixi.v1";
+
+/// A browser cannot set `Authorization` on a WebSocket -- the API has no
+/// header argument -- so the token rides as a second subprotocol:
+/// `Sec-WebSocket-Protocol: divixi.v1, <token>`. A query parameter would also
+/// work and is worse: it lands in logs and in `Referer`. Base64url and `.`
+/// are all valid HTTP token characters, so nothing has to be re-encoded.
+fn protocol_token(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get("sec-websocket-protocol")?.to_str().ok()?;
+    let mut parts = raw.split(',').map(str::trim);
+    (parts.next()? == WS_PROTOCOL).then(|| parts.next().map(str::to_string)).flatten().filter(|t| !t.is_empty())
+}
+
 /// The requesting device, or why not.
-fn device(ctx: &Ctx, headers: &HeaderMap) -> Result<super::auth::Device, Refused> {
-    let token = bearer(headers).ok_or(Refused::SignIn)?;
-    let st = ctx.state();
-    let owner = super::github::owner(&st.store);
-    st.remote.auth.check(&st.store, &token, owner.as_deref())
+///
+/// Two checks, and they answer different questions. The token says this
+/// device was let in once and has not been dropped; [`over_the_tailnet`] says
+/// the request in front of us really came from somebody allowed to make it.
+async fn device(ctx: &Ctx, from: Option<std::net::IpAddr>, headers: &HeaderMap) -> Result<super::auth::Device, Refused> {
+    let token = bearer(headers).or_else(|| protocol_token(headers)).ok_or(Refused::SignIn)?;
+    let found = {
+        let st = ctx.state();
+        let owner = super::github::owner(&st.store);
+        st.remote.auth.check(&st.store, &token, owner.as_deref())?
+    };
+    over_the_tailnet(ctx, from, headers, &found).await?;
+    Ok(found)
+}
+
+/// Whether a request that came through `tailscale serve` may be made.
+///
+/// Only forwarded requests are judged here: the app's own paths -- an SSH
+/// tunnel, this machine's address -- carry no `X-Forwarded-For` and are
+/// unchanged by any of this.
+///
+/// Two things that look alike and are not:
+///
+/// * **No peer resolved** falls through to the token. A stopped `tailscaled`
+///   or a daemon that cannot answer must not lock the owner out of their own
+///   machine, and the token is the floor it degrades to -- which is exactly
+///   where this stood before identity existed.
+/// * **A peer that resolved and is not allowed** is refused. That is not
+///   ambiguity, it is an answer, and on a tailnet of 406 colleagues it is the
+///   answer the allowlist exists to give.
+async fn over_the_tailnet(ctx: &Ctx, from: Option<std::net::IpAddr>, headers: &HeaderMap, device: &super::auth::Device) -> Result<(), Refused> {
+    let trust = super::peer::trust(&ctx.app);
+    if !trust.on || !super::peer::forwarded(headers) {
+        return Ok(());
+    }
+    let Some(found) = super::peer::resolve(&ctx.app, from, headers, &trust).await else {
+        tracing::debug!("a forwarded request resolved to no tailnet peer; its token is the whole of the check");
+        return Ok(());
+    };
+    if !trust.allows(&found.login) {
+        tracing::warn!(login = %found.login, "a tailnet account that is not on the allowlist tried to come in");
+        return Err(Refused::Dropped);
+    }
+    // A session pinned to a device cannot be replayed from another, even by
+    // the same person inside the same tailnet.
+    if let Some(pinned) = device.peer.as_deref() {
+        if pinned != found.key(trust.pin) {
+            tracing::warn!(device = %device.id, "a device's session came from another node; refusing it");
+            return Err(Refused::Dropped);
+        }
+    }
+    Ok(())
 }
 
 fn refused(r: Refused) -> Response<Body> {
@@ -107,8 +194,17 @@ impl SignIn {
         serde_json::from_slice(body).ok()
     }
 
-    fn name(&self) -> String {
-        self.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Divixi app".into())
+    /// What the device list will call this. A browser sends no name, so one
+    /// is read from its user-agent: dropping a lost phone out of three rows
+    /// all reading "Divixi app" is not possible.
+    fn name(&self, headers: &HeaderMap) -> String {
+        if let Some(given) = self.name.clone().filter(|n| !n.trim().is_empty()) {
+            return given;
+        }
+        match headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()) {
+            Some(ua) if !ua.is_empty() => device_name(ua),
+            _ => "Divixi app".into(),
+        }
     }
 }
 
@@ -117,16 +213,32 @@ impl SignIn {
 /// The scope is not chosen here: it is signed into the token
 /// ([`super::auth::Scope`]), so this endpoint cannot be used to widen a link
 /// that was minted for a phone.
-async fn token(State(ctx): State<Ctx>, body: Bytes) -> Response<Body> {
+async fn token(State(ctx): State<Ctx>, ConnectInfo(from): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response<Body> {
     let Some(b) = SignIn::parse(&body) else { return (StatusCode::BAD_REQUEST, "expected {\"token\"}").into_response() };
+    // Pinned to whoever is scanning, when the tailnet can say who that is.
+    // Decided here, at the one moment a device is created: the pin is what
+    // the device carries forever after.
+    let pinned = signing_in_from(&ctx, Some(from.ip()), &headers).await;
     let st = ctx.state();
-    match st.remote.auth.redeem(&st.store, &b.token, &b.name()) {
+    match st.remote.auth.redeem(&st.store, &b.token, &b.name(&headers), pinned) {
         Ok(pair) => tokens(pair),
         Err(r) => refused(r),
     }
 }
 
+/// The peer key to pin a device being created to, or `None`.
+///
+/// `None` is the ordinary case and not a failure: the Divixi app does not
+/// come over the tailnet, and identity trust is off until it is configured.
+async fn signing_in_from(ctx: &Ctx, from: Option<std::net::IpAddr>, headers: &HeaderMap) -> Option<String> {
+    let trust = super::peer::trust(&ctx.app);
+    let found = super::peer::resolve(&ctx.app, from, headers, &trust).await?;
+    trust.allows(&found.login).then(|| found.key(trust.pin))
+}
+
 /// A short, recognisable name for a phone, from what its browser says.
+///
+/// Used when a browser signs in and sends no name of its own.
 ///
 /// The device list is how a lost phone gets dropped, and dropping the right
 /// one out of three rows all reading "Divixi app" is not possible. Browsers
@@ -161,127 +273,6 @@ fn device_name(ua: &str) -> String {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct PairQuery {
-    #[serde(default)]
-    token: String,
-}
-
-/// Open a pairing link from a phone's browser.
-///
-/// A navigation, so it carries no `Origin` and passes the guard above without
-/// the guard being widened for it. The link is spent here, and the page that
-/// comes back keeps the tokens for this origin and takes the token out of the
-/// address bar, so it is not left sitting in the phone's history.
-async fn pair(State(ctx): State<Ctx>, headers: HeaderMap, Query(q): Query<PairQuery>) -> Response<Body> {
-    let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or_default();
-    let name = device_name(ua);
-    let machine = sysinfo::System::host_name().unwrap_or_else(|| "this computer".into());
-    let st = ctx.state();
-    match st.remote.auth.redeem(&st.store, &q.token, &name) {
-        Ok((access, refresh)) => {
-            tracing::info!(device = %name, "a device paired from a browser");
-            html(StatusCode::OK, &paired_page(&machine, &name, &access, &refresh))
-        }
-        // No reason beyond "it did not work". The two ways here are an expired
-        // code and one already scanned, and telling them apart tells whoever
-        // is holding a code they should not have which of the two it is.
-        Err(_) => html(StatusCode::UNAUTHORIZED, &refused_page(&machine)),
-    }
-}
-
-fn html(status: StatusCode, body: &str) -> Response<Body> {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        // This page carries tokens: nothing may keep a copy of it.
-        .header(header::CACHE_CONTROL, "no-store")
-        .header("Referrer-Policy", "no-referrer")
-        .body(Body::from(body.to_string()))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-}
-
-/// Text going into the page's **markup**. A host name and a browser's own
-/// string are both outside our control.
-///
-/// Not for anything going inside `<script>`: a script element's content is
-/// not HTML, entities are never decoded there, and running a token through
-/// this would quietly change it the day the token alphabet grows a character
-/// this escapes. That is [`js_string`]'s job.
-fn escape(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for c in raw.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            '/' => out.push_str("&#47;"),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// A value going inside `<script>`, as a JavaScript string literal.
-///
-/// `serde_json` does the quoting and escaping, and `/` is escaped afterwards
-/// so the sequence `</script>` cannot appear in the data and end the element
-/// early. Today's tokens are base64url and contain none of this; the point is
-/// that they do not have to stay that way for the page to stay correct.
-fn js_string(raw: &str) -> String {
-    serde_json::to_string(raw).unwrap_or_else(|_| "\"\"".into()).replace('/', r"\/")
-}
-
-const PAGE_STYLE: &str = concat!(
-    r#"<meta name="viewport" content="width=device-width,initial-scale=1">"#,
-    "<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;",
-    "background:#111318;color:#e7e9ee;font:16px/1.6 system-ui,-apple-system,sans-serif}",
-    "main{max-width:30rem;padding:2rem}h1{font-size:1.25rem;margin:0 0 .75rem;line-height:1.4}",
-    "p{margin:0 0 .75rem;color:#a8adbb}b{color:#e7e9ee;font-weight:600}</style>",
-);
-
-/// What a phone sees when its scan worked.
-///
-/// The tokens are kept for this origin, where the app will look for them once
-/// there is an app to serve here. Kept in `localStorage` and not a cookie, on
-/// purpose: a cookie would be sent with every request to this origin whoever
-/// caused it, and the whole reason this server has no CSRF problem is that
-/// there is no ambient credential for another page to ride.
-fn paired_page(machine: &str, name: &str, access: &str, refresh: &str) -> String {
-    format!(
-        concat!(
-            "<!doctype html><html lang=\"en\"><head><title>Divixi</title>{style}</head><body><main>",
-            "<h1>This phone is paired with <b>{machine}</b></h1>",
-            "<p>Signed in as <b>{name}</b>. Divixi itself is not served here yet \u{2014} this address will open it when the next update lands.</p>",
-            "<p>To undo this, open Divixi on {machine} and drop this device under Settings \u{203a} Remote instances.</p>",
-            "</main><script>",
-            "try{{localStorage.setItem('divixi.access',{access});localStorage.setItem('divixi.refresh',{refresh})}}catch(e){{}}",
-            "history.replaceState(null,'','/');",
-            "</script></body></html>",
-        ),
-        style = PAGE_STYLE,
-        machine = escape(machine),
-        name = escape(name),
-        access = js_string(access),
-        refresh = js_string(refresh),
-    )
-}
-
-fn refused_page(machine: &str) -> String {
-    format!(
-        concat!(
-            "<!doctype html><html lang=\"en\"><head><title>Divixi</title>{style}</head><body><main>",
-            "<h1>This code did not work</h1>",
-            "<p>A code lasts five minutes and can be scanned once. Open Divixi on <b>{machine}</b> and show a new one.</p>",
-            "</main></body></html>",
-        ),
-        style = PAGE_STYLE,
-        machine = escape(machine),
-    )
-}
-
 /// The peer's address, for the log.
 fn peer(headers_ext: &axum::http::Extensions) -> String {
     headers_ext.get::<axum::extract::ConnectInfo<SocketAddr>>().map(|c| c.0.to_string()).unwrap_or_default()
@@ -290,11 +281,13 @@ fn peer(headers_ext: &axum::http::Extensions) -> String {
 /// A GitHub token: in if GitHub says it is this instance's owner.
 async fn github(State(ctx): State<Ctx>, request: Request<Body>) -> Response<Body> {
     let from = peer(request.extensions());
+    let headers = request.headers().clone();
     let Ok(body) = axum::body::to_bytes(request.into_body(), 64 * 1024).await else { return StatusCode::BAD_REQUEST.into_response() };
     let Some(b) = SignIn::parse(&body) else { return (StatusCode::BAD_REQUEST, "expected {\"token\"}").into_response() };
     let Some(owner) = super::github::owner(&ctx.state().store) else {
         return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": "this Divixi has no owner yet: sign in to GitHub on it (Settings › Remote instances)" }))).into_response();
     };
+    let pinned = signing_in_from(&ctx, from.parse().ok().map(|a: SocketAddr| a.ip()), &headers).await;
     let login = match super::github::login_of(&b.token).await {
         Ok(l) => l,
         Err(e) => return (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": e }))).into_response(),
@@ -304,7 +297,7 @@ async fn github(State(ctx): State<Ctx>, request: Request<Body>) -> Response<Body
         return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": format!("{login} does not own this Divixi") }))).into_response();
     }
     let st = ctx.state();
-    tokens(st.remote.auth.admit(&st.store, &b.name(), Some(login), super::auth::Scope::Full, super::auth::REFRESH_SECS))
+    tokens(st.remote.auth.admit(&st.store, &b.name(&headers), Some(login), super::auth::Scope::Full, super::auth::REFRESH_SECS, pinned))
 }
 
 /// New tokens for a refresh token (as `Bearer`).
@@ -319,8 +312,8 @@ async fn refresh(State(ctx): State<Ctx>, headers: HeaderMap) -> Response<Body> {
 
 // ----- commands and events -----
 
-async fn invoke(State(ctx): State<Ctx>, Path(cmd): Path<String>, headers: HeaderMap, body: Bytes) -> Response<Body> {
-    let (who, scope) = match device(&ctx, &headers) {
+async fn invoke(State(ctx): State<Ctx>, Path(cmd): Path<String>, ConnectInfo(from): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response<Body> {
+    let (who, scope) = match device(&ctx, Some(from.ip()), &headers).await {
         Ok(d) => (d.id, d.scope),
         Err(r) => return refused(r),
     };
@@ -358,12 +351,17 @@ struct Since {
     since: u64,
 }
 
-async fn events(State(ctx): State<Ctx>, headers: HeaderMap, Query(q): Query<Since>, ws: WebSocketUpgrade) -> Response<Body> {
-    let who = match device(&ctx, &headers) {
+async fn events(State(ctx): State<Ctx>, ConnectInfo(from): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(q): Query<Since>, ws: WebSocketUpgrade) -> Response<Body> {
+    // Once, at the upgrade, and never again: a socket lives for hours and
+    // resolving per frame would be a daemon call per event.
+    let who = match device(&ctx, Some(from.ip()), &headers).await {
         Ok(d) => d.id,
         Err(r) => return refused(r),
     };
     let hub = ctx.state().remote.events.clone();
+    // Echoed back only if the browser offered it; the app sends no
+    // subprotocol and gets none.
+    let ws = if protocol_token(&headers).is_some() { ws.protocols([WS_PROTOCOL]) } else { ws };
     ws.on_upgrade(move |socket| async move {
         *ctx.state().remote.sockets.lock().entry(who.clone()).or_default() += 1;
         pump(socket, hub, q.since).await;
@@ -472,6 +470,44 @@ async fn pump(mut socket: WebSocket, hub: Arc<super::events::Hub>, since: u64) {
     }
 }
 
+// ----- the app itself, for a phone -----
+
+/// The built UI, from the assets Tauri already embeds.
+///
+/// No second copy of `dist`: `asset_resolver()` reads the same bundle the
+/// app's own window loads, so the phone and the window can never be showing
+/// different builds.
+///
+/// Served without a token, and that is not an oversight. This is the shell —
+/// the same JavaScript the repository ships — and it has to load before
+/// there is anywhere to type a token. Everything the shell then asks for goes
+/// through `/api`, which does need one.
+async fn app_asset(State(ctx): State<Ctx>, uri: Uri) -> Response<Body> {
+    let path = uri.path().trim_start_matches('/');
+    let wanted = if path.is_empty() { "index.html" } else { path };
+    let resolver = ctx.app.asset_resolver();
+    // A path with no asset is a route inside the app (`/`, and whatever the
+    // app routes to later), so the shell answers for it. A missing file under
+    // `/assets/` is a genuine 404 and must not come back as HTML, or a broken
+    // script tag reports itself as a parse error somewhere else entirely.
+    let found = resolver.get(wanted.to_string()).or_else(|| {
+        (!wanted.starts_with("assets/")).then(|| resolver.get("index.html".into())).flatten()
+    });
+    let Some(asset) = found else {
+        return (StatusCode::NOT_FOUND, "no such thing").into_response();
+    };
+    let mut res = Response::builder().header(header::CONTENT_TYPE, asset.mime_type.clone());
+    if let Some(csp) = &asset.csp_header {
+        res = res.header(header::CONTENT_SECURITY_POLICY, csp.clone());
+    }
+    // The shell is rebuilt with every release and its asset names are
+    // hashed; the entry document is not, so it may not be kept.
+    let cache = if wanted.starts_with("assets/") { "public, max-age=31536000, immutable" } else { "no-cache" };
+    res.header(header::CACHE_CONTROL, cache)
+        .body(Body::from(asset.bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
 // ----- files -----
 
 fn from_protocol(res: axum::http::Response<Cow<'static, [u8]>>, sandbox: bool) -> Response<Body> {
@@ -493,8 +529,8 @@ fn rebuilt(uri: &Uri, prefix: &str) -> Request<Vec<u8>> {
     Request::builder().uri(with_query).body(Vec::new()).expect("a path is a uri")
 }
 
-async fn preview(State(ctx): State<Ctx>, headers: HeaderMap, uri: Uri) -> Response<Body> {
-    if let Err(r) = device(&ctx, &headers) {
+async fn preview(State(ctx): State<Ctx>, ConnectInfo(from): ConnectInfo<SocketAddr>, headers: HeaderMap, uri: Uri) -> Response<Body> {
+    if let Err(r) = device(&ctx, Some(from.ip()), &headers).await {
         return refused(r);
     }
     let app = ctx.app.clone();
@@ -505,8 +541,8 @@ async fn preview(State(ctx): State<Ctx>, headers: HeaderMap, uri: Uri) -> Respon
     }
 }
 
-async fn board(State(ctx): State<Ctx>, headers: HeaderMap, uri: Uri) -> Response<Body> {
-    if let Err(r) = device(&ctx, &headers) {
+async fn board(State(ctx): State<Ctx>, ConnectInfo(from): ConnectInfo<SocketAddr>, headers: HeaderMap, uri: Uri) -> Response<Body> {
+    if let Err(r) = device(&ctx, Some(from.ip()), &headers).await {
         return refused(r);
     }
     let app = ctx.app.clone();
@@ -519,8 +555,8 @@ async fn board(State(ctx): State<Ctx>, headers: HeaderMap, uri: Uri) -> Response
 
 /// A track's file as it is (`/raw/<track>/<path>`), for saving it on the
 /// app's PC.
-async fn raw(State(ctx): State<Ctx>, headers: HeaderMap, uri: Uri) -> Response<Body> {
-    if let Err(r) = device(&ctx, &headers) {
+async fn raw(State(ctx): State<Ctx>, ConnectInfo(from): ConnectInfo<SocketAddr>, headers: HeaderMap, uri: Uri) -> Response<Body> {
+    if let Err(r) = device(&ctx, Some(from.ip()), &headers).await {
         return refused(r);
     }
     let path = uri.path().strip_prefix("/raw/").unwrap_or_default();
@@ -562,31 +598,24 @@ mod tests {
     }
 
     #[test]
-    fn nothing_borrowed_from_outside_can_break_out_of_the_page() {
-        // A host name and a user-agent are not ours, and the page carries a
-        // token inside a script.
-        assert_eq!(escape("<script>alert(1)</script>"), "&lt;script&gt;alert(1)&lt;&#47;script&gt;");
-        assert_eq!(escape("a'b\"c"), "a&#39;b&quot;c");
-        assert_eq!(escape("a&b"), "a&amp;b");
-        let page = paired_page("</script><b>pwn", "iPhone · Safari", "aa.bb", "cc.dd");
-        assert!(!page.contains("</script><b>pwn"), "the host name is escaped");
-        assert!(page.contains("\"aa.bb\"") && page.contains("\"cc.dd\""), "the tokens still reach the phone");
-
-        // A token is base64url today and none of this depends on that: the
-        // script element must not be endable from inside its own data, and
-        // whatever goes in must be the value that comes back out.
-        for raw in ["a/b", "</script>", "a\"b", "back\\slash", "new\nline", "\u{2014}"] {
-            let out = js_string(raw);
-            assert!(!out.contains("</"), "{raw:?} became {out}");
-            let back: String = serde_json::from_str(&out.replace("\\/", "/")).expect("a JSON string");
-            assert_eq!(back, raw, "{out} did not round-trip");
-        }
-        let nasty = paired_page("desk", "x", "</script><script>alert(1)</script>", "b");
-        assert_eq!(nasty.matches("</script>").count(), 1, "only the page's own closing tag");
-        // The page must not be kept anywhere, and must not say which way the
-        // scan failed.
-        let refused = refused_page("desk");
-        assert!(!refused.contains("expired") && !refused.contains("already"));
+    fn a_websocket_carries_its_token_as_a_subprotocol() {
+        // A browser cannot set `Authorization` on a WebSocket, so the token
+        // rides here instead. Anything that is not our protocol first is not
+        // our socket.
+        let mut h = HeaderMap::new();
+        assert_eq!(protocol_token(&h), None);
+        h.insert("sec-websocket-protocol", "divixi.v1, head.sig".parse().unwrap());
+        assert_eq!(protocol_token(&h).as_deref(), Some("head.sig"));
+        h.insert("sec-websocket-protocol", "divixi.v1,head.sig".parse().unwrap());
+        assert_eq!(protocol_token(&h).as_deref(), Some("head.sig"), "spaces are optional");
+        h.insert("sec-websocket-protocol", "divixi.v1".parse().unwrap());
+        assert_eq!(protocol_token(&h), None, "no token offered");
+        h.insert("sec-websocket-protocol", "divixi.v1, ".parse().unwrap());
+        assert_eq!(protocol_token(&h), None, "an empty token is no token");
+        h.insert("sec-websocket-protocol", "chat, head.sig".parse().unwrap());
+        assert_eq!(protocol_token(&h), None, "another protocol's socket is not ours");
+        h.insert("sec-websocket-protocol", "head.sig, divixi.v1".parse().unwrap());
+        assert_eq!(protocol_token(&h), None, "the order is part of the shape");
     }
 
     #[test]

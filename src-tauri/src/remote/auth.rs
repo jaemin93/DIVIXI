@@ -141,6 +141,12 @@ pub struct Device {
     /// app for a month.
     #[serde(default = "default_life")]
     pub life: i64,
+    /// The tailnet peer this device signed in from
+    /// (`super::peer::Peer::key`), when one could be resolved. A session
+    /// pinned to it cannot be replayed from another node. `None` for every
+    /// device that did not come over the tailnet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
 }
 
 /// Without `n`: it is the one-time value a pairing link is good for and
@@ -160,7 +166,7 @@ impl std::fmt::Debug for Claims {
 /// Without the refresh token it holds; the rest is for the device list.
 impl std::fmt::Debug for Device {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { id, name, created, last_seen, login, refresh: _, scope, life } = self;
+        let Self { id, name, created, last_seen, login, refresh: _, scope, life, peer } = self;
         f.debug_struct("Device")
             .field("id", id)
             .field("name", name)
@@ -169,6 +175,7 @@ impl std::fmt::Debug for Device {
             .field("login", login)
             .field("scope", scope)
             .field("life", life)
+            .field("peer", peer)
             .finish_non_exhaustive()
     }
 }
@@ -311,7 +318,7 @@ impl Auth {
     }
 
     /// Open a pairing link: once, within its five minutes. A new device.
-    pub fn redeem(&self, store: &Store, token: &str, name: &str) -> Result<(String, String), Refused> {
+    pub fn redeem(&self, store: &Store, token: &str, name: &str, peer: Option<String>) -> Result<(String, String), Refused> {
         let claims = self.verify(token).filter(|c| c.k == Kind::Pair).ok_or(Refused::SignIn)?;
         {
             let _one = self.lock.lock();
@@ -322,12 +329,12 @@ impl Auth {
             }
         }
         // Scope and span come from the token, not from this endpoint: see [`Scope`].
-        Ok(self.admit(store, name, None, claims.s, claims.life()))
+        Ok(self.admit(store, name, None, claims.s, claims.life(), peer))
     }
 
     /// A new device, let in by the caller (a pairing token, or the owner's
     /// GitHub account as `login`).
-    pub fn admit(&self, store: &Store, name: &str, login: Option<String>, scope: Scope, life: i64) -> (String, String) {
+    pub fn admit(&self, store: &Store, name: &str, login: Option<String>, scope: Scope, life: i64, peer: Option<String>) -> (String, String) {
         let _one = self.lock.lock();
         let mut devices = self.devices(store);
         let t = now();
@@ -344,6 +351,7 @@ impl Auth {
             refresh: String::new(),
             scope,
             life: if life > 0 { life } else { REFRESH_SECS },
+            peer,
         });
         let i = devices.len() - 1;
         let pair = self.issue(store, &mut devices, i);
@@ -417,10 +425,10 @@ mod tests {
     fn a_pairing_link_works_once() {
         let (a, s) = auth();
         let (link, _) = a.pair_token(&s, Scope::Full, REFRESH_SECS);
-        let (access, _) = a.redeem(&s, &link, "Phone").unwrap();
+        let (access, _) = a.redeem(&s, &link, "Phone", None).unwrap();
         assert_eq!(a.check(&s, &access, None).unwrap().name, "Phone");
-        assert_eq!(a.redeem(&s, &link, "Phone"), Err(Refused::SignIn), "a link is good once");
-        assert_eq!(a.redeem(&s, "junk.token", "x"), Err(Refused::SignIn));
+        assert_eq!(a.redeem(&s, &link, "Phone", None), Err(Refused::SignIn), "a link is good once");
+        assert_eq!(a.redeem(&s, "junk.token", "x", None), Err(Refused::SignIn));
         // A link is not an access token, nor the other way round.
         assert_eq!(a.check(&s, &link, None).unwrap_err(), Refused::SignIn);
     }
@@ -429,7 +437,7 @@ mod tests {
     fn tampering_is_refused() {
         let (a, s) = auth();
         let (link, _) = a.pair_token(&s, Scope::Full, REFRESH_SECS);
-        let (access, _) = a.redeem(&s, &link, "Phone").unwrap();
+        let (access, _) = a.redeem(&s, &link, "Phone", None).unwrap();
         let (body, sig) = access.split_once('.').unwrap();
         let mut forged = serde_json::from_slice::<Claims>(&URL_SAFE_NO_PAD.decode(body).unwrap()).unwrap();
         forged.exp += 1_000_000;
@@ -443,7 +451,7 @@ mod tests {
     fn refresh_rotates_and_a_copy_drops_the_device() {
         let (a, s) = auth();
         let (link, _) = a.pair_token(&s, Scope::Full, REFRESH_SECS);
-        let (_, refresh) = a.redeem(&s, &link, "Phone").unwrap();
+        let (_, refresh) = a.redeem(&s, &link, "Phone", None).unwrap();
         let (access2, refresh2) = a.refresh(&s, &refresh).unwrap();
         assert!(a.check(&s, &access2, None).is_ok());
         // The old refresh token again: someone copied it.
@@ -456,7 +464,7 @@ mod tests {
     #[test]
     fn drop_one() {
         let (a, s) = auth();
-        let pair = |name: &str| a.redeem(&s, &a.pair_token(&s, Scope::Full, REFRESH_SECS).0, name).unwrap();
+        let pair = |name: &str| a.redeem(&s, &a.pair_token(&s, Scope::Full, REFRESH_SECS).0, name, None).unwrap();
         let (phone, _) = pair("Phone");
         let (tablet, _) = pair("Tablet");
         let phone_id = a.check(&s, &phone, None).unwrap().id;
@@ -468,22 +476,22 @@ mod tests {
     #[test]
     fn a_device_in_as_the_owner_stays_in_while_they_own_it() {
         let (a, s) = auth();
-        let (access, _) = a.admit(&s, "Laptop", Some("Octocat".into()), Scope::Full, REFRESH_SECS);
+        let (access, _) = a.admit(&s, "Laptop", Some("Octocat".into()), Scope::Full, REFRESH_SECS, None);
         assert!(a.check(&s, &access, Some("octocat")).is_ok(), "GitHub logins ignore case");
         assert_eq!(a.check(&s, &access, Some("someone")).unwrap_err(), Refused::Dropped);
         assert_eq!(a.check(&s, &access, None).unwrap_err(), Refused::Dropped, "no owner, no GitHub devices");
-        let (paired, _) = a.redeem(&s, &a.pair_token(&s, Scope::Full, REFRESH_SECS).0, "SSH").unwrap();
+        let (paired, _) = a.redeem(&s, &a.pair_token(&s, Scope::Full, REFRESH_SECS).0, "SSH", None).unwrap();
         assert!(a.check(&s, &paired, None).is_ok(), "a device paired over SSH has no login to match");
     }
 
     #[test]
     fn devices_past_their_refresh_are_let_go() {
         let (a, s) = auth();
-        a.admit(&s, "Old", None, Scope::Full, REFRESH_SECS);
+        a.admit(&s, "Old", None, Scope::Full, REFRESH_SECS, None);
         let mut devices = a.devices(&s);
         devices[0].last_seen -= REFRESH_SECS + 1;
         a.save_devices(&s, &devices);
-        a.admit(&s, "New", None, Scope::Full, REFRESH_SECS);
+        a.admit(&s, "New", None, Scope::Full, REFRESH_SECS, None);
         let names: Vec<_> = a.devices(&s).into_iter().map(|d| d.name).collect();
         assert_eq!(names, vec!["New"]);
     }
@@ -492,7 +500,7 @@ mod tests {
     fn a_scope_rides_in_the_token_and_sticks_to_the_device() {
         let (a, s) = auth();
         let (link, _) = a.pair_token(&s, Scope::Conversation, 7 * 24 * 60 * 60);
-        let (access, refresh) = a.redeem(&s, &link, "Phone").unwrap();
+        let (access, refresh) = a.redeem(&s, &link, "Phone", None).unwrap();
         assert_eq!(a.check(&s, &access, None).unwrap().scope, Scope::Conversation);
         // Renewing does not widen it.
         let (access2, _) = a.refresh(&s, &refresh).unwrap();
@@ -506,7 +514,7 @@ mod tests {
         // phone's link to the app's endpoint would hand it the machine.
         let (a, s) = auth();
         let (link, _) = a.pair_token(&s, Scope::Conversation, 7 * 24 * 60 * 60);
-        let (access, _) = a.redeem(&s, &link, "pretending to be the app").unwrap();
+        let (access, _) = a.redeem(&s, &link, "pretending to be the app", None).unwrap();
         assert_eq!(a.check(&s, &access, None).unwrap().scope, Scope::Conversation);
     }
 
@@ -517,7 +525,7 @@ mod tests {
         let (a, s) = auth();
         let old: Claims = serde_json::from_str(r#"{"k":"pair","exp":99999999999,"n":"abc","g":0}"#).unwrap();
         assert_eq!(old.s, Scope::Full);
-        let (access, _) = a.redeem(&s, &a.sign(&old), "Older app").unwrap();
+        let (access, _) = a.redeem(&s, &a.sign(&old), "Older app", None).unwrap();
         assert_eq!(a.check(&s, &access, None).unwrap().scope, Scope::Full);
         let device: Device = serde_json::from_str(r#"{"id":"x","name":"Old","created":0,"last_seen":0}"#).unwrap();
         assert_eq!(device.scope, Scope::Full);
@@ -530,24 +538,24 @@ mod tests {
         let store = Store::in_memory().unwrap();
         let first = Auth::with_key([7u8; 32]);
         let (link, _) = first.pair_token(&store, Scope::Conversation, REFRESH_SECS);
-        assert!(first.redeem(&store, &link, "Phone").is_ok());
+        assert!(first.redeem(&store, &link, "Phone", None).is_ok());
         // A new Auth over the same store is what a restart looks like.
         let after = Auth::with_key([7u8; 32]);
-        assert_eq!(after.redeem(&store, &link, "Phone again"), Err(Refused::SignIn), "a restart does not forget");
+        assert_eq!(after.redeem(&store, &link, "Phone again", None), Err(Refused::SignIn), "a restart does not forget");
     }
 
     #[test]
     fn spent_links_do_not_pile_up_past_their_expiry() {
         let (a, s) = auth();
         let (link, _) = a.pair_token(&s, Scope::Full, REFRESH_SECS);
-        a.redeem(&s, &link, "One").unwrap();
+        a.redeem(&s, &link, "One", None).unwrap();
         let spent: HashMap<String, i64> = serde_json::from_str(&s.get_meta(USED_KEY).unwrap().unwrap()).unwrap();
         assert_eq!(spent.len(), 1);
         // Age the record past its expiry; the next spend sweeps it.
         let old: HashMap<String, i64> = spent.keys().map(|k| (k.clone(), now() - 1)).collect();
         s.set_meta(USED_KEY, &serde_json::to_string(&old).unwrap()).unwrap();
         let (next, _) = a.pair_token(&s, Scope::Full, REFRESH_SECS);
-        a.redeem(&s, &next, "Two").unwrap();
+        a.redeem(&s, &next, "Two", None).unwrap();
         let spent: HashMap<String, i64> = serde_json::from_str(&s.get_meta(USED_KEY).unwrap().unwrap()).unwrap();
         assert_eq!(spent.len(), 1, "the old one was swept, not kept forever");
     }
@@ -557,7 +565,7 @@ mod tests {
         let (a, s) = auth();
         let week = 7 * 24 * 60 * 60;
         let (link, _) = a.pair_token(&s, Scope::Conversation, week);
-        let (access, refresh) = a.redeem(&s, &link, "Phone").unwrap();
+        let (access, refresh) = a.redeem(&s, &link, "Phone", None).unwrap();
         assert_eq!(a.check(&s, &access, None).unwrap().life, week);
         // The refresh token expires with the device's span, not the app's.
         let claims = a.verify(&refresh).unwrap();
@@ -580,27 +588,42 @@ mod tests {
     fn a_short_lived_device_is_let_go_before_a_long_lived_one() {
         let (a, s) = auth();
         let day = 24 * 60 * 60;
-        a.admit(&s, "Phone", None, Scope::Conversation, day);
-        a.admit(&s, "App", None, Scope::Full, REFRESH_SECS);
+        a.admit(&s, "Phone", None, Scope::Conversation, day, None);
+        a.admit(&s, "App", None, Scope::Full, REFRESH_SECS, None);
         let mut devices = a.devices(&s);
         // Both idle for two days: only the phone's span has run out.
         for d in devices.iter_mut() {
             d.last_seen -= 2 * day;
         }
         a.save_devices(&s, &devices);
-        a.admit(&s, "New", None, Scope::Full, REFRESH_SECS);
+        a.admit(&s, "New", None, Scope::Full, REFRESH_SECS, None);
         let names: Vec<_> = a.devices(&s).into_iter().map(|d| d.name).collect();
         assert_eq!(names, vec!["App", "New"]);
     }
 
     #[test]
+    fn a_device_remembers_the_node_it_signed_in_from() {
+        let (a, s) = auth();
+        let key = "ts:node:owner@may-i.io|nABC".to_string();
+        let (link, _) = a.pair_token(&s, Scope::Conversation, REFRESH_SECS);
+        let (access, refresh) = a.redeem(&s, &link, "Phone", Some(key.clone())).unwrap();
+        assert_eq!(a.check(&s, &access, None).unwrap().peer.as_deref(), Some(key.as_str()));
+        // Renewing keeps the pin: a refresh is not a way to move devices.
+        let (access2, _) = a.refresh(&s, &refresh).unwrap();
+        assert_eq!(a.check(&s, &access2, None).unwrap().peer, Some(key));
+        // A device that came in off the tailnet is pinned to nothing.
+        let (other, _) = a.admit(&s, "App", None, Scope::Full, REFRESH_SECS, None);
+        assert_eq!(a.check(&s, &other, None).unwrap().peer, None);
+    }
+
+    #[test]
     fn drop_all_ends_every_token() {
         let (a, s) = auth();
-        let (access, refresh) = a.admit(&s, "Laptop", Some("octocat".into()), Scope::Full, REFRESH_SECS);
+        let (access, refresh) = a.admit(&s, "Laptop", Some("octocat".into()), Scope::Full, REFRESH_SECS, None);
         let (link, _) = a.pair_token(&s, Scope::Full, REFRESH_SECS);
         a.drop_all(&s);
         assert_eq!(a.check(&s, &access, Some("octocat")).unwrap_err(), Refused::Dropped);
         assert_eq!(a.refresh(&s, &refresh), Err(Refused::Dropped));
-        assert_eq!(a.redeem(&s, &link, "Late"), Err(Refused::SignIn), "a link from before goes too");
+        assert_eq!(a.redeem(&s, &link, "Late", None), Err(Refused::SignIn), "a link from before goes too");
     }
 }

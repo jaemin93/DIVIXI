@@ -18,6 +18,7 @@ pub mod bridge;
 pub mod client;
 pub mod events;
 pub mod github;
+pub mod peer;
 pub mod server;
 pub mod tailscale;
 
@@ -47,6 +48,8 @@ pub struct Remote {
     /// Dropping it releases, so there is one way back and no second place to
     /// forget: turning phone access off, and the app quitting, both go here.
     awake: parking_lot::Mutex<Option<awake::Guard>>,
+    /// Resolved tailnet peers, by address. See [`peer`].
+    pub peers: peer::Cache,
     /// The last reading of Tailscale, and when it was taken. See [`look`].
     #[allow(clippy::type_complexity)]
     looked: parking_lot::Mutex<Option<(std::time::Instant, tailscale::Probe, tailscale::ServeState)>>,
@@ -67,12 +70,13 @@ impl Remote {
             terms: Default::default(),
             sockets: Default::default(),
             awake: Default::default(),
+            peers: Default::default(),
             looked: Default::default(),
         })
     }
 }
 
-fn setting(app: &AppHandle, key: &str) -> Option<String> {
+pub(super) fn setting(app: &AppHandle, key: &str) -> Option<String> {
     app.state::<AppState>().store.get_meta(&format!("{}{key}", crate::SETTING_PREFIX)).ok().flatten()
 }
 
@@ -404,13 +408,20 @@ async fn phone_status_now(app: &AppHandle, fresh: bool) -> PhoneStatus {
     let want = port(app);
     let (probe, serve) = look(app, want, fresh).await;
     let step = step_of(&probe, &serve);
+    let address = if probe.name.is_empty() { String::new() } else { format!("https://{}", probe.name) };
+    // The one origin a browser may name, kept beside the state that decides
+    // it rather than written at each place that could change it. Set only
+    // while this Divixi is actually published: a phone's every command is a
+    // POST, which carries `Origin`, so an origin left behind after turning
+    // phone access off would be a door left open with the address hidden.
+    let _ = set(app, "phone.origin", if step == Step::Ready { &address } else { "" });
     let st = app.state::<AppState>();
     let running = st.remote.running.lock().await.as_ref().map(|r| r.port);
     let awake = st.remote.awake.lock().as_ref().map(|g| g.held);
     PhoneStatus {
         on: phone_on(app),
         step,
-        address: if probe.name.is_empty() { String::new() } else { format!("https://{}", probe.name) },
+        address,
         awake,
         // Signed in with no other device online: the one thing wrong with this
         // machine that is not on this machine.
@@ -529,7 +540,9 @@ pub async fn phone_pair_link(app: AppHandle) -> Result<PairLink, String> {
     let days = phone_days(&app);
     let st = app.state::<AppState>();
     let (token, expires) = st.remote.auth.pair_token(&st.store, auth::Scope::Conversation, days * 24 * 60 * 60);
-    Ok(PairLink { url: format!("{}/auth/pair?token={token}", status.address), expires, days })
+    // The app, with the token in the query. It takes it, keeps it and
+    // takes it back out of the address bar; there is no page in between.
+    Ok(PairLink { url: format!("{}/?token={token}", status.address), expires, days })
 }
 
 /// Choose how long a phone stays signed in. Links already minted keep the

@@ -525,6 +525,8 @@ const ko = {
   // which is the other way round (this app driving another PC's Divixi), and
   // the two have been read as one before.
   "phone.title": "휴대폰 접속",
+  "web.notPaired": "이 휴대폰은 아직 이 Divixi와 연결되지 않았습니다.",
+  "web.notPairedHow": "그 컴퓨터에서 Divixi를 열고 설정 › 개요의 휴대폰 접속에서 QR 코드를 표시한 뒤, 이 휴대폰으로 스캔하세요.",
   "rail.phone": "휴대폰",
   "phone.showQr": "QR 코드 표시",
   "phone.days": "로그인 유지",
@@ -1399,6 +1401,8 @@ const en: Record<Key, string> = {
   // instances, which is the other way round (this app driving another PC's
   // Divixi), and the two have been read as one before.
   "phone.title": "Phone access",
+  "web.notPaired": "This phone is not paired with this Divixi yet.",
+  "web.notPairedHow": "Open Divixi on that computer, show a QR code under Settings › Overview, and scan it with this phone.",
   "rail.phone": "Phone",
   "phone.showQr": "Show QR code",
   "phone.days": "Stays signed in",

@@ -64,6 +64,10 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// and reporting a success as a timeout is worse than waiting.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// A whois is on the path of a request, so it may not make one wait: it is a
+/// local round trip to a daemon that already knows the answer.
+const WHOIS_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// The HTTPS port `tailscale serve` fronts. 443 is its own default, and the
 /// reason the address carries no port: a browser leaves `:443` out of `Origin`,
 /// which is what the origin check in a later stage will compare against.
@@ -315,6 +319,20 @@ fn valid_name(raw: &str, suffix: &str) -> Option<String> {
     };
     let labels: Vec<&str> = name.split('.').collect();
     (labels.len() >= 2 && labels.iter().all(|l| label_ok(l))).then_some(name)
+}
+
+/// Ask the daemon who a tailnet address belongs to.
+///
+/// The identity half of this module: `peer.rs` decides what a resolved login
+/// is allowed to do, and this only fetches it. Here rather than there because
+/// the CLI is found and run in exactly one place -- the vetted-absolute-path
+/// rule is only worth anything if nothing else spawns this binary.
+///
+/// `None` on every failure, which is the fail-closed direction: no peer
+/// resolves and the request falls back to what its token alone earns it.
+/// Short timeout, because this is on the path of a request.
+pub async fn whois(addr: &str) -> Option<Value> {
+    run_json(&["whois", "--json", addr], WHOIS_TIMEOUT).await
 }
 
 /// Run the CLI and parse stdout as JSON. `None` on any failure: the callers
