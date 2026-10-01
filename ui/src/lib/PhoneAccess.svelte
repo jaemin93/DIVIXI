@@ -52,16 +52,20 @@
   let copied = $state(false);
   let showQr = $state(false);
 
-  /** A live read every time: what this machine can do *now*, not what it could. */
-  async function refresh() {
+  /**
+   * `fresh` asks Tailscale again instead of reusing the last answer. The
+   * Check-again button means it; a render on the way into settings does not,
+   * and each read is two subprocesses.
+   */
+  async function refresh(fresh = false) {
     try {
-      status = await invoke<Status>("phone_status");
+      status = await invoke<Status>("phone_status", { fresh });
     } catch (err) {
       store.lastError = String(err);
     }
   }
 
-  onMount(refresh);
+  onMount(() => void refresh());
 
   async function run(f: () => Promise<Status>) {
     error = "";
@@ -72,7 +76,7 @@
       // `phone_set` rejects with the daemon's own words. They are the whole
       // point of the failure, so they are shown rather than summarised.
       error = String(err);
-      await refresh();
+      await refresh(true);
     } finally {
       busy = false;
     }
@@ -150,7 +154,7 @@
       {:else if canTurnOn}
         <button class="btn btn-acc" disabled={busy} onclick={() => turn(true)}>{t("phone.turnOn")}</button>
       {/if}
-      <button class="btn" disabled={busy} onclick={refresh} title={t("phone.checkHint")}>{t("phone.check")}</button>
+      <button class="btn" disabled={busy} onclick={() => refresh(true)} title={t("phone.checkHint")}>{t("phone.check")}</button>
     </div>
 
     <div class="body">

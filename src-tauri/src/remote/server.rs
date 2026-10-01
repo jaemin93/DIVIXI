@@ -201,9 +201,13 @@ fn html(status: StatusCode, body: &str) -> Response<Body> {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-/// Text going into the page. A host name and a browser's own string are both
-/// outside our control, and a token is base64url, so everything interpolated
-/// below goes through here.
+/// Text going into the page's **markup**. A host name and a browser's own
+/// string are both outside our control.
+///
+/// Not for anything going inside `<script>`: a script element's content is
+/// not HTML, entities are never decoded there, and running a token through
+/// this would quietly change it the day the token alphabet grows a character
+/// this escapes. That is [`js_string`]'s job.
 fn escape(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for c in raw.chars() {
@@ -218,6 +222,16 @@ fn escape(raw: &str) -> String {
         }
     }
     out
+}
+
+/// A value going inside `<script>`, as a JavaScript string literal.
+///
+/// `serde_json` does the quoting and escaping, and `/` is escaped afterwards
+/// so the sequence `</script>` cannot appear in the data and end the element
+/// early. Today's tokens are base64url and contain none of this; the point is
+/// that they do not have to stay that way for the page to stay correct.
+fn js_string(raw: &str) -> String {
+    serde_json::to_string(raw).unwrap_or_else(|_| "\"\"".into()).replace('/', r"\/")
 }
 
 const PAGE_STYLE: &str = concat!(
@@ -243,15 +257,15 @@ fn paired_page(machine: &str, name: &str, access: &str, refresh: &str) -> String
             "<p>Signed in as <b>{name}</b>. Divixi itself is not served here yet \u{2014} this address will open it when the next update lands.</p>",
             "<p>To undo this, open Divixi on {machine} and drop this device under Settings \u{203a} Remote instances.</p>",
             "</main><script>",
-            "try{{localStorage.setItem('divixi.access','{access}');localStorage.setItem('divixi.refresh','{refresh}')}}catch(e){{}}",
+            "try{{localStorage.setItem('divixi.access',{access});localStorage.setItem('divixi.refresh',{refresh})}}catch(e){{}}",
             "history.replaceState(null,'','/');",
             "</script></body></html>",
         ),
         style = PAGE_STYLE,
         machine = escape(machine),
         name = escape(name),
-        access = escape(access),
-        refresh = escape(refresh),
+        access = js_string(access),
+        refresh = js_string(refresh),
     )
 }
 
@@ -556,7 +570,19 @@ mod tests {
         assert_eq!(escape("a&b"), "a&amp;b");
         let page = paired_page("</script><b>pwn", "iPhone · Safari", "aa.bb", "cc.dd");
         assert!(!page.contains("</script><b>pwn"), "the host name is escaped");
-        assert!(page.contains("aa.bb") && page.contains("cc.dd"), "the tokens still reach the phone");
+        assert!(page.contains("\"aa.bb\"") && page.contains("\"cc.dd\""), "the tokens still reach the phone");
+
+        // A token is base64url today and none of this depends on that: the
+        // script element must not be endable from inside its own data, and
+        // whatever goes in must be the value that comes back out.
+        for raw in ["a/b", "</script>", "a\"b", "back\\slash", "new\nline", "\u{2014}"] {
+            let out = js_string(raw);
+            assert!(!out.contains("</"), "{raw:?} became {out}");
+            let back: String = serde_json::from_str(&out.replace("\\/", "/")).expect("a JSON string");
+            assert_eq!(back, raw, "{out} did not round-trip");
+        }
+        let nasty = paired_page("desk", "x", "</script><script>alert(1)</script>", "b");
+        assert_eq!(nasty.matches("</script>").count(), 1, "only the page's own closing tag");
         // The page must not be kept anywhere, and must not say which way the
         // scan failed.
         let refused = refused_page("desk");

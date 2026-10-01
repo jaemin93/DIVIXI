@@ -47,6 +47,9 @@ pub struct Remote {
     /// Dropping it releases, so there is one way back and no second place to
     /// forget: turning phone access off, and the app quitting, both go here.
     awake: parking_lot::Mutex<Option<awake::Guard>>,
+    /// The last reading of Tailscale, and when it was taken. See [`look`].
+    #[allow(clippy::type_complexity)]
+    looked: parking_lot::Mutex<Option<(std::time::Instant, tailscale::Probe, tailscale::ServeState)>>,
 }
 
 struct Running {
@@ -64,6 +67,7 @@ impl Remote {
             terms: Default::default(),
             sockets: Default::default(),
             awake: Default::default(),
+            looked: Default::default(),
         })
     }
 }
@@ -354,17 +358,51 @@ fn step_of(probe: &tailscale::Probe, serve: &tailscale::ServeState) -> Step {
     }
 }
 
-async fn phone_status_now(app: &AppHandle) -> PhoneStatus {
-    let want = port(app);
+/// How long a reading of Tailscale is reused before it is taken again.
+///
+/// Every read is two subprocesses and up to ten seconds, and the card, the
+/// rail's dialog and minting a code all want the same answer within a second
+/// or two of each other. Without this, opening the dialog from a warm card
+/// paid for the whole thing twice and showing a code paid for it a third
+/// time. Short enough that a human who changed something and pressed Check
+/// again gets the truth -- and that button asks for a fresh read anyway.
+const LOOK_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What Tailscale says, taken again only when the last answer is stale.
+///
+/// `fresh` is for the Check-again button and for just after acting: both are
+/// moments when a cached answer would be the wrong one.
+async fn look(app: &AppHandle, port: u16, fresh: bool) -> (tailscale::Probe, tailscale::ServeState) {
+    if !fresh {
+        let seen = app.state::<AppState>().remote.looked.lock().clone();
+        if let Some((at, probe, serve)) = seen {
+            if at.elapsed() < LOOK_TTL {
+                return (probe, serve);
+            }
+        }
+    }
     let probe = tailscale::probe().await;
     // Asking the daemon about serve is only meaningful once it can answer at
-    // all; before that the read would be a second way of saying the same thing,
-    // five seconds slower.
+    // all; before that the read would be a second way of saying the same
+    // thing, five seconds slower.
     let serve = if probe.reachable && !probe.stopped {
-        tailscale::serve_state(want).await
+        tailscale::serve_state(port).await
     } else {
         tailscale::ServeState::default()
     };
+    *app.state::<AppState>().remote.looked.lock() = Some((std::time::Instant::now(), probe.clone(), serve.clone()));
+    (probe, serve)
+}
+
+/// Forget the last reading, so the next one is taken again. Called after
+/// anything that changes what Tailscale would say.
+fn forget_look(app: &AppHandle) {
+    *app.state::<AppState>().remote.looked.lock() = None;
+}
+
+async fn phone_status_now(app: &AppHandle, fresh: bool) -> PhoneStatus {
+    let want = port(app);
+    let (probe, serve) = look(app, want, fresh).await;
     let step = step_of(&probe, &serve);
     let st = app.state::<AppState>();
     let running = st.remote.running.lock().await.as_ref().map(|r| r.port);
@@ -386,10 +424,13 @@ async fn phone_status_now(app: &AppHandle) -> PhoneStatus {
     }
 }
 
-/// Where phone access stands. A live read: what this machine can do next.
+/// Where phone access stands: what this machine can do next.
+///
+/// `fresh` asks Tailscale again rather than reusing the last answer, which is
+/// what the Check-again button wants and what an ordinary render does not.
 #[tauri::command]
-pub async fn phone_status(app: AppHandle) -> PhoneStatus {
-    phone_status_now(&app).await
+pub async fn phone_status(app: AppHandle, fresh: Option<bool>) -> PhoneStatus {
+    phone_status_now(&app, fresh.unwrap_or(false)).await
 }
 
 /// Turn phone access on or off.
@@ -421,14 +462,17 @@ pub async fn phone_set(app: AppHandle, on: bool) -> Result<PhoneStatus, String> 
             if !enabled(&app) {
                 stop(&app).await;
             }
+            forget_look(&app);
             return Err(result.detail);
         }
+        forget_look(&app);
         *app.state::<AppState>().remote.awake.lock() = Some(awake::hold());
     } else {
         set(&app, "phone.enabled", "false")?;
         // Dropping the guard releases the machine to sleep again.
         *app.state::<AppState>().remote.awake.lock() = None;
         let result = tailscale::unpublish(want).await;
+        forget_look(&app);
         if !enabled(&app) {
             stop(&app).await;
         }
@@ -439,7 +483,7 @@ pub async fn phone_set(app: AppHandle, on: bool) -> Result<PhoneStatus, String> 
             return Err(result.detail);
         }
     }
-    Ok(phone_status_now(&app).await)
+    Ok(phone_status_now(&app, false).await)
 }
 
 
@@ -478,7 +522,7 @@ pub struct PairLink {
 /// [`bridge`], so a paired phone cannot mint a link for anyone else.
 #[tauri::command]
 pub async fn phone_pair_link(app: AppHandle) -> Result<PairLink, String> {
-    let status = phone_status_now(&app).await;
+    let status = phone_status_now(&app, false).await;
     if status.step != Step::Ready {
         return Err("Phone access is not published yet, so a code would not open anything.".into());
     }
