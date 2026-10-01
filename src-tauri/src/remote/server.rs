@@ -497,8 +497,8 @@ async fn app_asset(State(ctx): State<Ctx>, uri: Uri) -> Response<Body> {
         return (StatusCode::NOT_FOUND, "no such thing").into_response();
     };
     let mut res = Response::builder().header(header::CONTENT_TYPE, asset.mime_type.clone());
-    if let Some(csp) = &asset.csp_header {
-        res = res.header(header::CONTENT_SECURITY_POLICY, csp.clone());
+    if let Some(csp) = web_csp(&ctx) {
+        res = res.header(header::CONTENT_SECURITY_POLICY, csp);
     }
     // The shell is rebuilt with every release and its asset names are
     // hashed; the entry document is not, so it may not be kept.
@@ -506,6 +506,30 @@ async fn app_asset(State(ctx): State<Ctx>, uri: Uri) -> Response<Body> {
     res.header(header::CACHE_CONTROL, cache)
         .body(Body::from(asset.bytes))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// The policy for the page as a browser sees it.
+///
+/// Deliberately not the app window's (`tauri.conf.json > app > security >
+/// csp`), which `asset.csp_header` would hand over: that one is written for
+/// custom schemes a browser has never heard of — `ipc:` in `connect-src`,
+/// `preview:` and `board:` in `frame-src` — and passing it on would be
+/// shipping a policy nobody wrote for this page. This one names what is
+/// actually reachable from here.
+///
+/// The socket is named explicitly rather than left to `'self'`. Whether
+/// `'self'` covers a `wss:` upgrade of the same host has a history of
+/// disagreement between browsers, and a policy that only works on some of
+/// them is worse than one that says what it means.
+fn web_csp(ctx: &Ctx) -> Option<String> {
+    allowed_origin(ctx).map(|o| web_csp_for(&o))
+}
+
+fn web_csp_for(origin: &str) -> String {
+    let socket = origin.replacen("https://", "wss://", 1);
+    format!(
+        "default-src 'self';          script-src 'self';          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;          font-src https://fonts.gstatic.com;          img-src 'self' data: blob:;          connect-src 'self' {socket};          frame-src 'self';          object-src 'none';          base-uri 'none';          form-action 'none'"
+    )
 }
 
 // ----- files -----
@@ -595,6 +619,19 @@ mod tests {
         // Nothing recognised is not guessed at.
         assert_eq!(device_name(""), "Phone");
         assert_eq!(device_name("curl/8.0"), "Phone");
+    }
+
+    #[test]
+    fn the_browsers_policy_names_the_socket_and_not_the_window_schemes() {
+        // Built from a known origin rather than read off `asset.csp_header`,
+        // which carries `ipc:` and `preview:` -- schemes that mean nothing in
+        // a browser and would be a policy nobody wrote for this page.
+        let csp = super::web_csp_for("https://laptop.tailb45a71.ts.net");
+        assert!(csp.contains("connect-src 'self' wss://laptop.tailb45a71.ts.net"), "{csp}");
+        for absent in ["ipc:", "preview:", "board:", "asset:"] {
+            assert!(!csp.contains(absent), "{absent} is the window's, not a browser's: {csp}");
+        }
+        assert!(csp.contains("object-src 'none'") && csp.contains("base-uri 'none'"), "{csp}");
     }
 
     #[test]
