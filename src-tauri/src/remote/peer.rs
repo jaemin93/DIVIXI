@@ -114,21 +114,36 @@ fn setting(app: &AppHandle, key: &str) -> Option<String> {
 /// Read the trust configuration, refusing the one shape that would be
 /// silently permissive.
 ///
-/// `phone.trust_identity` on with no `phone.allowed_logins` is a
-/// configuration error, not "let everyone in". It is refused here, where it
-/// is read, rather than at some later gate: there is no code path on which an
-/// empty allowlist admits anybody.
+/// **On unless turned off**, which is the opposite of how this started and
+/// the right way round. Trust can only ever *refuse* somebody the token
+/// would have let in — an unresolvable peer falls through to the token — so
+/// defaulting it off meant the allowlist was written and never consulted,
+/// and 405 colleagues on this tailnet were held out by nothing but the
+/// secrecy of a QR code.
+///
+/// The allowlist defaults to the one login the daemon says owns this
+/// machine, recorded by the last probe. That is the person at the keyboard,
+/// and admitting exactly them is the only default that is not a guess.
+/// `phone.allowed_logins` overrides it for whoever wants a second account.
+///
+/// Trust with an empty allowlist is a configuration error, not "let everyone
+/// in", and is refused here where it is read — there is no later gate on
+/// which an empty allowlist could admit anybody. Unknown own login and no
+/// configured list is exactly that case, so trust stays off and the token is
+/// the whole of the check, as it was before any of this.
 pub fn trust(app: &AppHandle) -> Trust {
-    let on = setting(app, "phone.trust_identity").as_deref() == Some("true");
-    let logins: Vec<String> = setting(app, "phone.allowed_logins")
-        .unwrap_or_default()
+    let on = setting(app, "phone.trust_identity").as_deref() != Some("false");
+    let configured = setting(app, "phone.allowed_logins").unwrap_or_default();
+    let fallback = setting(app, "phone.self_login").unwrap_or_default();
+    let from = if configured.trim().is_empty() { fallback } else { configured };
+    let logins: Vec<String> = from
         .split(',')
         .map(|l| l.trim().to_lowercase())
         .filter(|l| !l.is_empty())
         .collect();
     if on && logins.is_empty() {
-        tracing::error!(
-            "phone.trust_identity is on with no phone.allowed_logins: that would admit every account on this tailnet, so identity trust stays off"
+        tracing::debug!(
+            "no tailnet login is known for this machine and none is configured, so identity trust stays off and a token is the whole of the check"
         );
         return Trust::default();
     }

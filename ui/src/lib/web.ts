@@ -50,6 +50,9 @@ export function forget(): void {
 
 export const signedIn = (): boolean => read(ACCESS) !== null;
 
+/** Whether a scan has just put a pairing token in the address bar. */
+export const pairingInUrl = (): boolean => new URL(location.href).searchParams.has("token");
+
 /** The access token, for the event socket to carry as a subprotocol. */
 export const access = (): string | null => read(ACCESS);
 

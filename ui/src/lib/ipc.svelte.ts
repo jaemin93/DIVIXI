@@ -43,8 +43,20 @@ export const local = inTauri && instanceId === null;
  */
 export const overWeb = !inTauri && typeof location !== "undefined" && location.protocol.startsWith("http");
 
-/** Whether this browser has been paired. False until a code is scanned. */
-export const session = $state({ ready: inTauri, error: "" });
+/**
+ * Whether this browser may ask this Divixi for anything.
+ *
+ * `ready` starts from what is already stored rather than from false, so a
+ * phone that paired last week does not show the not-paired page for a frame
+ * on its way to the app. `arriving` covers the other case: a scan has put a
+ * token in the address bar and it is being redeemed, which is not the same
+ * as not being paired and must not be drawn as it.
+ */
+export const session = $state({
+  ready: inTauri || (!inTauri && web.signedIn()),
+  arriving: !inTauri && web.pairingInUrl(),
+  error: "",
+});
 
 /**
  * Take the pairing token out of the address bar, before anything asks for
@@ -52,8 +64,12 @@ export const session = $state({ ready: inTauri, error: "" });
  */
 export async function arrive(): Promise<void> {
   if (!overWeb) return;
-  session.error = await web.arrive();
-  session.ready = web.signedIn();
+  try {
+    session.error = await web.arrive();
+  } finally {
+    session.arriving = false;
+    session.ready = web.signedIn();
+  }
 }
 
 /** Sign this browser out. The device stays listed until it is dropped. */

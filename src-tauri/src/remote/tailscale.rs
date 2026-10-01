@@ -115,10 +115,12 @@ pub struct Probe {
     /// browser with nothing on this machine wrong.
     pub peers: usize,
     pub peers_online: usize,
-    /// The tailnet's name, for the card to say which one this is. A shared work
-    /// tailnet is not a private network and the human should see which they are
-    /// about to publish on.
+    /// The tailnet's name. A shared work tailnet is not a private network.
     pub tailnet: String,
+    /// The Tailscale login that owns this machine, from `Self.UserID` through
+    /// the status document's own `User` map. This is who phone access admits
+    /// by default: see `peer::trust`.
+    pub login: String,
     /// What happened, in the daemon's words where there are any.
     pub detail: String,
 }
@@ -378,7 +380,8 @@ pub async fn probe() -> Probe {
     let peers_online = peer.map_or(0, |p| p.values().filter(|v| v.get("Online") == Some(&Value::Bool(true))).count());
     let current = status.get("CurrentTailnet");
     let tailnet = current.and_then(|t| t.get("Name")).and_then(Value::as_str).unwrap_or_default().to_string();
-    let base = Probe { logged_in: true, peers, peers_online, tailnet, ..base };
+    let login = self_login(&status);
+    let base = Probe { logged_in: true, peers, peers_online, tailnet, login, ..base };
 
     // `CurrentTailnet` is absent when the node is not connected. The top-level
     // suffix is upstream-deprecated, so it is a fallback for an older daemon
@@ -413,6 +416,24 @@ pub async fn probe() -> Probe {
             .any(|d| d.trim().trim_end_matches('.').eq_ignore_ascii_case(&name))
     });
     Probe { name, https, ..base }
+}
+
+/// Who owns this machine, as the status document says.
+///
+/// `Self.UserID` indexes the document's own `User` map; the id is a number
+/// there and a string key in the map, so it is looked up both ways rather
+/// than assuming which. Empty when the document does not say, which leaves
+/// identity trust off rather than guessing at an identity.
+fn self_login(status: &Value) -> String {
+    let Some(id) = status.get("Self").and_then(|s| s.get("UserID")) else { return String::new() };
+    let users = status.get("User").and_then(Value::as_object);
+    let found = users.and_then(|u| u.get(&id.to_string()).or_else(|| u.values().find(|v| v.get("ID") == Some(id))));
+    found
+        .and_then(|u| u.get("LoginName"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase()
 }
 
 /// The port a status-document key names, if it names one.
@@ -788,6 +809,20 @@ mod tests {
             assert_eq!(valid_name(bad, s), None, "{bad:?} must not pass");
         }
         assert_eq!(valid_name("laptop.tailb45a71.ts.net", ""), None, "no suffix, no name");
+    }
+
+    #[test]
+    fn the_machines_own_login_is_read_from_the_status_document() {
+        let doc = json!({
+            "Self": { "UserID": 5865744717311672i64, "DNSName": "laptop.tailb45a71.ts.net." },
+            "User": { "5865744717311672": { "ID": 5865744717311672i64, "LoginName": "Owner@May-I.io" } }
+        });
+        assert_eq!(self_login(&doc), "owner@may-i.io", "lower-cased, as the allowlist matches");
+        // No `User` map, no id, no login: empty, which leaves trust off
+        // rather than inventing an identity to trust.
+        assert_eq!(self_login(&json!({ "Self": { "UserID": 1 } })), "");
+        assert_eq!(self_login(&json!({ "User": { "1": { "LoginName": "a@b" } } })), "");
+        assert_eq!(self_login(&json!({})), "");
     }
 
     #[test]

@@ -415,6 +415,11 @@ async fn phone_status_now(app: &AppHandle, fresh: bool) -> PhoneStatus {
     // POST, which carries `Origin`, so an origin left behind after turning
     // phone access off would be a door left open with the address hidden.
     let _ = set(app, "phone.origin", if step == Step::Ready { &address } else { "" });
+    // `peer::trust` runs on the request path and cannot probe, so the login
+    // the daemon reports for this machine is kept where it can read it.
+    if !probe.login.is_empty() {
+        let _ = set(app, "phone.self_login", &probe.login);
+    }
     let st = app.state::<AppState>();
     let running = st.remote.running.lock().await.as_ref().map(|r| r.port);
     let awake = st.remote.awake.lock().as_ref().map(|g| g.held);

@@ -69,7 +69,12 @@
      one. It stays until it is closed: unlike an error, it is already over. -->
 <CrashBanner />
 
-{#if !session.ready}
+{#if session.arriving}
+  <!-- A code was just scanned and is being redeemed. Blank rather than the
+       not-paired page: this phone is about to be paired, and saying it is
+       not would be wrong for as long as it took to read. -->
+  <div class="waiting"></div>
+{:else if !session.ready}
   <!-- A browser at this address with no pairing. Said plainly, instead of a
        shell whose every pane fails to load. -->
   <NotPaired />
@@ -138,6 +143,11 @@
 {/if}
 
 <style>
+  .waiting {
+    min-height: 100dvh;
+    background: var(--bg);
+  }
+
   .shell {
     height: 100%;
     display: flex;
