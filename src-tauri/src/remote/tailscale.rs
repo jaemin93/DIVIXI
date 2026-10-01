@@ -173,14 +173,38 @@ pub fn cli_path() -> Option<PathBuf> {
 /// avoid.
 enum Ran {
     NoCli,
-    /// Timed out, with whatever was captured before the deadline. On a tailnet
-    /// where Serve is not enabled, `tailscale serve` prints the enablement URL
-    /// and then blocks forever -- so the timeout is the only reachable outcome
-    /// and the captured output *is* the diagnosis.
+    /// Timed out, with whatever was captured before the deadline. Carrying the
+    /// output is the point: on a tailnet where Serve is not enabled,
+    /// `tailscale serve` prints the enablement URL and then blocks forever, so
+    /// the timeout is the only reachable outcome and that output is the only
+    /// diagnosis there is.
     Timeout { out: String, err: String },
     /// The binary is there but would not start.
     NoStart(String),
     Done { status: i32, out: String, err: String },
+}
+
+/// Read a pipe to its end, alongside the wait.
+///
+/// Both pipes are drained by their own task rather than by
+/// `wait_with_output`, because that future gives nothing back when it is
+/// cancelled -- and what it would have given back is the whole diagnosis in
+/// the case that matters most (see [`Ran::Timeout`]). Killing the child closes
+/// the pipes, so these finish on their own straight after.
+fn drain<R>(pipe: Option<R>) -> tokio::task::JoinHandle<String>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut buf = Vec::new();
+        if let Some(mut p) = pipe {
+            let _ = p.read_to_end(&mut buf).await;
+        }
+        // Lossy: a deadline can cut a multibyte sequence, and one mangled
+        // character beats a dropped reason.
+        String::from_utf8_lossy(&buf).into_owned()
+    })
 }
 
 async fn run(args: &[&str], timeout: Duration) -> Ran {
@@ -193,20 +217,24 @@ async fn run(args: &[&str], timeout: Duration) -> Ran {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return Ran::NoStart(e.to_string()),
     };
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        // Killed at the deadline by `kill_on_drop`, so nothing was captured:
-        // say that rather than inventing output we do not have.
-        Err(_) => Ran::Timeout { out: String::new(), err: String::new() },
+    let reading_out = drain(child.stdout.take());
+    let reading_err = drain(child.stderr.take());
+    let waited = tokio::time::timeout(timeout, child.wait()).await;
+    if waited.is_err() {
+        // Kill first so the pipes close and the readers finish; then take
+        // whatever they got before the deadline.
+        let _ = child.kill().await;
+    }
+    let out = reading_out.await.unwrap_or_default();
+    let err = reading_err.await.unwrap_or_default();
+    match waited {
+        Err(_) => Ran::Timeout { out, err },
         Ok(Err(e)) => Ran::NoStart(e.to_string()),
-        Ok(Ok(o)) => Ran::Done {
-            status: o.status.code().unwrap_or(-1),
-            out: String::from_utf8_lossy(&o.stdout).into_owned(),
-            err: String::from_utf8_lossy(&o.stderr).into_owned(),
-        },
+        Ok(Ok(status)) => Ran::Done { status: status.code().unwrap_or(-1), out, err },
     }
 }
 
