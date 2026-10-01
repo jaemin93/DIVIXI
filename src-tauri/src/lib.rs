@@ -1865,7 +1865,7 @@ pub fn pair_link() -> anyhow::Result<String> {
         .get_meta(&format!("{SETTING_PREFIX}remote.port"))?
         .and_then(|p| p.trim().parse::<u16>().ok())
         .filter(|p| *p >= 1024)
-        .unwrap_or(remote::DEFAULT_PORT);
+        .unwrap_or(remote::LISTEN_PORT);
     // Over SSH: whoever can run this owns the machine, so the link carries
     // full scope. A phone's link is minted in the app and carries less.
     let (token, _) = auth.pair_token(&store, remote::auth::Scope::Full, remote::auth::REFRESH_SECS);

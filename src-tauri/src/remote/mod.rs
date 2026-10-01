@@ -33,8 +33,19 @@ use crate::AppHandle;
 
 use crate::AppState;
 
-/// The port unless the `remote.port` setting says another.
+/// The port a Divixi answers on unless the `remote.port` setting says another,
+/// and the port another PC's server is expected on.
 pub const DEFAULT_PORT: u16 = 7488;
+
+/// The port this build listens on when nothing says otherwise.
+///
+/// A dev build takes the one above. It runs beside the installed app (its own
+/// data folder, its own window title), and both used to reach for 7488: the
+/// installed app held it, the dev build could not bind, and Tailscale kept
+/// forwarding to a release build that had none of the code being tried.
+/// Nothing about the dev build was visibly wrong; it simply was not the one
+/// answering.
+pub const LISTEN_PORT: u16 = if cfg!(debug_assertions) { DEFAULT_PORT + 1 } else { DEFAULT_PORT };
 
 pub struct Remote {
     pub auth: auth::Auth,
@@ -85,7 +96,7 @@ fn set(app: &AppHandle, key: &str, value: &str) -> Result<(), String> {
 }
 
 fn port(app: &AppHandle) -> u16 {
-    setting(app, "remote.port").and_then(|p| p.trim().parse().ok()).filter(|p| *p >= 1024).unwrap_or(DEFAULT_PORT)
+    setting(app, "remote.port").and_then(|p| p.trim().parse().ok()).filter(|p| *p >= 1024).unwrap_or(LISTEN_PORT)
 }
 
 /// Whether to answer on every network (an address other PCs reach
