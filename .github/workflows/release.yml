@@ -382,6 +382,9 @@ jobs:
     name: Bundle (${{ matrix.name }})
     needs: [prepare, create-release]
     if: needs.prepare.outputs.skip == 'false'
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     strategy:
       # Never abandon the other platforms because one failed: a release with
       # two of three installers is worth more than none, and the failure is
