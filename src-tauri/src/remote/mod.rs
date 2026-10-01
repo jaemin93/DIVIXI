@@ -19,6 +19,7 @@ pub mod client;
 pub mod events;
 pub mod github;
 pub mod peer;
+pub mod install;
 pub mod server;
 pub mod tailscale;
 
@@ -91,7 +92,7 @@ pub(super) fn setting(app: &AppHandle, key: &str) -> Option<String> {
     app.state::<AppState>().store.get_meta(&format!("{}{key}", crate::SETTING_PREFIX)).ok().flatten()
 }
 
-fn set(app: &AppHandle, key: &str, value: &str) -> Result<(), String> {
+pub(super) fn set(app: &AppHandle, key: &str, value: &str) -> Result<(), String> {
     app.state::<AppState>().store.set_meta(&format!("{}{key}", crate::SETTING_PREFIX), value).map_err(|e| e.to_string())
 }
 

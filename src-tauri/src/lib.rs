@@ -1095,10 +1095,24 @@ fn track_root(state: &AppState, track: &str) -> Result<PathBuf, String> {
     Ok(root)
 }
 
-/// Every file and folder under the track's folder, `.gitignore` honoured.
+/// The track's folder as a listing, `.gitignore` honoured. `open` names the
+/// folders the panel has open: with it, the answer is the folder's own
+/// children and theirs, which is what the panel draws and all it has to
+/// read. Left out, the whole tree comes, as searching by name needs.
+///
+/// The second value says the listing was cut, so the panel can say so
+/// rather than pass a half listing off as the whole folder.
 #[tauri::command(async)]
-fn workspace_tree(state: State<'_, AppState>, track: String) -> Result<Vec<workspace::Entry>, String> {
-    workspace::tree(&track_root(&state, &track)?)
+fn workspace_tree(
+    state: State<'_, AppState>,
+    track: String,
+    open: Option<Vec<String>>,
+) -> Result<(Vec<workspace::Entry>, bool), String> {
+    let root = track_root(&state, &track)?;
+    match open {
+        Some(open) => workspace::tree(&root, workspace::Reach::Open(&open.into_iter().collect())),
+        None => workspace::tree(&root, workspace::Reach::All),
+    }
 }
 
 /// Where each link or document card's text stands (read, reading, failed).
@@ -1609,6 +1623,11 @@ pub fn run() {
             remote::phone_pair_link,
             remote::phone_set_days,
             remote::remote_server_drop_all,
+            remote::install::remote_server_check,
+            remote::install::remote_server_install,
+            remote::install::remote_server_start,
+            remote::install::remote_server_cancel,
+            remote::install::remote_server_mute,
             remote::github::github_account,
             remote::github::github_set_client_id,
             remote::github::github_login_start,
@@ -1689,6 +1708,10 @@ pub fn run() {
             diagnostics_report,
             update::update_release,
             update::update_check,
+            update::update_download,
+            update::update_download_cancel,
+            update::update_open,
+            update::update_reveal,
             log_level,
             log_level_set,
             last_crash,

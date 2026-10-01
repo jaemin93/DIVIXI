@@ -18,7 +18,6 @@
    * stays where it is underneath; a click beside the drawer or Esc closes it.
    */
   let filter = $state("");
-  let folded = $state<Record<string, boolean>>({});
   /** The drawer shows the files or the git changes. */
   let drawerMode = $state<"files" | "changes">("files");
   /** The filter goes by file name or by what files contain. */
@@ -123,12 +122,21 @@
     if (!knowledge.formats.length) void knowledge.loadFormats();
   });
 
+  /** Whether a name filter is on, which is a flat list of files, not a tree. */
+  const byName = $derived(searchBy === "name" && !!filter.trim());
+  // Searching by name looks past the folders open, so it wants the whole
+  // list; browsing never asks for it.
+  $effect(() => {
+    if (byName && store.track) void store.loadFileList();
+  });
+
   /** The tree as rows with their depth; `shown` decides folding at render time. */
   type Row = WsEntry & { depth: number };
+  const source = $derived(byName ? store.fileList : store.tree);
   const rows = $derived.by((): Row[] => {
-    const q = filter.trim().toLowerCase();
+    const q = byName ? filter.trim().toLowerCase() : "";
     const out: Row[] = [];
-    for (const e of store.tree) {
+    for (const e of source) {
       const parts = e.path.split("/");
       const depth = parts.length - 1;
       if (q) {
@@ -142,23 +150,21 @@
     }
     return out;
   });
+  /** Nothing to draw yet: "loading" while it is on its way, else "empty". */
+  const waiting = $derived(byName ? store.fileListLoading || !store.fileListReady : store.treeLoading || !store.treeReady);
 
+  /** Whether a folder is open. A folder is shut until someone opens it. */
   function isOpen(path: string): boolean {
-    // Top-level folders start open; deeper ones closed.
-    return path in folded ? !folded[path] : !path.includes("/");
+    return store.isDirOpen(path);
   }
 
   function toggle(path: string) {
-    folded = { ...folded, [path]: isOpen(path) };
+    void store.toggleDir(path);
   }
 
   /** Whether every ancestor folder of a row is open. */
   function shown(row: Row): boolean {
-    const parts = row.path.split("/");
-    for (let i = 1; i < parts.length; i++) {
-      if (!isOpen(parts.slice(0, i).join("/"))) return false;
-    }
-    return true;
+    return store.isDirShown(row.path);
   }
 
   function ext(name: string): string {
@@ -477,25 +483,26 @@
           {/each}
           {#if foundCut}<div class="mono empty">{t("ws.searchCut")}</div>{/if}
         {:else}
-          {#if store.tree.length === 0}
-            <div class="mono empty">{store.treeLoading ? t("ws.loading") : t("ws.emptyDir")}</div>
+          {#if rows.length === 0}
+            <div class="mono empty">{waiting ? t("ws.loading") : byName ? t("ws.noMatch") : t("ws.emptyDir")}</div>
           {/if}
           {#each rows as r (r.path)}
-            {#if filter.trim() || shown(r)}
+            {#if byName || shown(r)}
               {#if r.dir}
                 <button class="node" style="padding-left: {10 + r.depth * 14}px" onclick={() => toggle(r.path)}>
                   <span class="mono chev">{isOpen(r.path) ? "▾" : "▸"}</span>
                   <span class="name">{r.name}</span>
                 </button>
               {:else}
-                <button class="node file" class:on={store.activeFile === r.path && store.panelTab === "file"} style="padding-left: {filter.trim() ? 10 : 24 + r.depth * 14}px" onclick={() => store.openFile(r.path)} oncontextmenu={(e) => fileMenu(e, r.path)} title={r.path}>
+                <button class="node file" class:on={store.activeFile === r.path && store.panelTab === "file"} style="padding-left: {byName ? 10 : 24 + r.depth * 14}px" onclick={() => store.openFile(r.path)} oncontextmenu={(e) => fileMenu(e, r.path)} title={r.path}>
                   <span class="mono ext">{ext(r.name) || "·"}</span>
-                  <span class="name">{filter.trim() ? r.path : r.name}</span>
+                  <span class="name">{byName ? r.path : r.name}</span>
                   {#if !compact}<span class="mono size">{kb(r.size)}</span>{/if}
                 </button>
               {/if}
             {/if}
           {/each}
+          {#if store.treeCut}<div class="mono empty">{t("ws.treeCut")}</div>{/if}
         {/if}
       </div>
     {/if}

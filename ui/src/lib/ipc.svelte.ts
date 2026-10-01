@@ -105,6 +105,13 @@ const OWN = new Set([
   "phone_pair_link",
   "phone_set_days",
   "remote_server_drop_all",
+  // Installing divixi-server on a remote machine is this app's doing, even
+  // when the page asking is that instance's own webview (Unreachable.svelte).
+  "remote_server_check",
+  "remote_server_install",
+  "remote_server_start",
+  "remote_server_cancel",
+  "remote_server_mute",
   "github_account",
   "github_set_client_id",
   "github_login_start",
@@ -112,6 +119,16 @@ const OWN = new Set([
   "github_logout",
   "pick_files",
   "open_url",
+  // The app an update replaces is this PC's, so its installer is fetched,
+  // verified and opened here whatever is shown. An instance is updated where
+  // it runs, and its card is not drawn in this window at all
+  // (src-tauri/src/update.rs). `update_check` and `update_release` are older
+  // and stay out of this set: the card that calls them is `local`-only, so
+  // they are never reached from an instance's webview either way.
+  "update_download",
+  "update_download_cancel",
+  "update_open",
+  "update_reveal",
   // A fault in this webview happened on this PC, so it belongs in this
   // PC's log and in the report made from it — not in the log of whatever
   // Divixi the webview happens to be showing.
@@ -190,6 +207,28 @@ export function onInstanceStatus(handler: (s: { id: string; online: boolean }) =
   if (!inTauri) return Promise.resolve(() => {});
   return tauriListen<{ id: string; online: boolean }>("instance-status", (e) => handler(e.payload));
 }
+
+/**
+ * How an install of divixi-server on a remote machine is going (this app's
+ * event, whatever is shown -- as `onInstanceStatus`, not through the chosen
+ * instance's relay, which is exactly what may not be there yet).
+ */
+export function onServerInstall(handler: (p: ServerInstall) => void): Promise<() => void> {
+  return tauriListen<ServerInstall>("server_install", (e) => handler(e.payload));
+}
+
+/** Mirrors the `server_install` event payload (remote/install.rs). */
+export type ServerInstall = {
+  host: string;
+  phase: "checking" | "downloading" | "verifying" | "installing" | "starting" | "done" | "failed" | "cancelled";
+  /** Where it had got to, when `phase` is "failed". */
+  at: ServerInstall["phase"] | null;
+  received: number;
+  total: number | null;
+  route: "remote" | "ssh" | null;
+  release: string | null;
+  error: string | null;
+};
 
 /** Why the chosen instance could not be reached, if it could not. */
 export const instance = $state<{ error: string }>({ error: "" });

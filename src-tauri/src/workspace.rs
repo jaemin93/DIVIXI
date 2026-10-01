@@ -6,6 +6,7 @@
 //! user's own `git` on PATH, so what the panel shows is what their
 //! terminal would say.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -75,37 +76,135 @@ fn rel_string(root: &Path, p: &Path) -> String {
         .join("/")
 }
 
-/// The folder's files and directories, honouring `.gitignore`, `.git`
-/// itself left out, folders first then names, case-insensitive.
-pub fn tree(root: &Path) -> Result<Vec<Entry>, String> {
-    if !root.is_dir() {
-        return Err(format!("not a directory: {}", root.display()));
+/// The direct children of each folder in `dirs`, one group per folder in
+/// the order given, `.gitignore` honoured and `.git` left out. No group
+/// holds more than `room`, since no single folder can take more than all
+/// that is left; the second value says a folder had more than that.
+fn children(root: &Path, dirs: &[PathBuf], room: usize) -> (Vec<Vec<(Entry, PathBuf)>>, bool) {
+    let mut groups: Vec<Vec<(Entry, PathBuf)>> = vec![Vec::new(); dirs.len()];
+    let at: HashMap<&Path, usize> = dirs.iter().enumerate().map(|(i, d)| (d.as_path(), i)).collect();
+    let mut builder = ignore::WalkBuilder::new(&dirs[0]);
+    for d in &dirs[1..] {
+        builder.add(d);
     }
-    let walker = ignore::WalkBuilder::new(root)
+    // Depth 1: each folder's own children and no deeper. A walker started
+    // at a folder reads the ignore files of its ancestors too, so a
+    // `.gitignore` higher up still counts.
+    let walker = builder
         .hidden(false)
         .git_ignore(true)
         .git_exclude(true)
         .git_global(true)
+        .max_depth(Some(1))
         .filter_entry(|e| e.file_name() != ".git")
         .build();
-    let mut out = Vec::new();
+    let mut more = false;
+    let mut filled = 0usize;
     for entry in walker.flatten() {
+        // Depth 0 is a folder of `dirs` itself, already in the listing.
+        if entry.depth() == 0 {
+            continue;
+        }
         let p = entry.path();
-        if p == root {
+        let Some(i) = p.parent().and_then(|parent| at.get(parent)).copied() else {
+            continue;
+        };
+        if groups[i].len() >= room {
+            more = true;
+            // Nothing else this round can find a place either.
+            if filled == groups.len() {
+                break;
+            }
             continue;
         }
         let dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let size = if dir { 0 } else { entry.metadata().map(|m| m.len()).unwrap_or(0) };
-        out.push(Entry {
+        let e = Entry {
             path: rel_string(root, p),
             name: entry.file_name().to_string_lossy().into_owned(),
             dir,
             size,
-        });
-        if out.len() >= MAX_ENTRIES {
-            break;
+        };
+        groups[i].push((e, p.to_path_buf()));
+        if groups[i].len() == room {
+            filled += 1;
         }
     }
+    (groups, more)
+}
+
+/// How far into the folder a listing goes.
+#[derive(Debug, Clone, Copy)]
+pub enum Reach<'a> {
+    /// Everything, as deep as the cap allows. What searching by name wants,
+    /// and the list the composer offers for `@`.
+    All,
+    /// The folder's own children, and the children of the folders named --
+    /// the ones the panel has open. A folder nobody opened costs nothing:
+    /// this is what browsing a tree of any size costs to draw.
+    Open(&'a std::collections::HashSet<String>),
+}
+
+impl Reach<'_> {
+    /// Whether the listing goes into this folder, by its path from the root.
+    fn opens(&self, path: &str) -> bool {
+        match self {
+            Reach::All => true,
+            Reach::Open(open) => open.contains(path),
+        }
+    }
+}
+
+/// The folder's files and directories, honouring `.gitignore`, `.git`
+/// itself left out, folders first then names, case-insensitive. The second
+/// value says the listing was cut at [`MAX_ENTRIES`].
+///
+/// The walk goes a level at a time, and a level's places go round the
+/// folders of that level a turn each. A depth-first walk spending one
+/// budget in the order it happened to meet things let a single folder take
+/// all of it: a `.venv` of ten thousand files, first in its folder by name,
+/// left every one of its siblings out of the listing. Here a folder can
+/// only crowd out what lies deeper than itself, never what sits beside it.
+pub fn tree(root: &Path, reach: Reach) -> Result<(Vec<Entry>, bool), String> {
+    listing(root, MAX_ENTRIES, reach)
+}
+
+/// [`tree`] with the cap given, so the tests can reach the cut without
+/// laying six thousand files on disk.
+fn listing(root: &Path, max: usize, reach: Reach) -> Result<(Vec<Entry>, bool), String> {
+    if !root.is_dir() {
+        return Err(format!("not a directory: {}", root.display()));
+    }
+    let mut out: Vec<Entry> = Vec::new();
+    let mut cut = false;
+    let mut level: Vec<PathBuf> = vec![root.to_path_buf()];
+    while !level.is_empty() && out.len() < max {
+        let room = max - out.len();
+        let (groups, more) = children(root, &level, room);
+        cut |= more;
+        let mut next: Vec<PathBuf> = Vec::new();
+        let deepest = groups.iter().map(Vec::len).max().unwrap_or(0);
+        let mut taken = 0usize;
+        'fill: for turn in 0..deepest {
+            for group in &groups {
+                let Some((e, full)) = group.get(turn) else { continue };
+                if taken == room {
+                    cut = true;
+                    break 'fill;
+                }
+                if e.dir && reach.opens(&e.path) {
+                    next.push(full.clone());
+                }
+                out.push(e.clone());
+                taken += 1;
+            }
+        }
+        level = next;
+    }
+    // Folders the budget ran out before opening: what is in them is missing
+    // too. A folder left out because nobody opened it is not that -- the
+    // loop runs to the end and `level` empties on its own.
+    cut |= !level.is_empty();
     // Folders before files at each level, then case-insensitive by name.
     // The key is built once per entry: a folder component sorts first
     // (false < true), so only a file's last component gets `true`.
@@ -119,7 +218,7 @@ pub fn tree(root: &Path) -> Result<Vec<Entry>, String> {
             .collect()
     };
     out.sort_by_cached_key(key);
-    Ok(out)
+    Ok((out, cut))
 }
 
 /// A line of a file that has what was searched for.
@@ -146,7 +245,7 @@ pub fn search(root: &Path, query: &str) -> Result<(Vec<Found>, bool), String> {
         return Ok((Vec::new(), false));
     }
     let mut out = Vec::new();
-    for e in tree(root)?.into_iter().filter(|e| !e.dir && e.size <= MAX_SEARCH_FILE) {
+    for e in tree(root, Reach::All)?.0.into_iter().filter(|e| !e.dir && e.size <= MAX_SEARCH_FILE) {
         let Ok(bytes) = std::fs::read(root.join(&e.path)) else { continue };
         if bytes.iter().take(8192).any(|b| *b == 0) {
             continue;
@@ -477,8 +576,216 @@ mod tests {
         std::fs::write(root.join("b.md"), "# b").unwrap();
         std::fs::write(root.join("A.txt"), "a").unwrap();
         std::fs::write(root.join("src/main.rs"), "fn main(){}").unwrap();
-        let paths: Vec<String> = tree(&root).unwrap().into_iter().map(|e| e.path).collect();
+        let (entries, cut) = tree(&root, Reach::All).unwrap();
+        let paths: Vec<String> = entries.into_iter().map(|e| e.path).collect();
         assert_eq!(paths, vec!["src", "src/main.rs", ".gitignore", "A.txt", "b.md"]);
+        assert!(!cut, "a small folder is listed whole");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The names the listing puts directly under `rel` (`""` for the
+    /// folder itself), sorted, as the panel's rows for that folder.
+    fn shown_under(entries: &[Entry], rel: &str) -> Vec<String> {
+        let mut out: Vec<String> = entries
+            .iter()
+            .filter_map(|e| {
+                let under = if rel.is_empty() {
+                    Some(e.path.as_str())
+                } else {
+                    e.path.strip_prefix(rel).and_then(|r| r.strip_prefix('/'))
+                };
+                under.filter(|u| !u.contains('/')).map(str::to_string)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// What is really in the folder, straight from the filesystem.
+    fn really_under(dir: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn touch(p: PathBuf) {
+        std::fs::write(p, "x").unwrap();
+    }
+
+    /// Whatever shape a folder has -- hidden names beside ordinary ones,
+    /// nothing but folders, nothing but files, nothing at all, or more
+    /// entries than fit on a screen -- the rows the panel draws for it are
+    /// exactly what `read_dir` says is in it.
+    #[test]
+    fn every_child_of_every_folder_is_listed() {
+        let root = temp("whole");
+        // Hidden names and ordinary ones, mixed.
+        std::fs::create_dir_all(root.join(".hidden")).unwrap();
+        touch(root.join(".hidden/inside.txt"));
+        touch(root.join(".dotfile"));
+        touch(root.join("plain.txt"));
+        touch(root.join("UPPER.MD"));
+        // Nothing but folders.
+        std::fs::create_dir_all(root.join("dirs/a")).unwrap();
+        std::fs::create_dir_all(root.join("dirs/b")).unwrap();
+        std::fs::create_dir_all(root.join("dirs/.c")).unwrap();
+        // Nothing but files.
+        std::fs::create_dir_all(root.join("files")).unwrap();
+        for n in ["one.py", "two.md", ".three"] {
+            touch(root.join("files").join(n));
+        }
+        // Nothing at all.
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        // More entries than a folder usually holds.
+        std::fs::create_dir_all(root.join("many")).unwrap();
+        for i in 0..400 {
+            touch(root.join("many").join(format!("f{i:03}.txt")));
+        }
+        let (entries, cut) = tree(&root, Reach::All).unwrap();
+        assert!(!cut, "nothing here reaches the cap");
+        for rel in ["", ".hidden", "dirs", "dirs/a", "files", "empty", "many"] {
+            let on_disk = really_under(&root.join(rel));
+            assert_eq!(shown_under(&entries, rel), on_disk, "the rows under {rel:?} are what is there");
+        }
+        // Folders before files, then by name without regard to case.
+        let top: Vec<&str> = entries.iter().filter(|e| !e.path.contains('/')).map(|e| e.path.as_str()).collect();
+        assert_eq!(top, vec![".hidden", "dirs", "empty", "files", "many", ".dotfile", "plain.txt", "UPPER.MD"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The bug this guards: one enormous folder used to spend the whole
+    /// budget on its own contents, so every file beside it went missing and
+    /// the panel showed a worker's folder as holding nothing but `.venv`.
+    #[test]
+    fn a_huge_folder_does_not_push_its_siblings_out_of_the_listing() {
+        let root = temp("fat");
+        let work = root.join("gold-stage1");
+        std::fs::create_dir_all(work.join(".venv")).unwrap();
+        std::fs::create_dir_all(work.join("__pycache__")).unwrap();
+        for i in 0..50 {
+            touch(work.join(".venv").join(format!("lib{i:02}.py")));
+        }
+        touch(work.join("__pycache__/carryforward.pyc"));
+        let mine = ["carryforward.py", "findings.md", "gold_build.py", "notes.txt", "run.py", "verify.txt"];
+        for n in mine {
+            touch(work.join(n));
+        }
+        // A cap smaller than `.venv` alone: the cut has to fall somewhere.
+        let (entries, cut) = listing(&root, 20, Reach::All).unwrap();
+        assert!(cut, "the listing was cut, and says so");
+        assert_eq!(shown_under(&entries, "gold-stage1"), really_under(&work), "every sibling of .venv is still listed");
+        // What is cut is what lies deeper, and it is shared out, not taken
+        // by whichever folder the walk happened to meet first.
+        assert!(!shown_under(&entries, "gold-stage1/.venv").is_empty());
+        assert_eq!(shown_under(&entries, "gold-stage1/__pycache__"), vec!["carryforward.pyc"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The level-at-a-time walk starts a fresh walker at each folder, so
+    /// this checks a `.gitignore` above them is still obeyed deeper down.
+    #[test]
+    fn gitignore_still_counts_below_the_top_level() {
+        let root = temp("ignored-deep");
+        std::fs::create_dir_all(root.join("a/b/target")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
+        touch(root.join("a/b/target/out.o"));
+        touch(root.join("a/b/keep.rs"));
+        touch(root.join("a/b/noisy.log"));
+        let (entries, _) = tree(&root, Reach::All).unwrap();
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["a", "a/b", "a/b/keep.rs", ".gitignore"], "target/ and *.log stay out, .git too");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An empty folder lists nothing and is not reported as cut.
+    #[test]
+    fn an_empty_folder_lists_nothing() {
+        let root = temp("empty");
+        assert_eq!(tree(&root, Reach::All).unwrap(), (Vec::new(), false));
+        assert!(tree(&root.join("gone"), Reach::All).is_err(), "a folder that is not there is an error");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Past the cap the shallow entries are the ones kept: a folder you can
+    /// see is worth more than a file buried six levels down.
+    #[test]
+    fn the_cut_falls_on_the_deepest_entries() {
+        let root = temp("deep");
+        let mut at = root.clone();
+        for level in 0..8 {
+            at = at.join(format!("level{level}"));
+            std::fs::create_dir_all(&at).unwrap();
+            for i in 0..4 {
+                touch(at.join(format!("f{i}.txt")));
+            }
+        }
+        let (entries, cut) = listing(&root, 12, Reach::All).unwrap();
+        assert!(cut);
+        assert_eq!(entries.len(), 12);
+        // The levels that fit are listed whole; the cut lands below them.
+        assert_eq!(shown_under(&entries, ""), vec!["level0"]);
+        assert_eq!(shown_under(&entries, "level0"), really_under(&root.join("level0")));
+        assert_eq!(shown_under(&entries, "level0/level1"), really_under(&root.join("level0/level1")));
+        assert!(shown_under(&entries, "level0/level1/level2").len() < 5, "the deepest level is where it ran out");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn open(paths: &[&str]) -> std::collections::HashSet<String> {
+        paths.iter().map(|p| (*p).to_string()).collect()
+    }
+
+    /// What the panel asks for: the folder's own children, and nothing from
+    /// a folder nobody opened. A `.venv` of any size costs one row.
+    #[test]
+    fn nothing_is_read_out_of_a_folder_that_is_not_open() {
+        let root = temp("reach");
+        std::fs::create_dir_all(root.join("gold-stage1/.venv/Lib")).unwrap();
+        std::fs::create_dir_all(root.join("gold-stage1/iam_backup")).unwrap();
+        for i in 0..80 {
+            touch(root.join("gold-stage1/.venv/Lib").join(format!("m{i:02}.py")));
+        }
+        touch(root.join("gold-stage1/iam_backup/role.json"));
+        touch(root.join("gold-stage1/findings.md"));
+        touch(root.join("top.txt"));
+
+        // Nothing open: the root's children and no more.
+        let (shut, cut) = tree(&root, Reach::Open(&open(&[]))).unwrap();
+        assert_eq!(shut.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), vec!["gold-stage1", "top.txt"]);
+        assert!(!cut, "a folder left shut is not a listing that was cut");
+
+        // One folder open: its children, and still nothing below them.
+        let (one, _) = tree(&root, Reach::Open(&open(&["gold-stage1"]))).unwrap();
+        assert_eq!(shown_under(&one, "gold-stage1"), really_under(&root.join("gold-stage1")));
+        assert!(shown_under(&one, "gold-stage1/.venv").is_empty(), ".venv is shut, so it was never read");
+
+        // Open deeper and the deeper children come, still only those.
+        let (deep, _) = tree(&root, Reach::Open(&open(&["gold-stage1", "gold-stage1/.venv"]))).unwrap();
+        assert_eq!(shown_under(&deep, "gold-stage1/.venv"), vec!["Lib"]);
+        assert!(shown_under(&deep, "gold-stage1/.venv/Lib").is_empty());
+
+        // A remembered folder that is no longer there is simply not found.
+        let (gone, cut) = tree(&root, Reach::Open(&open(&["gold-stage1", "gold-stage1/was-here"]))).unwrap();
+        assert_eq!(shown_under(&gone, "gold-stage1"), really_under(&root.join("gold-stage1")));
+        assert!(!cut);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The cap still bites when one open folder holds more than it, and the
+    /// listing still says it was cut.
+    #[test]
+    fn an_open_folder_bigger_than_the_cap_is_still_reported_cut() {
+        let root = temp("reach-cut");
+        std::fs::create_dir_all(root.join("big")).unwrap();
+        for i in 0..40 {
+            touch(root.join("big").join(format!("f{i:02}.txt")));
+        }
+        let (entries, cut) = listing(&root, 20, Reach::Open(&open(&["big"]))).unwrap();
+        assert!(cut, "the open folder had more than fits");
+        assert_eq!(entries.len(), 20);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -544,3 +851,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+

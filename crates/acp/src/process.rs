@@ -586,13 +586,6 @@ setTimeout(() => process.exit(0), 30000);
     /// and it is the process-group teardown that satisfies it.
     /// `shutdown_kills_a_detached_grandchild` is the one with teeth on Windows.
     #[tokio::test]
-    // TODO: remove once the first CI run confirms the Unix teardown works.
-    // The process-group fix landed with this test, but it has never been
-    // executed on macOS or Linux -- only cross-compiled. ci.yml runs it there
-    // as a reporting step (`continue-on-error`) so the real result is visible
-    // without a wrong guess blocking every pull request. When that step passes,
-    // delete this attribute and the step, and the test becomes an ordinary gate.
-    #[cfg_attr(not(windows), ignore = "unverified on Unix: ci.yml runs it as a reporting step; promote to a gate once that passes")]
     async fn shutdown_kills_the_process_group() {
         if !have_node() {
             eprintln!("skipping: node is not on PATH");
@@ -624,7 +617,6 @@ setTimeout(() => process.exit(0), 30000);
     /// still worth running there: it costs nothing and it pins that closing the
     /// job handle is what tears the tree down, however teardown was reached.
     #[tokio::test]
-    #[cfg_attr(not(windows), ignore = "unverified on Unix: ci.yml runs it as a reporting step; promote to a gate once that passes")]
     async fn a_cancelled_shutdown_still_kills_the_tree() {
         if !have_node() {
             eprintln!("skipping: node is not on PATH");

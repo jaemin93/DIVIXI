@@ -382,6 +382,9 @@ jobs:
     name: Bundle (${{ matrix.name }})
     needs: [prepare, create-release]
     if: needs.prepare.outputs.skip == 'false'
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     strategy:
       # Never abandon the other platforms because one failed: a release with
       # two of three installers is worth more than none, and the failure is
@@ -434,9 +437,8 @@ jobs:
       # treats a Developer-ID-signed, un-notarised app worse than an unsigned
       # one, because it looks like it is trying to pass. So 0/6 or 6/6 only.
       #
-      # Divixi has no auto-updater, so 0/6 produces a plainly unsigned bundle
-      # rather than an ad-hoc signed one. (An ad-hoc signature only matters when
-      # something has to verify a seal in place, which is an updater's job.)
+      # Divixi now ships updater metadata/signatures, but macOS signing still
+      # follows this all-or-nothing gate for the app bundle itself.
       - name: Resolve macOS signing mode
         if: runner.os == 'macOS'
         shell: bash
@@ -543,10 +545,10 @@ jobs:
       # out than passed: the docs also say that if it points at an existing
       # release, `releaseDraft` has to match that release's state, which is one
       # more thing to keep in step for no gain. The only documented cost of
-      # omitting it is where `latest.json` points, and Divixi has no updater so
-      # no `latest.json` is produced.
+      # omitting it is where `latest.json` points.
       #
-      # There is deliberately no signing environment in this step.
+      # Updater signing keys are passed only to this step to produce
+      # `latest.json` and per-asset `.sig` files.
       #
       # This file used to pass all eight secrets here and say that "unset ones
       # arrive as empty strings, which tauri-action treats as absent". That was
@@ -583,6 +585,8 @@ jobs:
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v0.6.2, 2026-03-14
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # Which release this binary came from, for the app's update check.
           # src-tauri/build.rs bakes it in; without it a build calls itself a
           # development build, which is the honest answer for a working copy.
