@@ -10,6 +10,15 @@
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/jaemin93/divixi/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU1M0E4Mzc5RjI0NzEzMUIKUldRYkUwZnllWU02NVJiOEc5b05rckg1M0lHMGVWQitWM2hsZm5YemEvdjhoVndVcGQ1VGVldm0K"
+    }
+  },
   "app": {
     "windows": [
       {
@@ -35,6 +44,7 @@
     "longDescription": "One conductor, many agents. A desktop app for directing coding agents: you talk to one conductor, and it divides the work among worker sessions that run side by side.",
     "licenseFile": "../LICENSE",
     "category": "DeveloperTool",
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
