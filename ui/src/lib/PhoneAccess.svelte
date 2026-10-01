@@ -179,29 +179,16 @@
       <!-- The cost of being on, stated where the switch is -- and only while
            Divixi is actually holding the machine awake. Published by hand, it
            holds nothing, and a promise nobody is keeping is worse than none. -->
-      {#if s.awake}
+      {#if s.awake === "awake" || s.awake === "unsupported"}
         <p class="hint">
-          {s.awake === "awake" ? t("phone.awake") : s.awake === "unsupported" ? t("phone.awakeUnsupported") : t("phone.awakeRefused")}
+          {s.awake === "awake" ? t("phone.awake") : t("phone.awakeUnsupported")}
         </p>
-      {/if}
-
-      <!-- Which tailnet this machine is about to be published on. A work
-           tailnet is not a private network, and the number of other devices on
-           it is the honest way to say so. -->
-      {#if s.probe.tailnet}
-        <p class="hint">{t("phone.tailnet", { name: s.probe.tailnet, peers: String(s.probe.peers) })}</p>
       {/if}
 
       <!-- Publishing succeeds on a tailnet of one and the address looks right,
            and then nothing can open it. Said before that happens, not after. -->
       {#if s.alone}
         <p class="warn">{t("phone.alone")}</p>
-      {/if}
-
-      <!-- Phone access never asks for this; remote instances did. Surfaced so
-           the two are not confused for each other's doing. -->
-      {#if s.listen_all}
-        <p class="warn">{t("phone.listenAll")}</p>
       {/if}
 
       {#if on}

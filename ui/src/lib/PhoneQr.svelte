@@ -96,6 +96,8 @@
       <path d={qrPath(qr, 2)} fill="#000" />
     </svg>
 
+    <hr class="rule" />
+
     <p class="warn">{t("phone.qr.warn", { clock, days: String(link.days) })}</p>
 
     <div class="row">
@@ -118,9 +120,18 @@
   /* White behind the code whatever the theme: a reader needs the contrast,
      and an inverted code is not a code. */
   .qr {
-    width: 200px;
-    height: 200px;
+    /* Smaller than it was: a phone camera wants the whole code inside the
+       frame, and 200px filled more of the screen than it could take in. */
+    width: 148px;
+    height: 148px;
     background: #fff;
+  }
+
+  /* The code is its own thing on the card, not another paragraph. */
+  .rule {
+    margin: 12px 0;
+    border: 0;
+    border-top: 1px solid var(--line);
   }
 
   .row {
