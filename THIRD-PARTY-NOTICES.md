@@ -94,11 +94,11 @@ is a UEFI-target transitive dependency and is not linked into desktop builds.)
 
 ## 3. npm dependencies
 
-183 packages installed. **No GPL or AGPL.** Counts: MIT 149, Apache-2.0 11,
+184 packages installed. **No GPL or AGPL.** Counts: MIT 150, Apache-2.0 11,
 ISC 8, BSD-3-Clause 5, `Apache-2.0 OR MIT` 3, MPL-2.0 2, BSD-2-Clause 1,
 Unlicense 1, and the two Anthropic packages covered in §4.
 
-### Shipped in `dist/` — the eight runtime dependencies
+### Shipped in `dist/` — the nine runtime dependencies
 
 These are bundled into the UI and therefore redistributed:
 
@@ -112,6 +112,13 @@ These are bundled into the UI and therefore redistributed:
 | `marked` | 18.0.14 | MIT |
 | `marked-highlight` | 2.2.4 | MIT |
 | `perfect-freehand` | 1.2.3 | MIT |
+| `qrcode-generator` | 2.0.4 | MIT |
+
+`qrcode-generator` is Kazuhiko Arase's reference QR encoder and has no
+dependencies of its own. It draws the pairing code for phone access; the QR
+specification is DENSO WAVE's, and "QR Code" is their registered trademark,
+which costs nothing to use but is noted because the package's own header
+does.
 
 `dompurify` is dual-licensed with an **OR**, so Divixi takes the Apache-2.0
 option and no MPL obligation arises for it. `highlight.js` (BSD-3-Clause) and

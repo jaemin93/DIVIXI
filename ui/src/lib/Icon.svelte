@@ -26,7 +26,8 @@
     | "home"
     | "routines"
     | "play"
-    | "bell";
+    | "bell"
+    | "phone";
 </script>
 
 <script lang="ts">
@@ -96,6 +97,8 @@
     <rect x="4.5" y="1.5" width="7" height="13" rx="1" /><path d="M7 12.5h2" />
     <!-- Routines: work that comes round again. An arrow closing a loop,
          not a clock — nothing here fires on time. -->
+  {:else if name === "phone"}
+    <rect x="4.5" y="1.5" width="7" height="13" /><path d="M6.5 12.5h3" />
   {:else if name === "routines"}
     <path d="M2.5 8a5.5 5.5 0 0 1 9.4-3.9" /><path d="M13.5 8a5.5 5.5 0 0 1-9.4 3.9" />
     <path d="M12.5 1.5v3h-3" /><path d="M3.5 14.5v-3h3" />

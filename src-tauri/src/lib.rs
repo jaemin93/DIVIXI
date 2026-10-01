@@ -1618,6 +1618,11 @@ pub fn run() {
             remote::remote_server_status,
             remote::remote_server_set,
             remote::remote_server_drop,
+            remote::phone_status,
+            remote::phone_set,
+            remote::phone_pair_link,
+            remote::phone_set_days,
+            remote::remote_server_drop_all,
             remote::install::remote_server_check,
             remote::install::remote_server_install,
             remote::install::remote_server_start,
@@ -1883,8 +1888,10 @@ pub fn pair_link() -> anyhow::Result<String> {
         .get_meta(&format!("{SETTING_PREFIX}remote.port"))?
         .and_then(|p| p.trim().parse::<u16>().ok())
         .filter(|p| *p >= 1024)
-        .unwrap_or(remote::DEFAULT_PORT);
-    let (token, _) = auth.pair_token(&store);
+        .unwrap_or(remote::LISTEN_PORT);
+    // Over SSH: whoever can run this owns the machine, so the link carries
+    // full scope. A phone's link is minted in the app and carries less.
+    let (token, _) = auth.pair_token(&store, remote::auth::Scope::Full, remote::auth::REFRESH_SECS);
     Ok(format!("http://127.0.0.1:{port}/auth/pair?token={token}"))
 }
 
