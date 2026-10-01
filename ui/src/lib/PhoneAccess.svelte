@@ -4,6 +4,7 @@
   import { store } from "./store.svelte";
   import { t, type Key } from "./i18n.svelte";
   import PhoneQr from "./PhoneQr.svelte";
+  import { pairing } from "./pairing.svelte";
 
   /**
    * Settings › Overview: this Divixi, opened in a phone's browser.
@@ -86,7 +87,10 @@
     run(async () => {
       const next = await invoke<Status>("phone_set", { on });
       // A code for an address that is no longer published opens nothing.
-      if (!on) showQr = false;
+      if (!on) {
+        showQr = false;
+        pairing.forget();
+      }
       return next;
     });
 

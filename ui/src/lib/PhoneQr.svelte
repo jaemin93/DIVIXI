@@ -1,104 +1,79 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { invoke } from "./ipc.svelte";
   import { t } from "./i18n.svelte";
-  import { encodeQr, qrPath, type Qr } from "./qr";
+  import { qrPath } from "./qr";
+  import { pairing } from "./pairing.svelte";
 
   /**
    * A pairing code, drawn and counted down.
    *
    * One component for both places that show one — the Overview card and the
-   * rail's modal — so there is one mint, one countdown and one warning. Two
-   * copies of this would be two chances for one of them to leave a dead code
-   * on screen.
-   *
-   * The code is taken off the screen the moment it expires rather than left
-   * sitting there: a code that no longer works looks exactly like one that
-   * does, and the only way to find out is to fail at the phone.
+   * rail's dialog — and the code itself lives in `pairing`, outside this
+   * component, so closing one of them does not throw away a code that still
+   * works and opening the other does not mint a second.
    */
 
   let { onhide }: { onhide?: () => void } = $props();
 
-  type PairLink = { url: string; expires: number; days: number };
-
-  let link = $state<PairLink | null>(null);
-  let qr = $state<Qr | null>(null);
-  let error = $state("");
   let copied = $state(false);
-  let left = $state(0);
-
   let ticking: ReturnType<typeof setInterval> | undefined;
 
-  async function mint() {
-    error = "";
-    link = null;
-    qr = null;
-    try {
-      const got = await invoke<PairLink>("phone_pair_link");
-      // Drawn before it is shown: a payload too long to encode must fail here
-      // and not as an empty square on the screen.
-      qr = encodeQr(got.url);
-      link = got;
-      tick();
-    } catch (err) {
-      error = String(err);
-    }
-  }
-
-  function tick() {
-    if (!link) return;
-    left = Math.max(0, link.expires - Math.floor(Date.now() / 1000));
-    if (left === 0) {
-      // Expired. Nothing to copy and nothing to scan, so nothing is shown.
-      link = null;
-      qr = null;
-    }
-  }
-
   onMount(() => {
-    void mint();
-    ticking = setInterval(tick, 1000);
+    void pairing.ensure();
+    ticking = setInterval(() => pairing.tick(), 1000);
   });
   onDestroy(() => clearInterval(ticking));
 
-  const clock = $derived(`${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`);
+  /**
+   * How wide to draw it, in whole pixels per module.
+   *
+   * A fixed width was wrong at both ends: a realistic pairing URL is a
+   * version 11 symbol, 61 modules across, and 148px of it is 2.3 pixels a
+   * module — under what a camera can resolve off a screen. Four is the usual
+   * floor. Sizing from the module count also keeps every module a whole
+   * number of pixels, so the browser is not resampling module edges.
+   */
+  const PX_PER_MODULE = 4;
+  const across = $derived(pairing.qr ? pairing.qr.size + 4 : 0);
+  const width = $derived(across * PX_PER_MODULE);
 
   async function copy() {
-    if (!link) return;
-    await navigator.clipboard.writeText(link.url);
+    if (!pairing.link) return;
+    await navigator.clipboard.writeText(pairing.link.url);
     copied = true;
     setTimeout(() => (copied = false), 1600);
   }
 
   function hide() {
-    link = null;
-    qr = null;
+    // The code is left standing: it is still good, and showing this again
+    // should bring back the same one rather than mint another.
     onhide?.();
   }
 </script>
 
 <div class="qrwrap">
-  {#if error}
-    <p class="warn">{error}</p>
-    <button class="btn sm" onclick={mint}>{t("phone.qr.again")}</button>
-  {:else if qr && link}
-    <!-- One path for the whole symbol: a version 12 code is over two thousand
-         modules, and that many elements is slow to lay out. `shape-rendering`
-         keeps the edges hard when the browser scales it. -->
+  {#if pairing.error}
+    <p class="warn">{pairing.error}</p>
+    <button class="btn sm" onclick={() => pairing.mint()}>{t("phone.qr.again")}</button>
+  {:else if pairing.qr && pairing.link}
+    <!-- One path for the whole symbol: a version 11 code is over three
+         thousand modules, and that many elements is slow to lay out.
+         `shape-rendering` keeps the module edges hard. -->
     <svg
       class="qr"
-      viewBox="0 0 {qr.size + 4} {qr.size + 4}"
+      style="width: {width}px; height: {width}px"
+      viewBox="0 0 {across} {across}"
       shape-rendering="crispEdges"
       role="img"
       aria-label={t("phone.qr.alt")}
     >
-      <rect width={qr.size + 4} height={qr.size + 4} fill="#fff" />
-      <path d={qrPath(qr, 2)} fill="#000" />
+      <rect width={across} height={across} fill="#fff" />
+      <path d={qrPath(pairing.qr, 2)} fill="#000" />
     </svg>
 
     <hr class="rule" />
 
-    <p class="warn">{t("phone.qr.warn", { clock, days: String(link.days) })}</p>
+    <p class="warn">{t("phone.qr.warn", { clock: pairing.clock, days: String(pairing.link.days) })}</p>
 
     <div class="row">
       <button class="btn sm" onclick={copy}>{copied ? t("phone.copied") : t("phone.qr.copyLink")}</button>
@@ -120,16 +95,13 @@
   /* White behind the code whatever the theme: a reader needs the contrast,
      and an inverted code is not a code. */
   .qr {
-    /* Smaller than it was: a phone camera wants the whole code inside the
-       frame, and 200px filled more of the screen than it could take in. */
-    width: 148px;
-    height: 148px;
     background: #fff;
   }
 
-  /* The code is its own thing on the card, not another paragraph. */
   .rule {
-    margin: 12px 0;
+    width: 100%;
+    height: 0;
+    margin: 2px 0;
     border: 0;
     border-top: 1px solid var(--line);
   }
