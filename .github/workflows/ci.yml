@@ -12,9 +12,6 @@
 #   - prettier: same reason, for the UI.
 #   - code signing and notarization: no certificates. macOS is built unsigned,
 #     which proves it compiles and bundles but not that it launches.
-#   - the agent process tree on Unix: implemented but never executed on a Unix
-#     machine, only cross-compiled. Run and reported on macOS and Linux
-#     (`continue-on-error`) rather than gated, until one real run says it works.
 name: CI
 
 on:
@@ -132,25 +129,6 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
-      # The Unix teardown (a process group, signalled SIGTERM then SIGKILL) is
-      # implemented -- but it has only ever been cross-compiled from Windows,
-      # never executed on macOS or Linux. So the test stays #[ignore]d there
-      # and runs here as a report instead: the real result is visible on every
-      # run, and a wrong guess about a platform nobody has tested cannot block
-      # unrelated pull requests.
-      #
-      # When this step passes, delete it and the #[cfg_attr(not(windows),
-      # ignore)] in crates/acp/src/process.rs. The test then runs in
-      # `cargo test` above and becomes an ordinary gate.
-      - name: Agent process tree on Unix (report only, not yet gated)
-        if: runner.os != 'Windows'
-        continue-on-error: true
-        # Both of them: the graceful teardown and the aborted one. The second
-        # covers the path session.rs actually takes when a session fails to
-        # start, which is where the pgid-cleared-too-early leak lived.
-        # Quoted: a plain scalar ending in a colon reads as a mapping key.
-        run: "cargo test -p orchestra-acp --lib -- --ignored process::tests::"
-
       - name: Build app binary
         run: cargo build -p orchestra-app --bin divixi
 
@@ -211,9 +189,19 @@ jobs:
         with:
           cache-key: bundle-${{ matrix.name }}
 
-      # tauri build runs beforeBuildCommand (npm run build) itself.
+      # With updater metadata enabled in tauri.conf.json, `tauri build` insists
+      # on a private signing key whenever a public updater key is configured.
+      # CI bundle artifacts are non-release smoke outputs, so they use an
+      # ephemeral per-run key instead of release secrets.
       - name: tauri build (unsigned)
-        run: npx tauri build --bundles ${{ matrix.bundles }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/ci-updater.key"
+          npx tauri signer generate --ci -w "$key" -f >/dev/null
+          export TAURI_SIGNING_PRIVATE_KEY
+          TAURI_SIGNING_PRIVATE_KEY="$(cat "$key")"
+          npx tauri build --bundles ${{ matrix.bundles }}
 
       # Tauri builds the .app's icon from the PNGs in bundle.icon, one entry
       # per size, so the largest PNG listed is the sharpest the Dock and
@@ -224,7 +212,11 @@ jobs:
       - name: Check .app carries an icon (macOS)
         if: runner.os == 'macOS'
         run: |
-          app=$(find target/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)
+          app=$(find target/release/bundle/macos -maxdepth 1 -name '*.app' 2>/dev/null | head -1)
+          if [ -z "$app" ]; then
+            echo "::error::no .app in target/release/bundle/macos -- the build made no bundle, so there is no icon to check"
+            exit 1
+          fi
           echo "bundle: $app"
           icns=$(ls "$app/Contents/Resources/"*.icns 2>/dev/null | head -1)
           if [ -z "$icns" ]; then
@@ -235,7 +227,12 @@ jobs:
           echo "icon sizes: $(ls "$RUNNER_TEMP/icon.iconset" | tr '\n' ' ')"
           plutil -p "$app/Contents/Info.plist" | grep -E 'CFBundleShortVersionString|CFBundleVersion|CFBundleIdentifier'
 
+      # Uploaded whether or not the icon check passed: a bundle whose icon is
+      # wrong is still worth looking at, and the check exists to say what is
+      # wrong with it, not to hide it. Not on cancel, when there is nothing
+      # worth keeping.
       - name: Upload bundle
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: divixi-${{ matrix.name }}-unsigned

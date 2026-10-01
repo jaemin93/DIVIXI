@@ -34,7 +34,9 @@
     online: boolean;
     version: string | null;
     build: string | null;
+    release: string | null;
     stale: boolean;
+    freshness: "unknown" | "same" | "other" | "too_old";
   };
   type Link = "online" | "trying" | "off";
   const link = (h: Host | undefined): Link => (h?.online ? "online" : h?.connected ? "trying" : "off");
@@ -195,7 +197,13 @@
     store.openSettings("remote");
   }
 
+  /**
+   * Why the instance is out of step. A server that names no build at all is
+   * not "a different build" -- it is one from before that field, which is a
+   * different thing to do about it (update it, rather than match commits).
+   */
   function staleNote(h: Host): string {
+    if (h.freshness === "too_old") return t("instances.tooOld", { version: h.version ?? "?" });
     return t("instances.stale", { version: h.version ?? "?", build: h.build ?? "?" });
   }
 

@@ -19,6 +19,7 @@
   import Unreachable from "./lib/Unreachable.svelte";
   import ErrorToasts from "./lib/ErrorToasts.svelte";
   import CrashBanner from "./lib/CrashBanner.svelte";
+  import UpdateBanner from "./lib/UpdateBanner.svelte";
   import { inTauri, instance } from "./lib/ipc.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
   import { slide } from "svelte/transition";
@@ -66,6 +67,11 @@
 <!-- And, on the launch after a panic, what happened to the run before this
      one. It stays until it is closed: unlike an error, it is already over. -->
 <CrashBanner />
+
+<!-- And, once someone has asked, that a release is out or that its installer
+     is downloaded and checked. Same place, same manners; nothing puts it there
+     but a press (src-tauri/src/update.rs). -->
+<UpdateBanner />
 
 {#if instance.error}
   <div class="shell">

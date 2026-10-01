@@ -256,8 +256,68 @@ pub struct AgentEnvelope {
     pub event: AgentEvent,
 }
 
+/// A reply's text, put together from the chunks an agent streams.
+///
+/// Text an agent writes on either side of a tool call is two passages, not
+/// one: "It's an npm install, not Homebrew." then, after the call,
+/// "`check-claude-app` is gone". Joined as they came they read as one run-on
+/// line. A run's stored output (crates/store) and a routine's history
+/// (src-tauri/src/routine.rs) both put a reply together this way, so the two
+/// read the same.
+#[derive(Debug, Default)]
+pub struct Reply {
+    text: String,
+    after_tool: bool,
+}
+
+impl Reply {
+    /// Add a chunk of what the agent said.
+    pub fn say(&mut self, chunk: &str) {
+        if self.after_tool && !self.text.is_empty() {
+            // A blank line between them -- and exactly one, however many
+            // newlines the two sides already bring to the seam.
+            let have = self.text.chars().rev().take_while(|c| *c == '\n').count() + chunk.chars().take_while(|c| *c == '\n').count();
+            for _ in have..2 {
+                self.text.push('\n');
+            }
+        }
+        self.after_tool = false;
+        self.text.push_str(chunk);
+    }
+
+    /// A tool call came between what was said and what comes next.
+    pub fn tool(&mut self) {
+        self.after_tool = true;
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    pub fn into_string(self) -> String {
+        self.text
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reply_keeps_passages_on_either_side_of_a_tool_apart() {
+        let mut r = super::Reply::default();
+        r.say("It's an npm global ");
+        r.say("install, not Homebrew.");
+        r.tool();
+        r.say("`check-claude-app` is gone.");
+        assert_eq!(r.as_str(), "It's an npm global install, not Homebrew.\n\n`check-claude-app` is gone.");
+
+        let mut list = super::Reply::default();
+        list.say("- reading the file\n");
+        list.tool();
+        list.say("The file is empty.");
+        assert_eq!(list.into_string(), "- reading the file\n\nThe file is empty.", "one newline is not a paragraph break");
+    }
+
+
     use super::*;
 
     #[test]

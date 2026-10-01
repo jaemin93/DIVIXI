@@ -195,7 +195,6 @@
   let atIndex = $state(0);
   /** Escape closes the list until the next keystroke. */
   let atHidden = $state(false);
-  let treeAsked = "";
   function trackCaret() {
     caret = box?.selectionStart ?? draft.length;
   }
@@ -305,19 +304,17 @@
     return m ? { query: m[1].toLowerCase(), start: before.length - m[1].length - 1 } : null;
   });
 
-  // The file list comes from the track's folder; fetch it the first time "@" is typed.
+  // The file list comes from the track's folder -- every file in it, not
+  // only the folders the browser has open; fetch it the first time "@" is typed.
   $effect(() => {
-    if (atToken && store.track && treeAsked !== store.track && !store.treeLoading) {
-      treeAsked = store.track;
-      void store.loadTree();
-    }
+    if (atToken && store.track) void store.loadFileList();
   });
 
   /** Files whose name or path has the query; names that start with it first. */
   const atMatches = $derived.by((): WsEntry[] => {
     if (!atToken) return [];
     const q = atToken.query;
-    const files = store.tree.filter((e) => !e.dir);
+    const files = store.fileList.filter((e) => !e.dir);
     if (!q) return files.slice(0, 30);
     const scored: [number, WsEntry][] = [];
     for (const e of files) {
@@ -362,7 +359,7 @@
     ...atMatches.map((file) => ({ kind: "file" as const, file })),
   ]);
   const kbOff = $derived(kbOffered ? 1 : 0);
-  const atOpen = $derived(atToken !== null && !atHidden && (atItems.length > 0 || store.treeLoading));
+  const atOpen = $derived(atToken !== null && !atHidden && (atItems.length > 0 || store.fileListLoading));
 
   $effect(() => {
     void atItems.length;
@@ -686,7 +683,7 @@
           {/if}
           <div class="mlab-sm ph">{t("composer.files")}</div>
           {#if atMatches.length === 0}
-            <div class="mono waiting"><span class="dot pulse"></span>{store.treeLoading ? t("composer.filesLoading") : t("composer.noFiles")}</div>
+            <div class="mono waiting"><span class="dot pulse"></span>{store.fileListLoading ? t("composer.filesLoading") : t("composer.noFiles")}</div>
           {/if}
           {#each atMatches as f, j (f.path)}
             {@const i = kbOff + designMatches.length + j}
