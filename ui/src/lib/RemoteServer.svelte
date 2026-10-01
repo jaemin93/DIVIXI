@@ -118,6 +118,10 @@
     </div>
     <div class="body">
       <p class="hint">{t("serve.note")}</p>
+      <p class="hint">
+        {t("serve.notPhone")}
+        <button class="link" onclick={() => (store.settingsSection = "overview")}>{t("serve.goPhone")}</button>
+      </p>
       <div class="two">
         <div class="seg" role="radiogroup" aria-label={t("serve.where")}>
           <button class="segopt" class:on={!status.all} role="radio" aria-checked={!status.all} disabled={busy} onclick={() => serve(status!.enabled, false)}>{t("serve.local")}</button>
@@ -247,6 +251,16 @@
     margin: 0;
     font-size: 12px;
     color: var(--warn);
+  }
+
+  .link {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: var(--acc);
+    cursor: pointer;
+    text-decoration: underline;
   }
 
   input {

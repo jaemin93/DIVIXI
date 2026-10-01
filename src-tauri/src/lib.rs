@@ -1604,6 +1604,8 @@ pub fn run() {
             remote::remote_server_status,
             remote::remote_server_set,
             remote::remote_server_drop,
+            remote::phone_status,
+            remote::phone_set,
             remote::github::github_account,
             remote::github::github_set_client_id,
             remote::github::github_login_start,

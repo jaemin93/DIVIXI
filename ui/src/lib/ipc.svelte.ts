@@ -48,6 +48,10 @@ const OWN = new Set([
   "remote_server_status",
   "remote_server_set",
   "remote_server_drop",
+  // Phone access is this PC's own: publishing THIS machine on its tailnet,
+  // whichever Divixi the window happens to be showing.
+  "phone_status",
+  "phone_set",
   "github_account",
   "github_set_client_id",
   "github_login_start",

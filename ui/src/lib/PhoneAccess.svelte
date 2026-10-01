@@ -1,0 +1,295 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { invoke } from "./ipc.svelte";
+  import { store } from "./store.svelte";
+  import { t, type Key } from "./i18n.svelte";
+
+  /**
+   * Settings › Overview: this Divixi, opened in a phone's browser.
+   *
+   * NOT remote instances. Remote instances is this app driving ANOTHER PC's
+   * Divixi; this is opening YOUR OWN on your phone. The two have been confused
+   * once already, so they never share a pane, never share a word ("phone
+   * access", never "remote"), and each card points at the other by name.
+   *
+   * The state machine is the backend's (`remote::Step`). This renders `step`
+   * and never works it out again from the parts: two owners for one state
+   * machine is how a card comes to say "ready" about a machine that is not.
+   */
+
+  type Probe = {
+    installed: boolean;
+    reachable: boolean;
+    stopped: boolean;
+    logged_in: boolean;
+    name: string;
+    https: boolean | null;
+    peers: number;
+    peers_online: number;
+    tailnet: string;
+    detail: string;
+  };
+  type Serve = { published: boolean | null; port_free: boolean | null; detail: string };
+  type Step = "install" | "start_tailscale" | "sign_in" | "enable_magicdns" | "enable_https" | "occupied" | "publish" | "ready";
+  type Status = {
+    on: boolean;
+    step: Step;
+    address: string;
+    probe: Probe;
+    serve: Serve;
+    awake: "awake" | "unsupported" | "refused";
+    port: number;
+    running: boolean;
+    listen_all: boolean;
+    alone: boolean;
+    publish_command: string;
+    unpublish_command: string;
+  };
+
+  let status = $state<Status | null>(null);
+  let busy = $state(false);
+  let error = $state("");
+  let copied = $state(false);
+
+  /** A live read every time: what this machine can do *now*, not what it could. */
+  async function refresh() {
+    try {
+      status = await invoke<Status>("phone_status");
+    } catch (err) {
+      store.lastError = String(err);
+    }
+  }
+
+  onMount(refresh);
+
+  async function run(f: () => Promise<Status>) {
+    error = "";
+    busy = true;
+    try {
+      status = await f();
+    } catch (err) {
+      // `phone_set` rejects with the daemon's own words. They are the whole
+      // point of the failure, so they are shown rather than summarised.
+      error = String(err);
+      await refresh();
+    } finally {
+      busy = false;
+    }
+  }
+
+  const turn = (on: boolean) => run(() => invoke<Status>("phone_set", { on }));
+
+  async function copy(text: string) {
+    await navigator.clipboard.writeText(text);
+    copied = true;
+    setTimeout(() => (copied = false), 1600);
+  }
+
+  /** One line per step: what is in the way, and what to do about it. */
+  const STEP_BLURB: Record<Step, Key> = {
+    install: "phone.step.install",
+    start_tailscale: "phone.step.startTailscale",
+    sign_in: "phone.step.signIn",
+    enable_magicdns: "phone.step.enableMagicdns",
+    enable_https: "phone.step.enableHttps",
+    occupied: "phone.step.occupied",
+    publish: "phone.step.publish",
+    ready: "phone.step.ready",
+  };
+
+  const s = $derived(status);
+  /** Only `publish` earns the button: every other step has something in the way. */
+  const canTurnOn = $derived(s?.step === "publish");
+  const on = $derived(s?.step === "ready");
+</script>
+
+{#if s}
+  <div class="card">
+    <div class="cardhead">
+      <span class="ctitle">{t("phone.title")}</span>
+      <span class="state" class:on>{on ? t("phone.on") : t("phone.off")}</span>
+      <span class="grow"></span>
+      {#if on}
+        <button class="btn" disabled={busy} onclick={() => turn(false)}>{t("phone.turnOff")}</button>
+      {:else if canTurnOn}
+        <button class="btn btn-acc" disabled={busy} onclick={() => turn(true)}>{t("phone.turnOn")}</button>
+      {/if}
+      <button class="btn" disabled={busy} onclick={refresh} title={t("phone.checkHint")}>{t("phone.check")}</button>
+    </div>
+
+    <div class="body">
+      <p class="blurb">{t(STEP_BLURB[s.step])}</p>
+
+      <!-- The daemon's own words, whenever it said anything. Our step is a
+           classification; this is what Tailscale actually reported. -->
+      {#if s.probe.detail && s.step !== "ready"}
+        <p class="said mono">{s.probe.detail}</p>
+      {/if}
+      {#if s.step === "occupied" && s.serve.detail}
+        <p class="said mono">{s.serve.detail}</p>
+      {/if}
+
+      {#if s.address}
+        <div class="line">
+          <span class="addr mono">{s.address}</span>
+          <button class="btn sm" onclick={() => copy(s.address)}>{copied ? t("phone.copied") : t("phone.copy")}</button>
+        </div>
+      {/if}
+
+      {#if on}
+        <!-- The cost of being on, stated where the switch is. -->
+        <p class="hint">
+          {s.awake === "awake" ? t("phone.awake") : s.awake === "unsupported" ? t("phone.awakeUnsupported") : t("phone.awakeRefused")}
+        </p>
+      {/if}
+
+      <!-- Which tailnet this machine is about to be published on. A work
+           tailnet is not a private network, and the number of other devices on
+           it is the honest way to say so. -->
+      {#if s.probe.tailnet}
+        <p class="hint">{t("phone.tailnet", { name: s.probe.tailnet, peers: String(s.probe.peers) })}</p>
+      {/if}
+
+      <!-- Publishing succeeds on a tailnet of one and the address looks right,
+           and then nothing can open it. Said before that happens, not after. -->
+      {#if s.alone}
+        <p class="warn">{t("phone.alone")}</p>
+      {/if}
+
+      <!-- Phone access never asks for this; remote instances did. Surfaced so
+           the two are not confused for each other's doing. -->
+      {#if s.listen_all}
+        <p class="warn">{t("phone.listenAll")}</p>
+      {/if}
+
+      {#if s.step === "occupied"}
+        <p class="hint">{t("phone.byHand")}</p>
+        <code class="cmd mono">{s.publish_command}</code>
+      {/if}
+
+      {#if error}
+        <p class="warn">{error}</p>
+        <p class="hint">{t("phone.byHand")}</p>
+        <code class="cmd mono">{on ? s.unpublish_command : s.publish_command}</code>
+      {/if}
+
+      <!-- The sentence that keeps this apart from remote instances, in both
+           directions. The owner dropped this idea once over exactly this. -->
+      <p class="hint">
+        {t("phone.notRemote")}
+        <button class="link" onclick={() => (store.settingsSection = "remote")}>{t("phone.goRemote")}</button>
+      </p>
+    </div>
+  </div>
+{/if}
+
+<style>
+  .card {
+    border: 1px solid var(--line);
+    background: var(--card);
+    margin-bottom: 12px;
+  }
+
+  .cardhead {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .ctitle {
+    font-size: 14px;
+    color: var(--hi);
+  }
+
+  .grow {
+    flex: 1;
+  }
+
+  .state {
+    font-size: 12px;
+    color: var(--lab);
+  }
+
+  .state.on {
+    color: var(--ok);
+  }
+
+  .body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 18px 16px;
+  }
+
+  .line {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .blurb {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--txt);
+  }
+
+  .addr {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    color: var(--hi);
+    overflow-wrap: anywhere;
+  }
+
+  .hint {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--dim);
+  }
+
+  /* What Tailscale itself said. Set apart from our own words so it is clear
+     which is which when the two disagree. */
+  .said {
+    margin: 0;
+    padding: 8px 10px;
+    border-left: 2px solid var(--line);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--lab);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .warn {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--warn);
+    overflow-wrap: anywhere;
+  }
+
+  .cmd {
+    display: block;
+    padding: 8px 10px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--hi);
+    user-select: all;
+    overflow-wrap: anywhere;
+  }
+
+  .link {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: var(--acc);
+    cursor: pointer;
+    text-decoration: underline;
+  }
+</style>

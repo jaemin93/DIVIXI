@@ -26,6 +26,7 @@
   import { invoke, inTauri, local } from "./ipc.svelte";
   import RemoteHosts from "./RemoteHosts.svelte";
   import RemoteServer from "./RemoteServer.svelte";
+  import PhoneAccess from "./PhoneAccess.svelte";
   import { onMount } from "svelte";
 
   /** Minutes before an unused conductor or worker session is closed (0: never). */
@@ -268,6 +269,8 @@
           <div class="sub">divixi</div>
         </div>
       </div>
+
+      {#if local}<PhoneAccess />{/if}
 
       <div class="card">
         <div class="cardhead">
