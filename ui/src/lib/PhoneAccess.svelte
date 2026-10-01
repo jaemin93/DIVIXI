@@ -37,13 +37,11 @@
     address: string;
     probe: Probe;
     serve: Serve;
-    awake: "awake" | "unsupported" | "refused";
+    awake: "awake" | "unsupported" | "refused" | null;
     port: number;
     running: boolean;
     listen_all: boolean;
     alone: boolean;
-    publish_command: string;
-    unpublish_command: string;
   };
 
   let status = $state<Status | null>(null);
@@ -78,6 +76,22 @@
   }
 
   const turn = (on: boolean) => run(() => invoke<Status>("phone_set", { on }));
+
+  /**
+   * Steps Divixi cannot act on itself: Tailscale is missing, signed out, or a
+   * tailnet-wide setting is off. Each opens Tailscale's own page for that one
+   * thing. The alternative was printing a command for the human to type, and
+   * Kiro Crew does not do that to people.
+   */
+  const HELP: Partial<Record<Step, { url: string; label: Key }>> = {
+    install: { url: "https://tailscale.com/download", label: "phone.help.install" },
+    start_tailscale: { url: "https://tailscale.com/kb/1080/cli#status", label: "phone.help.startTailscale" },
+    sign_in: { url: "https://tailscale.com/kb/1080/cli#login", label: "phone.help.signIn" },
+    enable_magicdns: { url: "https://tailscale.com/kb/1081/magicdns", label: "phone.help.enableMagicdns" },
+    enable_https: { url: "https://tailscale.com/kb/1153/enabling-https", label: "phone.help.enableHttps" },
+  };
+  const help = $derived(status ? HELP[status.step] : undefined);
+  const openHelp = (url: string) => invoke("open_url", { url }).catch((err) => (store.lastError = String(err)));
 
   async function copy(text: string) {
     await navigator.clipboard.writeText(text);
@@ -136,8 +150,10 @@
         </div>
       {/if}
 
-      {#if on}
-        <!-- The cost of being on, stated where the switch is. -->
+      <!-- The cost of being on, stated where the switch is -- and only while
+           Divixi is actually holding the machine awake. Published by hand, it
+           holds nothing, and a promise nobody is keeping is worse than none. -->
+      {#if s.awake}
         <p class="hint">
           {s.awake === "awake" ? t("phone.awake") : s.awake === "unsupported" ? t("phone.awakeUnsupported") : t("phone.awakeRefused")}
         </p>
@@ -162,23 +178,17 @@
         <p class="warn">{t("phone.listenAll")}</p>
       {/if}
 
-      {#if s.step === "occupied"}
-        <p class="hint">{t("phone.byHand")}</p>
-        <code class="cmd mono">{s.publish_command}</code>
-      {/if}
-
       {#if error}
         <p class="warn">{error}</p>
-        <p class="hint">{t("phone.byHand")}</p>
-        <code class="cmd mono">{on ? s.unpublish_command : s.publish_command}</code>
       {/if}
 
-      <!-- The sentence that keeps this apart from remote instances, in both
-           directions. The owner dropped this idea once over exactly this. -->
-      <p class="hint">
-        {t("phone.notRemote")}
-        <button class="link" onclick={() => (store.settingsSection = "remote")}>{t("phone.goRemote")}</button>
-      </p>
+      <!-- Only where Divixi cannot act for itself. Tailscale's own page for
+           the one thing that is missing, not a command to type. -->
+      {#if help}
+        <div class="line">
+          <button class="btn sm" onclick={() => openHelp(help!.url)}>{t(help.label)}</button>
+        </div>
+      {/if}
     </div>
   </div>
 {/if}
@@ -272,24 +282,4 @@
     overflow-wrap: anywhere;
   }
 
-  .cmd {
-    display: block;
-    padding: 8px 10px;
-    background: var(--bg);
-    border: 1px solid var(--line);
-    font-size: 12px;
-    color: var(--hi);
-    user-select: all;
-    overflow-wrap: anywhere;
-  }
-
-  .link {
-    padding: 0;
-    border: 0;
-    background: none;
-    font: inherit;
-    color: var(--acc);
-    cursor: pointer;
-    text-decoration: underline;
-  }
 </style>

@@ -485,47 +485,44 @@ fn has_port_keys(node: &Value) -> bool {
 }
 
 /// Whether serve is fronting Divixi's `port`.
-pub async fn serve_state(port: u16) -> ServeState {
-    let unknown = |detail: String| ServeState { published: None, port_free: None, detail };
-    let out = match run(&["serve", "status", "--json"], READ_TIMEOUT).await {
-        Ran::NoCli => return unknown("The tailscale CLI was not found in a standard install location.".into()),
-        Ran::NoStart(e) => return unknown(format!("The tailscale CLI could not be started: {e}")),
-        Ran::Timeout { out, err } => {
-            let mut detail = "The tailscale CLI did not answer in time.".to_string();
-            let words = said(&out, &err);
-            if !words.is_empty() {
-                detail.push_str(&format!(" Before the deadline it printed: {words}"));
-            }
-            return unknown(detail);
-        }
-        Ran::Done { status: 0, out, .. } => out,
-        Ran::Done { status, out, err } => {
-            let words = said(&out, &err);
-            return unknown(if words.is_empty() { format!("tailscale serve status exited {status}") } else { words });
-        }
-    };
-
-    let nothing = |detail: &str| ServeState { published: Some(false), port_free: Some(true), detail: detail.into() };
-    if out.trim().is_empty() {
-        return nothing("No serve configuration is active.");
+/// Whether a document carries no serve configuration at all.
+///
+/// `{}` and `null` are the obvious shapes, but not the only ones: Go marshals
+/// a `ServeConfig` whose maps are nil as `{"TCP":null,"Web":null}`, and that is
+/// "nothing is served", not "something this build cannot read". Reading it as
+/// the latter is what refused the very first publish on a machine with no
+/// serve configuration -- the one case that has to work.
+fn is_empty_doc(node: &Value) -> bool {
+    match node {
+        Value::Null => true,
+        Value::Object(map) => map.values().all(is_empty_doc),
+        Value::Array(items) => items.iter().all(is_empty_doc),
+        _ => false,
     }
-    let Ok(doc) = serde_json::from_str::<Value>(&out) else {
-        // The daemon *did* answer; we cannot read its shape. That is not the
-        // same as no answer, and the write guards need the difference.
-        return unknown("tailscale serve status returned output this build cannot read.".into());
-    };
-    if doc.is_null() || doc == serde_json::json!({}) || doc == serde_json::json!([]) {
-        return nothing("No serve configuration is active.");
+}
+
+/// What a serve-status document says about Divixi on `port`.
+///
+/// Pure, and the whole of the classification: [`serve_state`] only fetches the
+/// document and hands it here, so a test of this is a test of what runs.
+fn classify_doc(doc: &Value, port: u16) -> ServeState {
+    let unknown = |detail: String| ServeState { published: None, port_free: None, detail };
+    if is_empty_doc(doc) {
+        return ServeState {
+            published: Some(false),
+            port_free: Some(true),
+            detail: "No serve configuration is active.".into(),
+        };
     }
 
     let mut scoped = Vec::new();
-    port_subtrees(&doc, SERVE_PORT, &mut scoped);
+    port_subtrees(doc, SERVE_PORT, &mut scoped);
     if scoped.is_empty() {
-        // Nothing keys our port. When the document demonstrably keys by port,
-        // that absence is a determination: everything serve holds is on other
-        // ports and this write endangers none of it. Another project on port 80
-        // must not read as "something is on 443".
-        return if has_port_keys(&doc) {
+        // Nothing keys our port. When the document demonstrably keys mappings
+        // by port, that absence is a determination: everything serve holds
+        // sits on other ports and this write endangers none of it. Another
+        // project on port 80 must not read as "something is on 443".
+        return if has_port_keys(doc) {
             ServeState {
                 published: Some(false),
                 port_free: Some(true),
@@ -563,24 +560,53 @@ pub async fn serve_state(port: u16) -> ServeState {
     }
 }
 
-/// The command a human can paste when we refuse, or when the daemon does.
-pub fn publish_command(port: u16) -> String {
-    format!("tailscale serve --bg --https={SERVE_PORT} http://127.0.0.1:{port}")
+/// Whether serve is fronting Divixi's `port`.
+pub async fn serve_state(port: u16) -> ServeState {
+    let unknown = |detail: String| ServeState { published: None, port_free: None, detail };
+    let out = match run(&["serve", "status", "--json"], READ_TIMEOUT).await {
+        Ran::NoCli => return unknown("The tailscale CLI was not found in a standard install location.".into()),
+        Ran::NoStart(e) => return unknown(format!("The tailscale CLI could not be started: {e}")),
+        Ran::Timeout { out, err } => {
+            let mut detail = "The tailscale CLI did not answer in time.".to_string();
+            let words = said(&out, &err);
+            if !words.is_empty() {
+                detail.push_str(&format!(" Before the deadline it printed: {words}"));
+            }
+            return unknown(detail);
+        }
+        Ran::Done { status: 0, out, .. } => out,
+        Ran::Done { status, out, err } => {
+            let words = said(&out, &err);
+            return unknown(if words.is_empty() { format!("tailscale serve status exited {status}") } else { words });
+        }
+    };
+    if out.trim().is_empty() {
+        return ServeState {
+            published: Some(false),
+            port_free: Some(true),
+            detail: "No serve configuration is active.".into(),
+        };
+    }
+    match serde_json::from_str::<Value>(&out) {
+        Ok(doc) => classify_doc(&doc, port),
+        // The daemon *did* answer; we cannot read its shape. That is not the
+        // same as no answer, and the write guards need the difference.
+        Err(_) => unknown("tailscale serve status returned output this build cannot read.".into()),
+    }
 }
 
-pub fn unpublish_command() -> String {
-    format!("tailscale serve --https {SERVE_PORT} --set-path={SERVE_MOUNT} off")
-}
-
-/// Add the hint a code earns, beside the daemon's words and never instead.
+/// Add what the code means, beside the daemon's words and never instead.
+///
+/// Says what happened and what is missing. It does not hand over a command:
+/// the button is the way this is done, and a card that prints a command line
+/// has given up and called it help.
 fn with_hint(code: Code, words: String, fallback: String, nothing_happened: &str) -> Outcome {
     let hint = match code {
-        // The most likely refusal, and the one nobody guesses: serve
-        // configuration is daemon state, so it needs root or a standing grant.
-        Code::NoPermission => format!(
-            "{nothing_happened} Changing serve configuration needs root or a standing grant: try `sudo tailscale serve …`, or grant this user once with `sudo tailscale set --operator=$USER`."
-        ),
-        Code::DaemonUnavailable => format!("{nothing_happened} Check `tailscale status`; the daemon may be stopped or signed out."),
+        // The likeliest refusal, and the one nobody can guess from the message:
+        // serve configuration is daemon state, so on Linux and macOS it needs a
+        // standing grant this app cannot give itself.
+        Code::NoPermission => format!(" {nothing_happened} Divixi is not allowed to change Tailscale's serve configuration on this machine."),
+        Code::DaemonUnavailable => format!(" {nothing_happened} Tailscale is not answering — it may be stopped or signed out."),
         _ => String::new(),
     };
     let detail = if words.is_empty() { fallback } else { words };
@@ -613,13 +639,21 @@ pub async fn publish(port: u16) -> Outcome {
     // sits entirely on other ports belongs to something else on this machine
     // and is untouched by this write, so it must not block it.
     let state = serve_state(port).await;
-    if !(state.published == Some(true) || state.port_free == Some(true)) {
+    // Already ours and already right: that is the goal, not an obstacle. Adopt
+    // it and say so rather than writing the same configuration over itself.
+    if state.published == Some(true) {
+        return Outcome {
+            ok: true,
+            code: Code::Ok,
+            detail: format!("Divixi was already published on this machine's tailnet ({SERVE_PORT} → 127.0.0.1:{port})."),
+        };
+    }
+    if state.port_free != Some(true) {
         return Outcome::bad(
             Code::NotOurs,
             format!(
-                "{} Refusing to publish, because `tailscale serve` would REPLACE whatever is at {SERVE_PORT}{SERVE_MOUNT} and this check could not confirm it is free or already Divixi. If you are sure, run `{}` yourself.",
+                "{} Divixi will not publish over it, because `tailscale serve` replaces whatever is at {SERVE_PORT}{SERVE_MOUNT} and this check could not confirm it is free.",
                 state.detail,
-                publish_command(port),
             ),
         );
     }
@@ -632,7 +666,7 @@ pub async fn publish(port: u16) -> Outcome {
             // waiting for it, so the captured output carries the one thing
             // needed and a bare "timed out" would hide it.
             let mut detail = format!(
-                "`tailscale serve` did not answer within {}s. It may still have applied — press Check again before retrying.",
+                "Tailscale did not answer within {}s. It may still have applied — press Check again before retrying.",
                 WRITE_TIMEOUT.as_secs()
             );
             let words = said(&out, &err);
@@ -648,7 +682,7 @@ pub async fn publish(port: u16) -> Outcome {
         },
         Ran::Done { status, out, err } => {
             let lead = if err.trim().is_empty() { out.clone() } else { err.clone() };
-            with_hint(classify(&lead), said(&out, &err), format!("tailscale serve exited {status}"), "Nothing was published.")
+            with_hint(classify(&lead), said(&out, &err), format!("Tailscale refused (exit {status})."), "Nothing was published.")
         }
     }
 }
@@ -673,18 +707,14 @@ pub async fn unpublish(port: u16) -> Outcome {
     if state.published != Some(true) {
         return Outcome::bad(
             Code::NotOurs,
-            format!(
-                "{} Refusing to withdraw, because this check could not confirm {SERVE_PORT}{SERVE_MOUNT} is Divixi. If you are sure, run `{}` yourself.",
-                state.detail,
-                unpublish_command(),
-            ),
+            format!("{} Divixi will not withdraw it, because this check could not confirm {SERVE_PORT}{SERVE_MOUNT} is Divixi's.", state.detail),
         );
     }
     match run(&["serve", "--https", &SERVE_PORT.to_string(), &format!("--set-path={SERVE_MOUNT}"), "off"], WRITE_TIMEOUT).await {
         Ran::NoCli => Outcome::bad(Code::NoCli, "Tailscale was not found; nothing to do."),
         Ran::NoStart(e) => Outcome::bad(Code::Failed, format!("The tailscale CLI could not be started: {e}")),
         Ran::Timeout { out, err } => {
-            let mut detail = format!("`tailscale serve` did not answer within {}s.", WRITE_TIMEOUT.as_secs());
+            let mut detail = format!("Tailscale did not answer within {}s.", WRITE_TIMEOUT.as_secs());
             let words = said(&out, &err);
             if !words.is_empty() {
                 detail.push_str(&format!(" Before the deadline it printed: {words}"));
@@ -702,7 +732,7 @@ pub async fn unpublish(port: u16) -> Outcome {
             // ("Tailscale is stopped.") rather than like a failure, and without
             // it nobody can tell that nothing was withdrawn.
             let lead = if err.trim().is_empty() { out.clone() } else { err.clone() };
-            with_hint(classify(&lead), said(&out, &err), format!("tailscale serve exited {status}"), "Nothing was withdrawn.")
+            with_hint(classify(&lead), said(&out, &err), format!("Tailscale refused (exit {status})."), "Nothing was withdrawn.")
         }
     }
 }
@@ -765,46 +795,55 @@ mod tests {
         assert_eq!(key_port("123456"), None, "not a port");
     }
 
-    fn state_of(doc: &Value, port: u16) -> (Option<bool>, Option<bool>) {
-        // The classification half of `serve_state`, without the subprocess.
-        let mut scoped = Vec::new();
-        port_subtrees(doc, SERVE_PORT, &mut scoped);
-        if scoped.is_empty() {
-            return if has_port_keys(doc) { (Some(false), Some(true)) } else { (None, None) };
+    /// The real thing, verbatim, from `tailscale serve status --json` on this
+    /// machine (Windows Tailscale 1.102.3) while Divixi was published. Pinned
+    /// as a string rather than a `json!` so a change to the shape has to be a
+    /// change to this text: the previous tests built their own document and a
+    /// helper that re-implemented the classification, so they agreed with each
+    /// other while the code disagreed with the daemon.
+    const OURS: &str = r#"{
+      "TCP": { "443": { "HTTPS": true } },
+      "Web": {
+        "laptop-mc28nnvi.tailb45a71.ts.net:443": {
+          "Handlers": { "/": { "Proxy": "http://127.0.0.1:7488" } }
         }
-        let mut mounts = Vec::new();
-        for s in &scoped {
-            mount_subtrees(s, SERVE_MOUNT, &mut mounts);
-        }
-        if mounts.is_empty() {
-            return (None, Some(false));
-        }
-        let needles = [format!("http://127.0.0.1:{port}"), format!("http://localhost:{port}")];
-        if mounts.iter().any(|m| finds_target(m, &needles)) {
-            (Some(true), Some(false))
-        } else {
-            (Some(false), Some(false))
-        }
+      }
+    }"#;
+
+    fn state_of(doc: &str, port: u16) -> (Option<bool>, Option<bool>) {
+        let v: Value = serde_json::from_str(doc).expect("fixture parses");
+        let st = classify_doc(&v, port);
+        (st.published, st.port_free)
     }
 
     #[test]
-    fn ours_on_443_reads_as_published() {
-        let doc = json!({ "TCP": { "443": { "HTTPS": true } }, "Web": { "desk.tail.ts.net:443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:7488" } } } } });
-        assert_eq!(state_of(&doc, 7488), (Some(true), Some(false)));
+    fn the_document_this_machine_really_returns_reads_as_ours() {
+        assert_eq!(state_of(OURS, 7488), (Some(true), Some(false)), "{OURS}");
+    }
+
+    #[test]
+    fn a_config_with_nothing_in_it_leaves_our_port_free() {
+        // The bug this pins. Go marshals a `ServeConfig` with nil maps, so an
+        // unconfigured daemon answers with keys and nulls rather than `{}` --
+        // and reading that as "could not tell" refused the very first publish
+        // on a machine that had no serve configuration at all, which is every
+        // machine the first time.
+        for doc in [r#"{}"#, r#"null"#, r#"[]"#, r#"{"TCP":null,"Web":null}"#, r#"{"TCP":null,"Web":null,"AllowFunnel":null}"#, r#"{"TCP":{},"Web":{}}"#] {
+            assert_eq!(state_of(doc, 7488), (Some(false), Some(true)), "{doc} is nothing served");
+        }
     }
 
     #[test]
     fn someone_elses_handler_at_our_mount_is_not_ours() {
-        let doc = json!({ "TCP": { "443": { "HTTPS": true } }, "Web": { "desk.tail.ts.net:443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:3000" } } } } });
-        assert_eq!(state_of(&doc, 7488), (Some(false), Some(false)), "refuses: publishing would replace it");
+        let doc = r#"{"TCP":{"443":{"HTTPS":true}},"Web":{"desk.tail.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}"#;
+        assert_eq!(state_of(doc, 7488), (Some(false), Some(false)), "refuses: publishing would replace it");
     }
 
     #[test]
     fn ours_under_another_mount_does_not_make_the_mount_ours() {
-        // The narrowing that matters: ours at /divixi, a stranger's at / — the
-        // mount a withdrawal would actually remove.
-        let doc = json!({ "Web": { "desk.tail.ts.net:443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:3000" }, "/divixi": { "Proxy": "http://127.0.0.1:7488" } } } } });
-        assert_eq!(state_of(&doc, 7488).0, Some(false));
+        // Ours at /divixi, a stranger's at / -- the mount a withdrawal removes.
+        let doc = r#"{"Web":{"desk.tail.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"},"/divixi":{"Proxy":"http://127.0.0.1:7488"}}}}}"#;
+        assert_eq!(state_of(doc, 7488).0, Some(false));
     }
 
     #[test]
@@ -812,22 +851,31 @@ mod tests {
         // A real document from a Windows 1.x daemon holding one port-80
         // mapping: another project on this machine must not read as "something
         // is on 443".
-        let doc = json!({ "TCP": { "80": { "HTTP": true } }, "Web": { "desk.tail.ts.net:80": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:9980" } } } } });
-        assert_eq!(state_of(&doc, 7488), (Some(false), Some(true)), "free: this write endangers nothing");
+        let doc = r#"{"TCP":{"80":{"HTTP":true}},"Web":{"desk.tail.ts.net:80":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:9980"}}}}}"#;
+        assert_eq!(state_of(doc, 7488), (Some(false), Some(true)), "free: this write endangers nothing");
     }
 
     #[test]
     fn a_document_with_no_port_keys_stays_unknown() {
-        // No evidence of a port-keyed schema, so "our port is free" is not a
-        // determination this build may make. Refusing costs one pasted command.
-        let doc = json!({ "Something": { "Else": "http://127.0.0.1:9999" } });
-        assert_eq!(state_of(&doc, 7488), (None, None));
+        // Content, but no evidence of a port-keyed schema, so "our port is
+        // free" is not a determination this build may make.
+        let doc = r#"{"Something":{"Else":"http://127.0.0.1:9999"}}"#;
+        assert_eq!(state_of(doc, 7488), (None, None));
     }
 
     #[test]
     fn a_port_443_mapping_we_cannot_read_is_unknown_not_free() {
-        let doc = json!({ "Web": { "desk.tail.ts.net:443": { "Something": "unreadable" } } });
-        assert_eq!(state_of(&doc, 7488), (None, Some(false)));
+        let doc = r#"{"Web":{"desk.tail.ts.net:443":{"Something":"unreadable"}}}"#;
+        assert_eq!(state_of(doc, 7488), (None, Some(false)));
+    }
+
+    #[test]
+    fn the_port_we_look_for_is_divixis_own() {
+        // The same document is ours for 7488 and a stranger's for anything
+        // else, so the needle really is the port and not just "something
+        // loopback-shaped".
+        assert_eq!(state_of(OURS, 7488).0, Some(true));
+        assert_eq!(state_of(OURS, 9999).0, Some(false));
     }
 
     #[test]
@@ -853,10 +901,15 @@ mod tests {
     }
 
     #[test]
-    fn a_pasteable_command_is_offered_for_both_directions() {
-        assert_eq!(publish_command(7488), "tailscale serve --bg --https=443 http://127.0.0.1:7488");
-        // `--set-path` is named: without it upstream removes every mount on the
-        // port, and prompts when there is more than one.
-        assert!(unpublish_command().contains("--set-path=/"));
+    fn nothing_we_say_hands_the_human_a_command() {
+        // Kiro Crew does not make the user type commands and neither do we:
+        // the button acts, or the card says what is missing. A command line in
+        // a card is homework.
+        let doc: Value = serde_json::from_str(r#"{"Web":{"d:443":{"Something":"x"}}}"#).unwrap();
+        let said = classify_doc(&doc, 7488).detail;
+        assert!(!said.contains("tailscale "), "{said}");
+        let refused = with_hint(Code::NoPermission, "access denied".into(), String::new(), "Nothing was published.");
+        assert!(!refused.detail.contains("sudo"), "{}", refused.detail);
+        assert!(!refused.detail.contains("--operator"), "{}", refused.detail);
     }
 }

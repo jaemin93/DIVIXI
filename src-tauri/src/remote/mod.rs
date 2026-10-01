@@ -300,7 +300,9 @@ pub struct PhoneStatus {
     pub probe: tailscale::Probe,
     pub serve: tailscale::ServeState,
     /// Whether this PC is actually being kept awake, and if not why not.
-    pub awake: awake::Held,
+    /// `None` means Divixi is holding nothing -- serve can be published by
+    /// hand, and then the card must not promise a machine that will stay up.
+    pub awake: Option<awake::Held>,
     pub port: u16,
     /// Divixi's own server. Phone access needs it, and turns it on itself.
     pub running: bool,
@@ -313,8 +315,6 @@ pub struct PhoneStatus {
     /// right, and then the phone cannot connect with nothing on this machine
     /// wrong -- so it is said before that happens, not after.
     pub alone: bool,
-    pub publish_command: String,
-    pub unpublish_command: String,
 }
 
 fn step_of(probe: &tailscale::Probe, serve: &tailscale::ServeState) -> Step {
@@ -366,7 +366,7 @@ async fn phone_status_now(app: &AppHandle) -> PhoneStatus {
     let step = step_of(&probe, &serve);
     let st = app.state::<AppState>();
     let running = st.remote.running.lock().await.as_ref().map(|r| r.port);
-    let awake = st.remote.awake.lock().as_ref().map_or(awake::Held::Unsupported, |g| g.held);
+    let awake = st.remote.awake.lock().as_ref().map(|g| g.held);
     PhoneStatus {
         on: phone_on(app),
         step,
@@ -378,8 +378,6 @@ async fn phone_status_now(app: &AppHandle) -> PhoneStatus {
         port: running.unwrap_or(want),
         running: running.is_some(),
         listen_all: listen_all(app),
-        publish_command: tailscale::publish_command(want),
-        unpublish_command: tailscale::unpublish_command(),
         probe,
         serve,
     }
