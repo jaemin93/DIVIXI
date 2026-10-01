@@ -380,6 +380,14 @@ fn worker_key(track: &str, worker: &str) -> String {
     format!("{track}/{worker}")
 }
 
+/// The tracks named by a set of worker session keys.
+///
+/// The inverse of [`worker_key`], and the reason it is a function: a worker's
+/// name is the human's, so it can hold a `/`, and only the first one divides.
+fn tracks_of<'a>(keys: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    keys.into_iter().filter_map(|key| key.split_once('/').map(|(track, _)| track.to_string())).collect()
+}
+
 /// Where a track's workers work, as the conductor is told.
 enum Folders {
     Own,
@@ -3509,6 +3517,10 @@ pub async fn worker_states(app: &AppHandle) -> Vec<(String, Vec<WorkerState>)> {
 /// `sessions.idle_minutes` setting, 30 by default, 0 for never): each is an
 /// agent process holding memory. Their conversations stay in the store and
 /// the agent's own record, so the next message reopens them with memory.
+///
+/// A conductor with a worker mid-turn is never closed, however long it has
+/// been quiet. Waiting is not idling, and the wait is usually longer than the
+/// limit: a worker that takes an hour is ordinary.
 pub fn sweep_idle(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -3526,10 +3538,28 @@ pub fn sweep_idle(app: AppHandle) {
             }
             let limit = Duration::from_secs(minutes * 60);
             {
+                // Tracks with a worker mid-turn. Their conductors are not
+                // idle: they are waiting for something they started, and the
+                // report is the only thing that crosses the membrane. Closing
+                // one means the report arrives with nowhere to go, parks, and
+                // then sits there -- a parked report deliberately does not
+                // reopen a closed conductor (see `flush_parked`), so it waits
+                // for the human to say something unrelated. A worker that runs
+                // longer than the idle limit made that certain rather than
+                // unlucky.
+                let awaited = {
+                    let workers = state.sessions.workers.lock().await;
+                    tracks_of(workers.iter().filter(|(_, l)| l.running.is_some()).map(|(key, _)| key.as_str()))
+                };
                 let mut conductors = state.sessions.conductors.lock().await;
                 let idle: Vec<String> = conductors
                     .iter()
-                    .filter(|(track, c)| !state.sessions.is_busy(track) && c.live.running.is_none() && c.live.used.elapsed() > limit)
+                    .filter(|(track, c)| {
+                        !state.sessions.is_busy(track)
+                            && c.live.running.is_none()
+                            && c.live.used.elapsed() > limit
+                            && !awaited.contains(track)
+                    })
                     .map(|(track, _)| track.clone())
                     .collect();
                 for track in idle {
@@ -4192,6 +4222,32 @@ mod proposal_tests {
         // `usize::MAX`, so it is past any index a card's options could have
         // and can never be mistaken for one of them.
         assert_eq!(rx.try_recv().unwrap(), Some(OWN_ANSWER));
+    }
+}
+
+#[cfg(test)]
+mod waiting_tests {
+    use super::{tracks_of, worker_key};
+
+    /// A conductor is spared the idle sweep while a worker of its own is
+    /// mid-turn, and the sweep learns which track that is from the session
+    /// key. Round-tripped against `worker_key` so the two cannot drift.
+    #[test]
+    fn a_worker_key_says_which_track_is_waiting() {
+        let keys = [worker_key("tr002", "routine-dag"), worker_key("tr007", "repo-clean")];
+        assert_eq!(tracks_of(keys.iter().map(String::as_str)), vec!["tr002".to_string(), "tr007".to_string()]);
+
+        // A worker is named by a human, so the name can hold a slash. Only
+        // the first one divides, or the track would come back truncated and
+        // its conductor would be closed out from under a running worker.
+        let odd = worker_key("tr002", "fix/parser");
+        assert_eq!(odd, "tr002/fix/parser");
+        assert_eq!(tracks_of([odd.as_str()]), vec!["tr002".to_string()]);
+
+        // Nothing running, nothing spared.
+        assert!(tracks_of(Vec::<&str>::new()).is_empty());
+        // A key with no slash names no track rather than naming itself.
+        assert!(tracks_of(["malformed"]).is_empty());
     }
 }
 
