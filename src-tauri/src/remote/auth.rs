@@ -51,6 +51,28 @@ pub enum Kind {
     Refresh,
 }
 
+/// How much of this Divixi a device may drive ([`super::bridge::allowed`]).
+///
+/// The scope is carried *in the signed token*, not chosen by the endpoint that
+/// redeems it. A pairing link minted for a phone must stay a phone's link even
+/// if it is posted to the endpoint the Divixi app uses; deciding at the
+/// endpoint would let whoever holds the link pick their own permissions.
+///
+/// `Full` is the serde default so a token or a device stored before this field
+/// existed keeps the access it was granted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// Everything a remote caller may do: the conversation, and the machine
+    /// (its shell, its folders, deleting things). What a pairing token minted
+    /// on this machine over SSH, or this instance's owner signing in with
+    /// GitHub, has always granted.
+    #[default]
+    Full,
+    /// The conversation only ([`super::bridge::ALLOWED`]). A phone.
+    Conversation,
+}
+
 /// What a token says.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Claims {
@@ -64,6 +86,10 @@ pub struct Claims {
     pub d: String,
     /// The generation the token was issued in.
     pub g: u64,
+    /// What the device this token is for may do. Signed, so it cannot be
+    /// widened by whoever presents the token.
+    #[serde(default)]
+    pub s: Scope,
 }
 
 /// A device paired with this Divixi.
@@ -80,6 +106,9 @@ pub struct Device {
     /// The refresh token's current link; an older one coming back is a copy.
     #[serde(default)]
     refresh: String,
+    /// What this device may do. Fixed when it is admitted and never widened.
+    #[serde(default)]
+    pub scope: Scope,
 }
 
 /// Without `n`: it is the one-time value a pairing link is good for and
@@ -91,21 +120,22 @@ pub struct Device {
 /// logged. `finish_non_exhaustive()` is what says a field was left out.
 impl std::fmt::Debug for Claims {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { k, exp, n: _, d, g } = self;
-        f.debug_struct("Claims").field("k", k).field("exp", exp).field("d", d).field("g", g).finish_non_exhaustive()
+        let Self { k, exp, n: _, d, g, s } = self;
+        f.debug_struct("Claims").field("k", k).field("exp", exp).field("d", d).field("g", g).field("s", s).finish_non_exhaustive()
     }
 }
 
 /// Without the refresh token it holds; the rest is for the device list.
 impl std::fmt::Debug for Device {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { id, name, created, last_seen, login, refresh: _ } = self;
+        let Self { id, name, created, last_seen, login, refresh: _, scope } = self;
         f.debug_struct("Device")
             .field("id", id)
             .field("name", name)
             .field("created", created)
             .field("last_seen", last_seen)
             .field("login", login)
+            .field("scope", scope)
             .finish_non_exhaustive()
     }
 }
@@ -190,9 +220,13 @@ impl Auth {
     }
 
     /// A pairing link's token, and when it stops working.
-    pub fn pair_token(&self, store: &Store) -> (String, i64) {
+    ///
+    /// `scope` is what the device redeeming it will get, and it is signed into
+    /// the token: a link minted for a phone cannot be redeemed for more by
+    /// sending it somewhere else.
+    pub fn pair_token(&self, store: &Store, scope: Scope) -> (String, i64) {
         let exp = now() + PAIR_SECS;
-        let token = self.sign(&Claims { k: Kind::Pair, exp, n: nonce(), d: String::new(), g: self.generation(store) });
+        let token = self.sign(&Claims { k: Kind::Pair, exp, n: nonce(), d: String::new(), g: self.generation(store), s: scope });
         (token, exp)
     }
 
@@ -203,8 +237,9 @@ impl Auth {
         devices[i].refresh = link.clone();
         devices[i].last_seen = now();
         let id = devices[i].id.clone();
-        let access = self.sign(&Claims { k: Kind::Access, exp: now() + ACCESS_SECS, n: nonce(), d: id.clone(), g });
-        let refresh = self.sign(&Claims { k: Kind::Refresh, exp: now() + REFRESH_SECS, n: link, d: id, g });
+        let s = devices[i].scope;
+        let access = self.sign(&Claims { k: Kind::Access, exp: now() + ACCESS_SECS, n: nonce(), d: id.clone(), g, s });
+        let refresh = self.sign(&Claims { k: Kind::Refresh, exp: now() + REFRESH_SECS, n: link, d: id, g, s });
         (access, refresh)
     }
 
@@ -222,12 +257,13 @@ impl Auth {
         if claims.g != self.generation(store) {
             return Err(Refused::SignIn);
         }
-        Ok(self.admit(store, name, None))
+        // The scope comes from the token, not from this endpoint: see [`Scope`].
+        Ok(self.admit(store, name, None, claims.s))
     }
 
     /// A new device, let in by the caller (a pairing token, or the owner's
     /// GitHub account as `login`).
-    pub fn admit(&self, store: &Store, name: &str, login: Option<String>) -> (String, String) {
+    pub fn admit(&self, store: &Store, name: &str, login: Option<String>, scope: Scope) -> (String, String) {
         let _one = self.lock.lock();
         let mut devices = self.devices(store);
         let t = now();
@@ -241,6 +277,7 @@ impl Auth {
             last_seen: t,
             login,
             refresh: String::new(),
+            scope,
         });
         let i = devices.len() - 1;
         let pair = self.issue(store, &mut devices, i);
@@ -313,7 +350,7 @@ mod tests {
     #[test]
     fn a_pairing_link_works_once() {
         let (a, s) = auth();
-        let (link, _) = a.pair_token(&s);
+        let (link, _) = a.pair_token(&s, Scope::Full);
         let (access, _) = a.redeem(&s, &link, "Phone").unwrap();
         assert_eq!(a.check(&s, &access, None).unwrap().name, "Phone");
         assert_eq!(a.redeem(&s, &link, "Phone"), Err(Refused::SignIn), "a link is good once");
@@ -325,7 +362,7 @@ mod tests {
     #[test]
     fn tampering_is_refused() {
         let (a, s) = auth();
-        let (link, _) = a.pair_token(&s);
+        let (link, _) = a.pair_token(&s, Scope::Full);
         let (access, _) = a.redeem(&s, &link, "Phone").unwrap();
         let (body, sig) = access.split_once('.').unwrap();
         let mut forged = serde_json::from_slice::<Claims>(&URL_SAFE_NO_PAD.decode(body).unwrap()).unwrap();
@@ -339,7 +376,7 @@ mod tests {
     #[test]
     fn refresh_rotates_and_a_copy_drops_the_device() {
         let (a, s) = auth();
-        let (link, _) = a.pair_token(&s);
+        let (link, _) = a.pair_token(&s, Scope::Full);
         let (_, refresh) = a.redeem(&s, &link, "Phone").unwrap();
         let (access2, refresh2) = a.refresh(&s, &refresh).unwrap();
         assert!(a.check(&s, &access2, None).is_ok());
@@ -353,7 +390,7 @@ mod tests {
     #[test]
     fn drop_one() {
         let (a, s) = auth();
-        let pair = |name: &str| a.redeem(&s, &a.pair_token(&s).0, name).unwrap();
+        let pair = |name: &str| a.redeem(&s, &a.pair_token(&s, Scope::Full).0, name).unwrap();
         let (phone, _) = pair("Phone");
         let (tablet, _) = pair("Tablet");
         let phone_id = a.check(&s, &phone, None).unwrap().id;
@@ -365,31 +402,66 @@ mod tests {
     #[test]
     fn a_device_in_as_the_owner_stays_in_while_they_own_it() {
         let (a, s) = auth();
-        let (access, _) = a.admit(&s, "Laptop", Some("Octocat".into()));
+        let (access, _) = a.admit(&s, "Laptop", Some("Octocat".into()), Scope::Full);
         assert!(a.check(&s, &access, Some("octocat")).is_ok(), "GitHub logins ignore case");
         assert_eq!(a.check(&s, &access, Some("someone")).unwrap_err(), Refused::Dropped);
         assert_eq!(a.check(&s, &access, None).unwrap_err(), Refused::Dropped, "no owner, no GitHub devices");
-        let (paired, _) = a.redeem(&s, &a.pair_token(&s).0, "SSH").unwrap();
+        let (paired, _) = a.redeem(&s, &a.pair_token(&s, Scope::Full).0, "SSH").unwrap();
         assert!(a.check(&s, &paired, None).is_ok(), "a device paired over SSH has no login to match");
     }
 
     #[test]
     fn devices_past_their_refresh_are_let_go() {
         let (a, s) = auth();
-        a.admit(&s, "Old", None);
+        a.admit(&s, "Old", None, Scope::Full);
         let mut devices = a.devices(&s);
         devices[0].last_seen -= REFRESH_SECS + 1;
         a.save_devices(&s, &devices);
-        a.admit(&s, "New", None);
+        a.admit(&s, "New", None, Scope::Full);
         let names: Vec<_> = a.devices(&s).into_iter().map(|d| d.name).collect();
         assert_eq!(names, vec!["New"]);
     }
 
     #[test]
+    fn a_scope_rides_in_the_token_and_sticks_to_the_device() {
+        let (a, s) = auth();
+        let (link, _) = a.pair_token(&s, Scope::Conversation);
+        let (access, refresh) = a.redeem(&s, &link, "Phone").unwrap();
+        assert_eq!(a.check(&s, &access, None).unwrap().scope, Scope::Conversation);
+        // Renewing does not widen it.
+        let (access2, _) = a.refresh(&s, &refresh).unwrap();
+        assert_eq!(a.check(&s, &access2, None).unwrap().scope, Scope::Conversation);
+    }
+
+    #[test]
+    fn a_phones_link_cannot_be_redeemed_for_more() {
+        // The hole this guards: the Divixi app and a phone redeem through
+        // different endpoints, so if the endpoint picked the scope, posting a
+        // phone's link to the app's endpoint would hand it the machine.
+        let (a, s) = auth();
+        let (link, _) = a.pair_token(&s, Scope::Conversation);
+        let (access, _) = a.redeem(&s, &link, "pretending to be the app").unwrap();
+        assert_eq!(a.check(&s, &access, None).unwrap().scope, Scope::Conversation);
+    }
+
+    #[test]
+    fn a_token_from_before_the_scope_existed_is_full() {
+        // Devices and tokens kept by an older build carry no `s`/`scope`, and
+        // must not quietly lose the access they were granted.
+        let (a, s) = auth();
+        let old: Claims = serde_json::from_str(r#"{"k":"pair","exp":99999999999,"n":"abc","g":0}"#).unwrap();
+        assert_eq!(old.s, Scope::Full);
+        let (access, _) = a.redeem(&s, &a.sign(&old), "Older app").unwrap();
+        assert_eq!(a.check(&s, &access, None).unwrap().scope, Scope::Full);
+        let device: Device = serde_json::from_str(r#"{"id":"x","name":"Old","created":0,"last_seen":0}"#).unwrap();
+        assert_eq!(device.scope, Scope::Full);
+    }
+
+    #[test]
     fn drop_all_ends_every_token() {
         let (a, s) = auth();
-        let (access, refresh) = a.admit(&s, "Laptop", Some("octocat".into()));
-        let (link, _) = a.pair_token(&s);
+        let (access, refresh) = a.admit(&s, "Laptop", Some("octocat".into()), Scope::Full);
+        let (link, _) = a.pair_token(&s, Scope::Full);
         a.drop_all(&s);
         assert_eq!(a.check(&s, &access, Some("octocat")).unwrap_err(), Refused::Dropped);
         assert_eq!(a.refresh(&s, &refresh), Err(Refused::Dropped));

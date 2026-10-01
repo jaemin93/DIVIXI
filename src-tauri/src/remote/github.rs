@@ -241,7 +241,7 @@ mod tests {
         let store = orchestra_store::Store::in_memory().unwrap();
         let auth = super::super::auth::Auth::with_key([1u8; 32]);
         set_owner(&store, &auth, Some("octocat")).unwrap();
-        let (access, _) = auth.admit(&store, "Laptop", Some("octocat".into()));
+        let (access, _) = auth.admit(&store, "Laptop", Some("octocat".into()), crate::remote::auth::Scope::Full);
         set_owner(&store, &auth, Some("OctoCat")).unwrap();
         assert!(auth.check(&store, &access, owner(&store).as_deref()).is_ok(), "the same login, other case: nothing changes");
         set_owner(&store, &auth, Some("someone")).unwrap();

@@ -112,6 +112,10 @@ impl SignIn {
 }
 
 /// A pairing token minted on this machine (`divixi-server token`, over SSH).
+///
+/// The scope is not chosen here: it is signed into the token
+/// ([`super::auth::Scope`]), so this endpoint cannot be used to widen a link
+/// that was minted for a phone.
 async fn token(State(ctx): State<Ctx>, body: Bytes) -> Response<Body> {
     let Some(b) = SignIn::parse(&body) else { return (StatusCode::BAD_REQUEST, "expected {\"token\"}").into_response() };
     let st = ctx.state();
@@ -143,7 +147,7 @@ async fn github(State(ctx): State<Ctx>, request: Request<Body>) -> Response<Body
         return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": format!("{login} does not own this Divixi") }))).into_response();
     }
     let st = ctx.state();
-    tokens(st.remote.auth.admit(&st.store, &b.name(), Some(login)))
+    tokens(st.remote.auth.admit(&st.store, &b.name(), Some(login), super::auth::Scope::Full))
 }
 
 /// New tokens for a refresh token (as `Bearer`).
@@ -159,8 +163,8 @@ async fn refresh(State(ctx): State<Ctx>, headers: HeaderMap) -> Response<Body> {
 // ----- commands and events -----
 
 async fn invoke(State(ctx): State<Ctx>, Path(cmd): Path<String>, headers: HeaderMap, body: Bytes) -> Response<Body> {
-    let who = match device(&ctx, &headers) {
-        Ok(d) => d.id,
+    let (who, scope) = match device(&ctx, &headers) {
+        Ok(d) => (d.id, d.scope),
         Err(r) => return refused(r),
     };
     let args: Value = if body.is_empty() {
@@ -171,7 +175,7 @@ async fn invoke(State(ctx): State<Ctx>, Path(cmd): Path<String>, headers: Header
             Err(e) => return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": format!("the arguments are not JSON: {e}") }))).into_response(),
         }
     };
-    if let Err(why) = super::bridge::allowed(&cmd, &args) {
+    if let Err(why) = super::bridge::allowed(&cmd, &args, scope) {
         return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": why }))).into_response();
     }
     let closing = (cmd == "term_close").then(|| args.get("id").and_then(Value::as_u64)).flatten();
