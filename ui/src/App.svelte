@@ -6,6 +6,7 @@
   import Composer from "./lib/Composer.svelte";
   import Workspace from "./lib/Workspace.svelte";
   import Setup from "./lib/Setup.svelte";
+  import PhoneDialog from "./lib/PhoneDialog.svelte";
   import TagDialog from "./lib/TagDialog.svelte";
   import Settings from "./lib/Settings.svelte";
   import WorkerView from "./lib/WorkerView.svelte";
@@ -17,10 +18,11 @@
   import RoutineView from "./lib/RoutineView.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
   import Unreachable from "./lib/Unreachable.svelte";
+  import NotPaired from "./lib/NotPaired.svelte";
   import ErrorToasts from "./lib/ErrorToasts.svelte";
   import CrashBanner from "./lib/CrashBanner.svelte";
   import UpdateBanner from "./lib/UpdateBanner.svelte";
-  import { inTauri, instance } from "./lib/ipc.svelte";
+  import { inTauri, instance, session } from "./lib/ipc.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
@@ -70,10 +72,20 @@
 
 <!-- And, once someone has asked, that a release is out or that its installer
      is downloaded and checked. Same place, same manners; nothing puts it there
-     but a press (src-tauri/src/update.rs). -->
-<UpdateBanner />
+     but a press (src-tauri/src/update.rs). The app's window only: a phone has
+     no installer. -->
+{#if inTauri}<UpdateBanner />{/if}
 
-{#if instance.error}
+{#if session.arriving}
+  <!-- A code was just scanned and is being redeemed. Blank rather than the
+       not-paired page: this phone is about to be paired, and saying it is
+       not would be wrong for as long as it took to read. -->
+  <div class="waiting"></div>
+{:else if !session.ready}
+  <!-- A browser at this address with no pairing. Said plainly, instead of a
+       shell whose every pane fails to load. -->
+  <NotPaired />
+{:else if instance.error}
   <div class="shell">
     <WindowChrome />
     <Unreachable />
@@ -86,6 +98,9 @@
   {/if}
   {#if store.tagDialog}
     <TagDialog />
+  {/if}
+  {#if store.phoneDialog}
+    <PhoneDialog onclose={() => (store.phoneDialog = false)} />
   {/if}
   <div class="body">
     <Rail />
@@ -135,6 +150,11 @@
 {/if}
 
 <style>
+  .waiting {
+    min-height: 100dvh;
+    background: var(--bg);
+  }
+
   .shell {
     height: 100%;
     display: flex;

@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
+import * as web from "./web";
 
 /**
  * How the UI reaches the Divixi it shows. Everything else in the UI imports
@@ -14,6 +15,11 @@ import { listen as tauriListen } from "@tauri-apps/api/event";
  * own in the window (kept warm when another is shown), told its instance
  * before it runs (`window.__DIVIXI_INSTANCE__`); the window's first
  * webview is Local.
+ *
+ * In a phone's browser there is no Tauri at all, and the third way is HTTP
+ * to the Divixi that served the page (`web.ts`). Which of the three a call
+ * takes is decided here and nowhere else -- that rule is what let phone
+ * access be added without touching a component.
  */
 
 /** Whether the page runs in the app's window (not a bare browser in development). */
@@ -27,6 +33,50 @@ export const instanceName: string | null = instanceId ? ((window as unknown as {
 
 /** This PC's own Divixi: its folders, terminal and files are at hand. */
 export const local = inTauri && instanceId === null;
+
+/**
+ * The page is a phone's browser, reaching the Divixi that served it.
+ *
+ * Note what this is not: it is not a remote instance. A remote instance is
+ * another PC's Divixi driven from this app. This is one Divixi, opened
+ * somewhere other than its own window.
+ */
+export const overWeb = !inTauri && typeof location !== "undefined" && location.protocol.startsWith("http");
+
+/**
+ * Whether this browser may ask this Divixi for anything.
+ *
+ * `ready` starts from what is already stored rather than from false, so a
+ * phone that paired last week does not show the not-paired page for a frame
+ * on its way to the app. `arriving` covers the other case: a scan has put a
+ * token in the address bar and it is being redeemed, which is not the same
+ * as not being paired and must not be drawn as it.
+ */
+export const session = $state({
+  ready: inTauri || (!inTauri && web.signedIn()),
+  arriving: !inTauri && web.pairingInUrl(),
+  error: "",
+});
+
+/**
+ * Take the pairing token out of the address bar, before anything asks for
+ * data. Called once, from the app's own start-up.
+ */
+export async function arrive(): Promise<void> {
+  if (!overWeb) return;
+  try {
+    session.error = await web.arrive();
+  } finally {
+    session.arriving = false;
+    session.ready = web.signedIn();
+  }
+}
+
+/** Sign this browser out. The device stays listed until it is dropped. */
+export function signOut(): void {
+  web.forget();
+  session.ready = false;
+}
 
 /** Show another instance (or this PC, null) in this window: its webview comes to the front. */
 export function switchInstance(id: string | null): Promise<void> {
@@ -48,6 +98,13 @@ const OWN = new Set([
   "remote_server_status",
   "remote_server_set",
   "remote_server_drop",
+  // Phone access is this PC's own: publishing THIS machine on its tailnet,
+  // whichever Divixi the window happens to be showing.
+  "phone_status",
+  "phone_set",
+  "phone_pair_link",
+  "phone_set_days",
+  "remote_server_drop_all",
   // Installing divixi-server on a remote machine is this app's doing, even
   // when the page asking is that instance's own webview (Unreachable.svelte).
   "remote_server_check",
@@ -80,6 +137,7 @@ const OWN = new Set([
 
 /** Call a command of the Divixi shown. */
 export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (overWeb) return web.invoke<T>(cmd, args ?? {});
   if (instanceId && !OWN.has(cmd)) return tauriInvoke<T>("instance_invoke", { id: instanceId, cmd, args: args ?? {} });
   return tauriInvoke<T>(cmd, args);
 }
@@ -89,6 +147,9 @@ export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<
  * them: the paths themselves here, copies kept there for an instance.
  */
 export function bring(paths: string[]): Promise<string[]> {
+  // A browser has no paths to bring: its files arrive as uploads, which is
+  // the composer's own path.
+  if (overWeb) return Promise.resolve([]);
   if (!instanceId || paths.length === 0) return Promise.resolve(paths);
   return tauriInvoke<string[]>("instance_upload", { id: instanceId, paths });
 }
@@ -121,6 +182,7 @@ function relay() {
 
 /** Listen to an event of the Divixi shown; the returned function stops listening. */
 export async function listen<T>(event: string, handler: (e: Event<T>) => void): Promise<() => void> {
+  if (overWeb) return web.listen<T>(event, handler as (e: { event: string; id: number; payload: T }) => void);
   if (!instanceId) return tauriListen<T>(event, handler);
   let set = handlers.get(event);
   if (!set) handlers.set(event, (set = new Set()));
@@ -133,12 +195,16 @@ export async function listen<T>(event: string, handler: (e: Event<T>) => void): 
 
 /** Save a track's file on this PC (a save dialog here, whichever Divixi is shown). */
 export function saveAs(track: string, path: string): Promise<string | null> {
+  // No save dialog on a phone: that dialog belongs to the PC's own window.
+  if (overWeb) return Promise.resolve(null);
   if (!instanceId) return tauriInvoke<string | null>("workspace_save_as", { track, path });
   return tauriInvoke<string | null>("instance_save_as", { id: instanceId, track, path });
 }
 
 /** An instance's link came up or went down (this app's event, whatever is shown). */
 export function onInstanceStatus(handler: (s: { id: string; online: boolean }) => void): Promise<() => void> {
+  // This app's own event, about instances it holds. A browser holds none.
+  if (!inTauri) return Promise.resolve(() => {});
   return tauriListen<{ id: string; online: boolean }>("instance-status", (e) => handler(e.payload));
 }
 
@@ -184,10 +250,14 @@ const via = () => (instanceId ? `@${encodeURIComponent(instanceId)}/` : "");
 
 /** Where a track file is served for previewing. */
 export function previewBase(): string {
+  // Over HTTP the server serves these itself; the custom protocols are the
+  // app window's, and a browser has never heard of them.
+  if (overWeb) return web.previewBase();
   return (navigator.userAgent.includes("Windows") ? "http://preview.localhost/" : "preview://localhost/") + via();
 }
 
 /** Where a design board's files are served. */
 export function boardBase(): string {
+  if (overWeb) return web.boardBase();
   return (navigator.userAgent.includes("Windows") ? "http://board.localhost/" : "board://localhost/") + via();
 }
