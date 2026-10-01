@@ -12,7 +12,7 @@
    * GitHub account.
    */
   type Account = { client_id: string; login: string; owner: string };
-  type Device = { id: string; name: string; last_seen: number; login?: string | null };
+  type Device = { id: string; name: string; last_seen: number; login?: string | null; scope: "full" | "conversation" };
   type Status = { enabled: boolean; running: boolean; port: number; all: boolean; addresses: string[]; owner: string; devices: Device[] };
   type Code = { user_code: string; verification_uri: string; expires_in: number };
 
@@ -74,6 +74,14 @@
   const drop = (device: string) =>
     run(async () => {
       status = await invoke<Status>("remote_server_drop", { device });
+    });
+
+  /** The lost-phone button: one write ends every token this Divixi issued. */
+  let confirming = $state(false);
+  const dropAll = () =>
+    run(async () => {
+      status = await invoke<Status>("remote_server_drop_all");
+      confirming = false;
     });
 </script>
 
@@ -150,11 +158,26 @@
           <div class="line dev">
             <div class="what">
               <div class="who">{d.name}</div>
-              <div class="hint mono">{t("serve.lastSeen", { when: whenLabel(d.last_seen * 1000, store.now, store.lang) })}{#if d.login} · GitHub {d.login}{:else} · SSH{/if}</div>
+              <!-- How it came in, because that is what decides what it may
+                   do: a phone gets the conversation, the rest get the machine. -->
+              <div class="hint mono">
+                {t("serve.lastSeen", { when: whenLabel(d.last_seen * 1000, store.now, store.lang) })}
+                {#if d.scope === "conversation"}· {t("serve.viaPhone")}{:else if d.login}· GitHub {d.login}{:else}· SSH{/if}
+              </div>
             </div>
             <button class="btn sm" disabled={busy} onclick={() => drop(d.id)}>{t("serve.drop")}</button>
           </div>
         {/each}
+        <div class="line">
+          {#if confirming}
+            <span class="hint">{t("serve.dropAllSure")}</span>
+            <button class="btn sm" disabled={busy} onclick={dropAll}>{t("serve.dropAllYes")}</button>
+            <button class="btn sm" disabled={busy} onclick={() => (confirming = false)}>{t("serve.dropAllNo")}</button>
+          {:else}
+            <button class="btn sm" disabled={busy} onclick={() => (confirming = true)}>{t("serve.dropAll")}</button>
+          {/if}
+        </div>
+        <p class="hint">{t("serve.dropAllNote")}</p>
       {/if}
     </div>
   </section>

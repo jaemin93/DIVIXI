@@ -3,6 +3,7 @@
   import { invoke } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import { t, type Key } from "./i18n.svelte";
+  import PhoneQr from "./PhoneQr.svelte";
 
   /**
    * Settings › Overview: this Divixi, opened in a phone's browser.
@@ -42,12 +43,14 @@
     running: boolean;
     listen_all: boolean;
     alone: boolean;
+    days: number;
   };
 
   let status = $state<Status | null>(null);
   let busy = $state(false);
   let error = $state("");
   let copied = $state(false);
+  let showQr = $state(false);
 
   /** A live read every time: what this machine can do *now*, not what it could. */
   async function refresh() {
@@ -75,7 +78,23 @@
     }
   }
 
-  const turn = (on: boolean) => run(() => invoke<Status>("phone_set", { on }));
+  const turn = (on: boolean) =>
+    run(async () => {
+      const next = await invoke<Status>("phone_set", { on });
+      // A code for an address that is no longer published opens nothing.
+      if (!on) showQr = false;
+      return next;
+    });
+
+  /** The span the next code grants. Links already out keep the span they had. */
+  async function setDays(days: number) {
+    try {
+      await invoke("phone_set_days", { days });
+      await refresh();
+    } catch (err) {
+      store.lastError = String(err);
+    }
+  }
 
   /**
    * Steps Divixi cannot act on itself: Tailscale is missing, signed out, or a
@@ -124,6 +143,9 @@
       <span class="state" class:on>{on ? t("phone.on") : t("phone.off")}</span>
       <span class="grow"></span>
       {#if on}
+        <button class="btn btn-acc" disabled={busy} onclick={() => (showQr = !showQr)}>
+          {showQr ? t("phone.qr.hide") : t("phone.showQr")}
+        </button>
         <button class="btn" disabled={busy} onclick={() => turn(false)}>{t("phone.turnOff")}</button>
       {:else if canTurnOn}
         <button class="btn btn-acc" disabled={busy} onclick={() => turn(true)}>{t("phone.turnOn")}</button>
@@ -176,6 +198,25 @@
            the two are not confused for each other's doing. -->
       {#if s.listen_all}
         <p class="warn">{t("phone.listenAll")}</p>
+      {/if}
+
+      {#if on}
+        <!-- Said where the code is made, and the same number the token
+             carries: `phone_pair_link` signs in whatever this says. -->
+        <div class="line">
+          <span class="hint">{t("phone.days")}</span>
+          <div class="seg" role="radiogroup" aria-label={t("phone.days")}>
+            {#each [1, 7, 30] as d (d)}
+              <button class="segopt" class:on={s.days === d} role="radio" aria-checked={s.days === d} onclick={() => setDays(d)}>
+                {t("phone.daysN", { n: String(d) })}
+              </button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
+      {#if showQr && on}
+        <PhoneQr onhide={() => (showQr = false)} />
       {/if}
 
       {#if error}
@@ -259,6 +300,26 @@
     font-size: 12px;
     line-height: 1.55;
     color: var(--dim);
+  }
+
+  .seg {
+    display: flex;
+    border: 1px solid var(--line);
+  }
+
+  .segopt {
+    padding: 3px 10px;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: 12px;
+    color: var(--dim);
+    cursor: pointer;
+  }
+
+  .segopt.on {
+    background: var(--line);
+    color: var(--hi);
   }
 
   /* What Tailscale itself said. Set apart from our own words so it is clear

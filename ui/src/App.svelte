@@ -6,6 +6,7 @@
   import Composer from "./lib/Composer.svelte";
   import Workspace from "./lib/Workspace.svelte";
   import Setup from "./lib/Setup.svelte";
+  import PhoneDialog from "./lib/PhoneDialog.svelte";
   import TagDialog from "./lib/TagDialog.svelte";
   import Settings from "./lib/Settings.svelte";
   import WorkerView from "./lib/WorkerView.svelte";
@@ -80,6 +81,9 @@
   {/if}
   {#if store.tagDialog}
     <TagDialog />
+  {/if}
+  {#if store.phoneDialog}
+    <PhoneDialog onclose={() => (store.phoneDialog = false)} />
   {/if}
   <div class="body">
     <Rail />

@@ -52,6 +52,9 @@ const OWN = new Set([
   // whichever Divixi the window happens to be showing.
   "phone_status",
   "phone_set",
+  "phone_pair_link",
+  "phone_set_days",
+  "remote_server_drop_all",
   "github_account",
   "github_set_client_id",
   "github_login_start",

@@ -43,6 +43,7 @@ pub fn router(ctx: Ctx) -> Router {
         .route("/auth/token", post(token))
         .route("/auth/github", post(github))
         .route("/auth/refresh", post(refresh))
+        .route("/auth/pair", get(pair))
         .route("/api/health", get(|| async { axum::Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "build": env!("DIVIXI_BUILD") })) }))
         // An attachment (up to 50 MB) comes as base64 in a command.
         .route("/api/invoke/{cmd}", post(invoke).layer(axum::extract::DefaultBodyLimit::max(72 * 1024 * 1024)))
@@ -125,6 +126,148 @@ async fn token(State(ctx): State<Ctx>, body: Bytes) -> Response<Body> {
     }
 }
 
+/// A short, recognisable name for a phone, from what its browser says.
+///
+/// The device list is how a lost phone gets dropped, and dropping the right
+/// one out of three rows all reading "Divixi app" is not possible. Browsers
+/// lie about most of a user-agent string; the few tokens read here are the
+/// ones that survive that, and anything unrecognised is simply "Phone" rather
+/// than a guess dressed up as a fact.
+fn device_name(ua: &str) -> String {
+    let os = [("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"), ("Macintosh", "Mac"), ("Windows", "Windows"), ("Linux", "Linux")]
+        .iter()
+        .find(|(needle, _)| ua.contains(needle))
+        .map(|(_, name)| *name);
+    // Order matters: all of these say "Safari" too, and Edge says "Chrome",
+    // so the most specific claim has to be tested first.
+    let browser = [
+        ("Edg/", "Edge"),
+        ("OPR/", "Opera"),
+        ("SamsungBrowser", "Samsung Internet"),
+        ("FxiOS", "Firefox"),
+        ("CriOS", "Chrome"),
+        ("Firefox", "Firefox"),
+        ("Chrome", "Chrome"),
+        ("Safari", "Safari"),
+    ]
+    .iter()
+    .find(|(needle, _)| ua.contains(needle))
+    .map(|(_, name)| *name);
+    match (os, browser) {
+        (Some(os), Some(b)) => format!("{os} · {b}"),
+        (Some(os), None) => os.to_string(),
+        (None, Some(b)) => b.to_string(),
+        (None, None) => "Phone".to_string(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PairQuery {
+    #[serde(default)]
+    token: String,
+}
+
+/// Open a pairing link from a phone's browser.
+///
+/// A navigation, so it carries no `Origin` and passes the guard above without
+/// the guard being widened for it. The link is spent here, and the page that
+/// comes back keeps the tokens for this origin and takes the token out of the
+/// address bar, so it is not left sitting in the phone's history.
+async fn pair(State(ctx): State<Ctx>, headers: HeaderMap, Query(q): Query<PairQuery>) -> Response<Body> {
+    let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let name = device_name(ua);
+    let machine = sysinfo::System::host_name().unwrap_or_else(|| "this computer".into());
+    let st = ctx.state();
+    match st.remote.auth.redeem(&st.store, &q.token, &name) {
+        Ok((access, refresh)) => {
+            tracing::info!(device = %name, "a device paired from a browser");
+            html(StatusCode::OK, &paired_page(&machine, &name, &access, &refresh))
+        }
+        // No reason beyond "it did not work". The two ways here are an expired
+        // code and one already scanned, and telling them apart tells whoever
+        // is holding a code they should not have which of the two it is.
+        Err(_) => html(StatusCode::UNAUTHORIZED, &refused_page(&machine)),
+    }
+}
+
+fn html(status: StatusCode, body: &str) -> Response<Body> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        // This page carries tokens: nothing may keep a copy of it.
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("Referrer-Policy", "no-referrer")
+        .body(Body::from(body.to_string()))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Text going into the page. A host name and a browser's own string are both
+/// outside our control, and a token is base64url, so everything interpolated
+/// below goes through here.
+fn escape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            '/' => out.push_str("&#47;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+const PAGE_STYLE: &str = concat!(
+    r#"<meta name="viewport" content="width=device-width,initial-scale=1">"#,
+    "<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;",
+    "background:#111318;color:#e7e9ee;font:16px/1.6 system-ui,-apple-system,sans-serif}",
+    "main{max-width:30rem;padding:2rem}h1{font-size:1.25rem;margin:0 0 .75rem;line-height:1.4}",
+    "p{margin:0 0 .75rem;color:#a8adbb}b{color:#e7e9ee;font-weight:600}</style>",
+);
+
+/// What a phone sees when its scan worked.
+///
+/// The tokens are kept for this origin, where the app will look for them once
+/// there is an app to serve here. Kept in `localStorage` and not a cookie, on
+/// purpose: a cookie would be sent with every request to this origin whoever
+/// caused it, and the whole reason this server has no CSRF problem is that
+/// there is no ambient credential for another page to ride.
+fn paired_page(machine: &str, name: &str, access: &str, refresh: &str) -> String {
+    format!(
+        concat!(
+            "<!doctype html><html lang=\"en\"><head><title>Divixi</title>{style}</head><body><main>",
+            "<h1>This phone is paired with <b>{machine}</b></h1>",
+            "<p>Signed in as <b>{name}</b>. Divixi itself is not served here yet \u{2014} this address will open it when the next update lands.</p>",
+            "<p>To undo this, open Divixi on {machine} and drop this device under Settings \u{203a} Remote instances.</p>",
+            "</main><script>",
+            "try{{localStorage.setItem('divixi.access','{access}');localStorage.setItem('divixi.refresh','{refresh}')}}catch(e){{}}",
+            "history.replaceState(null,'','/');",
+            "</script></body></html>",
+        ),
+        style = PAGE_STYLE,
+        machine = escape(machine),
+        name = escape(name),
+        access = escape(access),
+        refresh = escape(refresh),
+    )
+}
+
+fn refused_page(machine: &str) -> String {
+    format!(
+        concat!(
+            "<!doctype html><html lang=\"en\"><head><title>Divixi</title>{style}</head><body><main>",
+            "<h1>This code did not work</h1>",
+            "<p>A code lasts five minutes and can be scanned once. Open Divixi on <b>{machine}</b> and show a new one.</p>",
+            "</main></body></html>",
+        ),
+        style = PAGE_STYLE,
+        machine = escape(machine),
+    )
+}
+
 /// The peer's address, for the log.
 fn peer(headers_ext: &axum::http::Extensions) -> String {
     headers_ext.get::<axum::extract::ConnectInfo<SocketAddr>>().map(|c| c.0.to_string()).unwrap_or_default()
@@ -147,7 +290,7 @@ async fn github(State(ctx): State<Ctx>, request: Request<Body>) -> Response<Body
         return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": format!("{login} does not own this Divixi") }))).into_response();
     }
     let st = ctx.state();
-    tokens(st.remote.auth.admit(&st.store, &b.name(), Some(login), super::auth::Scope::Full))
+    tokens(st.remote.auth.admit(&st.store, &b.name(), Some(login), super::auth::Scope::Full, super::auth::REFRESH_SECS))
 }
 
 /// New tokens for a refresh token (as `Bearer`).
@@ -388,6 +531,37 @@ async fn raw(State(ctx): State<Ctx>, headers: HeaderMap, uri: Uri) -> Response<B
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_phone_gets_a_name_somebody_could_pick_out_of_a_list() {
+        let iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1";
+        assert_eq!(device_name(iphone), "iPhone · Safari");
+        let android = "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
+        assert_eq!(device_name(android), "Android · Chrome", "Android is tested before the Linux it also claims");
+        let edge = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 Edg/120.0";
+        assert_eq!(device_name(edge), "Windows · Edge", "Edge says Chrome and Safari too");
+        let samsung = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 SamsungBrowser/23.0 Chrome/115.0 Mobile Safari/537.36";
+        assert_eq!(device_name(samsung), "Android · Samsung Internet");
+        // Nothing recognised is not guessed at.
+        assert_eq!(device_name(""), "Phone");
+        assert_eq!(device_name("curl/8.0"), "Phone");
+    }
+
+    #[test]
+    fn nothing_borrowed_from_outside_can_break_out_of_the_page() {
+        // A host name and a user-agent are not ours, and the page carries a
+        // token inside a script.
+        assert_eq!(escape("<script>alert(1)</script>"), "&lt;script&gt;alert(1)&lt;&#47;script&gt;");
+        assert_eq!(escape("a'b\"c"), "a&#39;b&quot;c");
+        assert_eq!(escape("a&b"), "a&amp;b");
+        let page = paired_page("</script><b>pwn", "iPhone · Safari", "aa.bb", "cc.dd");
+        assert!(!page.contains("</script><b>pwn"), "the host name is escaped");
+        assert!(page.contains("aa.bb") && page.contains("cc.dd"), "the tokens still reach the phone");
+        // The page must not be kept anywhere, and must not say which way the
+        // scan failed.
+        let refused = refused_page("desk");
+        assert!(!refused.contains("expired") && !refused.contains("already"));
+    }
 
     #[test]
     fn bearer_tokens_are_read() {

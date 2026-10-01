@@ -310,6 +310,8 @@ pub struct PhoneStatus {
     /// Phone access never asks for that -- `tailscale serve` reaches loopback
     /// -- so it is surfaced rather than caused, and the card can say so.
     pub listen_all: bool,
+    /// How long a phone paired from here stays signed in, in days.
+    pub days: i64,
     /// No other device is online on this tailnet, so there is nothing to open
     /// the address FROM. Publishing still succeeds and the address still looks
     /// right, and then the phone cannot connect with nothing on this machine
@@ -375,6 +377,7 @@ async fn phone_status_now(app: &AppHandle) -> PhoneStatus {
         // Signed in with no other device online: the one thing wrong with this
         // machine that is not on this machine.
         alone: probe.logged_in && !probe.name.is_empty() && probe.peers_online == 0,
+        days: phone_days(app),
         port: running.unwrap_or(want),
         running: running.is_some(),
         listen_all: listen_all(app),
@@ -437,6 +440,77 @@ pub async fn phone_set(app: AppHandle, on: bool) -> Result<PhoneStatus, String> 
         }
     }
     Ok(phone_status_now(&app).await)
+}
+
+
+/// How long a phone stays signed in, in days: 1, 7 or 30.
+///
+/// Read here and signed into every link minted, so the number on the screen
+/// and the number in the token are one number.
+fn phone_days(app: &AppHandle) -> i64 {
+    setting(app, "phone.days")
+        .and_then(|d| d.trim().parse().ok())
+        .filter(|d| auth::PHONE_DAYS.contains(d))
+        .unwrap_or(auth::PHONE_DAYS_DEFAULT)
+}
+
+/// A pairing link, and when it stops working.
+#[derive(Serialize)]
+pub struct PairLink {
+    /// `https://<name>/auth/pair?token=…`. A URL and not a bare token, so a
+    /// phone's camera offers to open it and the whole thing is one tap.
+    pub url: String,
+    /// Unix seconds. The card counts down to this and takes the code off the
+    /// screen when it passes, rather than leaving a dead one up.
+    pub expires: i64,
+    /// The span this link grants, for the sentence beside the code.
+    pub days: i64,
+}
+
+/// Mint a pairing link for a phone.
+///
+/// [`auth::Scope::Conversation`] and the configured span, both signed in. Only
+/// ever from a press, and only while phone access is actually published: a
+/// code for an address that answers nothing is a worse failure than no code,
+/// because it fails on the phone where there is nothing to read.
+///
+/// Never reachable from another device -- it is on neither list in
+/// [`bridge`], so a paired phone cannot mint a link for anyone else.
+#[tauri::command]
+pub async fn phone_pair_link(app: AppHandle) -> Result<PairLink, String> {
+    let status = phone_status_now(&app).await;
+    if status.step != Step::Ready {
+        return Err("Phone access is not published yet, so a code would not open anything.".into());
+    }
+    let days = phone_days(&app);
+    let st = app.state::<AppState>();
+    let (token, expires) = st.remote.auth.pair_token(&st.store, auth::Scope::Conversation, days * 24 * 60 * 60);
+    Ok(PairLink { url: format!("{}/auth/pair?token={token}", status.address), expires, days })
+}
+
+/// Choose how long a phone stays signed in. Links already minted keep the
+/// span they were minted with; this is the span the next one gets.
+#[tauri::command]
+pub async fn phone_set_days(app: AppHandle, days: i64) -> Result<i64, String> {
+    if !auth::PHONE_DAYS.contains(&days) {
+        return Err(format!("{days} is not one of the spans a phone can be signed in for"));
+    }
+    set(&app, "phone.days", &days.to_string())?;
+    Ok(days)
+}
+
+/// Sign out every device at once: the panic button for a lost phone.
+///
+/// A generation bump, so it ends access tokens, refresh tokens and any
+/// pairing link already shown but not yet scanned, in one write.
+#[tauri::command]
+pub async fn remote_server_drop_all(app: AppHandle) -> ServerStatus {
+    {
+        let st = app.state::<AppState>();
+        st.remote.auth.drop_all(&st.store);
+    }
+    tracing::info!("every paired device was signed out");
+    remote_server_status(app).await
 }
 
 #[cfg(test)]

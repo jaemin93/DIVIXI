@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { inTauri } from "./ipc.svelte";
+  import { inTauri, local } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import { kb } from "./knowledge.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
@@ -40,6 +40,9 @@
     // No PC shell from another device.
     // A shell on the Divixi shown: this PC, or the remote instance (as VS Code Remote).
     ...(inTauri ? [{ id: "terminal", icon: "terminal" as IconName, label: "rail.terminal" as Key, go: () => store.setTerminal(!store.termOpen) }] : []),
+    // Opening THIS PC's Divixi on a phone. Only from the app: a phone has no
+    // business being offered a way to pair another phone.
+    ...(local ? [{ id: "phone", icon: "phone" as IconName, label: "rail.phone" as Key, go: () => (store.phoneDialog = true) }] : []),
     { id: "settings", icon: "settings", label: "rail.settings", go: () => store.openSettings("overview") },
   ];
 
@@ -53,6 +56,7 @@
     if (item.id === "routines") return store.view === "routines";
     if (item.id === "settings") return store.view === "settings";
     if (item.id === "terminal") return store.termOpen;
+    if (item.id === "phone") return store.phoneDialog;
     return false;
   }
 

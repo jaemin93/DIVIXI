@@ -19,6 +19,12 @@
 use serde::Serialize;
 
 /// Whether this machine is being kept awake, and if not, why not.
+///
+/// `Unsupported` is only ever built off Windows, so a Windows build reads it
+/// as dead. It stays in the shape rather than being hidden behind a `cfg`,
+/// because the card branches on all three on every platform and a value that
+/// changes shape per build is a worse thing to render.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Held {

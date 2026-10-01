@@ -708,6 +708,8 @@ class Store {
   trackListOpen = $state(true);
   /** Which settings section is open. */
   settingsSection = $state<SettingsSection>("overview");
+  /** The rail's phone dialog: show a pairing code for this PC's Divixi. */
+  phoneDialog = $state(false);
   /** Worker whose session is open in the main area (view === "worker"). */
   openWorker = $state("");
   /** Conversation text size. Persisted. */
