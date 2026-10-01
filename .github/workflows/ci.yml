@@ -193,21 +193,15 @@ jobs:
       # on a private signing key whenever a public updater key is configured.
       # CI bundle artifacts are non-release smoke outputs, so they use an
       # ephemeral per-run key instead of release secrets.
-      - name: Generate ephemeral updater signing key
+      - name: tauri build (unsigned)
         shell: bash
         run: |
           set -euo pipefail
           key="$RUNNER_TEMP/ci-updater.key"
           npx tauri signer generate --ci -w "$key" -f >/dev/null
-          {
-            echo "TAURI_SIGNING_PRIVATE_KEY<<__DIVIXI_CI_UPDATER_KEY__"
-            cat "$key"
-            echo "__DIVIXI_CI_UPDATER_KEY__"
-          } >> "$GITHUB_ENV"
-
-      # tauri build runs beforeBuildCommand (npm run build) itself.
-      - name: tauri build (unsigned)
-        run: npx tauri build --bundles ${{ matrix.bundles }}
+          export TAURI_SIGNING_PRIVATE_KEY
+          TAURI_SIGNING_PRIVATE_KEY="$(cat "$key")"
+          npx tauri build --bundles ${{ matrix.bundles }}
 
       # Tauri builds the .app's icon from the PNGs in bundle.icon, one entry
       # per size, so the largest PNG listed is the sharpest the Dock and
