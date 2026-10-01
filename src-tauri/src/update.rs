@@ -22,7 +22,7 @@
 //! own. An update channel that runs unsigned code it fetched is a
 //! way in for whoever can answer for the server, and the signature is the
 //! only thing that would make it not one. So Tauri's updater plugin is not
-//! used and no `latest.json` or `.sig` is produced.
+//! used by the app runtime.
 //!
 //! What the app does do -- step 1 on a press or once a day, the rest only ever
 //! on a press:
@@ -42,10 +42,10 @@
 //! rather than being stepped around. The download even marks the file as
 //! having come from the internet (`Zone.Identifier`), because it did.
 //!
-//! If a certificate is ever bought, the decision to revisit is
-//! `tauri-plugin-updater` plus `plugins.updater.pubkey` in tauri.conf.json,
-//! and the release workflow has to start producing `latest.json` and `.sig`
-//! artifacts. Until then, none of that exists.
+//! The release workflow now publishes updater metadata/signatures
+//! (`latest.json` and `.sig`) for distribution integrity, but this module's
+//! install path remains explicit and manual until runtime updater adoption is
+//! chosen (`tauri-plugin-updater` wiring in Rust + UI flow changes).
 //!
 //! Windows SmartScreen and macOS Gatekeeper both warn about the unsigned
 //! bundles, which is why the buttons in front of all of this say so.
