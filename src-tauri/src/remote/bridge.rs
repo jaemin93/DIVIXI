@@ -6,24 +6,22 @@
 //! Tauri API: the Tauri version is pinned, and the tests below go through it.
 //!
 //! A command added to the app is closed to remote callers until it is listed
-//! here, and how much of the list a caller gets depends on the scope its device
-//! was admitted with ([`super::auth::Scope`]).
+//! here. Every paired device gets the whole list, a phone included: it comes
+//! in over this machine's own tailnet with a pairing token, and there it does
+//! what the app's window does.
 
 use serde_json::Value;
 use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponse, InvokeResponseBody};
 use tauri::webview::InvokeRequest;
 use tauri::{AppHandle, Manager, Runtime};
 
-use super::auth::Scope;
-
-/// The conversation: what every remote caller may do, whatever its scope.
+/// The conversation: tracks, runs, decisions, workers, designs, knowledge.
 ///
-/// Left out on purpose: anything that opens a window on the PC (pickers, save
-/// dialogs, the file manager, opening files or links there), the terminal,
-/// agent sign-in and download, deleting tracks, designs or knowledge, editing
-/// files, boards and knowledge sources, and the remote-access controls
-/// themselves. Those are [`OWNER_ALLOWED`], and a [`Scope::Conversation`]
-/// device does not get them.
+/// Left out of both lists on purpose, for every device: anything that acts on
+/// the PC's own screen (pickers, save dialogs, the file manager, opening files
+/// or links there, agent sign-in in its browser, the app's own installer), and
+/// who may reach this machine at all (pairing, the server and phone switches,
+/// remote instances, GitHub sign-in).
 pub const ALLOWED: &[&str] = &[
     // tracks and conversations
     "list_tracks",
@@ -78,22 +76,34 @@ pub const ALLOWED: &[&str] = &[
     "knowledge_formats",
     "knowledge_context",
     "knowledge_embedding_status",
+    // routines
+    "list_routines",
+    "create_routine",
+    "update_routine",
+    "delete_routine",
+    "routine_runs",
+    "run_routine",
+    "routine_cancel",
+    "running_routines",
     // the app
     "agent_statuses",
     "app_info",
     "system_metrics",
     "get_setting",
     "set_setting",
+    "ui_log",
+    "last_crash",
+    "log_level",
+    "log_level_set",
+    "diagnostics_report",
 ];
 
-/// The machine: what a [`Scope::Full`] device may do on top of [`ALLOWED`].
+/// The machine: its shell, its folders, making and deleting things.
 ///
-/// Full scope says whoever came in is this Divixi's owner -- they minted a
-/// pairing token on this machine over SSH, or signed in as the GitHub account
-/// that owns it -- so they do here what its own window does, its terminal
-/// included. Still closed even then: anything that opens a window or a browser
-/// on the machine (pickers, save dialogs, the file manager, agent sign-in), and
-/// the remote-instance and GitHub controls.
+/// Once only a [`super::auth::Scope::Full`] device's (the owner's, over SSH or
+/// GitHub); a phone, paired as `Conversation`, got [`ALLOWED`] alone and could
+/// not so much as make a track. A phone is on this machine's own tailnet,
+/// paired from its window, so it gets this too.
 const OWNER_ALLOWED: &[&str] = &[
     "create_track",
     "update_track",
@@ -128,21 +138,24 @@ const OWNER_ALLOWED: &[&str] = &[
     "knowledge_default_config",
 ];
 
-/// Settings another device may not read or write: secrets, GitHub and the
-/// remote-instance switches.
+/// Settings another device may not read or write: secrets, GitHub, the
+/// remote-instance switches and phone access (`phone.*`: who may sign in, how
+/// long, from where -- what `phone_set` guards, not to be reached around it)
+/// and the embedding (`knowledge.embed.*`): its key is a secret, and its
+/// address is where that key is sent, so the whole of it is this PC's window's.
 fn setting_closed(key: &str) -> bool {
-    key.starts_with("remote") || key.starts_with("github") || key.starts_with("knowledge.embed") || key.contains("key") || key.contains("token") || key.contains("secret")
+    key.starts_with("remote")
+        || key.starts_with("phone")
+        || key.starts_with("github")
+        || key.starts_with("knowledge.embed")
+        || key.contains("key")
+        || key.contains("token")
+        || key.contains("secret")
 }
 
-/// Whether a device admitted with `scope` may make this call.
-///
-/// Until the scope existed this took the union unconditionally, so [`ALLOWED`]
-/// never actually bounded anything and every remote caller -- including one
-/// paired to the desktop app -- could open a shell. The two lists now mean what
-/// their names say.
-pub fn allowed(cmd: &str, args: &Value, scope: Scope) -> Result<(), String> {
-    let in_scope = ALLOWED.contains(&cmd) || (scope == Scope::Full && OWNER_ALLOWED.contains(&cmd));
-    if !in_scope {
+/// Whether another device may make this call.
+pub fn allowed(cmd: &str, args: &Value) -> Result<(), String> {
+    if !(ALLOWED.contains(&cmd) || OWNER_ALLOWED.contains(&cmd)) {
         return Err(format!("{cmd} is not available from another device"));
     }
     if cmd == "get_setting" || cmd == "set_setting" {
@@ -221,58 +234,124 @@ mod tests {
 
     #[test]
     fn only_listed_commands_and_open_settings() {
-        let full = |cmd: &str| allowed(cmd, &json!({}), Scope::Full);
-        assert!(full("list_tracks").is_ok());
-        assert!(full("pick_folder").is_err());
-        assert!(full("term_open").is_ok(), "the owner's shell");
-        assert!(full("workspace_reveal").is_err());
-        assert!(full("delete_track").is_ok(), "the owner may");
-        assert!(full("remote_server_set").is_err());
-        assert!(full("github_login_start").is_err());
-        assert!(allowed("get_setting", &json!({ "key": "theme" }), Scope::Full).is_ok());
-        assert!(allowed("get_setting", &json!({ "key": "github.client_id" }), Scope::Full).is_err());
-        assert!(allowed("get_setting", &json!({ "key": "knowledge.embed.key" }), Scope::Full).is_err());
-        assert!(allowed("set_setting", &json!({ "key": "remote.enabled" }), Scope::Full).is_err());
+        let call = |cmd: &str| allowed(cmd, &json!({}));
+        assert!(call("list_tracks").is_ok());
+        assert!(call("pick_folder").is_err());
+        assert!(call("term_open").is_ok(), "the machine's shell");
+        assert!(call("workspace_reveal").is_err());
+        assert!(call("delete_track").is_ok());
+        assert!(call("remote_server_set").is_err());
+        assert!(call("github_login_start").is_err());
+        assert!(allowed("get_setting", &json!({ "key": "theme" })).is_ok());
+        assert!(allowed("get_setting", &json!({ "key": "github.client_id" })).is_err());
+        assert!(allowed("get_setting", &json!({ "key": "knowledge.embed.key" })).is_err());
+        assert!(allowed("set_setting", &json!({ "key": "remote.enabled" })).is_err());
     }
 
-    /// The boundary between the two lists, from both sides. Before the scope
-    /// existed `allowed` took their union, so every one of the `Conversation`
-    /// refusals below was an `Ok` -- a device paired to the desktop app could
-    /// open a shell on it.
+    /// A phone does what the app's window does: what the conversation needs,
+    /// and the machine's shell, folders, tracks and routines. Before, a phone
+    /// was refused every one of these but the first three.
     #[test]
-    fn the_conversation_scope_is_the_conversation_only() {
-        let chat = |cmd: &str| allowed(cmd, &json!({}), Scope::Conversation);
-        let owner = |cmd: &str| allowed(cmd, &json!({}), Scope::Full);
-
-        // ALLOWED: both scopes, and the things a phone is actually for.
-        for cmd in ["list_tracks", "get_run", "conductor_prompt", "list_decisions", "answer_decision", "worker_report", "workspace_read"] {
-            assert!(chat(cmd).is_ok(), "{cmd} is the conversation");
-            assert!(owner(cmd).is_ok(), "{cmd} is the conversation");
+    fn a_phone_does_what_the_window_does() {
+        let call = |cmd: &str| allowed(cmd, &json!({}));
+        for cmd in [
+            "list_tracks",
+            "conductor_prompt",
+            "answer_decision",
+            "create_track",
+            "update_track",
+            "delete_track",
+            "browse_dirs",
+            "make_dir",
+            "term_open",
+            "term_write",
+            "term_close",
+            "workspace_write",
+            "design_apply",
+            "download_agent",
+            "knowledge_add",
+            "knowledge_embed_test",
+            "list_routines",
+            "create_routine",
+            "run_routine",
+            "delete_routine",
+            "ui_log",
+            "last_crash",
+            "log_level_set",
+            "diagnostics_report",
+        ] {
+            assert!(call(cmd).is_ok(), "{cmd}");
         }
+    }
 
-        // OWNER_ALLOWED: full only. The machine, not the conversation.
-        for cmd in ["term_open", "term_write", "term_close", "delete_track", "workspace_write", "browse_dirs", "make_dir", "design_apply", "download_agent", "knowledge_add"] {
-            assert_eq!(
-                chat(cmd).unwrap_err(),
-                format!("{cmd} is not available from another device"),
-                "{cmd} is the machine, not the conversation",
-            );
-            assert!(owner(cmd).is_ok(), "{cmd} is still the owner's");
+    /// The embedding is set on the PC only, address and model included: a
+    /// device that could point it elsewhere would have the key sent there.
+    /// Closed to reading as well, as every closed setting is.
+    #[test]
+    fn the_embedding_is_set_on_the_pc_only() {
+        for key in [
+            "knowledge.embed.enabled",
+            "knowledge.embed.url",
+            "knowledge.embed.model",
+            "knowledge.embed.key",
+            "knowledge.embed.dims",
+            "knowledge.embed.rate",
+        ] {
+            for cmd in ["get_setting", "set_setting"] {
+                assert_eq!(
+                    allowed(cmd, &json!({ "key": key, "value": "https://elsewhere.example/v1" })).unwrap_err(),
+                    format!("the setting {key} is not available from another device"),
+                    "{cmd} {key}",
+                );
+            }
         }
+        // The knowledge settings around it stay open.
+        assert!(allowed("set_setting", &json!({ "key": "knowledge.agent" })).is_ok());
+    }
 
-        // On neither list: refused whatever the scope.
-        for cmd in ["pick_files", "remote_server_set", "remote_pair_link", "github_login_start", "workspace_reveal"] {
-            assert!(chat(cmd).is_err(), "{cmd}");
-            assert!(owner(cmd).is_err(), "{cmd}");
+    /// Still closed to every device: the PC's own screen, and who may reach
+    /// this machine. The closed settings stay closed too.
+    #[test]
+    fn the_pcs_screen_and_its_door_stay_closed() {
+        for cmd in [
+            "pick_folder",
+            "pick_files",
+            "workspace_save_as",
+            "workspace_reveal",
+            "logs_open",
+            "design_open_file",
+            "open_url",
+            "login_agent",
+            "update_download",
+            "update_open",
+            "phone_set",
+            "phone_pair_link",
+            "remote_server_set",
+            "remote_server_drop_all",
+            "remote_host_save",
+            "instance_invoke",
+            "show_instance",
+            "github_login_start",
+        ] {
+            assert_eq!(allowed(cmd, &json!({})).unwrap_err(), format!("{cmd} is not available from another device"), "{cmd}");
         }
-
-        // The closed settings are closed at every scope -- the scope narrows
-        // what may be called, it never opens a second door into a setting.
-        for key in ["github.client_id", "knowledge.embed.key", "remote.enabled"] {
-            assert!(allowed("get_setting", &json!({ "key": key }), Scope::Full).is_err(), "{key}");
-            assert!(allowed("get_setting", &json!({ "key": key }), Scope::Conversation).is_err(), "{key}");
+        for key in [
+            "github.client_id",
+            "knowledge.embed.key",
+            "remote.enabled",
+            "some.token",
+            "a.secret",
+            "phone.enabled",
+            "phone.allowed_logins",
+            "phone.trust_identity",
+            "phone.pin_scope",
+            "phone.days",
+            "phone.origin",
+            "phone.self_login",
+        ] {
+            assert!(allowed("get_setting", &json!({ "key": key })).is_err(), "{key}");
+            assert!(allowed("set_setting", &json!({ "key": key })).is_err(), "{key}");
         }
-        assert!(allowed("set_setting", &json!({ "key": "theme" }), Scope::Conversation).is_ok());
     }
 
     /// Neither list may grow a command the other already has: the union is no

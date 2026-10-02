@@ -428,6 +428,19 @@ input::placeholder {
   max-width: 100%;
 }
 
+/* A phone: a wide table or code block scrolls inside itself, never the page. */
+@media (max-width: 640px) {
+  .md pre {
+    max-width: 100%;
+  }
+
+  .md table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
+
 /* highlight.js tokens on the house palette. Two themes, same vocabulary. */
 .hljs-comment,
 .hljs-quote {

@@ -44,20 +44,25 @@
     }
   }
 
-  async function go(path: string | null) {
+  async function go(path: string | null): Promise<boolean> {
     busy = true;
     error = "";
     try {
       at = await invoke<Dirs>("browse_dirs", { path });
       typed = at.path;
+      return true;
     } catch (err) {
       error = String(err);
+      return false;
     } finally {
       busy = false;
     }
   }
-  // Where it opens: the folder given when it was opened (it does not follow).
-  onMount(() => void go(start || null));
+  // Where it opens: the folder given when it was opened (it does not follow),
+  // else, when that one is gone, where the instance starts.
+  onMount(async () => {
+    if (!(await go(start || null)) && start) await go(null);
+  });
 
   const join = (base: string, name: string) => (base.endsWith("/") || base.endsWith("\\") ? base + name : `${base}${base.includes("\\") ? "\\" : "/"}${name}`);
 
@@ -278,5 +283,62 @@
     font-size: 11.5px;
     color: var(--deltx);
     white-space: pre-wrap;
+  }
+
+  /* A phone: the whole screen, and rows and buttons a finger can hit. */
+  @media (max-width: 640px) {
+    .backdrop {
+      inset: 0;
+      padding: 0;
+    }
+
+    .sheet {
+      width: 100%;
+      height: 100%;
+      border: 0;
+    }
+
+    .head {
+      height: 48px;
+    }
+
+    .x {
+      width: 44px;
+      height: 44px;
+    }
+
+    .path input,
+    .newrow input {
+      height: 44px;
+      font-size: 16px;
+    }
+
+    .row {
+      height: 48px;
+      gap: 12px;
+    }
+
+    .name,
+    .up {
+      font-size: 15px;
+    }
+
+    .btn.sm,
+    .foot .btn {
+      height: 44px;
+      padding: 0 14px;
+    }
+
+    .foot {
+      flex-wrap: wrap;
+    }
+
+    .foot .grow {
+      display: none;
+    }
+
+    .foot .btn {
+      flex: 1;
+    }
   }
 </style>

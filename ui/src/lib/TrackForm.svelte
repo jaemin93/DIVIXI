@@ -167,7 +167,6 @@
       <Mark size={28} />
       <h1 class="serif">{editing ? track?.name : newTitle}</h1>
     </div>
-    <p class="blurb">{editing ? t("newtrack.editBlurb") : t("newtrack.blurb")}</p>
 
     <form onsubmit={submit}>
       <label class="field">
@@ -217,10 +216,9 @@
           </button>
         </div>
         {#if tab === "conductor"}
-          {@render role(t("newtrack.conductorNote"), t("newtrack.agent"), agent, (a) => (agent = a as AgentId), conductorOptions, conductorConfig, (id, v) => (conductorConfig[id] = v), agent)}
+          {@render role(t("newtrack.agent"), agent, (a) => (agent = a as AgentId), conductorOptions, conductorConfig, (id, v) => (conductorConfig[id] = v), agent)}
         {:else}
           {@render role(
-            t("newtrack.workerNote"),
             t("newtrack.workerAgent"),
             shownWorkerAgent,
             (a) => {
@@ -268,7 +266,6 @@
 
 <!-- One role: which agent, then that agent's options as selects. -->
 {#snippet role(
-  note: string,
   agentLabelText: string,
   chosen: string,
   pick: (id: string) => void,
@@ -278,8 +275,6 @@
   effectiveAgent: string,
 )}
   <section class="role" role="tabpanel">
-    <p class="rolenote">{note}</p>
-
     <div class="field">
       <span class="mlab-sm">{agentLabelText}</span>
       <div class="agents" role="radiogroup" aria-label={agentLabelText}>
@@ -362,14 +357,6 @@
     color: var(--hi);
   }
 
-  .blurb {
-    margin: 12px 0 0;
-    font-size: 13px;
-    line-height: 1.6;
-    color: var(--dim);
-    max-width: 600px;
-  }
-
   form {
     margin-top: 30px;
     border-top: 1px solid var(--line);
@@ -429,13 +416,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 11px;
-  }
-
-  .rolenote {
-    margin: 16px 0 0;
-    font-size: 12px;
-    line-height: 1.6;
-    color: var(--dim);
   }
 
   .cat {
@@ -590,5 +570,64 @@
 
   .grow {
     flex: 1;
+  }
+
+  /* A phone: one column, and the form before anything to read. */
+  @media (max-width: 640px) {
+    .sheet {
+      padding: 20px 16px 28px;
+    }
+
+    h1 {
+      font-size: 26px;
+    }
+
+    form {
+      margin-top: 18px;
+    }
+
+    .field {
+      padding: 14px 0;
+    }
+
+    input,
+    select,
+    .opt,
+    .folder .btn {
+      height: 44px;
+    }
+
+    /* 16px keeps a phone's browser from zooming in on focus. */
+    input,
+    select,
+    input.mono {
+      font-size: 16px;
+    }
+
+    .wfolders {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .agents {
+      flex-direction: column;
+    }
+
+    .opt {
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .opt:last-child {
+      border-bottom: 0;
+    }
+
+    .foot .btn {
+      flex: 1;
+      height: 44px;
+    }
+
+    .foot .grow {
+      display: none;
+    }
   }
 </style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { inTauri, local } from "./ipc.svelte";
+  import { inTauri, local, overWeb } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import { kb } from "./knowledge.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
@@ -37,9 +37,9 @@
   ];
 
   const secondary: Item[] = [
-    // No PC shell from another device.
-    // A shell on the Divixi shown: this PC, or the remote instance (as VS Code Remote).
-    ...(inTauri ? [{ id: "terminal", icon: "terminal" as IconName, label: "rail.terminal" as Key, go: () => store.setTerminal(!store.termOpen) }] : []),
+    // A shell on the Divixi shown: this PC, the remote instance (as VS Code
+    // Remote), or from a phone the PC that served it.
+    ...(inTauri || overWeb ? [{ id: "terminal", icon: "terminal" as IconName, label: "rail.terminal" as Key, go: () => store.setTerminal(!store.termOpen) }] : []),
     // Opening THIS PC's Divixi on a phone. Only from the app: a phone has no
     // business being offered a way to pair another phone.
     ...(local ? [{ id: "phone", icon: "phone" as IconName, label: "rail.phone" as Key, go: () => (store.phoneDialog = true) }] : []),

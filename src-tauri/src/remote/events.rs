@@ -21,6 +21,11 @@ pub const EVENTS: &[&str] = &[
     "design",
     "design_extract",
     "conductor_handoff",
+    "track_saved",
+    "track_deleted",
+    "parked",
+    "routines",
+    "routine_done",
     "knowledge",
     "knowledge-removed",
     "knowledge-embedding",
@@ -151,6 +156,13 @@ mod tests {
         }
         assert!(matches!(hub.subscribe(1).1, CatchUp::Reset), "fell out of the ring");
         assert!(matches!(hub.subscribe(0).1, CatchUp::Frames(f) if f.is_empty()), "a fresh device starts now");
+    }
+
+    /// A spent pairing link is told to the window showing it, and to no device.
+    #[test]
+    fn a_spent_link_is_not_sent_to_devices() {
+        assert!(!EVENTS.contains(&super::super::server::PAIRED_EVENT));
+        assert!(!LIVE.contains(&super::super::server::PAIRED_EVENT));
     }
 
     #[test]

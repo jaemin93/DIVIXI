@@ -4,6 +4,7 @@
 //! [`AgentEvent::above_membrane`] decides what is allowed to reach a Track's
 //! timeline. Everything else stays in the session and is fetched on demand.
 
+pub mod path;
 pub mod report;
 
 use serde::{Deserialize, Serialize};

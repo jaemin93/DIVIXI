@@ -14,6 +14,8 @@
  * preflight nothing answers.
  */
 
+import { pairingName } from "./deviceName";
+
 const ACCESS = "divixi.access";
 const REFRESH = "divixi.refresh";
 
@@ -70,7 +72,9 @@ async function redeem(token: string): Promise<void> {
   const res = await fetch(`${base()}/auth/token`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-divixi": "1" },
-    body: JSON.stringify({ token }),
+    // No name: the server reads one from the user-agent. An iPad is the one
+    // it cannot tell (it says Macintosh), so that one is named here.
+    body: JSON.stringify({ token, name: pairingName(navigator.userAgent, navigator.maxTouchPoints ?? 0) }),
   });
   if (!res.ok) throw new Error(`pairing failed (${res.status})`);
   const got = (await res.json()) as Tokens;

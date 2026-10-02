@@ -55,6 +55,20 @@
   {#if pairing.error}
     <p class="warn">{pairing.error}</p>
     <button class="btn sm" onclick={() => pairing.mint()}>{t("phone.qr.again")}</button>
+  {:else if pairing.state === "used"}
+    <!-- Spent: it is good once, so the next device gets a code of its own. -->
+    <p class="hint">{t("phone.qr.used", { name: pairing.usedBy ?? "" })}</p>
+    <div class="row">
+      <button class="btn sm" disabled={pairing.busy} onclick={() => pairing.mint()}>{t("phone.qr.new")}</button>
+      <button class="btn sm" onclick={hide}>{t("phone.qr.hide")}</button>
+    </div>
+  {:else if pairing.state === "expired"}
+    <!-- The QR is not drawn: a dead code looks exactly like a live one. -->
+    <p class="warn">{t("phone.qr.expired")}</p>
+    <div class="row">
+      <button class="btn sm" disabled={pairing.busy} onclick={() => pairing.mint()}>{t("phone.qr.new")}</button>
+      <button class="btn sm" onclick={hide}>{t("phone.qr.hide")}</button>
+    </div>
   {:else if pairing.qr && pairing.link}
     <!-- One path for the whole symbol: a version 11 code is over three
          thousand modules, and that many elements is slow to lay out.
