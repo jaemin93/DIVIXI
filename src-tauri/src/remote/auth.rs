@@ -66,7 +66,8 @@ pub enum Kind {
     Refresh,
 }
 
-/// How much of this Divixi a device may drive ([`super::bridge::allowed`]).
+/// Which way a device was paired. Kept in its tokens, but no longer what it may
+/// drive: every paired device gets [`super::bridge::allowed`]'s whole list.
 ///
 /// The scope is carried *in the signed token*, not chosen by the endpoint that
 /// redeems it. A pairing link minted for a phone must stay a phone's link even
@@ -84,7 +85,8 @@ pub enum Scope {
     /// GitHub, has always granted.
     #[default]
     Full,
-    /// The conversation only ([`super::bridge::ALLOWED`]). A phone.
+    /// A phone, paired from this machine's window. Once the conversation only;
+    /// now what [`Scope::Full`] gets.
     Conversation,
 }
 

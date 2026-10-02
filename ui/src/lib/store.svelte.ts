@@ -1,4 +1,4 @@
-import { invoke, listen, inTauri, local, bring, boardBase } from "./ipc.svelte";
+import { invoke, listen, inTauri, local, overWeb, bring, boardBase } from "./ipc.svelte";
 import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Key, type Lang, type LangPref } from "./i18n.svelte";
@@ -30,6 +30,7 @@ import {
 } from "./queue";
 
 import { addError, dropError, errorLife, type AppError } from "./errors";
+import { withTrack } from "./tracks";
 import { openKey, parseMemory, pruneOpen, remember, treeReply, underOpen, type WsEntry as WsEntryType } from "./fileTree";
 
 export { wasStopped, errorLife, type Queued, type AppError };
@@ -2420,13 +2421,18 @@ class Store {
   async createTrack(patch: TrackPatch): Promise<boolean> {
     try {
       const track = await invoke<Track>("create_track", { patch });
-      this.tracks.push(track);
+      this.takeTrack(track);
       await this.selectTrack(track.id);
       return true;
     } catch (err) {
       this.lastError = String(err);
       return false;
     }
+  }
+
+  /** A track made or changed here or on another device (`track_saved`): listed once. */
+  takeTrack(track: Track) {
+    this.tracks = withTrack(this.tracks, track);
   }
 
   /** Show a track in the main area; persisted so the app reopens on it. */
@@ -2454,7 +2460,7 @@ class Store {
   async updateTrack(id: string, patch: TrackPatch): Promise<boolean> {
     try {
       const next = await invoke<Track>("update_track", { id, patch });
-      this.tracks = this.tracks.map((t) => (t.id === id ? next : t));
+      this.takeTrack(next);
       if (id === this.track && this.readyAgents.some((a) => a.kind === next.agent)) this.agent = next.agent as AgentId;
       return true;
     } catch (err) {
@@ -2721,9 +2727,12 @@ class Store {
 
   /** Show or hide the track list column; persisted. */
   async setTerminal(open: boolean) {
-    if (!inTauri) return;
+    if (!inTauri && !overWeb) return;
     this.termOpen = open;
     if (open) this.termMounted = true;
+    // The setting is the PC's window's: a phone opening a shell does not open
+    // one there the next time, nor the other way round.
+    if (!inTauri) return;
     try {
       await invoke("set_setting", { key: "terminal", value: open ? "open" : "closed" });
     } catch (err) {
@@ -2856,7 +2865,7 @@ class Store {
         this.designListOpen = designList !== "closed";
         const h = Number(termHeight);
         if (Number.isFinite(h) && h > 0) this.setTermHeight(h);
-        if (term === "open") void this.setTerminal(true);
+        if (term === "open" && inTauri) void this.setTerminal(true);
       } catch {
         // Defaults are fine.
       }
@@ -3766,6 +3775,7 @@ export async function connectEvents() {
     // has nothing to draw and does not ask for the events.
     ...(local ? [listen<UpdateProgress>("update_download", (e) => store.updateProgressed(e.payload))] : []),
     listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
+    listen<Track>("track_saved", (e) => store.takeTrack(e.payload)),
     listen<{ track: string; from: string; to: string; writing: boolean }>("conductor_handoff", (e) => store.takeHandoff(e.payload)),
     listen<WaitingDelivery>("parked", (e) => store.takeParked(e.payload)),
     listen<DesignDelta>("design", (e) => store.takeDesign(e.payload)),

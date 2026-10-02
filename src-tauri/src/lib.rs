@@ -254,9 +254,11 @@ fn check_patch(patch: &mut TrackPatch) -> Result<(), String> {
 }
 
 /// Create a track. An empty working directory means the repository the app
-/// was launched from; an empty agent means Claude Code.
+/// was launched from; an empty agent means Claude Code. Told to every window
+/// and device (`track_saved`), so a track made on a phone is listed on the
+/// PC at once, and the other way round.
 #[tauri::command]
-fn create_track(state: State<'_, AppState>, mut patch: TrackPatch) -> Result<TrackInfo, String> {
+fn create_track(app: tauri::AppHandle, state: State<'_, AppState>, mut patch: TrackPatch) -> Result<TrackInfo, String> {
     if patch.cwd.as_deref().map(str::trim).unwrap_or("").is_empty() {
         patch.cwd = Some(workspace_root().display().to_string());
     }
@@ -264,16 +266,19 @@ fn create_track(state: State<'_, AppState>, mut patch: TrackPatch) -> Result<Tra
         patch.agent = Some(AgentKind::ClaudeCode.id().to_string());
     }
     check_patch(&mut patch)?;
-    state.store.create_track(&patch).map_err(|e| e.to_string())
+    let track = state.store.create_track(&patch).map_err(|e| e.to_string())?;
+    let _ = app.emit("track_saved", &track);
+    Ok(track)
 }
 
 /// Change a track: name, intent, folder, or the conductor's and sessions'
 /// agent and session options. The conductor reopens with the new options
 /// at its next message (keeping its memory); open sessions keep theirs until
 /// closed. A new folder closes every session and forgets their memory,
-/// since a session belongs to the directory it was opened in.
+/// since a session belongs to the directory it was opened in. Told to every
+/// window and device (`track_saved`), as a new track is.
 #[tauri::command]
-async fn update_track(state: State<'_, AppState>, id: String, mut patch: TrackPatch) -> Result<TrackInfo, String> {
+async fn update_track(app: tauri::AppHandle, state: State<'_, AppState>, id: String, mut patch: TrackPatch) -> Result<TrackInfo, String> {
     check_patch(&mut patch)?;
     let before = state
         .store
@@ -291,7 +296,9 @@ async fn update_track(state: State<'_, AppState>, id: String, mut patch: TrackPa
         worktree::remove_track(&state.store, &id, &workers);
         state.store.forget_track_sessions(&id).map_err(|e| e.to_string())?;
     }
-    state.store.update_track(&id, &patch).map_err(|e| e.to_string())
+    let track = state.store.update_track(&id, &patch).map_err(|e| e.to_string())?;
+    let _ = app.emit("track_saved", &track);
+    Ok(track)
 }
 
 /// Delete a track: its sessions close, its runs and memory go.

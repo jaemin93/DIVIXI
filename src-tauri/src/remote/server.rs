@@ -317,8 +317,8 @@ async fn refresh(State(ctx): State<Ctx>, headers: HeaderMap) -> Response<Body> {
 // ----- commands and events -----
 
 async fn invoke(State(ctx): State<Ctx>, Path(cmd): Path<String>, ConnectInfo(from): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response<Body> {
-    let (who, scope) = match device(&ctx, Some(from.ip()), &headers).await {
-        Ok(d) => (d.id, d.scope),
+    let who = match device(&ctx, Some(from.ip()), &headers).await {
+        Ok(d) => d.id,
         Err(r) => return refused(r),
     };
     let args: Value = if body.is_empty() {
@@ -329,7 +329,7 @@ async fn invoke(State(ctx): State<Ctx>, Path(cmd): Path<String>, ConnectInfo(fro
             Err(e) => return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": format!("the arguments are not JSON: {e}") }))).into_response(),
         }
     };
-    if let Err(why) = super::bridge::allowed(&cmd, &args, scope) {
+    if let Err(why) = super::bridge::allowed(&cmd, &args) {
         return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": why }))).into_response();
     }
     let closing = (cmd == "term_close").then(|| args.get("id").and_then(Value::as_u64)).flatten();

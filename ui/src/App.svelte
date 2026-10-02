@@ -31,8 +31,15 @@
   const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   const side = { axis: "x" as const, duration: reduced ? 0 : 200, easing: cubicOut };
 
+  /** A phone-sized screen: no room for the track list beside a new track's form. */
+  const narrowQuery = typeof matchMedia === "function" ? matchMedia("(max-width: 640px)") : null;
+  let narrow = $state(narrowQuery?.matches ?? false);
+  narrowQuery?.addEventListener("change", (e) => (narrow = e.matches));
+
   /** The track list sits beside every view but settings, once a track exists. */
-  const listShown = $derived(store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.view !== "routines" && store.trackListOpen && store.tracks.length > 0);
+  const listShown = $derived(
+    store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.view !== "routines" && !(narrow && store.view === "new-track") && store.trackListOpen && store.tracks.length > 0,
+  );
 
   // Browser-style zoom keys, app-wide.
   function onKey(e: KeyboardEvent) {
