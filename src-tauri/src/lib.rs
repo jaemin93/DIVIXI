@@ -301,9 +301,10 @@ async fn update_track(app: tauri::AppHandle, state: State<'_, AppState>, id: Str
     Ok(track)
 }
 
-/// Delete a track: its sessions close, its runs and memory go.
+/// Delete a track: its sessions close, its runs and memory go. Told to every
+/// window and device (`track_deleted`, the track's id), as a saved one is.
 #[tauri::command]
-async fn delete_track(state: State<'_, AppState>, id: String) -> Result<(), String> {
+async fn delete_track(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     if state.sessions.is_active(&id).await {
         return Err("the track is still working; wait for it to finish".to_string());
     }
@@ -313,7 +314,9 @@ async fn delete_track(state: State<'_, AppState>, id: String) -> Result<(), Stri
     let workers = track_workers(&state, &id);
     worktree::check_nothing_pending(&state.store, &id, &workers)?;
     worktree::remove_track(&state.store, &id, &workers);
-    state.store.delete_track(&id).map_err(|e| e.to_string())
+    state.store.delete_track(&id).map_err(|e| e.to_string())?;
+    let _ = app.emit("track_deleted", &id);
+    Ok(())
 }
 
 /// The names of a track's workers, as the store has them.
@@ -545,19 +548,24 @@ async fn running_routines(app: AppHandle) -> Result<Vec<String>, String> {
 }
 
 /// Save a routine. It runs alone, so it needs its own folder and agent —
-/// there is no track to borrow either from.
+/// there is no track to borrow either from. Every window and device is told
+/// (`routines`): one may have been saved on a phone.
 #[tauri::command(async)]
-fn create_routine(state: State<'_, AppState>, patch: RoutinePatch) -> Result<Routine, String> {
+fn create_routine(app: AppHandle, state: State<'_, AppState>, patch: RoutinePatch) -> Result<Routine, String> {
     check_routine(&state, &patch)?;
-    state.store.create_routine(&patch).map_err(|e| e.to_string())
+    let made = state.store.create_routine(&patch).map_err(|e| e.to_string())?;
+    let _ = routine::notify(&app);
+    Ok(made)
 }
 
 /// Rewrite a routine: its name, what it tells its agent, the folder, the
 /// agent, its options, or the track it tells when it has run.
 #[tauri::command(async)]
-fn update_routine(state: State<'_, AppState>, id: String, patch: RoutinePatch) -> Result<Routine, String> {
+fn update_routine(app: AppHandle, state: State<'_, AppState>, id: String, patch: RoutinePatch) -> Result<Routine, String> {
     check_routine(&state, &patch)?;
-    state.store.update_routine(&id, &patch).map_err(|e| e.to_string())
+    let saved = state.store.update_routine(&id, &patch).map_err(|e| e.to_string())?;
+    let _ = routine::notify(&app);
+    Ok(saved)
 }
 
 /// The agent must be one this machine has, and the folder a real directory:
@@ -577,8 +585,10 @@ fn check_routine(state: &AppState, patch: &RoutinePatch) -> Result<(), String> {
 
 /// Forget a routine, and the runs it made. Nothing else holds them.
 #[tauri::command(async)]
-fn delete_routine(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.store.delete_routine(&id).map_err(|e| e.to_string())
+fn delete_routine(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.store.delete_routine(&id).map_err(|e| e.to_string())?;
+    let _ = routine::notify(&app);
+    Ok(())
 }
 
 /// A routine's runs, newest first.
@@ -2060,5 +2070,23 @@ mod patch_tests {
         check_patch(&mut patch).unwrap();
         let after = store.update_track(&created.id, &patch).unwrap();
         assert_eq!((after.color.as_str(), after.tags.len()), ("#7aa2f7", 2));
+    }
+
+    /// A folder sent from a phone or typed in comes back without `\\?\`, and
+    /// so does every path the folder picker hands out.
+    #[test]
+    fn a_track_folder_is_kept_plain() {
+        let here = std::env::temp_dir().canonicalize().unwrap();
+        let mut patch = TrackPatch { cwd: Some(format!(" {} ", here.display())), ..Default::default() };
+        check_patch(&mut patch).unwrap();
+        let cwd = patch.cwd.unwrap();
+        assert!(!cwd.starts_with(r"\\?\"), "{cwd}");
+        assert_eq!(cwd, plain(&here.display().to_string()));
+
+        let dirs = browse_dirs(Some(here.display().to_string())).unwrap();
+        assert_eq!(dirs.path, cwd);
+        for p in [Some(dirs.path), dirs.parent, Some(dirs.home)].into_iter().flatten() {
+            assert!(!p.starts_with(r"\\?\"), "{p}");
+        }
     }
 }

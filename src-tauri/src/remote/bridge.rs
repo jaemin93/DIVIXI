@@ -138,11 +138,19 @@ const OWNER_ALLOWED: &[&str] = &[
     "knowledge_default_config",
 ];
 
-/// Settings another device may not read or write: secrets, GitHub and the
-/// remote-instance switches. The embedding's address and model are open; its
-/// key is a secret.
+/// Settings another device may not read or write: secrets, GitHub, the
+/// remote-instance switches and phone access (`phone.*`: who may sign in, how
+/// long, from where -- what `phone_set` guards, not to be reached around it)
+/// and the embedding (`knowledge.embed.*`): its key is a secret, and its
+/// address is where that key is sent, so the whole of it is this PC's window's.
 fn setting_closed(key: &str) -> bool {
-    key.starts_with("remote") || key.starts_with("github") || key.contains("key") || key.contains("token") || key.contains("secret")
+    key.starts_with("remote")
+        || key.starts_with("phone")
+        || key.starts_with("github")
+        || key.starts_with("knowledge.embed")
+        || key.contains("key")
+        || key.contains("token")
+        || key.contains("secret")
 }
 
 /// Whether another device may make this call.
@@ -274,17 +282,31 @@ mod tests {
         ] {
             assert!(call(cmd).is_ok(), "{cmd}");
         }
-        // The embedding's settings, but not its key.
+    }
+
+    /// The embedding is set on the PC only, address and model included: a
+    /// device that could point it elsewhere would have the key sent there.
+    /// Closed to reading as well, as every closed setting is.
+    #[test]
+    fn the_embedding_is_set_on_the_pc_only() {
         for key in [
             "knowledge.embed.enabled",
             "knowledge.embed.url",
             "knowledge.embed.model",
+            "knowledge.embed.key",
             "knowledge.embed.dims",
             "knowledge.embed.rate",
         ] {
-            assert!(allowed("get_setting", &json!({ "key": key })).is_ok(), "{key}");
-            assert!(allowed("set_setting", &json!({ "key": key })).is_ok(), "{key}");
+            for cmd in ["get_setting", "set_setting"] {
+                assert_eq!(
+                    allowed(cmd, &json!({ "key": key, "value": "https://elsewhere.example/v1" })).unwrap_err(),
+                    format!("the setting {key} is not available from another device"),
+                    "{cmd} {key}",
+                );
+            }
         }
+        // The knowledge settings around it stay open.
+        assert!(allowed("set_setting", &json!({ "key": "knowledge.agent" })).is_ok());
     }
 
     /// Still closed to every device: the PC's own screen, and who may reach
@@ -313,7 +335,20 @@ mod tests {
         ] {
             assert_eq!(allowed(cmd, &json!({})).unwrap_err(), format!("{cmd} is not available from another device"), "{cmd}");
         }
-        for key in ["github.client_id", "knowledge.embed.key", "remote.enabled", "some.token", "a.secret"] {
+        for key in [
+            "github.client_id",
+            "knowledge.embed.key",
+            "remote.enabled",
+            "some.token",
+            "a.secret",
+            "phone.enabled",
+            "phone.allowed_logins",
+            "phone.trust_identity",
+            "phone.pin_scope",
+            "phone.days",
+            "phone.origin",
+            "phone.self_login",
+        ] {
             assert!(allowed("get_setting", &json!({ "key": key })).is_err(), "{key}");
             assert!(allowed("set_setting", &json!({ "key": key })).is_err(), "{key}");
         }

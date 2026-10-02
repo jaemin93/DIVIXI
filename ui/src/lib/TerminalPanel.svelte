@@ -29,8 +29,13 @@
   let activeKey = $state(0);
   let host = $state<HTMLDivElement>();
   let nextKey = 1;
-  /** Output for ids not registered yet: the shell can speak before \`term_open\` returns. */
+  /**
+   * Output for ids not registered yet: the shell can speak before \`term_open\`
+   * returns. Every device hears every shell, so most unknown ids are another
+   * device's: only the first chunks are kept, and an id's are dropped when it exits.
+   */
   const early = new Map<number, string[]>();
+  const EARLY_CHUNKS = 64;
   /** Settles once the output listeners are registered; a shell is not started before. */
   let ready: Promise<unknown> = Promise.resolve();
 
@@ -137,11 +142,17 @@
       listen<{ id: number; data: string }>("term", (e) => {
         const tab = tabs.find((x) => x.id === e.payload.id);
         if (tab) tab.term.write(e.payload.data);
-        else early.set(e.payload.id, [...(early.get(e.payload.id) ?? []), e.payload.data]);
+        else {
+          const kept = early.get(e.payload.id) ?? [];
+          if (kept.length < EARLY_CHUNKS) early.set(e.payload.id, [...kept, e.payload.data]);
+        }
       }),
       listen<{ id: number }>("term_exit", (e) => {
         const tab = tabs.find((x) => x.id === e.payload.id);
-        if (!tab) return;
+        if (!tab) {
+          early.delete(e.payload.id);
+          return;
+        }
         tab.exited = true;
         tab.term.write(`\r\n\x1b[90m${t("term.exited")}\x1b[0m\r\n`);
       }),

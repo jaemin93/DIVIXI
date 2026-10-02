@@ -2483,6 +2483,12 @@ class Store {
     } catch (err) {
       return String(err);
     }
+    await this.dropTrack(id);
+    return "";
+  }
+
+  /** A track deleted here or on another device (`track_deleted`): gone from everything shown. */
+  async dropTrack(id: string) {
     resolveDecisions(this.decisions.filter((d) => d.track === id).map((d) => d.id));
     this.decisions = this.decisions.filter((d) => d.track !== id);
     this.tracks = this.tracks.filter((t) => t.id !== id);
@@ -2497,7 +2503,6 @@ class Store {
         this.view = "new-track";
       }
     }
-    return "";
   }
 
   /** Native folder picker; empty when cancelled. */
@@ -3776,13 +3781,15 @@ export async function connectEvents() {
     ...(local ? [listen<UpdateProgress>("update_download", (e) => store.updateProgressed(e.payload))] : []),
     listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
     listen<Track>("track_saved", (e) => store.takeTrack(e.payload)),
+    listen<string>("track_deleted", (e) => void store.dropTrack(e.payload)),
     listen<{ track: string; from: string; to: string; writing: boolean }>("conductor_handoff", (e) => store.takeHandoff(e.payload)),
     listen<WaitingDelivery>("parked", (e) => store.takeParked(e.payload)),
     listen<DesignDelta>("design", (e) => store.takeDesign(e.payload)),
     listen<string>("design_extract", (e) => {
       if (e.payload === store.artifact) void store.loadExtracts(e.payload);
     }),
-    // A routine was saved (by the conductor), started, or finished. The
+    // A routine was saved (here, on another device or by the conductor),
+    // deleted, started, or finished. The
     // running set is read even off the page, so the rail's count and a
     // later visit are right without waiting for a reload.
     listen("routines", () => {

@@ -22,6 +22,7 @@ pub const EVENTS: &[&str] = &[
     "design_extract",
     "conductor_handoff",
     "track_saved",
+    "track_deleted",
     "parked",
     "routines",
     "routine_done",
