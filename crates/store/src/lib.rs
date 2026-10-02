@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use orchestra_core::path::plain;
 use orchestra_core::{AgentEvent, SessionName, RunId, RunStatus};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -617,7 +618,7 @@ fn row_to_routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<Routine> {
         id: r.get(0)?,
         name: r.get(1)?,
         instruction: r.get(2)?,
-        cwd: r.get(3)?,
+        cwd: plain(&r.get::<_, String>(3)?),
         agent: r.get(4)?,
         config: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
         created_at: r.get(6)?,
@@ -1791,7 +1792,9 @@ fn row_to_track(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackInfo> {
         id: r.get(0)?,
         name: r.get(1)?,
         intent: r.get(2)?,
-        cwd: r.get(3)?,
+        // Older builds could keep `\\?\C:\…` (the remote folder picker);
+        // it leaves as `C:\…`, the form shells and agents take.
+        cwd: plain(&r.get::<_, String>(3)?),
         agent: r.get(4)?,
         created_at: r.get(5)?,
         updated_at: r.get(6)?,
@@ -2298,6 +2301,24 @@ mod tests {
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_verbatim_folder_kept_earlier_reads_plain() {
+        let store = Store::in_memory().unwrap();
+        let tr = store.create_track(&new_track("t", "", r"\\?\C:\Users\x\repo", "claude_code")).unwrap();
+        assert_eq!(tr.cwd, r"C:\Users\x\repo");
+        assert_eq!(store.track(&tr.id).unwrap().unwrap().cwd, r"C:\Users\x\repo");
+        let ro = store
+            .create_routine(&RoutinePatch {
+                name: Some("r".into()),
+                instruction: Some("i".into()),
+                cwd: Some(r"\\?\UNC\srv\share\ops".into()),
+                agent: Some("claude_code".into()),
+                config: None,
+            })
+            .unwrap();
+        assert_eq!(ro.cwd, r"\\srv\share\ops");
     }
 
     #[test]

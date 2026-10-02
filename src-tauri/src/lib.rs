@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use orchestra_acp::{AgentSpec, ConfigOptionInfo};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
+use orchestra_core::path::plain;
 use orchestra_core::{AgentEnvelope, AgentEvent};
 use orchestra_store::{
     ArtifactInfo, ArtifactPatch, Decision, Routine, RoutinePatch, RoutineRun, RunSummary, SearchHit, Store, StoredEvent, TrackInfo,
@@ -226,7 +227,7 @@ fn check_patch(patch: &mut TrackPatch) -> Result<(), String> {
         }
     }
     if let Some(c) = patch.cwd.as_mut() {
-        *c = c.trim().to_string();
+        *c = plain(c.trim());
         if !std::path::Path::new(c.as_str()).is_dir() {
             return Err(format!("not a directory: {c}"));
         }
@@ -466,7 +467,8 @@ fn browse_dirs(path: Option<String>) -> Result<Dirs, String> {
         .take(5000)
         .collect();
     dirs.sort_by_key(|n| n.to_lowercase());
-    let show = |p: &std::path::Path| p.display().to_string().trim_start_matches(r"\?").to_string();
+    // Shown, and kept as a track's folder when picked: never `\\?\`.
+    let show = |p: &std::path::Path| plain(&p.display().to_string());
     Ok(Dirs { path: show(&dir), parent: dir.parent().map(show), home: show(&home), dirs })
 }
 
