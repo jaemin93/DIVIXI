@@ -24,7 +24,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::{json, Value};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::AppHandle;
 
@@ -224,10 +224,29 @@ async fn token(State(ctx): State<Ctx>, ConnectInfo(from): ConnectInfo<SocketAddr
     // the device carries forever after.
     let pinned = signing_in_from(&ctx, Some(from.ip()), &headers).await;
     let st = ctx.state();
-    match st.remote.auth.redeem(&st.store, &b.token, &b.name(&headers), pinned) {
-        Ok(pair) => tokens(pair),
+    // Read before it is spent: a spent link's id is what the screen still
+    // showing it is told, so the next device is not handed a dead code.
+    let link = st.remote.auth.link_id(&b.token);
+    let name = b.name(&headers);
+    match st.remote.auth.redeem(&st.store, &b.token, &name, pinned) {
+        Ok(pair) => {
+            if let Some(id) = link {
+                // This PC's window only: not in `events::EVENTS`.
+                let _ = ctx.app.emit(PAIRED_EVENT, Paired { id, name: shown_name(&name).to_string() });
+            }
+            tokens(pair)
+        }
         Err(r) => refused(r),
     }
+}
+
+/// A pairing link was spent (`/auth/token`), and by what.
+pub const PAIRED_EVENT: &str = "phone_paired";
+
+#[derive(Clone, serde::Serialize)]
+struct Paired {
+    id: String,
+    name: String,
 }
 
 /// The peer key to pin a device being created to, or `None`.
@@ -245,35 +264,30 @@ async fn signing_in_from(ctx: &Ctx, from: Option<std::net::IpAddr>, headers: &He
 /// Used when a browser signs in and sends no name of its own.
 ///
 /// The device list is how a lost phone gets dropped, and dropping the right
-/// one out of three rows all reading "Divixi app" is not possible. Browsers
-/// lie about most of a user-agent string; the few tokens read here are the
-/// ones that survive that, and anything unrecognised is simply "Phone" rather
-/// than a guess dressed up as a fact.
+/// one out of three rows all reading "Divixi app" is not possible. Only the
+/// device is read: the browser is not, since on iOS every browser is WebKit
+/// and says "Safari" (Edge on an iPhone was listed as Safari). Anything
+/// unrecognised is simply "Phone" rather than a guess dressed up as a fact.
+/// An iPad's Safari says "Macintosh"; the pairing page tells it apart and
+/// sends the name itself.
 fn device_name(ua: &str) -> String {
-    let os = [("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"), ("Macintosh", "Mac"), ("Windows", "Windows"), ("Linux", "Linux")]
+    [("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"), ("Macintosh", "Mac"), ("Windows", "Windows"), ("Linux", "Linux")]
         .iter()
         .find(|(needle, _)| ua.contains(needle))
-        .map(|(_, name)| *name);
-    // Order matters: all of these say "Safari" too, and Edge says "Chrome",
-    // so the most specific claim has to be tested first.
-    let browser = [
-        ("Edg/", "Edge"),
-        ("OPR/", "Opera"),
-        ("SamsungBrowser", "Samsung Internet"),
-        ("FxiOS", "Firefox"),
-        ("CriOS", "Chrome"),
-        ("Firefox", "Firefox"),
-        ("Chrome", "Chrome"),
-        ("Safari", "Safari"),
-    ]
-    .iter()
-    .find(|(needle, _)| ua.contains(needle))
-    .map(|(_, name)| *name);
-    match (os, browser) {
-        (Some(os), Some(b)) => format!("{os} · {b}"),
-        (Some(os), None) => os.to_string(),
-        (None, Some(b)) => b.to_string(),
-        (None, None) => "Phone".to_string(),
+        .map(|(_, name)| name.to_string())
+        .unwrap_or_else(|| "Phone".to_string())
+}
+
+/// What [`device_name`] once put after the device (`iPhone · Safari`).
+const BROWSERS_ONCE_NAMED: &[&str] = &["Edge", "Opera", "Samsung Internet", "Firefox", "Chrome", "Safari"];
+
+/// A device's name as listed: a browser [`device_name`] once added is left
+/// off. At display only, so the stored name is untouched, and only that exact
+/// tail, so a name a device chose for itself is shown as it is.
+pub fn shown_name(name: &str) -> &str {
+    match name.rsplit_once(" · ") {
+        Some((device, browser)) if BROWSERS_ONCE_NAMED.contains(&browser) => device,
+        _ => name,
     }
 }
 
@@ -317,8 +331,8 @@ async fn refresh(State(ctx): State<Ctx>, headers: HeaderMap) -> Response<Body> {
 // ----- commands and events -----
 
 async fn invoke(State(ctx): State<Ctx>, Path(cmd): Path<String>, ConnectInfo(from): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Response<Body> {
-    let (who, scope) = match device(&ctx, Some(from.ip()), &headers).await {
-        Ok(d) => (d.id, d.scope),
+    let who = match device(&ctx, Some(from.ip()), &headers).await {
+        Ok(d) => d.id,
         Err(r) => return refused(r),
     };
     let args: Value = if body.is_empty() {
@@ -329,7 +343,7 @@ async fn invoke(State(ctx): State<Ctx>, Path(cmd): Path<String>, ConnectInfo(fro
             Err(e) => return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": format!("the arguments are not JSON: {e}") }))).into_response(),
         }
     };
-    if let Err(why) = super::bridge::allowed(&cmd, &args, scope) {
+    if let Err(why) = super::bridge::allowed(&cmd, &args) {
         return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": why }))).into_response();
     }
     let closing = (cmd == "term_close").then(|| args.get("id").and_then(Value::as_u64)).flatten();
@@ -613,16 +627,40 @@ mod tests {
     #[test]
     fn a_phone_gets_a_name_somebody_could_pick_out_of_a_list() {
         let iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1";
-        assert_eq!(device_name(iphone), "iPhone · Safari");
+        assert_eq!(device_name(iphone), "iPhone");
+        // Edge on an iPhone: WebKit, and says Safari. No browser is named.
+        let edge_ios = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 EdgiOS/131.0 Mobile/15E148 Safari/604.1";
+        assert_eq!(device_name(edge_ios), "iPhone");
         let android = "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
-        assert_eq!(device_name(android), "Android · Chrome", "Android is tested before the Linux it also claims");
+        assert_eq!(device_name(android), "Android", "Android is tested before the Linux it also claims");
         let edge = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 Edg/120.0";
-        assert_eq!(device_name(edge), "Windows · Edge", "Edge says Chrome and Safari too");
-        let samsung = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 SamsungBrowser/23.0 Chrome/115.0 Mobile Safari/537.36";
-        assert_eq!(device_name(samsung), "Android · Samsung Internet");
+        assert_eq!(device_name(edge), "Windows");
         // Nothing recognised is not guessed at.
         assert_eq!(device_name(""), "Phone");
         assert_eq!(device_name("curl/8.0"), "Phone");
+    }
+
+    #[test]
+    fn a_browser_named_before_is_left_off_when_listed() {
+        assert_eq!(shown_name("iPhone · Safari"), "iPhone");
+        assert_eq!(shown_name("Mac · Safari"), "Mac");
+        assert_eq!(shown_name("Android · Samsung Internet"), "Android");
+        assert_eq!(shown_name("Windows · Edge"), "Windows");
+        assert_eq!(shown_name("iPad"), "iPad");
+        assert_eq!(shown_name("Divixi app"), "Divixi app");
+        // Only that exact tail: a name chosen otherwise is shown as it is.
+        assert_eq!(shown_name("Lab · Rack 2"), "Lab · Rack 2");
+        assert_eq!(shown_name("Safari"), "Safari");
+    }
+
+    #[test]
+    fn a_name_the_page_sends_is_taken_over_the_user_agent() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15".parse().unwrap());
+        let ipad = SignIn { token: String::new(), name: Some("iPad".into()) };
+        assert_eq!(ipad.name(&headers), "iPad");
+        let unnamed = SignIn { token: String::new(), name: None };
+        assert_eq!(unnamed.name(&headers), "Mac");
     }
 
     #[test]

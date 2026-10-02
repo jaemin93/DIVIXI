@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use orchestra_core::path::plain_path;
 use parking_lot::Mutex;
 use serde::Serialize;
 use sysinfo::{Disks, System};
@@ -46,12 +47,13 @@ impl Meter {
         let disks = Disks::new_with_refreshed_list();
         let chosen = path
             .and_then(|p| {
-                let p = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+                // Canonical on Windows is `\\?\C:\…`; mount points are `C:\`.
+                let p = p.canonicalize().map(|c| plain_path(&c)).unwrap_or_else(|_| p.to_path_buf());
                 // The deepest mount point that contains the path.
                 disks
                     .list()
                     .iter()
-                    .filter(|d| p.starts_with(d.mount_point()) || strip_verbatim(&p).starts_with(d.mount_point()))
+                    .filter(|d| p.starts_with(d.mount_point()))
                     .max_by_key(|d| d.mount_point().as_os_str().len())
             })
             .or_else(|| disks.list().iter().max_by_key(|d| d.total_space()));
@@ -72,13 +74,6 @@ impl Meter {
             working: 0,
         }
     }
-}
-
-/// `\?\C:\x` → `C:\x`: canonicalize on Windows adds the verbatim prefix,
-/// mount points do not have it.
-fn strip_verbatim(p: &Path) -> std::path::PathBuf {
-    let s = p.to_string_lossy();
-    std::path::PathBuf::from(s.strip_prefix(r"\?\").unwrap_or(&s).to_string())
 }
 
 #[cfg(test)]

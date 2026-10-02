@@ -1,8 +1,12 @@
 <script lang="ts">
-  import { invoke } from "./ipc.svelte";
+  import { invoke, local } from "./ipc.svelte";
   import { store, agentLabel } from "./store.svelte";
-  import { kb, K_AGENT, K_CONFIG, K_EMBED_DIMS, K_EMBED_ENABLED, K_EMBED_KEY, K_EMBED_MODEL, K_EMBED_RATE, K_EMBED_URL, K_EXTRACT, K_POOL } from "./knowledge.svelte";
+  import { kb } from "./knowledge.svelte";
+  import { K_AGENT, K_CONFIG, K_EMBED_DIMS, K_EMBED_ENABLED, K_EMBED_KEY, K_EMBED_MODEL, K_EMBED_RATE, K_EMBED_URL, K_EXTRACT, K_POOL, embedSettable, paneKeys } from "./knowledgeKeys";
   import { t } from "./i18n.svelte";
+
+  /** The embedding is set on this PC only: from another device it is not shown, read or saved. */
+  const embedHere = embedSettable(local);
 
   /**
    * How the knowledge library describes documents (the agent, its model
@@ -31,9 +35,11 @@
   $effect(() => {
     if (sLoaded) return;
     void (async () => {
-      const [agent, config, pool, extract, on, url, model, key, dims, rate] = await Promise.all(
-        [K_AGENT, K_CONFIG, K_POOL, K_EXTRACT, K_EMBED_ENABLED, K_EMBED_URL, K_EMBED_MODEL, K_EMBED_KEY, K_EMBED_DIMS, K_EMBED_RATE].map(get),
-      );
+      const keys = paneKeys(embedHere);
+      const read = await Promise.all(keys.map(get));
+      const value = (key: string) => read[keys.indexOf(key)] ?? null;
+      const [agent, config, pool, extract] = [K_AGENT, K_CONFIG, K_POOL, K_EXTRACT].map(value);
+      const [on, url, model, key, dims, rate] = [K_EMBED_ENABLED, K_EMBED_URL, K_EMBED_MODEL, K_EMBED_KEY, K_EMBED_DIMS, K_EMBED_RATE].map(value);
       sAgent = agent || store.readyAgents[0]?.kind || "";
       cheap = await defaults(sAgent);
       try {
@@ -138,6 +144,7 @@
   );
 
   async function saveEmbedding() {
+    if (!embedHere) return;
     saving = true;
     // What is written is what was on screen when Save was pressed; edits
     // made meanwhile stay unsaved.
@@ -247,6 +254,7 @@
     </div>
     <p class="note">{t("kb.set.applies")}</p>
 
+    {#if embedHere}
     <h2 class="gap">{t("kb.emb.title")}</h2>
     <p class="note">{t("kb.emb.blurb")}</p>
     <div class="row">
@@ -295,6 +303,7 @@
       <span class="grow"></span>
       <button class="btn btn-acc" disabled={!dirty || saving} onclick={saveEmbedding}>{t("kb.emb.save")}</button>
     </div>
+    {/if}
   </div>
 
 <style>

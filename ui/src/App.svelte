@@ -22,8 +22,9 @@
   import ErrorToasts from "./lib/ErrorToasts.svelte";
   import CrashBanner from "./lib/CrashBanner.svelte";
   import UpdateBanner from "./lib/UpdateBanner.svelte";
-  import { inTauri, instance, session } from "./lib/ipc.svelte";
+  import { inTauri, instance, overWeb, session } from "./lib/ipc.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
+  import { visibleFrame } from "./lib/viewport";
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
 
@@ -31,8 +32,37 @@
   const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   const side = { axis: "x" as const, duration: reduced ? 0 : 200, easing: cubicOut };
 
+  /** A phone-sized screen: no room for the track list beside a new track's form. */
+  const narrowQuery = typeof matchMedia === "function" ? matchMedia("(max-width: 640px)") : null;
+  let narrow = $state(narrowQuery?.matches ?? false);
+  narrowQuery?.addEventListener("change", (e) => (narrow = e.matches));
+
+  // In a phone's browser the soft keyboard covers the page instead of
+  // shrinking it. The shell follows the part still visible, so the message
+  // box and the newest message stay above the keyboard. The app's own
+  // window has no soft keyboard and is left as it is.
+  $effect(() => {
+    const vv = overWeb ? window.visualViewport : null;
+    if (!vv) return;
+    const root = document.documentElement;
+    const fit = () => {
+      const f = visibleFrame(vv, window.innerHeight);
+      root.style.setProperty("--vvh", `${f.height}px`);
+      root.style.setProperty("--vvtop", `${f.top}px`);
+    };
+    fit();
+    vv.addEventListener("resize", fit);
+    vv.addEventListener("scroll", fit);
+    return () => {
+      vv.removeEventListener("resize", fit);
+      vv.removeEventListener("scroll", fit);
+    };
+  });
+
   /** The track list sits beside every view but settings, once a track exists. */
-  const listShown = $derived(store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.view !== "routines" && store.trackListOpen && store.tracks.length > 0);
+  const listShown = $derived(
+    store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.view !== "routines" && !(narrow && store.view === "new-track") && store.trackListOpen && store.tracks.length > 0,
+  );
 
   // Browser-style zoom keys, app-wide.
   function onKey(e: KeyboardEvent) {
@@ -86,12 +116,12 @@
        shell whose every pane fails to load. -->
   <NotPaired />
 {:else if instance.error}
-  <div class="shell">
+  <div class="shell" class:web={overWeb}>
     <WindowChrome />
     <Unreachable />
   </div>
 {:else}
-<div class="shell">
+<div class="shell" class:web={overWeb}>
   {#if inTauri}<WindowChrome />{/if}
   {#if store.setupOpen}
     <Setup />
@@ -160,6 +190,16 @@
     display: flex;
     flex-direction: column;
     background: var(--bg);
+  }
+
+  /* A browser: the strip above the soft keyboard (set from visualViewport
+     above), or the dynamic viewport before that is known. */
+  .shell.web {
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: var(--vvtop, 0px);
+    height: var(--vvh, 100dvh);
   }
 
   .body {

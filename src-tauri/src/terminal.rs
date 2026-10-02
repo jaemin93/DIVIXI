@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use orchestra_core::path::plain_path;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -69,6 +70,17 @@ fn shell() -> CommandBuilder {
     }
 }
 
+/// [`shell`], started in `cwd` when it is a folder. Always the plain form:
+/// PowerShell given `\\?\C:\x` prompts
+/// `PS Microsoft.PowerShell.Core\FileSystem::\\?\C:\x>`.
+fn shell_in(cwd: Option<&Path>) -> CommandBuilder {
+    let mut cmd = shell();
+    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
+        cmd.cwd(plain_path(dir));
+    }
+    cmd
+}
+
 fn size(cols: u16, rows: u16) -> PtySize {
     PtySize {
         rows: rows.max(2),
@@ -113,11 +125,7 @@ impl Terminals {
     /// Start a shell in `cwd` and stream its output. Returns the id.
     pub fn open(&self, app: AppHandle, cwd: Option<&Path>, cols: u16, rows: u16) -> Result<u32, String> {
         let pair = native_pty_system().openpty(size(cols, rows)).map_err(|e| e.to_string())?;
-        let mut cmd = shell();
-        if let Some(dir) = cwd.filter(|d| d.is_dir()) {
-            cmd.cwd(dir);
-        }
-        let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+        let child = pair.slave.spawn_command(shell_in(cwd)).map_err(|e| e.to_string())?;
         // The shell holds the slave now; ours would keep the pty open after it exits.
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -223,6 +231,54 @@ mod tests {
         let ok = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap_or(false);
         let _ = child.kill();
         assert!(ok, "the shell did not answer on the pty");
+    }
+
+    /// The shell starts in the plain form of a verbatim folder, and
+    /// PowerShell's own idea of where it is has no `\\?\` either.
+    #[cfg(windows)]
+    #[test]
+    fn shell_starts_in_the_plain_form_of_a_verbatim_folder() {
+        use portable_pty::native_pty_system;
+        use std::io::{Read, Write};
+        let here = std::env::temp_dir().canonicalize().unwrap();
+        assert!(here.to_string_lossy().starts_with(r"\\?\"), "canonicalize gives the verbatim form");
+        let cmd = super::shell_in(Some(&here));
+        let cwd = cmd.get_cwd().unwrap().to_string_lossy().into_owned();
+        assert!(!cwd.starts_with(r"\\?\"), "{cwd}");
+        assert_eq!(std::path::Path::new(&cwd), orchestra_core::path::plain_path(&here));
+
+        let pair = native_pty_system().openpty(super::size(200, 24)).unwrap();
+        let mut cmd = cmd;
+        // Marks made at run time, so the command line (ConPTY may echo it in
+        // the window title) does not hold them.
+        cmd.args(["-NoProfile", "-Command", "Write-Output (\"<\" + \"<\" + (Get-Location).Path + \">\" + \">\")"]);
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut all = Vec::new();
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                all.extend_from_slice(&buf[..n]);
+                if buf[..n].windows(4).any(|w| w == b"[6n") {
+                    let _ = writer.write_all(b"[1;1R");
+                    let _ = writer.flush();
+                }
+                let text = String::from_utf8_lossy(&all);
+                if let Some(at) = text.find("<<").and_then(|i| text[i + 2..].find(">>").map(|j| text[i + 2..i + 2 + j].to_string())) {
+                    let _ = tx.send(at);
+                    return;
+                }
+            }
+        });
+        let at = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap_or_default();
+        let _ = child.kill();
+        assert_eq!(at, cwd, "PowerShell's location");
     }
 
     #[test]

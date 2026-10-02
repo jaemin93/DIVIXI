@@ -49,17 +49,18 @@ export type KTab = "list" | "graph" | "sources";
 /** Mirrors `knowledge::EmbeddingStatus`. */
 export type KEmbedding = { enabled: boolean; model: string; embedded: number; failed: number; total: number; error: string };
 
-/** Settings keys, as `knowledge.rs` reads them. */
-export const K_AGENT = "knowledge.agent";
-export const K_CONFIG = "knowledge.config";
-export const K_POOL = "knowledge.pool";
-export const K_EXTRACT = "knowledge.extract";
-export const K_EMBED_ENABLED = "knowledge.embed.enabled";
-export const K_EMBED_URL = "knowledge.embed.url";
-export const K_EMBED_MODEL = "knowledge.embed.model";
-export const K_EMBED_KEY = "knowledge.embed.key";
-export const K_EMBED_DIMS = "knowledge.embed.dims";
-export const K_EMBED_RATE = "knowledge.embed.rate";
+export {
+  K_AGENT,
+  K_CONFIG,
+  K_POOL,
+  K_EXTRACT,
+  K_EMBED_ENABLED,
+  K_EMBED_URL,
+  K_EMBED_MODEL,
+  K_EMBED_KEY,
+  K_EMBED_DIMS,
+  K_EMBED_RATE,
+} from "./knowledgeKeys";
 
 /**
  * The knowledge library as the UI sees it: its sources (each also an

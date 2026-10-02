@@ -8,6 +8,7 @@
   import Popover from "./Popover.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
+  import { boxFit, boxLimit, visibleFrame } from "./viewport";
 
   // Each conversation keeps its own draft: what is typed in one track stays there.
   let draftKey = store.chatKey;
@@ -56,14 +57,35 @@
     });
   }
 
-  /** The box grows with its text, up to eight lines; only past that does it scroll. */
-  const MAX_BOX = 8 * 22 + 24;
+  /** A phone-sized screen: the box starts at one line and takes at most 40% of what is visible. */
+  const narrowQuery = typeof matchMedia === "function" ? matchMedia("(max-width: 640px)") : null;
+  let narrow = $state(narrowQuery?.matches ?? false);
+  onMount(() => {
+    const onNarrow = (e: MediaQueryListEvent) => {
+      narrow = e.matches;
+      queueMicrotask(grow);
+    };
+    narrowQuery?.addEventListener("change", onNarrow);
+    // The keyboard coming up shortens what is visible, and so the box's share of it.
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
+    const onResize = () => {
+      if (narrow) grow();
+    };
+    vv?.addEventListener("resize", onResize);
+    return () => {
+      narrowQuery?.removeEventListener("change", onNarrow);
+      vv?.removeEventListener("resize", onResize);
+    };
+  });
+
+  /** The box grows with its text, up to eight lines (on a phone, 40% of the screen); only past that does it scroll. */
   function grow() {
     if (!box) return;
     box.style.height = "auto";
-    const wanted = box.scrollHeight;
-    box.style.height = `${Math.min(wanted, MAX_BOX)}px`;
-    box.style.overflowY = wanted > MAX_BOX ? "auto" : "hidden";
+    const visible = visibleFrame(window.visualViewport, window.innerHeight).height;
+    const fit = boxFit(box.scrollHeight, boxLimit(visible, narrow));
+    box.style.height = `${fit.height}px`;
+    box.style.overflowY = fit.scroll ? "auto" : "hidden";
   }
 
   // ----- slash commands -----
@@ -739,7 +761,9 @@
         bind:this={box}
         bind:value={draft}
         rows="1"
-        placeholder={store.busy ? t("composer.queueing") : store.chatArtifact ? t("design.placeholder") : t("composer.placeholder")}
+        placeholder={narrow
+          ? store.busy ? t("composer.queueingShort") : store.chatArtifact ? t("design.placeholderShort") : t("composer.placeholderShort")
+          : store.busy ? t("composer.queueing") : store.chatArtifact ? t("design.placeholder") : t("composer.placeholder")}
         aria-label={t("composer.placeholder")}
         onkeydown={onKey}
         oninput={() => {
@@ -1327,5 +1351,49 @@
     width: 40px;
     flex-shrink: 0;
     font-size: 11px;
+  }
+
+  /* A phone: the conversation keeps the screen. The box starts at one line
+     and stops at 40% of what is visible (grow() above, this as its floor
+     before that runs); buttons stay 44px to the finger. */
+  @media (max-width: 640px) {
+    .composer {
+      padding: 6px 8px max(4px, env(safe-area-inset-bottom));
+    }
+
+    .attached {
+      margin: 0 0 6px;
+    }
+
+    form {
+      gap: 4px;
+    }
+
+    /* Just the icon; the 44px square stays the finger's. */
+    .plus {
+      border-color: transparent;
+    }
+
+    /* 16px: below that iOS zooms the page in when the box is touched. */
+    textarea {
+      font-size: 16px;
+      padding: 11px 12px;
+      max-height: calc(var(--vvh, 100dvh) * 0.4);
+    }
+
+    .slash {
+      max-height: min(280px, calc(var(--vvh, 100dvh) * 0.45));
+    }
+
+    /* The folder path is only for reading; the agent and context keep the row. */
+    .status {
+      height: 28px;
+      margin-top: 2px;
+      gap: 6px;
+    }
+
+    .chip.static {
+      display: none;
+    }
   }
 </style>

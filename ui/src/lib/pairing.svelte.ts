@@ -1,5 +1,6 @@
 import { invoke } from "./ipc.svelte";
 import { encodeQr, type Qr } from "./qr";
+import { clock, codeState, secondsLeft, spends, type CodeState } from "./countdown";
 
 /**
  * The pairing code currently on offer.
@@ -12,7 +13,10 @@ import { encodeQr, type Qr } from "./qr";
  * by accident.
  */
 
-export type PairLink = { url: string; expires: number; days: number };
+export type PairLink = { url: string; expires: number; days: number; id: string };
+
+/** `phone_paired`: a device signed in with the link `id`. */
+export type Paired = { id: string; name: string };
 
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -21,21 +25,43 @@ class Pairing {
   qr = $state<Qr | null>(null);
   error = $state("");
   busy = $state(false);
+  /**
+   * The time the countdown is drawn against, moved on by `tick`. A state and
+   * not `Date.now()` in `left`: reading the clock is not something a view can
+   * depend on, so the countdown was drawn once and stayed at 5:00.
+   */
+  now = $state(now());
+  /** The device that signed in with the code on screen; it is good once. */
+  usedBy = $state<string | null>(null);
 
   /** Seconds before this code stops working; zero when there is none. */
   get left(): number {
-    return this.link ? Math.max(0, this.link.expires - now()) : 0;
+    return this.link ? secondsLeft(this.link.expires, this.now) : 0;
   }
 
   /** `m:ss`, for the countdown beside the code. */
   get clock(): string {
-    const l = this.left;
-    return `${Math.floor(l / 60)}:${String(l % 60).padStart(2, "0")}`;
+    return clock(this.left);
   }
 
-  /** A code to show: the one in hand if it is still good, otherwise a new one. */
+  /** `used` and `expired` stay until somebody asks for a new code: none is made on its own. */
+  get state(): CodeState {
+    return codeState(this.link?.expires ?? null, this.now, this.usedBy !== null);
+  }
+
+  /** A device signed in with a code (`phone_paired`): if it is the one on screen, it is spent. */
+  paired(p: Paired): void {
+    if (spends(this.link?.id, p.id)) this.usedBy = p.name;
+  }
+
+  /**
+   * A code to show: the one in hand, live, used or expired, otherwise a new
+   * one. A used or expired one is shown as such; only its button makes another.
+   */
   async ensure(): Promise<void> {
-    if (this.link && this.left > 0) return;
+    // Nothing ticks while no code is on screen, so `now` may be old.
+    this.now = now();
+    if (this.state !== "none" || this.busy) return;
     await this.mint();
   }
 
@@ -48,6 +74,7 @@ class Pairing {
       // Drawn before it is shown: a payload that cannot be encoded has to
       // fail here and not as an empty square on the screen.
       this.qr = encodeQr(link.url);
+      this.now = now();
       this.link = link;
     } catch (err) {
       this.error = String(err);
@@ -57,16 +84,18 @@ class Pairing {
   }
 
   /**
-   * Take an expired code off the screen. A dead code looks exactly like a
-   * live one, and the only way to tell is to fail at the phone.
+   * Move the countdown on. At zero the code turns `expired` and the view
+   * takes it off the screen: a dead code looks exactly like a live one, and
+   * the only way to tell is to fail at the phone.
    */
   tick(): void {
-    if (this.link && this.left === 0) this.forget();
+    this.now = now();
   }
 
   forget(): void {
     this.link = null;
     this.qr = null;
+    this.usedBy = null;
   }
 }
 

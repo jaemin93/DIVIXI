@@ -34,13 +34,14 @@
   import RemoteServer from "./RemoteServer.svelte";
   import PhoneAccess from "./PhoneAccess.svelte";
   import { onMount } from "svelte";
+  import { customFilter, type LogLevel } from "./logLevel";
 
   /** Minutes before an unused conductor or worker session is closed (0: never). */
   let idleMinutes = $state(30);
 
-  /** Mirrors `logging::Level`: how much is being logged, and what set it. */
-  type LogLevel = { filter: string; preset: string; source: string };
   let level = $state<LogLevel | null>(null);
+  /** Spelled out only when no preset button is lit for it. */
+  const customLevel = $derived(customFilter(level));
 
   onMount(() => {
     invoke<string | null>("get_setting", { key: "sessions.idle_minutes" })
@@ -129,13 +130,6 @@
     } catch (err) {
       store.lastError = t("settings.levelFailed", { why: String(err) });
     }
-  }
-
-  /** What put the level in force, in this language. */
-  function levelFrom(source: string): string {
-    if (source === "env") return t("settings.levelFrom.env");
-    if (source === "setting") return t("settings.levelFrom.setting");
-    return t("settings.levelFrom.default");
   }
 
   async function openLogs() {
@@ -358,7 +352,6 @@
         <div class="row"><span class="dim">workspace</span><span class="path">{store.info?.workspace ?? "…"}</span></div>
         <div class="row"><span class="dim">runs</span><span>{store.info?.runs ?? "…"}</span></div>
       </div>
-      <p class="note">{t("settings.aboutNote")}</p>
 
       <!-- This PC's own app is the one an update would replace, so the card is
            local-only like the log folder and the diagnostics above it. A
@@ -368,7 +361,6 @@
           <div class="gtitle">{t("settings.updates")}</div>
           <div class="card pad">
             <div class="ftitle">{t("settings.updateCheck")}</div>
-            <p class="fnote">{t("settings.updateNote")}</p>
             <p class="fnote now mono">
               {store.release === null ? t("settings.updateDevBuild") : t("settings.updateRelease", { tag: store.release })}
             </p>
@@ -382,10 +374,7 @@
                  Off here means the app asks GitHub nothing on its own; the
                  button above keeps working either way. -->
             <div class="swrow">
-              <div class="swsays">
-                <div class="ftitle">{t("settings.updateAuto")}</div>
-                <p class="fnote">{t("settings.updateAutoNote")}</p>
-              </div>
+              <div class="ftitle grow">{t("settings.updateAuto")}</div>
               <button
                 class="toggle"
                 class:on={store.updateAuto}
@@ -404,11 +393,11 @@
                    in step, as in CrashBanner and ErrorToasts. -->
               <div class="ures" role={wrong ? "alert" : "status"} aria-live={wrong ? "assertive" : "polite"}>
                 {#if c.kind === "dev_build"}
-                  <p class="fnote warn">{t("settings.updateDevNote")}</p>
+                  <p class="fnote">{t("settings.updateDevStatus")}</p>
                 {:else if c.kind === "up_to_date"}
                   <p class="fnote ok">{t("settings.updateLatest", { tag: c.current })}</p>
                 {:else if c.kind === "ahead"}
-                  <p class="fnote">{t("settings.updateAhead", { tag: c.current, latest: c.latest })}</p>
+                  <p class="fnote">{t("settings.updateAheadStatus", { latest: c.latest })}</p>
                 {:else if c.kind === "update"}
                   <p class="fnote found">{t("settings.updateFound", { tag: c.latest, current: c.current })}</p>
                   <div class="actions">
@@ -499,13 +488,11 @@
           <div class="gtitle">{t("settings.diag")}</div>
           <div class="card pad">
             <div class="ftitle">{t("settings.logs")}</div>
-            <p class="fnote">{t("settings.logsNote")}</p>
             <div class="actions">
               <button class="btn" onclick={openLogs}>{t("settings.openLogs")}</button>
             </div>
 
             <div class="ftitle top">{t("settings.level")}</div>
-            <p class="fnote">{t("settings.levelNote")}</p>
             <div class="seg" role="radiogroup" aria-label={t("settings.level")}>
               {#each levels as l (l.id)}
                 <button class="segopt" class:on={level?.preset === l.id} role="radio" aria-checked={level?.preset === l.id} onclick={() => setLevel(l.id)}>
@@ -513,15 +500,12 @@
                 </button>
               {/each}
             </div>
-            {#if level}
-              <p class="fnote now mono">{t("settings.levelNow", { filter: level.filter, from: levelFrom(level.source) })}</p>
-            {/if}
-            {#if level && (level.preset === "debug" || level.preset === "trace")}
-              <p class="fnote warn">{t("settings.levelDebugNote")}</p>
+            {#if customLevel !== null}
+              <p class="fnote now mono">{t("settings.levelCustom", { filter: customLevel })}</p>
             {/if}
 
             <div class="ftitle top">{t("settings.report")}</div>
-            <p class="fnote">{t("settings.reportNote")}</p>
+            <p class="fnote">{t("settings.reportPaths")}</p>
             <div class="actions">
               <button class="btn" disabled={collecting} onclick={copyReport}>
                 {collecting ? t("settings.reportMaking") : t("settings.copyReport")}
@@ -676,14 +660,13 @@
     color: var(--ok);
   }
 
-  /* The filter in force, under its buttons. */
+  /* Which build this is, or which filter no preset stands for. */
   .fnote.now {
     margin: 10px 0 0;
     font-size: 11px;
     color: var(--lab);
   }
 
-  /* Turning the level up records more than the app's own lines. */
   .fnote.warn {
     margin: 8px 0 0;
     color: var(--warn);
@@ -724,15 +707,6 @@
     margin-top: 18px;
     padding-top: 16px;
     border-top: 1px solid var(--line);
-  }
-
-  .swsays {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .swsays .fnote {
-    margin-bottom: 0;
   }
 
   .toggle {
@@ -900,6 +874,7 @@
   }
 
   .kv {
+    margin-bottom: 26px;
     border: 1px solid var(--line);
     background: var(--card);
   }
@@ -951,6 +926,11 @@
 
   .ftitle.top {
     margin-top: 24px;
+  }
+
+  .ftitle + .actions,
+  .ftitle + .seg {
+    margin-top: 12px;
   }
 
   .fnote {

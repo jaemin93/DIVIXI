@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use orchestra_acp::{AgentSpec, ConfigOptionInfo};
 use orchestra_agents::{AgentKind, AgentStatus, DetectOptions, Readiness};
+use orchestra_core::path::plain;
 use orchestra_core::{AgentEnvelope, AgentEvent};
 use orchestra_store::{
     ArtifactInfo, ArtifactPatch, Decision, Routine, RoutinePatch, RoutineRun, RunSummary, SearchHit, Store, StoredEvent, TrackInfo,
@@ -226,7 +227,7 @@ fn check_patch(patch: &mut TrackPatch) -> Result<(), String> {
         }
     }
     if let Some(c) = patch.cwd.as_mut() {
-        *c = c.trim().to_string();
+        *c = plain(c.trim());
         if !std::path::Path::new(c.as_str()).is_dir() {
             return Err(format!("not a directory: {c}"));
         }
@@ -253,9 +254,11 @@ fn check_patch(patch: &mut TrackPatch) -> Result<(), String> {
 }
 
 /// Create a track. An empty working directory means the repository the app
-/// was launched from; an empty agent means Claude Code.
+/// was launched from; an empty agent means Claude Code. Told to every window
+/// and device (`track_saved`), so a track made on a phone is listed on the
+/// PC at once, and the other way round.
 #[tauri::command]
-fn create_track(state: State<'_, AppState>, mut patch: TrackPatch) -> Result<TrackInfo, String> {
+fn create_track(app: AppHandle, state: State<'_, AppState>, mut patch: TrackPatch) -> Result<TrackInfo, String> {
     if patch.cwd.as_deref().map(str::trim).unwrap_or("").is_empty() {
         patch.cwd = Some(workspace_root().display().to_string());
     }
@@ -263,16 +266,19 @@ fn create_track(state: State<'_, AppState>, mut patch: TrackPatch) -> Result<Tra
         patch.agent = Some(AgentKind::ClaudeCode.id().to_string());
     }
     check_patch(&mut patch)?;
-    state.store.create_track(&patch).map_err(|e| e.to_string())
+    let track = state.store.create_track(&patch).map_err(|e| e.to_string())?;
+    let _ = app.emit("track_saved", &track);
+    Ok(track)
 }
 
 /// Change a track: name, intent, folder, or the conductor's and sessions'
 /// agent and session options. The conductor reopens with the new options
 /// at its next message (keeping its memory); open sessions keep theirs until
 /// closed. A new folder closes every session and forgets their memory,
-/// since a session belongs to the directory it was opened in.
+/// since a session belongs to the directory it was opened in. Told to every
+/// window and device (`track_saved`), as a new track is.
 #[tauri::command]
-async fn update_track(state: State<'_, AppState>, id: String, mut patch: TrackPatch) -> Result<TrackInfo, String> {
+async fn update_track(app: AppHandle, state: State<'_, AppState>, id: String, mut patch: TrackPatch) -> Result<TrackInfo, String> {
     check_patch(&mut patch)?;
     let before = state
         .store
@@ -290,12 +296,15 @@ async fn update_track(state: State<'_, AppState>, id: String, mut patch: TrackPa
         worktree::remove_track(&state.store, &id, &workers);
         state.store.forget_track_sessions(&id).map_err(|e| e.to_string())?;
     }
-    state.store.update_track(&id, &patch).map_err(|e| e.to_string())
+    let track = state.store.update_track(&id, &patch).map_err(|e| e.to_string())?;
+    let _ = app.emit("track_saved", &track);
+    Ok(track)
 }
 
-/// Delete a track: its sessions close, its runs and memory go.
+/// Delete a track: its sessions close, its runs and memory go. Told to every
+/// window and device (`track_deleted`, the track's id), as a saved one is.
 #[tauri::command]
-async fn delete_track(state: State<'_, AppState>, id: String) -> Result<(), String> {
+async fn delete_track(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     if state.sessions.is_active(&id).await {
         return Err("the track is still working; wait for it to finish".to_string());
     }
@@ -305,7 +314,9 @@ async fn delete_track(state: State<'_, AppState>, id: String) -> Result<(), Stri
     let workers = track_workers(&state, &id);
     worktree::check_nothing_pending(&state.store, &id, &workers)?;
     worktree::remove_track(&state.store, &id, &workers);
-    state.store.delete_track(&id).map_err(|e| e.to_string())
+    state.store.delete_track(&id).map_err(|e| e.to_string())?;
+    let _ = app.emit("track_deleted", &id);
+    Ok(())
 }
 
 /// The names of a track's workers, as the store has them.
@@ -466,7 +477,8 @@ fn browse_dirs(path: Option<String>) -> Result<Dirs, String> {
         .take(5000)
         .collect();
     dirs.sort_by_key(|n| n.to_lowercase());
-    let show = |p: &std::path::Path| p.display().to_string().trim_start_matches(r"\?").to_string();
+    // Shown, and kept as a track's folder when picked: never `\\?\`.
+    let show = |p: &std::path::Path| plain(&p.display().to_string());
     Ok(Dirs { path: show(&dir), parent: dir.parent().map(show), home: show(&home), dirs })
 }
 
@@ -536,19 +548,24 @@ async fn running_routines(app: AppHandle) -> Result<Vec<String>, String> {
 }
 
 /// Save a routine. It runs alone, so it needs its own folder and agent —
-/// there is no track to borrow either from.
+/// there is no track to borrow either from. Every window and device is told
+/// (`routines`): one may have been saved on a phone.
 #[tauri::command(async)]
-fn create_routine(state: State<'_, AppState>, patch: RoutinePatch) -> Result<Routine, String> {
+fn create_routine(app: AppHandle, state: State<'_, AppState>, patch: RoutinePatch) -> Result<Routine, String> {
     check_routine(&state, &patch)?;
-    state.store.create_routine(&patch).map_err(|e| e.to_string())
+    let made = state.store.create_routine(&patch).map_err(|e| e.to_string())?;
+    let _ = routine::notify(&app);
+    Ok(made)
 }
 
 /// Rewrite a routine: its name, what it tells its agent, the folder, the
 /// agent, its options, or the track it tells when it has run.
 #[tauri::command(async)]
-fn update_routine(state: State<'_, AppState>, id: String, patch: RoutinePatch) -> Result<Routine, String> {
+fn update_routine(app: AppHandle, state: State<'_, AppState>, id: String, patch: RoutinePatch) -> Result<Routine, String> {
     check_routine(&state, &patch)?;
-    state.store.update_routine(&id, &patch).map_err(|e| e.to_string())
+    let saved = state.store.update_routine(&id, &patch).map_err(|e| e.to_string())?;
+    let _ = routine::notify(&app);
+    Ok(saved)
 }
 
 /// The agent must be one this machine has, and the folder a real directory:
@@ -568,8 +585,10 @@ fn check_routine(state: &AppState, patch: &RoutinePatch) -> Result<(), String> {
 
 /// Forget a routine, and the runs it made. Nothing else holds them.
 #[tauri::command(async)]
-fn delete_routine(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.store.delete_routine(&id).map_err(|e| e.to_string())
+fn delete_routine(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.store.delete_routine(&id).map_err(|e| e.to_string())?;
+    let _ = routine::notify(&app);
+    Ok(())
 }
 
 /// A routine's runs, newest first.
@@ -2051,5 +2070,23 @@ mod patch_tests {
         check_patch(&mut patch).unwrap();
         let after = store.update_track(&created.id, &patch).unwrap();
         assert_eq!((after.color.as_str(), after.tags.len()), ("#7aa2f7", 2));
+    }
+
+    /// A folder sent from a phone or typed in comes back without `\\?\`, and
+    /// so does every path the folder picker hands out.
+    #[test]
+    fn a_track_folder_is_kept_plain() {
+        let here = std::env::temp_dir().canonicalize().unwrap();
+        let mut patch = TrackPatch { cwd: Some(format!(" {} ", here.display())), ..Default::default() };
+        check_patch(&mut patch).unwrap();
+        let cwd = patch.cwd.unwrap();
+        assert!(!cwd.starts_with(r"\\?\"), "{cwd}");
+        assert_eq!(cwd, plain(&here.display().to_string()));
+
+        let dirs = browse_dirs(Some(here.display().to_string())).unwrap();
+        assert_eq!(dirs.path, cwd);
+        for p in [Some(dirs.path), dirs.parent, Some(dirs.home)].into_iter().flatten() {
+            assert!(!p.starts_with(r"\\?\"), "{p}");
+        }
     }
 }
