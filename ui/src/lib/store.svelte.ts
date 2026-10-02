@@ -31,6 +31,7 @@ import {
 
 import { addError, dropError, errorLife, type AppError } from "./errors";
 import { withTrack } from "./tracks";
+import { pairing, type Paired } from "./pairing.svelte";
 import { openKey, parseMemory, pruneOpen, remember, treeReply, underOpen, type WsEntry as WsEntryType } from "./fileTree";
 
 export { wasStopped, errorLife, type Queued, type AppError };
@@ -3779,6 +3780,9 @@ export async function connectEvents() {
     // card and banner are shown here only (`local`), so an instance's webview
     // has nothing to draw and does not ask for the events.
     ...(local ? [listen<UpdateProgress>("update_download", (e) => store.updateProgressed(e.payload))] : []),
+    // A device signed in with the pairing code on this PC's screen: it is
+    // spent, and the next device needs a new one.
+    ...(local ? [listen<Paired>("phone_paired", (e) => pairing.paired(e.payload))] : []),
     listen<Decision>("decision", (e) => store.upsertDecision(e.payload)),
     listen<Track>("track_saved", (e) => store.takeTrack(e.payload)),
     listen<string>("track_deleted", (e) => void store.dropTrack(e.payload)),

@@ -17,12 +17,19 @@ export function clock(seconds: number): string {
 
 /**
  * Where a code stands: `none` (nothing in hand, or one being made), `live`,
- * or `expired` — kept, not dropped, so the screen can say so and offer a new
- * one instead of looking as if it were still making one.
+ * `used` (a device signed in with it: it is good once) or `expired`. The last
+ * two are kept, not dropped, so the screen can say so and offer a new one
+ * instead of showing a dead code that looks exactly like a live one.
  */
-export type CodeState = "none" | "live" | "expired";
+export type CodeState = "none" | "live" | "used" | "expired";
 
-export function codeState(expires: number | null, now: number): CodeState {
+export function codeState(expires: number | null, now: number, used = false): CodeState {
   if (expires === null) return "none";
+  if (used) return "used";
   return secondsLeft(expires, now) > 0 ? "live" : "expired";
+}
+
+/** Whether `phone_paired` names the code on screen (`id` of `phone_pair_link`). */
+export function spends(shown: string | null | undefined, paired: string): boolean {
+  return !!shown && shown === paired;
 }

@@ -234,7 +234,16 @@ pub async fn remote_server_status(app: AppHandle) -> ServerStatus {
         all: listen_all(&app),
         addresses: addresses(),
         owner: github::owner(&st.store).unwrap_or_default(),
-        devices: st.remote.auth.devices(&st.store),
+        devices: st
+            .remote
+            .auth
+            .devices(&st.store)
+            .into_iter()
+            .map(|mut d| {
+                d.name = server::shown_name(&d.name).to_string();
+                d
+            })
+            .collect(),
     }
 }
 
@@ -537,6 +546,8 @@ pub struct PairLink {
     pub expires: i64,
     /// The span this link grants, for the sentence beside the code.
     pub days: i64,
+    /// Which link this is: what `phone_paired` names when a device spends it.
+    pub id: String,
 }
 
 /// Mint a pairing link for a phone.
@@ -557,9 +568,10 @@ pub async fn phone_pair_link(app: AppHandle) -> Result<PairLink, String> {
     let days = phone_days(&app);
     let st = app.state::<AppState>();
     let (token, expires) = st.remote.auth.pair_token(&st.store, auth::Scope::Conversation, days * 24 * 60 * 60);
+    let id = st.remote.auth.link_id(&token).unwrap_or_default();
     // The app, with the token in the query. It takes it, keeps it and
     // takes it back out of the address bar; there is no page in between.
-    Ok(PairLink { url: format!("{}/?token={token}", status.address), expires, days })
+    Ok(PairLink { url: format!("{}/?token={token}", status.address), expires, days, id })
 }
 
 /// Choose how long a phone stays signed in. Links already minted keep the

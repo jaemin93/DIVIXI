@@ -158,6 +158,13 @@ mod tests {
         assert!(matches!(hub.subscribe(0).1, CatchUp::Frames(f) if f.is_empty()), "a fresh device starts now");
     }
 
+    /// A spent pairing link is told to the window showing it, and to no device.
+    #[test]
+    fn a_spent_link_is_not_sent_to_devices() {
+        assert!(!EVENTS.contains(&super::super::server::PAIRED_EVENT));
+        assert!(!LIVE.contains(&super::super::server::PAIRED_EVENT));
+    }
+
     #[test]
     fn live_events_are_sent_not_kept() {
         let hub = Hub::default();

@@ -271,6 +271,13 @@ impl Auth {
         (self.sign(&claims), exp)
     }
 
+    /// Which pairing link a token is, while it is good: its one-time value.
+    /// The screen showing a code is told this one was spent (`phone_paired`)
+    /// and stops showing it; the value is worth nothing once spent.
+    pub fn link_id(&self, token: &str) -> Option<String> {
+        self.verify(token).filter(|c| c.k == Kind::Pair).map(|c| c.n)
+    }
+
     /// Spend a pairing link's one-time value, or say it was spent already.
     ///
     /// Kept in the store rather than in memory. A restart used to forget every
@@ -433,6 +440,37 @@ mod tests {
         assert_eq!(a.redeem(&s, "junk.token", "x", None), Err(Refused::SignIn));
         // A link is not an access token, nor the other way round.
         assert_eq!(a.check(&s, &link, None).unwrap_err(), Refused::SignIn);
+    }
+
+    /// A phone and then an iPad, one after the other: each on a code of its
+    /// own. The first code is spent by the phone, so the iPad needs the next
+    /// one, and neither device signs the other out.
+    #[test]
+    fn devices_pair_one_after_another_each_on_its_own_link() {
+        let (a, s) = auth();
+        let (first, _) = a.pair_token(&s, Scope::Conversation, 7 * 24 * 60 * 60);
+        let first_id = a.link_id(&first).unwrap();
+        let (phone, _) = a.redeem(&s, &first, "iPhone", None).unwrap();
+        assert_eq!(a.redeem(&s, &first, "iPad", None), Err(Refused::SignIn), "the phone spent it");
+
+        let (second, _) = a.pair_token(&s, Scope::Conversation, 7 * 24 * 60 * 60);
+        assert_ne!(a.link_id(&second).unwrap(), first_id, "each code is told apart");
+        let (ipad, _) = a.redeem(&s, &second, "iPad", None).unwrap();
+
+        assert_eq!(a.check(&s, &phone, None).unwrap().name, "iPhone");
+        assert_eq!(a.check(&s, &ipad, None).unwrap().name, "iPad");
+        assert_eq!(a.devices(&s).len(), 2);
+    }
+
+    #[test]
+    fn a_link_id_is_only_a_pairing_links() {
+        let (a, s) = auth();
+        let (link, _) = a.pair_token(&s, Scope::Conversation, REFRESH_SECS);
+        assert_eq!(a.link_id(&link).map(|id| id.len()), Some(32));
+        let (access, refresh) = a.redeem(&s, &link, "Phone", None).unwrap();
+        assert_eq!(a.link_id(&access), None);
+        assert_eq!(a.link_id(&refresh), None);
+        assert_eq!(a.link_id("junk.token"), None);
     }
 
     #[test]
