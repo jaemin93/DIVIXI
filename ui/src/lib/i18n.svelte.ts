@@ -329,6 +329,7 @@ const ko = {
   "design.arrowTo": "화살표: 이어질 항목을 누르세요",
   "design.chatEmpty": "보드에 그리고 쓰면서 에이전트와 이야기하세요. 메시지마다 보드 개요와 그림이 함께 갑니다.",
   "design.placeholder": "디자인 에이전트에게 메시지… (/command)",
+  "design.placeholderShort": "디자인 에이전트에게 메시지",
   "design.pending": "제안 {n}건",
   "design.keepAll": "모두 유지",
   "design.revertAll": "모두 되돌리기",
@@ -372,6 +373,7 @@ const ko = {
   // Working-folder panel
   "ws.width": "패널 너비",
   "ws.toggle": "작업 폴더 패널",
+  "ws.closePanel": "작업 폴더 패널 닫기",
   "ws.changes": "변경 사항",
   "ws.files": "파일",
   "ws.refresh": "새로 고침",
@@ -653,6 +655,7 @@ const ko = {
 
   // Composer
   "composer.placeholder": "지휘자에게 메시지… (/명령 @파일 @kb 지식)",
+  "composer.placeholderShort": "지휘자에게 메시지",
   "composer.add": "첨부",
   "composer.upload": "파일 업로드",
   "composer.attachDesign": "디자인 첨부",
@@ -674,6 +677,7 @@ const ko = {
   "composer.commands": "명령",
   "composer.opening": "지휘자 세션을 여는 중…",
   "composer.queueing": "지휘자가 응답 중 — 보내면 줄을 서고, 끝나면 자동으로 갑니다",
+  "composer.queueingShort": "응답 중 — 보내면 줄을 섭니다",
   "composer.queueTitle": "대기열에 넣기 (턴이 끝나면 자동 전송)",
   "composer.send": "보내기",
   "composer.stop": "중지",
@@ -1291,6 +1295,7 @@ const en: Record<Key, string> = {
   "design.arrowTo": "Arrow: click where it goes",
   "design.chatEmpty": "Talk with the agent while you draw and write. Every message brings the board's outline and picture.",
   "design.placeholder": "Message the design agent… (/command)",
+  "design.placeholderShort": "Message the design agent",
   "design.pending": "{n} suggestion(s)",
   "design.keepAll": "Keep all",
   "design.revertAll": "Revert all",
@@ -1333,6 +1338,7 @@ const en: Record<Key, string> = {
   // Working-folder panel
   "ws.width": "Panel width",
   "ws.toggle": "Working folder panel",
+  "ws.closePanel": "Close the working folder panel",
   "ws.changes": "Changes",
   "ws.files": "Files",
   "ws.refresh": "Refresh",
@@ -1613,6 +1619,7 @@ const en: Record<Key, string> = {
   "ws.large": "Too large to show",
 
   "composer.placeholder": "Message the conductor… (/command @file @kb knowledge)",
+  "composer.placeholderShort": "Message the conductor",
   "composer.add": "Attach",
   "composer.upload": "Upload files",
   "composer.attachDesign": "Attach a design",
@@ -1634,6 +1641,7 @@ const en: Record<Key, string> = {
   "composer.commands": "Commands",
   "composer.opening": "Opening the conductor session…",
   "composer.queueing": "The conductor is responding — what you send waits its turn and goes on its own",
+  "composer.queueingShort": "Responding — sends wait their turn",
   "composer.queueTitle": "Put it in the line (it goes when the turn ends)",
   "composer.send": "Send",
   "composer.stop": "Stop",

@@ -273,6 +273,10 @@
     <button class="tab icon" title={t("ws.refresh")} disabled={store.treeLoading || store.gitLoading} onclick={() => store.refreshWorkspace()}>
       <Icon name="refresh" size={14} />
     </button>
+    <!-- A phone: the panel is the whole screen, so it closes from here. -->
+    <button class="tab icon closepanel" title={t("ws.closePanel")} aria-label={t("ws.closePanel")} onclick={() => store.setPanel(false)}>
+      <Icon name="close" size={14} />
+    </button>
   </div>
 
   {#if store.panelTab === "changes"}
@@ -1094,5 +1098,71 @@
     color: var(--warn);
     background: var(--warnbg);
     border-bottom: 1px solid var(--warnln);
+  }
+
+  .closepanel {
+    display: none;
+  }
+
+  /* A phone: no room beside the conversation, so the panel covers the screen
+     (the strip above the soft keyboard, as the shell does) and a file is read
+     at the screen's width. Its width from the desktop does not apply, nor the
+     handle that sets it. */
+  @media (max-width: 640px) {
+    aside {
+      position: fixed;
+      left: 0;
+      right: 0;
+      top: var(--vvtop, 0px);
+      height: var(--vvh, 100dvh);
+      width: auto !important;
+      z-index: 30;
+      border-left: 0;
+    }
+
+    aside > :global([role="separator"]) {
+      display: none;
+    }
+
+    .tabs {
+      height: 44px;
+      padding-left: 0;
+    }
+
+    .tab.icon {
+      width: 44px;
+    }
+
+    .closepanel {
+      display: flex;
+    }
+
+    .tab.file {
+      max-width: 140px;
+    }
+
+    .filehead {
+      height: 44px;
+    }
+
+    .filehead .btn.sm {
+      height: 36px;
+    }
+
+    .mdwrap {
+      padding: 14px 16px 24px;
+    }
+
+    .imgwrap {
+      padding: 12px;
+    }
+
+    .drawer {
+      width: 86%;
+    }
+
+    .node {
+      height: 40px;
+    }
   }
 </style>

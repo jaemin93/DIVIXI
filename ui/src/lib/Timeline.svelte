@@ -478,6 +478,13 @@
     padding: 24px 34px 28px;
   }
 
+  /* A phone: the conversation takes the width the margins were using. */
+  @media (max-width: 640px) {
+    .scroll {
+      padding: 12px 12px 16px;
+    }
+  }
+
   /* The "jump to newest" button floats over the foot of the conversation,
      clear of the composer below it. */
   .jump {
@@ -502,6 +509,12 @@
 
   .jump:hover {
     background: var(--sel);
+  }
+
+  @media (max-width: 640px) {
+    .jump {
+      right: 12px;
+    }
   }
 
   .jarrow {
