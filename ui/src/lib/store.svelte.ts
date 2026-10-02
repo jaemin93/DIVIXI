@@ -31,6 +31,7 @@ import {
 
 import { addError, dropError, errorLife, type AppError } from "./errors";
 import { withTrack } from "./tracks";
+import { keepsSetting } from "./layoutSettings";
 import { pairing, type Paired } from "./pairing.svelte";
 import { openKey, parseMemory, pruneOpen, remember, treeReply, underOpen, type WsEntry as WsEntryType } from "./fileTree";
 
@@ -896,6 +897,7 @@ class Store {
 
   async setDesignList(open: boolean) {
     this.designListOpen = open;
+    if (!this.keeps("designlist")) return;
     try {
       await invoke("set_setting", { key: "designlist", value: open ? "open" : "closed" });
     } catch (err) {
@@ -1025,7 +1027,13 @@ class Store {
   /** The file whose close was asked while it had unsaved edits; a second close discards. */
   closeAsked = $state("");
 
+  /** Whether this window writes a setting: its layout only on this PC's own Divixi (`layoutSettings`). */
+  private keeps(key: string): boolean {
+    return keepsSetting(key, local);
+  }
+
   private persistWidth(key: string, value: number) {
+    if (!this.keeps(key)) return;
     invoke("set_setting", { key, value: String(value) }).catch((err) => {
       this.lastError = String(err);
     });
@@ -1069,10 +1077,11 @@ class Store {
     if (persist) this.persistWidth("panel_width", this.panelWidth);
   }
 
-  /** Show or hide the side panel; persisted. Opening refreshes it. */
+  /** Show or hide the side panel; persisted on this PC's own Divixi. Opening refreshes it. */
   async setPanel(open: boolean) {
     this.panelOpen = open;
     if (open) void this.refreshWorkspace();
+    if (!this.keeps("panel")) return;
     try {
       await invoke("set_setting", { key: "panel", value: open ? "open" : "closed" });
     } catch (err) {
@@ -1099,10 +1108,12 @@ class Store {
   setHeaderFolded(track: string, folded: boolean) {
     const { [track]: _was, ...rest } = this.headerFolded;
     this.headerFolded = folded ? { ...rest, [track]: true } : rest;
+    if (!this.keeps(HEADERS_SETTING)) return;
     invoke("set_setting", { key: HEADERS_SETTING, value: JSON.stringify(this.headerFolded) }).catch(tracing);
   }
 
   private async restoreHeaders() {
+    if (!this.keeps(HEADERS_SETTING)) return;
     try {
       const raw = await invoke<string | null>("get_setting", { key: HEADERS_SETTING });
       const parsed: unknown = raw ? JSON.parse(raw) : {};
@@ -1156,10 +1167,12 @@ class Store {
     const key = this.wsKey;
     if (!key) return;
     this.wsOpen = remember(this.wsOpen, key, open, new Set(this.tracks.map((tr) => tr.id)));
+    if (!this.keeps(WS_OPEN_SETTING)) return;
     invoke("set_setting", { key: WS_OPEN_SETTING, value: JSON.stringify(this.wsOpen) }).catch(tracing);
   }
 
   private async restoreWsOpen() {
+    if (!this.keeps(WS_OPEN_SETTING)) return;
     try {
       this.wsOpen = parseMemory(await invoke<string | null>("get_setting", { key: WS_OPEN_SETTING }));
     } catch (err) {
@@ -1692,6 +1705,7 @@ class Store {
   /** Change part of the list's filter; persisted. */
   async setTrackFilter(patch: Partial<TrackFilter>) {
     this.trackFilter = { ...this.trackFilter, ...patch };
+    if (!this.keeps("tracks_filter")) return;
     try {
       await invoke("set_setting", { key: "tracks_filter", value: JSON.stringify(this.trackFilter) });
     } catch (err) {
@@ -2450,6 +2464,7 @@ class Store {
       void this.refreshWorkerSessions();
     }
     if (this.readyAgents.some((a) => a.kind === track.agent)) this.agent = track.agent as AgentId;
+    if (!this.keeps("track")) return;
     try {
       await invoke("set_setting", { key: "track", value: id });
     } catch (err) {
@@ -2632,6 +2647,7 @@ class Store {
   /** Fold or unfold the rail; persisted. */
   async setRail(collapsed: boolean) {
     this.railCollapsed = collapsed;
+    if (!this.keeps("rail")) return;
     try {
       await invoke("set_setting", { key: "rail", value: collapsed ? "collapsed" : "expanded" });
     } catch (err) {
@@ -2692,6 +2708,7 @@ class Store {
   async setUiFont(font: UiFont) {
     this.uiFont = font;
     document.documentElement.dataset.uiFont = font;
+    if (!this.keeps("ui_font")) return;
     try {
       await invoke("set_setting", { key: "ui_font", value: font });
     } catch (err) {
@@ -2712,7 +2729,7 @@ class Store {
     } catch {
       (document.documentElement.style as unknown as { zoom: string }).zoom = `${z}%`;
     }
-    if (!persist) return;
+    if (!persist || !this.keeps("zoom")) return;
     try {
       await invoke("set_setting", { key: "zoom", value: String(z) });
     } catch (err) {
@@ -2724,6 +2741,7 @@ class Store {
   async setChatFont(size: ChatFont) {
     this.chatFont = size;
     document.documentElement.dataset.chatFont = size;
+    if (!this.keeps("chat_font")) return;
     try {
       await invoke("set_setting", { key: "chat_font", value: size });
     } catch (err) {
@@ -2738,7 +2756,7 @@ class Store {
     if (open) this.termMounted = true;
     // The setting is the PC's window's: a phone opening a shell does not open
     // one there the next time, nor the other way round.
-    if (!inTauri) return;
+    if (!this.keeps("terminal")) return;
     try {
       await invoke("set_setting", { key: "terminal", value: open ? "open" : "closed" });
     } catch (err) {
@@ -2754,6 +2772,7 @@ class Store {
 
   async setTrackList(open: boolean) {
     this.trackListOpen = open;
+    if (!this.keeps("tracklist")) return;
     try {
       await invoke("set_setting", { key: "tracklist", value: open ? "open" : "closed" });
     } catch (err) {
@@ -2766,29 +2785,32 @@ class Store {
     scheme?.addEventListener("change", () => {
       if (this.themePref === "system") this.applyTheme();
     });
+    // A setting this window does not keep (another device's view of the PC's
+    // layout) is not read either: it starts from the defaults.
+    const setting = (key: string) => (this.keeps(key) ? invoke<string | null>("get_setting", { key }) : Promise.resolve(null));
     try {
       const [summaries, tracks, savedTrack, agents, theme, rail, tracklist, chatFont, panelWidth, railWidth, trackListWidth, uiFont, zoom, language, panel, tagsJson, ...commandJson] =
         await Promise.all([
         invoke<RunSummary[]>("list_runs"),
         invoke<Track[]>("list_tracks"),
-        invoke<string | null>("get_setting", { key: "track" }),
+        setting("track"),
         invoke<AgentStatus[] | null>("agent_statuses"),
-        invoke<string | null>("get_setting", { key: "theme" }),
-        invoke<string | null>("get_setting", { key: "rail" }),
-        invoke<string | null>("get_setting", { key: "tracklist" }),
-        invoke<string | null>("get_setting", { key: "chat_font" }),
-        invoke<string | null>("get_setting", { key: "panel_width" }),
-        invoke<string | null>("get_setting", { key: "rail_width" }),
-        invoke<string | null>("get_setting", { key: "tracklist_width" }),
-        invoke<string | null>("get_setting", { key: "ui_font" }),
-        invoke<string | null>("get_setting", { key: "zoom" }),
-        invoke<string | null>("get_setting", { key: "language" }),
-        invoke<string | null>("get_setting", { key: "panel" }),
-        invoke<string | null>("get_setting", { key: "tags" }),
-        ...AGENT_IDS.map((id) => invoke<string | null>("get_setting", { key: `commands:${id}` })),
+        setting("theme"),
+        setting("rail"),
+        setting("tracklist"),
+        setting("chat_font"),
+        setting("panel_width"),
+        setting("rail_width"),
+        setting("tracklist_width"),
+        setting("ui_font"),
+        setting("zoom"),
+        setting("language"),
+        setting("panel"),
+        setting("tags"),
+        ...AGENT_IDS.map((id) => setting(`commands:${id}`)),
       ]);
       try {
-        const saved = await invoke<string | null>("get_setting", { key: "tracks_filter" });
+        const saved = await setting("tracks_filter");
         if (saved) this.trackFilter = { ...DEFAULT_TRACK_FILTER, ...(JSON.parse(saved) as Partial<TrackFilter>) };
       } catch {
         this.trackFilter = { ...DEFAULT_TRACK_FILTER };
@@ -2852,13 +2874,13 @@ class Store {
       }
       try {
         const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineListWidth] = await Promise.all([
-          invoke<string | null>("get_setting", { key: "terminal" }),
-          invoke<string | null>("get_setting", { key: "terminal_height" }),
-          invoke<string | null>("get_setting", { key: "artifact_chat_width" }),
-          invoke<string | null>("get_setting", { key: "designlist" }),
-          invoke<string | null>("get_setting", { key: "designlist_width" }),
-          invoke<string | null>("get_setting", { key: "settings_nav_width" }),
-          invoke<string | null>("get_setting", { key: "routinelist_width" }),
+          setting("terminal"),
+          setting("terminal_height"),
+          setting("artifact_chat_width"),
+          setting("designlist"),
+          setting("designlist_width"),
+          setting("settings_nav_width"),
+          setting("routinelist_width"),
         ]);
         const dc = Number(artifactChat);
         if (Number.isFinite(dc) && dc > 0) this.setArtifactChatWidth(dc);
@@ -2871,7 +2893,7 @@ class Store {
         this.designListOpen = designList !== "closed";
         const h = Number(termHeight);
         if (Number.isFinite(h) && h > 0) this.setTermHeight(h);
-        if (term === "open" && inTauri) void this.setTerminal(true);
+        if (term === "open") void this.setTerminal(true);
       } catch {
         // Defaults are fine.
       }
