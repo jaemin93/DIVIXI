@@ -258,7 +258,7 @@ fn check_patch(patch: &mut TrackPatch) -> Result<(), String> {
 /// and device (`track_saved`), so a track made on a phone is listed on the
 /// PC at once, and the other way round.
 #[tauri::command]
-fn create_track(app: tauri::AppHandle, state: State<'_, AppState>, mut patch: TrackPatch) -> Result<TrackInfo, String> {
+fn create_track(app: AppHandle, state: State<'_, AppState>, mut patch: TrackPatch) -> Result<TrackInfo, String> {
     if patch.cwd.as_deref().map(str::trim).unwrap_or("").is_empty() {
         patch.cwd = Some(workspace_root().display().to_string());
     }
@@ -278,7 +278,7 @@ fn create_track(app: tauri::AppHandle, state: State<'_, AppState>, mut patch: Tr
 /// since a session belongs to the directory it was opened in. Told to every
 /// window and device (`track_saved`), as a new track is.
 #[tauri::command]
-async fn update_track(app: tauri::AppHandle, state: State<'_, AppState>, id: String, mut patch: TrackPatch) -> Result<TrackInfo, String> {
+async fn update_track(app: AppHandle, state: State<'_, AppState>, id: String, mut patch: TrackPatch) -> Result<TrackInfo, String> {
     check_patch(&mut patch)?;
     let before = state
         .store
@@ -304,7 +304,7 @@ async fn update_track(app: tauri::AppHandle, state: State<'_, AppState>, id: Str
 /// Delete a track: its sessions close, its runs and memory go. Told to every
 /// window and device (`track_deleted`, the track's id), as a saved one is.
 #[tauri::command]
-async fn delete_track(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+async fn delete_track(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     if state.sessions.is_active(&id).await {
         return Err("the track is still working; wait for it to finish".to_string());
     }
