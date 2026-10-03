@@ -72,6 +72,10 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "s
 base64 = "0.23.1"
 imagesize = "0.15"
 
+[target.'cfg(windows)'.dependencies]
+# The terminal's PATH, read from the registry as Windows keeps it (src/windows_path.rs).
+winreg = "0.56.0"
+
 [dev-dependencies]
 # A mock app for the remote bridge's tests.
 tauri = { version = "2", features = ["tray-icon", "unstable", "test"] }

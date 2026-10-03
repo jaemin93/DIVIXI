@@ -48,6 +48,8 @@ mod routine;
 #[cfg(all(target_os = "macos", not(feature = "server")))]
 mod shell_path;
 mod terminal;
+#[cfg(windows)]
+mod windows_path;
 mod remote;
 mod update;
 mod workspace;
