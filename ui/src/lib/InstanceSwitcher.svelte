@@ -17,8 +17,10 @@
    * and the list is read again every 10 s besides. An instance built from
    * other code than this app is marked: its commands may not match.
    *
-   * The order is the human's: drag a row's handle in the menu, or Alt with
-   * an arrow key while it has the focus. Local is one of the list and can
+   * The order is the human's: drag a row in the menu, or Alt with an arrow
+   * key while it has the focus. The drag is pointer events, not HTML drag
+   * and drop: the window takes native drags for dropping files (Board,
+   * Composer), and on Windows that leaves none for the page. Local is one of the list and can
    * sit anywhere; the one on screen is only lit, never moved to the front.
    * See instanceOrder.ts for the rules — the order is this PC's
    * (localStorage, shared by every webview of the app and kept in step
@@ -74,9 +76,18 @@
   let hosts = $state<Host[]>([]);
   let saved = $state<InstanceRef[]>(adopt());
   let el = $state<HTMLDivElement>();
+  let menu = $state<HTMLDivElement>();
   /** The row a drag started from, and the gap it would land in; -1 is none. */
   let from = $state(-1);
   let gap = $state(-1);
+  /** A button held on a row, not yet moved far enough to be a drag. */
+  let press: { i: number; x: number; y: number } | null = null;
+  /** A drag just ended: the click it ends in is not a pick. */
+  let dragged = false;
+  /** How far the pointer goes before a press is a drag rather than a click. */
+  const SLOP = 4;
+  /** The gap the line is drawn in: none where the drop would change nothing. */
+  const mark = $derived(gap >= 0 && gap !== from && gap !== from + 1 ? gap : -1);
   /** The last move, for a screen reader to say. */
   let moved = $state("");
 
@@ -127,6 +138,7 @@
     return () => {
       clearInterval(every);
       window.removeEventListener("storage", onStorage);
+      dragEnd();
       void stop.then((f) => f());
     };
   });
@@ -150,36 +162,58 @@
     moved = t("instances.movedTo", { name: nameOf(what), at: list.indexOf(what) + 1, total: list.length });
   }
 
-  function dragStart(i: number, e: DragEvent) {
-    from = i;
-    gap = -1;
-    if (!e.dataTransfer) return;
-    e.dataTransfer.effectAllowed = "move";
-    // Some webviews start no drag at all unless something is on it.
-    e.dataTransfer.setData("text/plain", String(i));
-    // Drag the whole row, not the handle alone.
-    const row = (e.currentTarget as HTMLElement).closest(".row");
-    if (row) e.dataTransfer.setDragImage(row, 16, row.clientHeight / 2);
+  function onRowDown(i: number, e: PointerEvent) {
+    if (e.button !== 0) return;
+    press = { i, x: e.clientX, y: e.clientY };
+    window.addEventListener("pointermove", onDragMove);
+    window.addEventListener("pointerup", onDragUp);
+    window.addEventListener("pointercancel", dragEnd);
   }
 
-  function dragOver(i: number, e: DragEvent) {
-    if (from < 0) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-    // The nearer half of the row says which side of it the drop goes.
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    gap = e.clientY < r.top + r.height / 2 ? i : i + 1;
+  /** The gap under the pointer: the nearer half of a row says which side. */
+  function gapAt(y: number): number {
+    const rows = menu?.querySelectorAll<HTMLElement>(".row") ?? [];
+    for (let k = 0; k < rows.length; k++) {
+      const r = rows[k].getBoundingClientRect();
+      if (y < r.top + r.height / 2) return k;
+    }
+    return rows.length;
   }
 
-  function drop(e: DragEvent) {
-    e.preventDefault();
-    if (from >= 0 && gap >= 0) settle(move(order, from, gap), order[from]);
+  function onDragMove(e: PointerEvent) {
+    if (!press) return;
+    if (from < 0) {
+      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < SLOP) return;
+      from = press.i;
+    }
+    gap = gapAt(e.clientY);
+  }
+
+  function onDragUp() {
+    if (from >= 0) {
+      dragged = true;
+      // Released off any button, no click comes to clear it.
+      setTimeout(() => (dragged = false));
+      if (gap >= 0) settle(move(order, from, gap), order[from]);
+    }
     dragEnd();
   }
 
   function dragEnd() {
+    press = null;
     from = -1;
     gap = -1;
+    window.removeEventListener("pointermove", onDragMove);
+    window.removeEventListener("pointerup", onDragUp);
+    window.removeEventListener("pointercancel", dragEnd);
+  }
+
+  /** The click a drag ends in, swallowed before it reaches a row. */
+  function onMenuClick(e: MouseEvent) {
+    if (!dragged) return;
+    dragged = false;
+    e.preventDefault();
+    e.stopPropagation();
   }
 
   /** Alt with an arrow key on a row: the same move, without dragging. */
@@ -212,7 +246,10 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (open && e.key === "Escape") open = false;
+    if (!open || e.key !== "Escape") return;
+    // Escape during a drag puts the row back; the menu stays.
+    if (press) dragEnd();
+    else open = false;
   }
 </script>
 
@@ -239,28 +276,24 @@
   </button>
 
   {#if open}
-    <div class="menu" role="menu" aria-label={t("instances.all")}>
+    <div class="menu" class:dragging={from >= 0} role="menu" tabindex="-1" aria-label={t("instances.all")} bind:this={menu} onclickcapture={onMenuClick}>
       {#each order as c, i (c ?? "local")}
         {@const h = c ? hosts.find((x) => x.id === c) : undefined}
         <div
           class="row"
           class:on={c === instanceId}
           class:lift={from === i}
-          class:above={gap === i}
-          class:below={gap === order.length && i === order.length - 1}
+          class:above={mark === i}
+          class:below={mark === order.length && i === order.length - 1}
           role="none"
-          ondragover={(e) => dragOver(i, e)}
-          ondrop={drop}
+          onpointerdown={(e) => onRowDown(i, e)}
         >
           <button
             class="grip"
             role="menuitem"
-            draggable="true"
             aria-label={t("instances.reorder", { name: nameOf(c), at: i + 1, total: order.length })}
             aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
             title={t("instances.reorderHint")}
-            ondragstart={(e) => dragStart(i, e)}
-            ondragend={dragEnd}
             onkeydown={(e) => onRowKey(i, e)}
           >
             <svg width="10" height="12" viewBox="0 0 10 12" aria-hidden="true" fill="currentColor" stroke="none">
@@ -443,6 +476,21 @@
      it would drop into. */
   .row.lift {
     opacity: 0.4;
+  }
+
+  /* No text gets selected on the way, and the whole menu says "moving". */
+  .menu.dragging {
+    user-select: none;
+    cursor: grabbing;
+  }
+
+  .menu.dragging .row:hover {
+    background: transparent;
+  }
+
+  .menu.dragging .item,
+  .menu.dragging .grip {
+    cursor: grabbing;
   }
 
   .row.above {
