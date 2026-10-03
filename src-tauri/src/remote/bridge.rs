@@ -71,6 +71,7 @@ pub const ALLOWED: &[&str] = &[
     "knowledge_items",
     "knowledge_graph",
     "knowledge_entity_items",
+    "knowledge_query_entities",
     "knowledge_stats",
     "knowledge_overlaps",
     "knowledge_formats",

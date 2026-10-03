@@ -43,6 +43,8 @@ export type KNode = { id: number; name: string; kind: string; description: strin
 export type KEdge = { source: number; target: number; kind: string };
 export type KGraph = { nodes: KNode[]; edges: KEdge[] };
 export type KStats = { sources: number; items: number; entities: number; relations: number };
+/** Mirrors `store::QueryEntities`: what a search reaches in the graph. */
+export type KQueryEntities = { seeds: number[]; related: number[] };
 
 export type KTab = "list" | "graph" | "sources";
 
@@ -80,6 +82,8 @@ class Knowledge {
   query = $state("");
   /** The query the items shown answer ("" for the plain list). */
   shownQuery = $state("");
+  /** The entities `shownQuery` reaches: named by it, and within two relations. */
+  queryEntities = $state<KQueryEntities>({ seeds: [], related: [] });
   category = $state("");
   sourceFilter = $state("");
   loading = $state(false);
@@ -168,11 +172,26 @@ class Knowledge {
       if (seq !== this.searchSeq) return;
       this.items = items;
       this.shownQuery = query.trim();
+      void this.loadQueryEntities(seq);
     } catch (err) {
       if (seq === this.searchSeq) store.lastError = String(err);
     } finally {
       if (seq === this.searchSeq) this.loading = false;
     }
+  }
+
+  /** What the shown query reaches in the graph, for the graph view to light. */
+  private async loadQueryEntities(seq: number) {
+    const query = this.shownQuery;
+    let found: KQueryEntities = { seeds: [], related: [] };
+    if (query) {
+      try {
+        found = await invoke<KQueryEntities>("knowledge_query_entities", { query });
+      } catch {
+        // Cosmetic: the graph shows the query unlit.
+      }
+    }
+    if (seq === this.searchSeq) this.queryEntities = found;
   }
 
   async loadGraph() {
