@@ -179,7 +179,7 @@
     </div>
 
     <div class="body">
-      <p class="blurb">{t(STEP_BLURB[s.step])}</p>
+      <p class="blurb">{t(s.step === "publish" && s.serve.https === 8443 ? "phone.step.publishAlt" : STEP_BLURB[s.step])}</p>
 
       <!-- The daemon's own words, whenever it said anything. Our step is a
            classification; this is what Tailscale actually reported. -->

@@ -395,7 +395,7 @@ pub async fn probe() -> Probe {
         return Probe {
             stopped: true,
             logged_in: true,
-            detail: "Tailscale is stopped, so this machine is not on its tailnet.".into(),
+            detail: "Tailscale is stopped.".into(),
             ..base
         };
     }
@@ -428,7 +428,7 @@ pub async fn probe() -> Probe {
         .unwrap_or_default();
     if name.is_empty() {
         return Probe {
-            detail: "Signed in, but this machine has no MagicDNS name — MagicDNS may be off for this tailnet.".into(),
+            detail: "This machine has no MagicDNS name.".into(),
             ..base
         };
     }
@@ -702,7 +702,7 @@ fn choose(main: ServeState, alt: ServeState) -> ServeState {
         return main;
     }
     if alt.published == Some(false) && alt.port_free == Some(true) {
-        return ServeState { detail: format!("{} Divixi goes on port {SERVE_PORT_ALT} beside it.", main.detail), taken: true, ..alt };
+        return ServeState { detail: format!("{} Port {SERVE_PORT_ALT} is free.", main.detail), taken: true, ..alt };
     }
     main
 }
@@ -849,7 +849,7 @@ pub async fn publish(port: u16) -> Outcome {
         return Outcome::bad(
             Code::NotOurs,
             format!(
-                "{} Divixi will not publish over it, because `tailscale serve` replaces whatever is at {https}{SERVE_MOUNT} and this check could not confirm it is free.",
+                "{} Nothing was published.",
                 state.detail,
             ),
         );
@@ -894,7 +894,7 @@ async fn write(port: u16, https: u16) -> Outcome {
             // waiting for it, so the captured output carries the one thing
             // needed and a bare "timed out" would hide it.
             let mut detail = format!(
-                "Tailscale did not answer within {}s. It may still have applied — press Check again before retrying.",
+                "Tailscale did not answer within {}s.",
                 WRITE_TIMEOUT.as_secs()
             );
             let words = said(&out, &err);
