@@ -36,6 +36,16 @@
   --sel: #151515;
   --sb: #242424;
   --focus: #f0eeeb;
+
+  /* The knowledge graph, drawn as a plate: paper, a faint grid, hairline
+     edges, one red for what matters (the hub, the picked entity). */
+  --kg-paper: #0d0d0c;
+  --kg-grid: #151514;
+  --kg-grid2: #1c1b1a;
+  --kg-edge: #363431;
+  --kg-edge-acc: #5a2420;
+  --kg-node: #c9c7c4;
+  --kg-acc: #e03127;
 }
 
 .lt {
@@ -73,6 +83,14 @@
   --sel: #eae7e1;
   --sb: #d3cfc7;
   --focus: #0e0d0c;
+
+  --kg-paper: #f3f1ed;
+  --kg-grid: #ebe8e2;
+  --kg-grid2: #e1ddd6;
+  --kg-edge: #c2bdb4;
+  --kg-edge-acc: #dbb2ad;
+  --kg-node: #35332f;
+  --kg-acc: #8f1d16;
 }
 
 :root {
