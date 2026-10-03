@@ -41,6 +41,28 @@
   /** Where the pointer is, in world units, for the coordinate readout. */
   let pointer: { x: number; y: number } | null = null;
 
+  /**
+   * The overview rail's current section: "*" for the whole plate, an
+   * entity kind for that kind's nodes, null once nothing has been chosen.
+   * A kind keeps its nodes in full ink and fades the rest.
+   */
+  let section = $state<string | null>(null);
+  /** The entities the shown search reaches; empty when there is no query or it names none. */
+  const queried = $derived(new Set(kb.shownQuery ? kb.queryEntities.related : []));
+  const seeded = $derived(new Set(kb.shownQuery ? kb.queryEntities.seeds : []));
+  /** Documents the shown search found passages in. */
+  const querySources = $derived(new Set(kb.items.map((i) => i.source_id)).size);
+
+  $effect(() => {
+    // A new query lights other nodes: draw again.
+    void queried;
+    kick();
+  });
+
+  /** A camera move in progress, eased from one view to another. */
+  let glide: { from: typeof view; to: typeof view; t0: number } | null = null;
+  const GLIDE_MS = 420;
+
   function build() {
     const g = kb.graph;
     const old = new Map(bodies.map((b) => [b.node.id, b]));
@@ -80,6 +102,8 @@
     }
     if (hubLinks < 3) hub = null;
     if (hovered && !bodies.includes(hovered)) hovered = null;
+    // A reload may take the chosen kind away.
+    if (section && section !== "*" && !g.nodes.some((n) => n.kind === section)) section = null;
     heat = 1;
     kick();
   }
@@ -103,6 +127,12 @@
   /** Start drawing again (the layout or the view changed). */
   function kick() {
     if (frame || !canvas) return;
+    readInk();
+    frame = requestAnimationFrame(loop);
+  }
+
+  function readInk() {
+    if (!canvas) return;
     const styles = getComputedStyle(canvas);
     const v = (name: string, fallback: string) => styles.getPropertyValue(name).trim() || fallback;
     ink = {
@@ -117,7 +147,6 @@
       meta: v("--lab", ink.meta),
       mono: v("--mono", ink.mono),
     };
-    frame = requestAnimationFrame(loop);
   }
 
   function step() {
@@ -198,6 +227,11 @@
     (ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = `${px}px`;
   }
 
+  /** A graph this small labels every node it has room for, not just the often mentioned. */
+  const SMALL_GRAPH = 40;
+  /** Characters a label shows before it is cut short. */
+  const LABEL_MAX = 28;
+
   /** The hub ring's radius on screen at zoom k. */
   const ringOf = (k: number) => 14 * Math.min(1.4, Math.max(0.8, k));
 
@@ -249,6 +283,19 @@
 
     const pick = picked ? bodies.find((b) => b.node.id === picked!.id) : undefined;
     const lit = (b: Body) => b === pick || b === hovered;
+    // Two things fade a node: the overview rail's kind, and the shown query.
+    // The query is the question asked, so it outranks the rail: a node the
+    // query reaches stays half-inked outside the chosen kind, and one it
+    // does not reach fades furthest whatever kind it is.
+    const focus = section && section !== "*" ? section : null;
+    const asked = queried.size > 0;
+    const ink1 = (b: Body): number => {
+      if (lit(b)) return 1;
+      const inKind = !focus || b.node.kind === focus;
+      if (asked && !queried.has(b.node.id)) return 0.16;
+      return inKind ? 1 : asked ? 0.45 : 0.25;
+    };
+    const faded = (b: Body) => ink1(b) < 1;
     const size = (b: Body) => Math.max(2.5, b.r * Math.min(1.6, Math.max(0.7, k)));
 
     // The hub's orbit: a dotted ring at the mean distance of its neighbours.
@@ -275,17 +322,21 @@
     const plain: typeof links = [];
     const warm: typeof links = [];
     const hot: typeof links = [];
+    const dim: typeof links = [];
     for (const l of links) {
       if (lit(l.a) || lit(l.b)) hot.push(l);
-      else if (l.a === hub || l.b === hub) warm.push(l);
+      else if (faded(l.a) || faded(l.b)) dim.push(l);
+      else if (asked || l.a === hub || l.b === hub) warm.push(l);
       else plain.push(l);
     }
-    for (const [set, color, width] of [
-      [plain, ink.edge, 0.75],
-      [warm, ink.edgeAcc, 0.9],
-      [hot, ink.acc, 1],
+    for (const [set, color, width, alpha] of [
+      [dim, ink.edge, 0.75, 0.35],
+      [plain, ink.edge, 0.75, 1],
+      [warm, ink.edgeAcc, 0.9, 1],
+      [hot, ink.acc, 1, 1],
     ] as const) {
       if (!set.length) continue;
+      ctx.globalAlpha = alpha;
       ctx.strokeStyle = color;
       ctx.lineWidth = width;
       ctx.beginPath();
@@ -295,6 +346,7 @@
       }
       ctx.stroke();
     }
+    ctx.globalAlpha = 1;
 
     // Markers: hollow on paper, solid for the filled kinds, red when lit.
     ctx.lineWidth = 1;
@@ -306,21 +358,26 @@
       const y = snap(sy(b.y));
       const on = lit(b);
       const solid = g === "block" || g === "dot";
+      // What the query names is drawn in the accent, like what is pointed at.
+      const named = on || seeded.has(b.node.id);
+      ctx.globalAlpha = ink1(b);
       glyphPath(ctx, g, x, y, r);
-      ctx.fillStyle = b === pick ? ink.acc : solid ? (on ? ink.acc : ink.node) : ink.paper;
+      ctx.fillStyle = b === pick ? ink.acc : solid ? (named ? ink.acc : ink.node) : ink.paper;
       ctx.fill();
-      ctx.strokeStyle = on ? ink.acc : ink.node;
+      ctx.strokeStyle = named ? ink.acc : ink.node;
       ctx.stroke();
       if (b === pick) {
         ctx.strokeStyle = ink.acc;
         ctx.strokeRect(x - r - 4, y - r - 4, (r + 4) * 2, (r + 4) * 2);
       }
     }
+    ctx.globalAlpha = 1;
 
     // The hub: a red ring with a dot at its centre.
     if (hub) {
       const x = sx(hub.x);
       const y = sy(hub.y);
+      ctx.globalAlpha = Math.max(0.3, ink1(hub));
       ctx.beginPath();
       ctx.arc(x, y, ringOf(k), 0, Math.PI * 2);
       ctx.fillStyle = ink.paper;
@@ -333,19 +390,29 @@
       ctx.arc(x, y, 2.6, 0, Math.PI * 2);
       ctx.fill();
       ctx.lineWidth = 1;
+      ctx.globalAlpha = 1;
     }
 
     // Labels: spaced mono capitals; under the ones that matter, a line of grey meta.
     // Placed in order of importance (what is lit, the hub, the most mentioned), and a
     // label that would land on one already placed is left out rather than overprinted.
     const order = bodies
-      .filter((b) => b === hub || lit(b) || b.node.mentions >= 2 || k > 1.4)
-      .sort((p, q) => Number(lit(q)) - Number(lit(p)) || Number(q === hub) - Number(p === hub) || q.node.mentions - p.node.mentions);
-    // Markers are already on the plate: no label may cover one.
-    const taken: [number, number, number, number][] = bodies.map((b) => {
+      .filter((b) => (!faded(b) || seeded.has(b.node.id)) && (b === hub || lit(b) || seeded.has(b.node.id) || b.node.mentions >= 2 || bodies.length <= SMALL_GRAPH || k > 1.4))
+      .sort(
+        (p, q) =>
+          Number(lit(q)) - Number(lit(p)) ||
+          Number(seeded.has(q.node.id)) - Number(seeded.has(p.node.id)) ||
+          Number(q === hub) - Number(p === hub) ||
+          q.node.mentions - p.node.mentions,
+      );
+    // Markers in full ink are already on the plate: no label may cover one. Faded ones may be written over.
+    const taken: [number, number, number, number][] = bodies.filter((b) => !faded(b)).map((b) => {
       const r = b === hub ? ringOf(k) : size(b) * 1.3;
       return [sx(b.x) - r, sy(b.y) - r, sx(b.x) + r, sy(b.y) + r];
     });
+    // Nor may one run under the overview rail on the right edge.
+    const railH = sections.length * 24;
+    taken.push([w - (picked ? 304 : 0) - 150, h / 2 - railH / 2 - 8, w - (picked ? 304 : 0), h / 2 + railH / 2 + 8]);
     const free = (x0: number, y0: number, x1: number, y1: number) =>
       !taken.some(([a0, b0, a1, b1]) => x0 < a1 && x1 > a0 && y0 < b1 && y1 > b0);
     for (const b of order) {
@@ -354,7 +421,9 @@
       const x = sx(b.x);
       const y = sy(b.y);
       if (x < -240 || x > w + 40 || y < -30 || y > h + 30) continue;
-      const name = b.node.name.toUpperCase();
+      // Long names (hosts, URLs) are cut short until pointed at or picked.
+      const full = b.node.name.toUpperCase();
+      const name = on || full.length <= LABEL_MAX ? full : `${full.slice(0, LABEL_MAX - 1)}…`;
       const meta = isHub ? t("kb.graphHub", { n: hubLinks }).toUpperCase() : t("kb.graphMeta", { kind: b.node.kind, n: b.node.mentions });
       const showMeta = isHub || on || k > 1.2;
       ctx.font = `${isHub ? 500 : 400} 10px ${ink.mono}`;
@@ -369,16 +438,17 @@
       const lx = isHub ? x - Math.max(nw, mw) / 2 : x + r + (b === pick ? 22 : 6);
       const ly = isHub ? y + r + 6 : y - 6;
       const box: [number, number, number, number] = [lx - 2, ly, lx + Math.max(nw, mw) + 2, ly + (showMeta ? 24 : 12)];
-      if (!on && !free(...box)) continue;
+      const forced = on || seeded.has(b.node.id);
+      if (!forced && !free(...box)) continue;
       taken.push(box);
-      if (on) {
-        // Lit labels sit on a patch of paper so they read over whatever is under them.
+      if (forced) {
+        // Lit and named labels sit on a patch of paper so they read over whatever is under them.
         ctx.fillStyle = ink.paper;
         ctx.fillRect(box[0], box[1], box[2] - box[0], box[3] - box[1]);
       }
       ctx.font = `${isHub ? 500 : 400} 10px ${ink.mono}`;
       spaced(ctx, 1.4);
-      ctx.fillStyle = on ? ink.acc : ink.label;
+      ctx.fillStyle = on || seeded.has(b.node.id) ? ink.acc : ink.label;
       ctx.fillText(name, lx + (isHub ? (Math.max(nw, mw) - nw) / 2 : 0), ly + 9.5);
       if (showMeta) {
         ctx.font = `9px ${ink.mono}`;
@@ -451,10 +521,59 @@
 
   function loop() {
     if (running) step();
+    if (glide) {
+      const p = Math.min(1, (performance.now() - glide.t0) / GLIDE_MS);
+      const e = 1 - (1 - p) ** 3;
+      const { from, to } = glide;
+      view = { x: from.x + (to.x - from.x) * e, y: from.y + (to.y - from.y) * e, k: from.k + (to.k - from.k) * e };
+      if (p === 1) glide = null;
+    }
     draw();
-    // Keep going while the layout moves or a node is held; otherwise rest until kicked.
-    frame = (running && heat > SETTLED) || drag ? requestAnimationFrame(loop) : 0;
+    // Keep going while the layout moves, a node is held or the camera glides; otherwise rest until kicked.
+    frame = (running && heat > SETTLED) || drag || glide ? requestAnimationFrame(loop) : 0;
   }
+
+  /** A section is never framed further out than this, however its nodes lie. */
+  const FRAME_MIN_K = 0.5;
+
+  /** The range of `vs` without its outliers: 10th to 90th percentile once there are five or more. */
+  function spread(vs: number[]): [number, number] {
+    const sorted = [...vs].sort((a, b) => a - b);
+    const n = sorted.length;
+    if (n < 5) return [sorted[0], sorted[n - 1]];
+    return [sorted[Math.floor((n - 1) * 0.1)], sorted[Math.ceil((n - 1) * 0.9)]];
+  }
+
+  /** Move the camera to frame a section of the plate: everything, or one kind's nodes. */
+  function goTo(next: string) {
+    section = next;
+    const set = next === "*" ? bodies : bodies.filter((b) => b.node.kind === next);
+    if (!set.length || !canvas) {
+      kick();
+      return;
+    }
+    // Frame the bulk of the set, not its strays: one node flung far out would
+    // otherwise zoom the whole plate away. Past a handful of nodes the box runs
+    // from the 10th to the 90th percentile on each axis.
+    const [x0, x1] = spread(set.map((b) => b.x));
+    const [y0, y1] = spread(set.map((b) => b.y));
+    // Room for labels to the right, and for the rail, caption and scale bar round the edge.
+    const w = canvas.clientWidth - 240;
+    const h = canvas.clientHeight - 120;
+    const k = Math.min(2.5, Math.max(FRAME_MIN_K, Math.min(w / Math.max(1, x1 - x0 + 120), h / Math.max(1, y1 - y0 + 40))));
+    const cx = (x0 + x1) / 2 + 40;
+    const cy = (y0 + y1) / 2;
+    glide = { from: { ...view }, to: { x: -cx * k, y: -cy * k, k }, t0: performance.now() };
+    kick();
+  }
+
+  /** The rail: the whole plate first, then one stop per kind, most numerous first. */
+  const sections = $derived.by(() => {
+    const count = new Map<string, number>();
+    for (const n of kb.graph.nodes) count.set(n.kind, (count.get(n.kind) ?? 0) + 1);
+    const byKind = [...count].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    return [{ id: "*", label: t("kb.graphOverview"), n: kb.graph.nodes.length }, ...byKind.map(([id, n]) => ({ id, label: id, n }))];
+  });
 
   $effect(() => {
     // Rebuild whenever the graph is reloaded.
@@ -469,6 +588,17 @@
       cancelAnimationFrame(frame);
       frame = 0;
     };
+  });
+
+  $effect(() => {
+    // The theme is a class on <html>: when it turns, take the new inks at once,
+    // even mid-animation (kick alone only reads them when a loop starts).
+    const seen = new MutationObserver(() => {
+      readInk();
+      kick();
+    });
+    seen.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => seen.disconnect();
   });
 
   $effect(() => {
@@ -521,6 +651,7 @@
       drag.body.y = p.y;
       heat = Math.max(heat, 0.3);
     } else {
+      glide = null;
       view.x = drag.vx + e.clientX - drag.sx;
       view.y = drag.vy + e.clientY - drag.sy;
     }
@@ -555,6 +686,7 @@
 
   function wheel(e: WheelEvent) {
     e.preventDefault();
+    glide = null;
     const before = toWorld(e);
     const k = Math.min(4, Math.max(0.25, view.k * Math.exp(-e.deltaY * 0.0015)));
     view.k = k;
@@ -566,6 +698,8 @@
 
   function recenter() {
     view = { x: 0, y: 0, k: 1 };
+    glide = null;
+    section = null;
     for (const b of bodies) b.pinned = false;
     heat = 1;
     kick();
@@ -616,6 +750,31 @@
         <span class="fdot" class:pulse={running}></span>
         <span>{t("kb.graphFig")} · {running ? t("kb.graphLive") : t("kb.graphStill")}</span>
       </div>
+    {/if}
+    {#if kb.shownQuery}
+      <div class="query" aria-live="polite">
+        <div class="mono qlab">{t("kb.graphQuery")}</div>
+        <p class="qtext">{kb.shownQuery}</p>
+        <div class="mono qmeta">{t("kb.graphQueryMeta", { sources: querySources, entities: queried.size })}</div>
+      </div>
+    {/if}
+    {#if kb.graph.nodes.length}
+      <nav class="rail" class:shifted={!!picked} aria-label={t("kb.graphSections")}>
+        {#each sections as sec, i (sec.id)}
+          <button
+            class="stop"
+            class:on={section === sec.id}
+            class:head={i === 0}
+            aria-current={section === sec.id ? "true" : undefined}
+            title="{sec.label} · {sec.n}"
+            onclick={() => goTo(sec.id)}
+          >
+            <span class="slab">{sec.label}</span>
+            <span class="snum">{String(i).padStart(2, "0")}</span>
+            <span class="sline"></span>
+          </button>
+        {/each}
+      </nav>
     {/if}
     {#if picked}
       <aside class="detail">
@@ -744,6 +903,110 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
+    background: var(--kg-acc);
+  }
+
+  /* The query box, bottom left above the coordinates: the search the list
+     shows, in serif italic inside a red hairline, and what it found. */
+  .query {
+    position: absolute;
+    left: 16px;
+    bottom: 34px;
+    width: min(340px, calc(100% - 32px));
+    padding: 9px 12px 10px;
+    background: var(--kg-paper);
+    border: 1px solid var(--kg-acc);
+    pointer-events: none;
+  }
+
+  .qlab {
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--kg-acc);
+  }
+
+  .qtext {
+    margin: 4px 0 0;
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 14px;
+    line-height: 1.35;
+    color: var(--hi);
+    overflow-wrap: anywhere;
+  }
+
+  .qmeta {
+    margin-top: 6px;
+    font-size: 9px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--lab);
+  }
+
+  /* The overview rail, right edge: OVERVIEW 00 ——, then 01, 02… one per kind.
+     The chosen stop carries the red rule; the others show their label on hover. */
+  .rail {
+    position: absolute;
+    top: 50%;
+    right: 0;
+    transform: translateY(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+  }
+
+  .rail.shifted {
+    right: 304px;
+  }
+
+  .stop {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 22px;
+    padding: 0 0 0 10px;
+    background: transparent;
+    border: 0;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--lab);
+  }
+
+  .slab {
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .stop:hover .slab,
+  .stop:focus-visible .slab,
+  .stop.head .slab,
+  .stop.on .slab {
+    opacity: 1;
+  }
+
+  .stop:hover,
+  .stop.on {
+    color: var(--hi);
+  }
+
+  .sline {
+    width: 12px;
+    height: 1px;
+    background: var(--kg-edge);
+    transition: width 0.2s;
+  }
+
+  .stop:hover .sline {
+    width: 20px;
+    background: var(--lab);
+  }
+
+  .stop.on .sline {
+    width: 36px;
     background: var(--kg-acc);
   }
 
