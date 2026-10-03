@@ -1,6 +1,6 @@
 # Third-party notices
 
-Divixi itself is Apache-2.0 (see [LICENSE](LICENSE)). This file covers the
+DIVIXI itself is Apache-2.0 (see [LICENSE](LICENSE)). This file covers the
 **dependencies** it is built from: what they are licensed under, which of them
 end up inside a release, and which are only fetched on your own machine.
 
@@ -9,7 +9,7 @@ thing as [NOTICE](NOTICE):
 
 | File | Covers |
 |---|---|
-| [NOTICE](NOTICE) | Attribution Divixi **owes** under Apache-2.0 §4, for code adapted from Kiro Crew |
+| [NOTICE](NOTICE) | Attribution DIVIXI **owes** under Apache-2.0 §4, for code adapted from Kiro Crew |
 | **THIRD-PARTY-NOTICES.md** (this file) | The licences of the **dependency tree**, and what is redistributed |
 
 If you only want to know "can I ship this": nothing in the tree is GPL, AGPL,
@@ -19,7 +19,7 @@ SSPL, or commercially restricted. The details are below.
 
 ## 1. What a release actually contains
 
-A Divixi installer contains exactly two things built from third-party code:
+A DIVIXI installer contains exactly two things built from third-party code:
 
 1. **The Rust binary**, with every Cargo dependency compiled into it.
 2. **`dist/`**, the bundled UI, containing the eight runtime npm packages in
@@ -34,7 +34,7 @@ development-time tool and is not redistributed. See §4, which matters most.
 
 ## 2. Rust dependencies
 
-632 entries in `Cargo.lock`; 625 are external crates and 7 are Divixi's own
+632 entries in `Cargo.lock`; 625 are external crates and 7 are DIVIXI's own
 workspace members. Licences were read from each crate's own `Cargo.toml`
 (`os-audit/scan-cargo-licenses.mjs` reproduces this).
 
@@ -61,10 +61,10 @@ Four groups are worth naming explicitly.
 `cssparser`, `cssparser-macros`, `dtoa-short`, `selectors`, `option-ext`.
 
 MPL-2.0 is **file-level** copyleft. It reaches the MPL-licensed files
-themselves, not the program that links them, so it does not affect Divixi's own
+themselves, not the program that links them, so it does not affect DIVIXI's own
 licence. The obligation it does create: if you distribute a build, the MPL text
 must be available to recipients, and any modification you make *to those files*
-must be offered under MPL-2.0. Divixi does not modify them.
+must be offered under MPL-2.0. DIVIXI does not modify them.
 
 > https://www.mozilla.org/en-US/MPL/2.0/
 
@@ -120,7 +120,7 @@ specification is DENSO WAVE's, and "QR Code" is their registered trademark,
 which costs nothing to use but is noted because the package's own header
 does.
 
-`dompurify` is dual-licensed with an **OR**, so Divixi takes the Apache-2.0
+`dompurify` is dual-licensed with an **OR**, so DIVIXI takes the Apache-2.0
 option and no MPL obligation arises for it. `highlight.js` (BSD-3-Clause) and
 the MIT packages require their copyright notice be preserved in distributions;
 `dist/assets/*.js` retains the bundled license comments.
@@ -137,7 +137,7 @@ bundled, and never reach a user's machine.
 
 This is the part a reviewer is most likely to ask about, so it is spelled out.
 
-Divixi drives Claude Code and Codex over the Agent Client Protocol through two
+DIVIXI drives Claude Code and Codex over the Agent Client Protocol through two
 npm adapters:
 
 - `@agentclientprotocol/claude-agent-acp`, which depends on
@@ -151,7 +151,7 @@ Both Anthropic packages are **proprietary**. Their `LICENSE.md` reads, in full:
 > © Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements
 > outlined here: https://code.claude.com/docs/en/legal-and-compliance.
 
-**Divixi does not redistribute them.** Two facts establish that:
+**DIVIXI does not redistribute them.** Two facts establish that:
 
 1. `tauri.conf.json` declares no `bundle.resources`, so an installer contains
    only the Rust binary and `dist/`. No `node_modules` is packaged.
@@ -163,12 +163,12 @@ Both Anthropic packages are **proprietary**. Their `LICENSE.md` reads, in full:
 
 So the adapters and the Anthropic SDK are acquired by the user's npm, under
 Anthropic's own terms, exactly as if the user had typed the install command.
-Divixi is the thing that calls npm, not a redistributor. They appear in
+DIVIXI is the thing that calls npm, not a redistributor. They appear in
 `devDependencies` so that a development checkout can run an agent without the
 install step.
 
 The same holds for the agent CLIs themselves — Claude Code, Codex, GitHub
-Copilot CLI, Antigravity. Divixi locates and launches whatever the user has
+Copilot CLI, Antigravity. DIVIXI locates and launches whatever the user has
 already installed and signed into; it neither bundles nor relicenses them.
 Antigravity's ACP server is downloaded from Google at the user's request.
 

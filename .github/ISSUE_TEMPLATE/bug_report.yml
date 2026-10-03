@@ -1,5 +1,5 @@
 name: 🐛 Bug report
-description: Something in Divixi is broken or behaves unexpectedly
+description: Something in DIVIXI is broken or behaves unexpectedly
 labels: ["bug"]
 body:
   - type: markdown
@@ -14,7 +14,7 @@ body:
         is copied, so read it first: no API key or token goes in it, but the paths on your
         machine do.
 
-        Without that block a report is usually not actionable. Divixi is developed on
+        Without that block a report is usually not actionable. DIVIXI is developed on
         Windows, so a macOS or Linux report without it is guesswork.
 
         Please search [the open issues](https://github.com/jaemin93/divixi/issues) before
@@ -38,7 +38,7 @@ body:
     attributes:
       label: How to reproduce it
       description: >
-        Numbered steps, starting from a freshly launched Divixi. If it only happens
+        Numbered steps, starting from a freshly launched DIVIXI. If it only happens
         sometimes, say how often — "twice out of ten runs" is a useful fact. If it depends
         on which agent is running, say which.
       placeholder: |

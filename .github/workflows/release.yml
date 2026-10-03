@@ -250,7 +250,7 @@ jobs:
           # only chance this tag has to become a release.
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$tag" -m "Divixi $title"
+          git tag -a "$tag" -m "DIVIXI $title"
           git push origin "refs/tags/$tag"
 
           {
@@ -358,10 +358,10 @@ jobs:
                 'systems will try to stop you opening them. That is expected for',
                 'now, not a sign that anything is wrong with the download.',
                 '',
-                '- **macOS** refuses an unsigned app outright, and Divixi has',
+                '- **macOS** refuses an unsigned app outright, and DIVIXI has',
                 '  never been verified on a Mac at all. To open it anyway:',
                 '  right-click the app and choose *Open*, or clear the quarantine',
-                '  flag with `xattr -d com.apple.quarantine /Applications/Divixi.app`.',
+                '  flag with `xattr -d com.apple.quarantine /Applications/DIVIXI.app`.',
                 '- **Windows** shows a SmartScreen warning. Choose *More info*,',
                 '  then *Run anyway*.',
                 '',

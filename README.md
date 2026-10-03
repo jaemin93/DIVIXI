@@ -2,7 +2,7 @@
   <img src="docs/images/divixi.png" alt="" width="120" height="120">
 </p>
 
-<h1 align="center">Divixi</h1>
+<h1 align="center">DIVIXI</h1>
 
 <p align="center"><strong>One conductor, many agents.</strong></p>
 
@@ -11,7 +11,7 @@
 A desktop app for directing coding agents: you talk to one conductor, and it divides the
 work among worker sessions that run side by side.
 
-Divixi drives the agents you already use (Claude Code, Codex, GitHub Copilot, Antigravity)
+DIVIXI drives the agents you already use (Claude Code, Codex, GitHub Copilot, Antigravity)
 over the [Agent Client Protocol](https://agentclientprotocol.com), under your own logins.
 Each piece of work is a **Track**: a folder, a long-lived conductor session, and the workers
 it opens. What reaches you is what needs you: decisions to make, reports to read, changes
@@ -36,13 +36,13 @@ parts. The x is for crossing providers.
 
 ## Install
 
-Divixi is early software. Windows is the main platform, `divixi-server` runs on Linux,
+DIVIXI is early software. Windows is the main platform, `divixi-server` runs on Linux,
 and macOS is untested.
 
 **You need:**
 
 - **Node.js 22.18 or later.** The Claude Code and Codex adapters are Node programs.
-  Divixi installs them into its data folder on first use.
+  DIVIXI installs them into its data folder on first use.
 - **At least one agent, installed and signed in:**
 
 | Agent | Install | Sign in |
@@ -50,9 +50,9 @@ and macOS is untested.
 | Claude Code | [claude.com/claude-code](https://claude.com/claude-code) | run `claude` once |
 | Codex | [openai.com/codex](https://openai.com/codex) | `codex login` |
 | GitHub Copilot | [github.com/github/copilot-cli](https://github.com/github/copilot-cli) | `copilot login` |
-| Antigravity | [antigravity.google/cli](https://antigravity.google/cli) | `agy login` (Divixi fetches its ACP server) |
+| Antigravity | [antigravity.google/cli](https://antigravity.google/cli) | `agy login` (DIVIXI fetches its ACP server) |
 
-On first launch, Divixi finds the agents you have and checks that each one can open a
+On first launch, DIVIXI finds the agents you have and checks that each one can open a
 session.
 
 **From source** (Rust stable, Node.js 22.18+):
@@ -67,7 +67,7 @@ npx tauri build                                 # installer in target/release/bu
 
 ## Remote instances
 
-`divixi-server` is Divixi without a window, for a server. The desktop app reaches it over
+`divixi-server` is DIVIXI without a window, for a server. The desktop app reaches it over
 an SSH tunnel, or at an address with your GitHub account. It starts the server over SSH
 when it is not running.
 
@@ -76,10 +76,10 @@ running, and update it.
 
 ## Data and privacy
 
-- **No telemetry.** Divixi sends nothing about you or your use anywhere — nothing
-  reported, counted or phoned home. The only request Divixi makes of a server is the
+- **No telemetry.** DIVIXI sends nothing about you or your use anywhere — nothing
+  reported, counted or phoned home. The only request DIVIXI makes of a server is the
   update check below.
-- **Checking for updates.** Divixi asks the public GitHub API for the newest published
+- **Checking for updates.** DIVIXI asks the public GitHub API for the newest published
   release of this repository in two cases: when you press *Check for updates* in
   **Settings → About**, and once when the app opens, at most once a day. The request
   carries no sign-in, no version, no platform, and nothing that identifies you or this
@@ -88,9 +88,9 @@ running, and update it.
   way. You are told only when there is a newer release: an up-to-date answer and a failed
   check both pass in silence, and a failure is shown on that card and nowhere else.
 - **Updating is yours.** Downloading and installing only ever happen on a press. With a
-  release out, Divixi can fetch its installer (Windows for now), check it against the
+  release out, DIVIXI can fetch its installer (Windows for now), check it against the
   SHA-256 GitHub published for that file, and offer to open it — you click through the
-  installer yourself. Divixi never installs anything on its own; it has no code-signing
+  installer yourself. DIVIXI never installs anything on its own; it has no code-signing
   certificate, so it will not run unsigned code it fetched without you asking.
 - **Where your data lives.** Tracks, conversations, boards and the knowledge library are
   in the app's data folder: `%APPDATA%\app.divixi` on Windows, `~/.local/share/app.divixi`
@@ -120,7 +120,7 @@ private route.
 ### Reporting a bug
 
 Open **Settings → About → Diagnostics** and press *Copy diagnostics*. That puts the
-version, your OS, the agents Divixi found and the last warnings and errors on the
+version, your OS, the agents DIVIXI found and the last warnings and errors on the
 clipboard as one Markdown block; it is shown on screen first, so you can read it before
 pasting. Attach it to a
 [bug report](https://github.com/jaemin93/divixi/issues/new?template=bug_report.yml).
@@ -132,7 +132,7 @@ how to turn the logging up before you reproduce the problem.
 
 ### Kiro Crew
 
-Much of Divixi's interface was designed by studying
+Much of DIVIXI's interface was designed by studying
 [Kiro Crew](https://github.com/kirodotdev/KiroCrew), an open-source agent workspace by
 AWS (Apache License 2.0, Copyright Amazon.com, Inc. or its affiliates).
 
@@ -153,15 +153,15 @@ What we took from it:
   supervised SSH tunnel options. Our implementation differs (a native webview rather
   than an iframe).
 
-Where Divixi goes its own way: one conductor agent directing worker agents, decision
+Where DIVIXI goes its own way: one conductor agent directing worker agents, decision
 cards instead of prompt-by-prompt approval, and a knowledge library that needs no local
 embedding model.
 
-**Divixi is an independent project. It is not affiliated with, endorsed by, or sponsored
+**DIVIXI is an independent project. It is not affiliated with, endorsed by, or sponsored
 by Kiro, AWS, or Amazon. "Kiro" and "Kiro Crew" are trademarks of Amazon.com, Inc. or
-its affiliates, used here only to describe the origin of ideas Divixi borrowed.**
+its affiliates, used here only to describe the origin of ideas DIVIXI borrowed.**
 
 ## License
 
-Divixi is licensed under the [Apache License, Version 2.0](LICENSE). See
+DIVIXI is licensed under the [Apache License, Version 2.0](LICENSE). See
 [NOTICE](NOTICE) for attribution required by that license.

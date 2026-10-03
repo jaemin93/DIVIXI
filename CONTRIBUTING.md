@@ -1,6 +1,6 @@
-# Contributing to Divixi
+# Contributing to DIVIXI
 
-Thanks for being here. Divixi is a young project, and the fastest way to help is still
+Thanks for being here. DIVIXI is a young project, and the fastest way to help is still
 the simplest: report a bug you hit, or fix one that annoys you.
 
 - [Reporting a bug](#reporting-a-bug)
@@ -89,7 +89,7 @@ npm run app            # the app, in development mode
   from `dist/`, and `dist/` is not in git, so on a fresh clone a bare `cargo test` fails
   without it. `npm run app` does it for you; cargo does not.
 
-One trap that costs people an hour: **running Divixi from inside a Claude Code session
+One trap that costs people an hour: **running DIVIXI from inside a Claude Code session
 breaks Claude Code workers**, because Claude Code sees the inherited `CLAUDECODE` /
 `CLAUDE_CODE_*` variables as a nested session and exits at once. The app clears them at
 the top of `main`; if you are calling into the crates yourself, do the same.
@@ -145,8 +145,8 @@ fix.
 
 Read [.gitignore](.gitignore) before you add a directory at the repository root.
 
-Divixi's "a folder each" worker mode gives a worker its own folder directly under the
-track folder — which, when you develop Divixi with Divixi, is this repository root —
+DIVIXI's "a folder each" worker mode gives a worker its own folder directly under the
+track folder — which, when you develop DIVIXI with DIVIXI, is this repository root —
 named after the worker. There is no prefix or parent folder to match on, and a new
 worker adds a new root-level directory at any time. So `.gitignore` ignores **every**
 directory at the root and names the ones that belong to the project:
@@ -194,7 +194,7 @@ holds a secret derives `Debug`**. Tokens, keys and credentials get a hand-writte
 
 ## Commit messages
 
-Divixi does not use Conventional Commits. A subject line is a sentence saying what the
+DIVIXI does not use Conventional Commits. A subject line is a sentence saying what the
 commit does, in the present tense, with no type prefix:
 
 ```
@@ -214,7 +214,7 @@ them.
 
 ## Working with AI tools
 
-Use them. Divixi exists to run coding agents, and this repository is developed with them
+Use them. DIVIXI exists to run coding agents, and this repository is developed with them
 — the `Co-Authored-By` lines in `git log` are there on purpose. Nobody here will ask you
 to pretend otherwise, and no pull request is judged by which tools helped write it.
 
@@ -280,7 +280,7 @@ misleading:
   triaged, and making them fatal would block every pull request for reasons unrelated to
   it. Errors still fail the step. Do not add new warnings; you do not have to clear old
   ones.
-- **A "Remote-launch prerequisites" step records rather than asserts.** Divixi starts a
+- **A "Remote-launch prerequisites" step records rather than asserts.** DIVIXI starts a
   remote instance with `setsid`, which Linux has and macOS does not. The step logs which
   tools are present, per platform.
 - **Nothing CI builds is signed or notarized**, so the bundles it uploads are there to
@@ -291,10 +291,10 @@ request rather than chasing it.
 
 ## Licensing and attribution
 
-Divixi is [Apache License 2.0](LICENSE). By opening a pull request you contribute your
+DIVIXI is [Apache License 2.0](LICENSE). By opening a pull request you contribute your
 work under that licence; there is no CLA.
 
-[NOTICE](NOTICE) is the attribution Divixi owes under section 4 of the licence —
+[NOTICE](NOTICE) is the attribution DIVIXI owes under section 4 of the licence —
 including what was adapted from [Kiro Crew](https://github.com/kirodotdev/KiroCrew).
 **If your change brings in code, a prompt, or a data file from another project, say
 where it came from in the pull request and add it to NOTICE.** Do not paste code whose
@@ -305,6 +305,6 @@ licence you have not checked. Third-party dependency licences are summarised in
 
 Everyone taking part is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-**Do not open a public issue for a security vulnerability.** Divixi runs agent CLIs on
+**Do not open a public issue for a security vulnerability.** DIVIXI runs agent CLIs on
 your machine, holds API tokens, and opens SSH tunnels, so there is real surface here.
 [SECURITY.md](SECURITY.md) has the private route.

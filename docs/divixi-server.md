@@ -2,8 +2,8 @@
 
 **English** | [한국어](divixi-server.ko.md)
 
-`divixi-server` is **Divixi without a screen**. It runs Tracks, conductors, workers, knowledge and
-terminals from the same code as the app, and a Divixi app on another PC attaches to it as a
+`divixi-server` is **DIVIXI without a screen**. It runs Tracks, conductors, workers, knowledge and
+terminals from the same code as the app, and a DIVIXI app on another PC attaches to it as a
 **remote instance**. Pick it from the menu at the top left of the window and that server fills the
 same window.
 
@@ -74,7 +74,7 @@ source ~/.cargo/env
 Claude Code and Codex, which are JS programs. nvm or a distribution package, either is fine.
 
 **Agent CLIs.** Install the ones you want to use on the server, as that server's user, and **sign in
-once**. Divixi uses that sign-in as it is.
+once**. DIVIXI uses that sign-in as it is.
 
 | Agent | Install | Sign in |
 |---|---|---|
@@ -161,7 +161,7 @@ SSH is treated as the owner.
    ssh-agent, or an alias in `~/.ssh/config`). The app runs SSH in BatchMode, so it cannot ask you
    for a password or to confirm a host key. For a server you are reaching for the first time, run
    `ssh user@server` once in a terminal on your PC to take the host key.
-2. In the Divixi app, press **Settings › Remote instances › Add remote instance**, fill it in as
+2. In the DIVIXI app, press **Settings › Remote instances › Add remote instance**, fill it in as
    below, and save.
    - Connection: SSH tunnel
    - SSH host: `user@server`
@@ -192,7 +192,7 @@ pkill -x divixi-server; setsid -f ~/.local/bin/divixi-server serve >/dev/null 2>
   app Client ID; follow what the screen says.
 - Then, under **Add remote instance**, set the connection to **Direct address** and the address to
   `http://<Tailscale IP>:7488`.
-- The desktop Divixi becomes a server the same way, through "Open this PC as a remote instance" in
+- The desktop DIVIXI becomes a server the same way, through "Open this PC as a remote instance" in
   Settings.
 
 ---
@@ -213,7 +213,7 @@ pkill -x divixi-server                                                  # stop
 mkdir -p ~/.config/systemd/user
 cat > ~/.config/systemd/user/divixi-server.service <<'EOF'
 [Unit]
-Description=Divixi server (remote instance)
+Description=DIVIXI server (remote instance)
 After=network-online.target
 
 [Service]
@@ -259,7 +259,7 @@ pkill -x divixi-server            # with systemd: systemctl --user restart divix
 ```
 
 When the server's build differs from its own, the app puts a **"!"** on the chip at the top left and
-says "update the remote Divixi". The comparison is made against the Rust code, so it does not appear
+says "update the remote DIVIXI". The comparison is made against the Rust code, so it does not appear
 for an app update that only changed the UI. Put the app and the server on the **same commit** and it
 goes away — section 2 has the ways to do that. If you updated only the app, build the server again
 from that commit.
@@ -276,7 +276,7 @@ from that commit.
 | `did not answer through the tunnel` | Usually the server is not running: press **Start it** on that instance's card. If it will not come up, run `~/.local/bin/divixi-server serve` yourself (you will see the log) |
 | An agent shows as "not installed" | PATH on the server. Add the CLI and node directories to "Remote PATH" in the instance settings, or to `Environment=PATH` in the systemd unit |
 | A direct address says "no owner yet" | Run `divixi-server owner <github login>` on the server |
-| A direct address says "… does not own this Divixi" | Whether the app's GitHub account is the same as the server's owner |
+| A direct address says "… does not own this DIVIXI" | Whether the app's GitHub account is the same as the server's owner |
 | A remote shell is left behind | When the app dies, the server closes that machine's shells two minutes later |
 | "this build differs from the app" | Whether the server and the app came from the same commit (section 2). If you updated one side only, see section 7 |
 

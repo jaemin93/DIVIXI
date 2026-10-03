@@ -638,14 +638,14 @@ fn classify_at(doc: &Value, port: u16, https: u16) -> ServeState {
     for sub in &scoped {
         mount_subtrees(sub, SERVE_MOUNT, &mut mounts);
     }
-    let ours = state(Some(true), Some(false), format!("Serve is proxying {https}{SERVE_MOUNT} to Divixi on port {port}."));
+    let ours = state(Some(true), Some(false), format!("Serve is proxying {https}{SERVE_MOUNT} to DIVIXI on port {port}."));
     // Another's, with the loopback ports it proxies to when every handler
     // there names one: a mapping whose port nobody answers on is left over,
     // and [`settle`] lets it be taken.
     let theirs = |targets: Vec<Option<u16>>| ServeState {
         taken: true,
         others: if targets.iter().all(Option::is_some) { targets.iter().flatten().copied().collect() } else { Vec::new() },
-        ..state(Some(false), Some(false), format!("Serve is configured on {https}{SERVE_MOUNT}, but not for this Divixi."))
+        ..state(Some(false), Some(false), format!("Serve is configured on {https}{SERVE_MOUNT}, but not for this DIVIXI."))
     };
     if mounts.is_empty() {
         // No web handler, but a TCP forward on the port says what is there
@@ -797,7 +797,7 @@ fn with_hint(code: Code, words: String, fallback: String, nothing_happened: &str
         // The likeliest refusal, and the one nobody can guess from the message:
         // serve configuration is daemon state, so on Linux and macOS it needs a
         // standing grant this app cannot give itself.
-        Code::NoPermission => format!(" {nothing_happened} Divixi is not allowed to change Tailscale's serve configuration on this machine."),
+        Code::NoPermission => format!(" {nothing_happened} DIVIXI is not allowed to change Tailscale's serve configuration on this machine."),
         Code::DaemonUnavailable => format!(" {nothing_happened} Tailscale is not answering — it may be stopped or signed out."),
         _ => String::new(),
     };
@@ -842,7 +842,7 @@ pub async fn publish(port: u16) -> Outcome {
         return Outcome {
             ok: true,
             code: Code::Ok,
-            detail: format!("Divixi was already published on this machine's tailnet ({https} → 127.0.0.1:{port})."),
+            detail: format!("DIVIXI was already published on this machine's tailnet ({https} → 127.0.0.1:{port})."),
         };
     }
     if state.port_free != Some(true) {
@@ -874,7 +874,7 @@ pub async fn replace(port: u16) -> Outcome {
         Some(true) => Outcome {
             ok: true,
             code: Code::Ok,
-            detail: format!("Divixi was already published on this machine's tailnet ({SERVE_PORT} → 127.0.0.1:{port})."),
+            detail: format!("DIVIXI was already published on this machine's tailnet ({SERVE_PORT} → 127.0.0.1:{port})."),
         },
         Some(false) => write(port, SERVE_PORT).await,
         None => Outcome::bad(Code::NotOurs, format!("{} Nothing was replaced.", state.detail)),
@@ -906,7 +906,7 @@ async fn write(port: u16, https: u16) -> Outcome {
         Ran::Done { status: 0, .. } => Outcome {
             ok: true,
             code: Code::Ok,
-            detail: format!("Divixi is published on this machine's tailnet over HTTPS ({https} → 127.0.0.1:{port})."),
+            detail: format!("DIVIXI is published on this machine's tailnet over HTTPS ({https} → 127.0.0.1:{port})."),
         },
         Ran::Done { status, out, err } => {
             let lead = if err.trim().is_empty() { out.clone() } else { err.clone() };
@@ -927,7 +927,7 @@ pub async fn unpublish(port: u16) -> Outcome {
     let refuse = |detail: &str| {
         Outcome::bad(
             Code::NotOurs,
-            format!("{detail} Divixi will not withdraw it, because this check could not confirm {SERVE_PORT}{SERVE_MOUNT} is Divixi's."),
+            format!("{detail} DIVIXI will not withdraw it, because this check could not confirm {SERVE_PORT}{SERVE_MOUNT} is DIVIXI's."),
         )
     };
     let doc = match read_doc().await {
@@ -945,7 +945,7 @@ pub async fn unpublish(port: u16) -> Outcome {
             None => Outcome {
                 ok: true,
                 code: Code::Ok,
-                detail: "Nothing of Divixi's is published; anything else serve holds is left alone.".into(),
+                detail: "Nothing of DIVIXI's is published; anything else serve holds is left alone.".into(),
             },
         };
     }
@@ -955,7 +955,7 @@ pub async fn unpublish(port: u16) -> Outcome {
             return done;
         }
     }
-    Outcome { ok: true, code: Code::Ok, detail: "Divixi is no longer published on this machine's tailnet.".into() }
+    Outcome { ok: true, code: Code::Ok, detail: "DIVIXI is no longer published on this machine's tailnet.".into() }
 }
 
 /// Remove the handler at [`SERVE_MOUNT`] on HTTPS port `https`, and only that.
@@ -974,7 +974,7 @@ async fn off(https: u16) -> Outcome {
         Ran::Done { status: 0, .. } => Outcome {
             ok: true,
             code: Code::Ok,
-            detail: "Divixi is no longer published on this machine's tailnet.".into(),
+            detail: "DIVIXI is no longer published on this machine's tailnet.".into(),
         },
         Ran::Done { status, out, err } => {
             // The hint matters more here than on the publish side: a failed
@@ -1160,7 +1160,7 @@ mod tests {
         let v: Value = serde_json::from_str(DEV_BUILDS).unwrap();
         let st = classify_doc(&v, 7488);
         assert_eq!((st.published, st.port_free), (Some(false), Some(false)));
-        assert_eq!(st.detail, "Serve is configured on 443/, but not for this Divixi.");
+        assert_eq!(st.detail, "Serve is configured on 443/, but not for this DIVIXI.");
         assert_eq!(state_of(DEV_BUILDS, 7489), (Some(true), Some(false)), "and the dev build's own");
     }
 
@@ -1171,7 +1171,7 @@ mod tests {
             let v: Value = serde_json::from_str(doc).unwrap();
             let st = classify_doc(&v, 7488);
             assert_eq!((st.published, st.port_free), (Some(false), Some(true)), "{doc}");
-            assert!(!st.detail.contains("not for this Divixi"), "{doc}: {}", st.detail);
+            assert!(!st.detail.contains("not for this DIVIXI"), "{doc}: {}", st.detail);
         }
     }
 
