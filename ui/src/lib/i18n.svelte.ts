@@ -964,10 +964,7 @@ const ko = {
   "srv.phase.verifying": "받은 파일을 확인하는 중…",
   "srv.phase.installing": "설치하는 중…",
   "srv.phase.starting": "divixi-server를 띄우는 중…",
-  "srv.phase.done": "divixi-server {release}를 설치하고 띄웠습니다.",
   "srv.phase.cancelled": "취소했습니다. 그 머신에 남긴 것은 없습니다.",
-  "srv.route.remote": "그 머신이 GitHub에서 직접 받습니다",
-  "srv.route.ssh": "이 앱의 SSH 연결로 보냅니다(더 느립니다)",
   "srv.progress": "{done} / {total} MB · {pct}%",
   "srv.progressUnknown": "{done} MB",
   "srv.cancel": "취소",
@@ -978,7 +975,6 @@ const ko = {
   "srv.at.installing": "설치",
   "srv.at.starting": "서버 시작",
   "srv.retry": "다시 시도",
-  "srv.binPath": "이 인스턴스의 divixi-server 경로가 ~/.divixi/server/current/divixi-server를 가리키도록 바뀌었습니다.",
   "srv.reconnect": "다시 연결",
 } as const;
 
@@ -1927,10 +1923,7 @@ const en: Record<Key, string> = {
   "srv.phase.verifying": "Checking what arrived…",
   "srv.phase.installing": "Installing…",
   "srv.phase.starting": "Starting divixi-server…",
-  "srv.phase.done": "divixi-server {release} is installed and running.",
   "srv.phase.cancelled": "Cancelled. Nothing was left on that machine.",
-  "srv.route.remote": "that machine is fetching it from GitHub itself",
-  "srv.route.ssh": "through this app's SSH connection (the slower way)",
   "srv.progress": "{done} of {total} MB · {pct}%",
   "srv.progressUnknown": "{done} MB",
   "srv.cancel": "Cancel",
@@ -1941,7 +1934,6 @@ const en: Record<Key, string> = {
   "srv.at.installing": "installing",
   "srv.at.starting": "starting the server",
   "srv.retry": "Try again",
-  "srv.binPath": "This instance's divixi-server path now points at ~/.divixi/server/current/divixi-server.",
   "srv.reconnect": "Connect again",
 };
 

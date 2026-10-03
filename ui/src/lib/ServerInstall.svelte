@@ -56,8 +56,6 @@
   let progress = $state<ServerInstall | null>(null);
   /** Starting a server that is there and down. */
   let starting = $state(false);
-  /** The path setting was pointed at the managed binary. */
-  let repointed = $state(false);
 
   /**
    * Megabytes as the release notes and docs/divixi-server.md count them, so
@@ -76,21 +74,19 @@
     cancelled: "srv.at.downloading",
   };
 
-  const PHASE: Record<ServerInstall["phase"], Key> = {
+  /** "done" says nothing of its own: the reconnect button, if any, is what follows. */
+  const PHASE: Record<Exclude<ServerInstall["phase"], "done">, Key> = {
     checking: "srv.phase.checking",
     downloading: "srv.phase.downloading",
     verifying: "srv.phase.verifying",
     installing: "srv.phase.installing",
     starting: "srv.phase.starting",
-    done: "srv.phase.done",
     failed: "srv.phase.downloading",
     cancelled: "srv.phase.cancelled",
   };
 
   /** An install is underway: no other button applies while it is. */
   const busy = $derived(progress !== null && !["done", "failed", "cancelled"].includes(progress.phase));
-  /** The release it would install, when there is one. */
-  const target = $derived(found && "target" in found ? found.target : "");
   const size = $derived(found && "size" in found ? found.size : 0);
   /** This app is a development build, so no release can make the builds agree. */
   const devBuild = $derived(found !== null && "source" in found && found.source === "newest");
@@ -109,14 +105,10 @@
 
   async function start() {
     error = "";
-    repointed = false;
     progress = { host: id, phase: "checking", at: null, received: 0, total: null, route: null, release: null, error: null };
     try {
       await invoke<string>("remote_server_install", { id });
-      repointed = true;
-      // Not reconnected here: the person reads "installed and running"
-      // first, and presses for it. A reload would take the sentence away
-      // before anyone saw it.
+      // Not reconnected here: the person presses for it.
       await look();
     } catch (err) {
       // The events carry the phase and the remote's own words; this is the
@@ -174,10 +166,9 @@ ${String(err)}`;
   {#if progress}
     <!-- Underway, or just finished: the phases, in order, with the reason
          when one of them failed. -->
+    {#if progress.phase !== "done"}
     <div class="row">
-      <span class="what" class:bad={progress.phase === "failed"} class:ok={progress.phase === "done"}>
-        {progress.phase === "done" ? t("srv.phase.done", { release: progress.release ?? target }) : t(PHASE[progress.phase])}
-      </span>
+      <span class="what" class:bad={progress.phase === "failed"}>{t(PHASE[progress.phase])}</span>
       {#if progress.phase === "downloading"}
         <span class="mono num">
           {#if progress.total}
@@ -191,11 +182,11 @@ ${String(err)}`;
         <button class="btn sm" onclick={cancel}>{t("srv.cancel")}</button>
       {/if}
     </div>
+    {/if}
     {#if progress.phase === "downloading" && progress.route}
       <div class="bar" role="progressbar" aria-valuemin={0} aria-valuemax={progress.total ?? 0} aria-valuenow={progress.received}>
         <span class="fill" class:idle={!progress.total} style:width={progress.total ? `${Math.min(100, (progress.received / progress.total) * 100)}%` : "100%"}></span>
       </div>
-      <p class="note">{progress.route === "remote" ? t("srv.route.remote") : t("srv.route.ssh")}</p>
     {/if}
     {#if progress.phase === "failed"}
       <p class="note">{t("srv.failedAt", { phase: t(AT[progress.at ?? "installing"]) })}</p>
@@ -207,7 +198,6 @@ ${String(err)}`;
       <div class="acts"><button class="btn sm" onclick={again}>{t("srv.check")}</button></div>
     {/if}
     {#if progress.phase === "done"}
-      {#if repointed}<p class="note">{t("srv.binPath")}</p>{/if}
       {#if onInstalled}<div class="acts"><button class="btn sm btn-acc" onclick={() => onInstalled?.()}>{t("srv.reconnect")}</button></div>{/if}
     {/if}
   {:else if looking}
@@ -314,10 +304,6 @@ ${String(err)}`;
   .what {
     font-size: 12.5px;
     color: var(--txt);
-  }
-
-  .what.ok {
-    color: var(--ok);
   }
 
   .what.bad {
