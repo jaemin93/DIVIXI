@@ -73,6 +73,17 @@ const WHOIS_TIMEOUT: Duration = Duration::from_secs(2);
 /// which is what the origin check in a later stage will compare against.
 pub const SERVE_PORT: u16 = 443;
 
+/// Where Divixi goes when [`SERVE_PORT`]`[`SERVE_MOUNT`] belongs to something
+/// else that is running -- Kiro Crew's dashboard takes 443/ too. Beside it
+/// rather than over it: the address gains `:8443`, which the browser then puts
+/// in `Origin`, and the origin check compares the whole address.
+pub const SERVE_PORT_ALT: u16 = 8443;
+
+/// How long to wait for a loopback port to answer before calling it unknown.
+/// A refused connection on Windows loopback takes about two seconds (the SYN
+/// is retried), so this sits above that.
+const LISTEN_PROBE: Duration = Duration::from_secs(3);
+
 /// The mount we publish at. Passed **explicitly when withdrawing**, which is
 /// load-bearing rather than tidy: upstream treats an absent `--set-path` as
 /// "every mount under this port", collects them all and deletes them -- so a
@@ -139,6 +150,23 @@ pub struct ServeState {
     /// `false` by the write guards.
     pub port_free: Option<bool>,
     pub detail: String,
+    /// The HTTPS port this reading is about: where Divixi is published, or
+    /// where turning phone access on would put it. 0 when nothing was read.
+    pub https: u16,
+    /// [`SERVE_PORT`]`[`SERVE_MOUNT`] holds a mapping this check read and
+    /// found to be another's, with something answering behind it.
+    pub taken: bool,
+    /// The loopback ports another's mapping at the mount proxies to, when
+    /// every handler there is one. What [`listening`] is asked about.
+    #[serde(skip)]
+    pub(super) others: Vec<u16>,
+}
+
+impl ServeState {
+    /// [`ServeState::https`], with an unread state counted as [`SERVE_PORT`].
+    pub fn https_port(&self) -> u16 {
+        if self.https == 0 { SERVE_PORT } else { self.https }
+    }
 }
 
 /// Why a publish or withdrawal did not happen, for the UI to branch on. The
@@ -367,7 +395,7 @@ pub async fn probe() -> Probe {
         return Probe {
             stopped: true,
             logged_in: true,
-            detail: "Tailscale is stopped, so this machine is not on its tailnet.".into(),
+            detail: "Tailscale is stopped.".into(),
             ..base
         };
     }
@@ -400,7 +428,7 @@ pub async fn probe() -> Probe {
         .unwrap_or_default();
     if name.is_empty() {
         return Probe {
-            detail: "Signed in, but this machine has no MagicDNS name — MagicDNS may be off for this tailnet.".into(),
+            detail: "This machine has no MagicDNS name.".into(),
             ..base
         };
     }
@@ -504,17 +532,26 @@ fn mount_subtrees<'a>(node: &'a Value, mount: &str, out: &mut Vec<&'a Value>) {
 /// HTTP, so a mapping like that answers nothing and calling it published
 /// would put a dead address on the card.
 fn points_at(target: &str, port: u16) -> bool {
+    loopback_port(target) == Some(port)
+}
+
+/// The loopback port a plain-HTTP proxy target names, in any of the spellings
+/// [`points_at`] accepts. `None` for anything else.
+fn loopback_port(target: &str) -> Option<u16> {
     let t = target.trim().to_ascii_lowercase();
     let rest = t.strip_prefix("http://").unwrap_or(&t);
     if rest.contains("://") {
-        return false;
+        return None;
     }
     let rest = rest.trim_end_matches('/');
     if rest.contains('/') {
-        return false;
+        return None;
     }
     let (host, p) = rest.rsplit_once(':').unwrap_or(("127.0.0.1", rest));
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]") && p.parse::<u16>() == Ok(port)
+    if !matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
+        return None;
+    }
+    p.parse::<u16>().ok().filter(|p| *p > 0)
 }
 
 /// Whether any string anywhere under `node` is Divixi on `port`.
@@ -571,31 +608,29 @@ fn is_empty_doc(node: &Value) -> bool {
 ///
 /// Pure, and the whole of the classification: [`serve_state`] only fetches the
 /// document and hands it here, so a test of this is a test of what runs.
+#[cfg(test)]
 fn classify_doc(doc: &Value, port: u16) -> ServeState {
-    let unknown = |detail: String| ServeState { published: None, port_free: None, detail };
+    classify_at(doc, port, SERVE_PORT)
+}
+
+/// [`classify_doc`] for the mount on HTTPS port `https`.
+fn classify_at(doc: &Value, port: u16, https: u16) -> ServeState {
+    let state = |published, port_free, detail: String| ServeState { published, port_free, detail, https, ..Default::default() };
     if is_empty_doc(doc) {
-        return ServeState {
-            published: Some(false),
-            port_free: Some(true),
-            detail: "No serve configuration is active.".into(),
-        };
+        return state(Some(false), Some(true), "No serve configuration is active.".into());
     }
 
     let mut scoped = Vec::new();
-    port_subtrees(doc, SERVE_PORT, &mut scoped);
+    port_subtrees(doc, https, &mut scoped);
     if scoped.is_empty() {
         // Nothing keys our port. When the document demonstrably keys mappings
         // by port, that absence is a determination: everything serve holds
         // sits on other ports and this write endangers none of it. Another
         // project on port 80 must not read as "something is on 443".
         return if has_port_keys(doc) {
-            ServeState {
-                published: Some(false),
-                port_free: Some(true),
-                detail: format!("Serve is configured for other ports only; nothing is on port {SERVE_PORT}."),
-            }
+            state(Some(false), Some(true), format!("Serve is configured for other ports only; nothing is on port {https}."))
         } else {
-            unknown(format!("Serve is configured, but this build could not tell what is on port {SERVE_PORT}."))
+            state(None, None, format!("Serve is configured, but this build could not tell what is on port {https}."))
         };
     }
 
@@ -603,15 +638,14 @@ fn classify_doc(doc: &Value, port: u16) -> ServeState {
     for sub in &scoped {
         mount_subtrees(sub, SERVE_MOUNT, &mut mounts);
     }
-    let ours = ServeState {
-        published: Some(true),
-        port_free: Some(false),
-        detail: format!("Serve is proxying {SERVE_PORT}{SERVE_MOUNT} to Divixi on port {port}."),
-    };
-    let theirs = ServeState {
-        published: Some(false),
-        port_free: Some(false),
-        detail: format!("Serve is configured on {SERVE_PORT}{SERVE_MOUNT}, but not for this Divixi."),
+    let ours = state(Some(true), Some(false), format!("Serve is proxying {https}{SERVE_MOUNT} to Divixi on port {port}."));
+    // Another's, with the loopback ports it proxies to when every handler
+    // there names one: a mapping whose port nobody answers on is left over,
+    // and [`settle`] lets it be taken.
+    let theirs = |targets: Vec<Option<u16>>| ServeState {
+        taken: true,
+        others: if targets.iter().all(Option::is_some) { targets.iter().flatten().copied().collect() } else { Vec::new() },
+        ..state(Some(false), Some(false), format!("Serve is configured on {https}{SERVE_MOUNT}, but not for this Divixi."))
     };
     if mounts.is_empty() {
         // No web handler, but a TCP forward on the port says what is there
@@ -626,54 +660,131 @@ fn classify_doc(doc: &Value, port: u16) -> ServeState {
             })
             .collect();
         if forwards.is_empty() {
-            return ServeState {
-                published: None,
-                port_free: Some(false),
-                detail: format!("Serve is configured on port {SERVE_PORT}, but this build could not tell what is at {SERVE_MOUNT}."),
-            };
+            return state(None, Some(false), format!("Serve is configured on port {https}, but this build could not tell what is at {SERVE_MOUNT}."));
         }
-        return if forwards.iter().any(|(to, tls)| *tls && points_at(to, port)) { ours } else { theirs };
+        return if forwards.iter().any(|(to, tls)| *tls && points_at(to, port)) {
+            ours
+        } else {
+            theirs(forwards.iter().map(|(to, _)| loopback_port(to)).collect())
+        };
     }
     if mounts.iter().any(|m| finds_target(m, port)) {
         ours
     } else {
-        theirs
+        theirs(mounts.iter().map(|m| m.get("Proxy").and_then(Value::as_str).and_then(loopback_port)).collect())
     }
 }
 
-/// Whether serve is fronting Divixi's `port`.
+/// A reading, once it is known whether anything answers where another's
+/// mapping points. Nothing answering (`Some(false)`) makes it a leftover --
+/// typically from an app that published and then stopped -- and the mount
+/// counts as free. Answering or unknown leaves it another's.
+fn settle(st: ServeState, alive: Option<bool>) -> ServeState {
+    if st.published != Some(false) || st.port_free != Some(false) || st.others.is_empty() || alive != Some(false) {
+        return st;
+    }
+    let ports = st.others.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
+    let detail = format!("Serve's mapping on {}{SERVE_MOUNT} points at port {ports}, where nothing is listening.", st.https_port());
+    ServeState { port_free: Some(true), taken: false, detail, ..st }
+}
+
+/// Which mount Divixi is on, or would go to: 443 unless that is another's
+/// and running, then [`SERVE_PORT_ALT`] if that is free. `taken` stays with
+/// the answer, so the card can still offer to take 443 instead.
+fn choose(main: ServeState, alt: ServeState) -> ServeState {
+    if main.published == Some(true) {
+        return main;
+    }
+    if alt.published == Some(true) {
+        return ServeState { taken: main.taken, ..alt };
+    }
+    if main.port_free == Some(true) || !main.taken {
+        return main;
+    }
+    if alt.published == Some(false) && alt.port_free == Some(true) {
+        return ServeState { detail: format!("{} Port {SERVE_PORT_ALT} is free.", main.detail), taken: true, ..alt };
+    }
+    main
+}
+
+/// Any of `seen` answering is an answer; any unknown, unknown; else none.
+fn combine(seen: &[Option<bool>]) -> Option<bool> {
+    if seen.contains(&Some(true)) {
+        Some(true)
+    } else if seen.is_empty() || seen.contains(&None) {
+        None
+    } else {
+        Some(false)
+    }
+}
+
+/// Whether anything accepts a connection on loopback `port`, over IPv4 or
+/// IPv6 (`localhost` can be either). Connecting rather than binding: on
+/// Windows a bind to 127.0.0.1 succeeds beside a listener on 0.0.0.0. A
+/// refusal is `Some(false)`; running out of time is `None`.
+pub(super) async fn listening(port: u16) -> Option<bool> {
+    let at = |ip: std::net::IpAddr| async move {
+        match tokio::time::timeout(LISTEN_PROBE, tokio::net::TcpStream::connect((ip, port))).await {
+            Ok(Ok(_)) => Some(true),
+            Ok(Err(_)) => Some(false),
+            Err(_) => None,
+        }
+    };
+    let (v4, v6) = tokio::join!(at(std::net::Ipv4Addr::LOCALHOST.into()), at(std::net::Ipv6Addr::LOCALHOST.into()));
+    combine(&[v4, v6])
+}
+
+/// [`settle`] with the probe run, only when there is something to ask about.
+async fn settle_live(st: ServeState) -> ServeState {
+    if st.published != Some(false) || st.port_free != Some(false) || st.others.is_empty() {
+        return st;
+    }
+    let mut seen = Vec::new();
+    for p in &st.others {
+        seen.push(listening(*p).await);
+    }
+    let alive = combine(&seen);
+    settle(st, alive)
+}
+
+/// Whether serve is fronting Divixi's `port`, on 443 or beside it.
 pub async fn serve_state(port: u16) -> ServeState {
-    let unknown = |detail: String| ServeState { published: None, port_free: None, detail };
+    let doc = match read_doc().await {
+        Ok(doc) => doc,
+        Err(st) => return st,
+    };
+    let main = settle_live(classify_at(&doc, port, SERVE_PORT)).await;
+    let alt = settle_live(classify_at(&doc, port, SERVE_PORT_ALT)).await;
+    choose(main, alt)
+}
+
+/// The serve-status document, or the unknown state that explains its absence.
+/// No output at all is an empty document.
+async fn read_doc() -> Result<Value, ServeState> {
+    let unknown = |detail: String| ServeState { published: None, port_free: None, detail, ..Default::default() };
     let out = match run(&["serve", "status", "--json"], READ_TIMEOUT).await {
-        Ran::NoCli => return unknown("The tailscale CLI was not found in a standard install location.".into()),
-        Ran::NoStart(e) => return unknown(format!("The tailscale CLI could not be started: {e}")),
+        Ran::NoCli => return Err(unknown("The tailscale CLI was not found in a standard install location.".into())),
+        Ran::NoStart(e) => return Err(unknown(format!("The tailscale CLI could not be started: {e}"))),
         Ran::Timeout { out, err } => {
             let mut detail = "The tailscale CLI did not answer in time.".to_string();
             let words = said(&out, &err);
             if !words.is_empty() {
                 detail.push_str(&format!(" Before the deadline it printed: {words}"));
             }
-            return unknown(detail);
+            return Err(unknown(detail));
         }
         Ran::Done { status: 0, out, .. } => out,
         Ran::Done { status, out, err } => {
             let words = said(&out, &err);
-            return unknown(if words.is_empty() { format!("tailscale serve status exited {status}") } else { words });
+            return Err(unknown(if words.is_empty() { format!("tailscale serve status exited {status}") } else { words }));
         }
     };
     if out.trim().is_empty() {
-        return ServeState {
-            published: Some(false),
-            port_free: Some(true),
-            detail: "No serve configuration is active.".into(),
-        };
+        return Ok(Value::Null);
     }
-    match serde_json::from_str::<Value>(&out) {
-        Ok(doc) => classify_doc(&doc, port),
-        // The daemon *did* answer; we cannot read its shape. That is not the
-        // same as no answer, and the write guards need the difference.
-        Err(_) => unknown("tailscale serve status returned output this build cannot read.".into()),
-    }
+    // The daemon *did* answer; we cannot read its shape. That is not the same
+    // as no answer, and the write guards need the difference.
+    serde_json::from_str::<Value>(&out).map_err(|_| unknown("tailscale serve status returned output this build cannot read.".into()))
 }
 
 /// Add what the code means, beside the daemon's words and never instead.
@@ -719,26 +830,31 @@ pub async fn publish(port: u16) -> Outcome {
     // Keyed on `port_free`, not on "is anything configured": serve config that
     // sits entirely on other ports belongs to something else on this machine
     // and is untouched by this write, so it must not block it.
+    //
+    // A mapping whose port nobody answers on counts as free (see `settle`),
+    // and one that is another's and running sends Divixi to the port beside
+    // it (see `choose`) -- so neither needs anything from the human.
     let state = serve_state(port).await;
+    let https = state.https_port();
     // Already ours and already right: that is the goal, not an obstacle. Adopt
     // it and say so rather than writing the same configuration over itself.
     if state.published == Some(true) {
         return Outcome {
             ok: true,
             code: Code::Ok,
-            detail: format!("Divixi was already published on this machine's tailnet ({SERVE_PORT} → 127.0.0.1:{port})."),
+            detail: format!("Divixi was already published on this machine's tailnet ({https} → 127.0.0.1:{port})."),
         };
     }
     if state.port_free != Some(true) {
         return Outcome::bad(
             Code::NotOurs,
             format!(
-                "{} Divixi will not publish over it, because `tailscale serve` replaces whatever is at {SERVE_PORT}{SERVE_MOUNT} and this check could not confirm it is free.",
+                "{} Nothing was published.",
                 state.detail,
             ),
         );
     }
-    write(port).await
+    write(port, https).await
 }
 
 /// Put this Divixi at [`SERVE_PORT`]`[`SERVE_MOUNT`] in place of what serve
@@ -750,22 +866,26 @@ pub async fn replace(port: u16) -> Outcome {
     if cli_path().is_none() {
         return Outcome::bad(Code::NoCli, "Tailscale was not found in a standard install location, so nothing was published.");
     }
-    let state = serve_state(port).await;
+    let state = match read_doc().await {
+        Ok(doc) => classify_at(&doc, port, SERVE_PORT),
+        Err(st) => st,
+    };
     match state.published {
         Some(true) => Outcome {
             ok: true,
             code: Code::Ok,
             detail: format!("Divixi was already published on this machine's tailnet ({SERVE_PORT} → 127.0.0.1:{port})."),
         },
-        Some(false) => write(port).await,
+        Some(false) => write(port, SERVE_PORT).await,
         None => Outcome::bad(Code::NotOurs, format!("{} Nothing was replaced.", state.detail)),
     }
 }
 
-/// `serve --bg` for Divixi on `port`. Whatever was at the mount is replaced,
-/// which is why every caller decides first whether that is allowed.
-async fn write(port: u16) -> Outcome {
-    match run(&["serve", "--bg", &format!("--https={SERVE_PORT}"), &format!("http://127.0.0.1:{port}")], WRITE_TIMEOUT).await {
+/// `serve --bg` for Divixi on `port`, at HTTPS port `https`. Whatever was at
+/// the mount is replaced, which is why every caller decides first whether that
+/// is allowed.
+async fn write(port: u16, https: u16) -> Outcome {
+    match run(&["serve", "--bg", &format!("--https={https}"), &format!("http://127.0.0.1:{port}")], WRITE_TIMEOUT).await {
         Ran::NoCli => Outcome::bad(Code::NoCli, "Tailscale was not found, so nothing was published."),
         Ran::NoStart(e) => Outcome::bad(Code::Failed, format!("Tailscale is installed but could not be started: {e}")),
         Ran::Timeout { out, err } => {
@@ -774,7 +894,7 @@ async fn write(port: u16) -> Outcome {
             // waiting for it, so the captured output carries the one thing
             // needed and a bare "timed out" would hide it.
             let mut detail = format!(
-                "Tailscale did not answer within {}s. It may still have applied — press Check again before retrying.",
+                "Tailscale did not answer within {}s.",
                 WRITE_TIMEOUT.as_secs()
             );
             let words = said(&out, &err);
@@ -786,7 +906,7 @@ async fn write(port: u16) -> Outcome {
         Ran::Done { status: 0, .. } => Outcome {
             ok: true,
             code: Code::Ok,
-            detail: format!("Divixi is published on this machine's tailnet over HTTPS ({SERVE_PORT} → 127.0.0.1:{port})."),
+            detail: format!("Divixi is published on this machine's tailnet over HTTPS ({https} → 127.0.0.1:{port})."),
         },
         Ran::Done { status, out, err } => {
             let lead = if err.trim().is_empty() { out.clone() } else { err.clone() };
@@ -800,25 +920,47 @@ async fn write(port: u16) -> Outcome {
 /// An undetermined state refuses too, and that is the deliberate half: this
 /// build has seen almost none of the real serve-status shapes, so "I could not
 /// tell" must not become "go ahead".
+///
+/// Every mount that is ours comes off, 443 and the one beside it: one left
+/// behind would read as published and turn phone access straight back on.
 pub async fn unpublish(port: u16) -> Outcome {
-    let state = serve_state(port).await;
-    if state.published == Some(false) && state.port_free == Some(true) {
+    let refuse = |detail: &str| {
+        Outcome::bad(
+            Code::NotOurs,
+            format!("{detail} Divixi will not withdraw it, because this check could not confirm {SERVE_PORT}{SERVE_MOUNT} is Divixi's."),
+        )
+    };
+    let doc = match read_doc().await {
+        Ok(doc) => doc,
+        Err(st) => return refuse(&st.detail),
+    };
+    let readings = [classify_at(&doc, port, SERVE_PORT), classify_at(&doc, port, SERVE_PORT_ALT)];
+    let ours: Vec<u16> = readings.iter().filter(|s| s.published == Some(true)).map(ServeState::https_port).collect();
+    if ours.is_empty() {
         // Nothing of ours is published. Reported as success because the goal
         // already holds, and running the removal anyway would be a write
         // against configuration belonging to something else.
-        return Outcome {
-            ok: true,
-            code: Code::Ok,
-            detail: format!("Nothing of Divixi's is published on port {SERVE_PORT}; anything else serve holds is left alone."),
+        return match readings.iter().find(|s| s.published.is_none()) {
+            Some(unread) => refuse(&unread.detail),
+            None => Outcome {
+                ok: true,
+                code: Code::Ok,
+                detail: "Nothing of Divixi's is published; anything else serve holds is left alone.".into(),
+            },
         };
     }
-    if state.published != Some(true) {
-        return Outcome::bad(
-            Code::NotOurs,
-            format!("{} Divixi will not withdraw it, because this check could not confirm {SERVE_PORT}{SERVE_MOUNT} is Divixi's.", state.detail),
-        );
+    for https in ours {
+        let done = off(https).await;
+        if !done.ok {
+            return done;
+        }
     }
-    match run(&["serve", "--https", &SERVE_PORT.to_string(), &format!("--set-path={SERVE_MOUNT}"), "off"], WRITE_TIMEOUT).await {
+    Outcome { ok: true, code: Code::Ok, detail: "Divixi is no longer published on this machine's tailnet.".into() }
+}
+
+/// Remove the handler at [`SERVE_MOUNT`] on HTTPS port `https`, and only that.
+async fn off(https: u16) -> Outcome {
+    match run(&["serve", "--https", &https.to_string(), &format!("--set-path={SERVE_MOUNT}"), "off"], WRITE_TIMEOUT).await {
         Ran::NoCli => Outcome::bad(Code::NoCli, "Tailscale was not found; nothing to do."),
         Ran::NoStart(e) => Outcome::bad(Code::Failed, format!("The tailscale CLI could not be started: {e}")),
         Ran::Timeout { out, err } => {
@@ -1087,6 +1229,82 @@ mod tests {
         assert_eq!(state_of(svc, 7488), (Some(false), Some(true)));
         let both = format!(r#"{{"Services":{{"svc:web":{{"Web":{{"web.tail.ts.net:443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:3000"}}}}}}}}}}}},{}"#, &OURS.trim()[1..]);
         assert_eq!(state_of(&both, 7488), (Some(true), Some(false)), "{both}");
+    }
+
+    /// Verbatim from another PC (Windows Tailscale 1.102.2) that never ran a
+    /// Divixi dev build: Kiro Crew's dashboard (gateway 5476) published 443/
+    /// and then stopped, and nothing listens on 5476.
+    const KIRO_LEFT: &str = r#"{"TCP":{"443":{"HTTPS":true}},"Web":{"desktop-x01.tail123456.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:5476"}}}}}"#;
+
+    fn read(doc: &str, https: u16) -> ServeState {
+        classify_at(&serde_json::from_str(doc).unwrap(), 7488, https)
+    }
+
+    #[test]
+    fn a_left_over_mapping_nobody_answers_is_taken_without_asking() {
+        let st = read(KIRO_LEFT, SERVE_PORT);
+        assert_eq!((st.published, st.port_free, st.taken), (Some(false), Some(false), true));
+        assert_eq!(st.others, vec![5476]);
+        let st = settle(st, Some(false));
+        assert_eq!((st.published, st.port_free, st.taken), (Some(false), Some(true), false), "{}", st.detail);
+        let st = choose(st, read(KIRO_LEFT, SERVE_PORT_ALT));
+        assert_eq!((st.https_port(), st.port_free), (443, Some(true)), "publish goes to 443, over the leftover");
+    }
+
+    #[test]
+    fn a_running_strangers_443_sends_divixi_beside_it() {
+        let main = settle(read(KIRO_LEFT, SERVE_PORT), Some(true));
+        assert_eq!(main.port_free, Some(false), "Kiro Crew is running: not ours to take");
+        let st = choose(main, read(KIRO_LEFT, SERVE_PORT_ALT));
+        assert_eq!((st.published, st.port_free, st.https_port(), st.taken), (Some(false), Some(true), 8443, true));
+        // Not knowing whether it runs is not knowing it is gone.
+        let st = choose(settle(read(KIRO_LEFT, SERVE_PORT), None), read(KIRO_LEFT, SERVE_PORT_ALT));
+        assert_eq!(st.https_port(), 8443);
+    }
+
+    #[test]
+    fn divixi_beside_a_stranger_reads_as_published_there() {
+        let doc = r#"{"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{
+            "d.tail.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:5476"}}},
+            "d.tail.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:7488"}}}}}"#;
+        let st = choose(settle(read(doc, SERVE_PORT), Some(true)), read(doc, SERVE_PORT_ALT));
+        assert_eq!((st.published, st.https_port(), st.taken), (Some(true), 8443, true));
+        // And 443 wins once it is ours too.
+        assert_eq!(choose(read(OURS, SERVE_PORT), read(doc, SERVE_PORT_ALT)).https_port(), 443);
+    }
+
+    #[test]
+    fn a_stranger_on_both_ports_is_still_occupied() {
+        let doc = r#"{"Web":{"d:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:5476"}}},"d:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:9000"}}}}}"#;
+        let st = choose(settle(read(doc, SERVE_PORT), Some(true)), settle(read(doc, SERVE_PORT_ALT), Some(true)));
+        assert_eq!((st.published, st.port_free, st.https_port(), st.taken), (Some(false), Some(false), 443, true));
+    }
+
+    #[test]
+    fn only_a_plain_loopback_mapping_can_be_called_left_over() {
+        // A remote host, a file, an HTTPS target: nothing local to knock on,
+        // so it stays another's however quiet it is.
+        for doc in [
+            r#"{"Web":{"d:443":{"Handlers":{"/":{"Proxy":"http://192.168.0.9:80"}}}}}"#,
+            r#"{"Web":{"d:443":{"Handlers":{"/":{"Path":"C:\\site"}}}}}"#,
+            r#"{"Web":{"d:443":{"Handlers":{"/":{"Proxy":"https+insecure://127.0.0.1:5476"}}}}}"#,
+        ] {
+            let st = settle(read(doc, SERVE_PORT), Some(false));
+            assert_eq!(st.port_free, Some(false), "{doc}");
+        }
+        assert_eq!(combine(&[Some(false), Some(false)]), Some(false));
+        assert_eq!(combine(&[Some(false), Some(true)]), Some(true));
+        assert_eq!(combine(&[Some(false), None]), None);
+        assert_eq!(combine(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn the_probe_tells_a_listener_from_nothing() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        assert_eq!(listening(port).await, Some(true));
+        drop(l);
+        assert_eq!(listening(port).await, Some(false));
     }
 
     /// Against this machine's real daemon, read only. Ignored by default: CI

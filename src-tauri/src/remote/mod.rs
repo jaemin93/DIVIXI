@@ -347,14 +347,24 @@ pub struct PhoneStatus {
     /// right, and then the phone cannot connect with nothing on this machine
     /// wrong -- so it is said before that happens, not after.
     pub alone: bool,
-    /// Serve holds 443/ for something this check read and found not to be
-    /// this Divixi, so the card may offer to put this one there instead.
-    /// Never for a mapping it could not read.
+    /// Serve holds 443/ for something running that this check read and found
+    /// not to be this Divixi, so the card may offer to put this one there
+    /// instead. Never for a mapping it could not read, nor a left-over one.
     pub replaceable: bool,
 }
 
+/// The address a phone opens: the port is named only when it is not 443,
+/// which is also how a browser writes the `Origin` the server compares.
+fn address_of(name: &str, https: u16) -> String {
+    match (name.is_empty(), https) {
+        (true, _) => String::new(),
+        (false, tailscale::SERVE_PORT) => format!("https://{name}"),
+        (false, p) => format!("https://{name}:{p}"),
+    }
+}
+
 fn replaceable(step: Step, serve: &tailscale::ServeState) -> bool {
-    step == Step::Occupied && serve.published == Some(false) && serve.port_free == Some(false)
+    matches!(step, Step::Occupied | Step::Publish) && serve.taken
 }
 
 fn step_of(probe: &tailscale::Probe, serve: &tailscale::ServeState) -> Step {
@@ -438,7 +448,7 @@ async fn phone_status_now(app: &AppHandle, fresh: bool) -> PhoneStatus {
     let want = port(app);
     let (probe, serve) = look(app, want, fresh).await;
     let step = step_of(&probe, &serve);
-    let address = if probe.name.is_empty() { String::new() } else { format!("https://{}", probe.name) };
+    let address = address_of(&probe.name, serve.https_port());
     // The one origin a browser may name, kept beside the state that decides
     // it rather than written at each place that could change it. Set only
     // while this Divixi is actually published: a phone's every command is a
@@ -639,7 +649,7 @@ mod tests {
     }
 
     fn free() -> ServeState {
-        ServeState { published: Some(false), port_free: Some(true), detail: String::new() }
+        ServeState { published: Some(false), port_free: Some(true), detail: String::new(), ..Default::default() }
     }
 
     #[test]
@@ -667,15 +677,20 @@ mod tests {
         // the write side will decline.
         let unknown = ServeState::default();
         assert_eq!(step_of(&ready_probe(), &unknown), Step::Occupied);
-        let strangers = ServeState { published: Some(false), port_free: Some(false), detail: String::new() };
+        let strangers = ServeState { published: Some(false), port_free: Some(false), detail: String::new(), ..Default::default() };
         assert_eq!(step_of(&ready_probe(), &strangers), Step::Occupied);
     }
 
     #[test]
     fn only_a_mapping_read_as_someone_elses_offers_replacing_it() {
-        let strangers = ServeState { published: Some(false), port_free: Some(false), detail: String::new() };
+        let strangers = ServeState { published: Some(false), port_free: Some(false), taken: true, ..Default::default() };
         assert!(replaceable(step_of(&ready_probe(), &strangers), &strangers));
-        let unread = ServeState { published: None, port_free: Some(false), detail: String::new() };
+        // Beside a running stranger on 8443: the plain press goes there, and
+        // taking 443 instead stays on offer.
+        let beside = ServeState { published: Some(false), port_free: Some(true), https: 8443, taken: true, ..Default::default() };
+        assert_eq!(step_of(&ready_probe(), &beside), Step::Publish);
+        assert!(replaceable(Step::Publish, &beside));
+        let unread = ServeState { published: None, port_free: Some(false), detail: String::new(), ..Default::default() };
         assert!(!replaceable(step_of(&ready_probe(), &unread), &unread));
         assert!(!replaceable(step_of(&ready_probe(), &ServeState::default()), &ServeState::default()));
         assert!(!replaceable(step_of(&ready_probe(), &free()), &free()), "a free port is a plain publish");
@@ -684,8 +699,16 @@ mod tests {
     }
 
     #[test]
+    fn the_address_names_the_port_only_beside_443() {
+        assert_eq!(address_of("desk.tail.ts.net", 443), "https://desk.tail.ts.net");
+        assert_eq!(address_of("desk.tail.ts.net", 8443), "https://desk.tail.ts.net:8443");
+        assert_eq!(address_of("", 8443), "");
+        assert_eq!(ServeState::default().https_port(), 443, "unread is 443");
+    }
+
+    #[test]
     fn being_published_outranks_a_stale_certificate_list() {
-        let ours = ServeState { published: Some(true), port_free: Some(false), detail: String::new() };
+        let ours = ServeState { published: Some(true), port_free: Some(false), detail: String::new(), ..Default::default() };
         assert_eq!(step_of(&ready_probe(), &ours), Step::Ready);
         assert_eq!(
             step_of(&Probe { https: Some(false), ..ready_probe() }, &ours),
