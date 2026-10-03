@@ -3146,6 +3146,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "winreg 0.56.0",
 ]
 
 [[package]]

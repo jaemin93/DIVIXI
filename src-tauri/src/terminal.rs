@@ -51,13 +51,16 @@ struct Exit {
 }
 
 /// What a new terminal runs: PowerShell 7 when installed, else Windows
-/// PowerShell; the login shell elsewhere.
+/// PowerShell; the login shell elsewhere. On Windows with the PATH of
+/// [`crate::windows_path`], not the one portable-pty would make.
 fn shell() -> CommandBuilder {
     #[cfg(windows)]
     {
-        let pwsh = std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("pwsh.exe").is_file()));
+        let path = crate::windows_path::shell_path();
+        let pwsh = std::env::split_paths(&path).any(|dir| dir.join("pwsh.exe").is_file());
         let mut cmd = CommandBuilder::new(if pwsh { "pwsh.exe" } else { "powershell.exe" });
         cmd.arg("-NoLogo");
+        crate::windows_path::apply(&mut cmd);
         cmd
     }
     #[cfg(not(windows))]
@@ -279,6 +282,72 @@ mod tests {
         let at = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap_or_default();
         let _ = child.kill();
         assert_eq!(at, cwd, "PowerShell's location");
+    }
+
+    /// Where Windows is, even when this test runs without `SystemRoot`.
+    #[cfg(windows)]
+    fn windows_dir() -> std::path::PathBuf {
+        std::env::var_os("SystemRoot").or_else(|| std::env::var_os("windir")).unwrap_or_else(|| r"C:\Windows".into()).into()
+    }
+
+    /// One PATH, under one name, with System32 in it spelled out.
+    #[cfg(windows)]
+    #[test]
+    fn shell_gets_one_path_with_system32_in_it() {
+        let cmd = super::shell();
+        let keys: Vec<&str> = cmd.iter_full_env_as_str().map(|(k, _)| k).filter(|k| k.eq_ignore_ascii_case("path")).collect();
+        assert_eq!(keys, ["Path"]);
+        let path = cmd.get_env("PATH").unwrap().to_string_lossy().into_owned();
+        assert!(!path.contains('%'), "{path}");
+        let system32 = windows_dir().join("System32").to_string_lossy().to_lowercase();
+        assert!(std::env::split_paths(&path).any(|d| d.to_string_lossy().to_lowercase() == system32), "{path}");
+    }
+
+    /// `ssh` resolves in a real shell on a real pty, where Windows has it.
+    #[cfg(windows)]
+    #[test]
+    fn shell_finds_ssh() {
+        use portable_pty::native_pty_system;
+        use std::io::{Read, Write};
+        let ssh = windows_dir().join(r"System32\OpenSSH\ssh.exe");
+        if !ssh.is_file() {
+            eprintln!("no {}: the OpenSSH client is not installed here", ssh.display());
+            return;
+        }
+        let pair = native_pty_system().openpty(super::size(300, 24)).unwrap();
+        let mut cmd = super::shell();
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            "Write-Output (\"<\" + \"<\" + (Get-Command ssh -ErrorAction SilentlyContinue).Source + \">\" + \">\")",
+        ]);
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut all = Vec::new();
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                all.extend_from_slice(&buf[..n]);
+                if buf[..n].windows(4).any(|w| w == b"[6n") {
+                    let _ = writer.write_all(b"[1;1R");
+                    let _ = writer.flush();
+                }
+                let text = String::from_utf8_lossy(&all);
+                if let Some(at) = text.find("<<").and_then(|i| text[i + 2..].find(">>").map(|j| text[i + 2..i + 2 + j].to_string())) {
+                    let _ = tx.send(at);
+                    return;
+                }
+            }
+        });
+        let found = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap_or_default();
+        let _ = child.kill();
+        assert!(found.eq_ignore_ascii_case(&ssh.to_string_lossy()), "Get-Command ssh gave {found:?}");
     }
 
     #[test]

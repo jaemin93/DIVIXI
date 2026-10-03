@@ -7,6 +7,7 @@
   import { store } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
+  import { MIN_CONTRAST, ansiFor } from "./termTheme";
 
   /**
    * The bottom panel: real shells in tabs, in the open track's folder.
@@ -53,6 +54,7 @@
       cursor: cssVar("--acc", "#e03127"),
       cursorAccent: bg,
       selectionBackground: cssVar("--lines", "#2a2a2a"),
+      ...ansiFor(store.theme),
     };
   }
 
@@ -79,6 +81,7 @@
       cursorBlink: true,
       scrollback: 5000,
       allowProposedApi: false,
+      minimumContrastRatio: MIN_CONTRAST,
       theme: theme(),
     });
     const fit = new FitAddon();
