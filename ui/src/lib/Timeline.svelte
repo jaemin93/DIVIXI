@@ -1,10 +1,12 @@
 <script lang="ts">
   import ReportCard from "./ReportCard.svelte";
-  import { store, agentLabel, splitAttachments, splitKnowledge, wasStopped, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Segment, type Tool } from "./store.svelte";
+  import { store, agentLabel, splitAttachments, splitKnowledge, wasStopped, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Run } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import DecisionCard from "./DecisionCard.svelte";
   import Working from "./Working.svelte";
   import Markdown from "./Markdown.svelte";
+  import StepGroup from "./StepGroup.svelte";
+  import { isActive, shape } from "./steps";
   import { t } from "./i18n.svelte";
   import { untrack } from "svelte";
   import { FOLLOWING, followed, reached, resized, scrolled, type Stick } from "./scroll";
@@ -165,26 +167,24 @@
       .replace(/\n{3,}/g, "\n\n");
   }
 
+  const isLive = (run: Run) => run.status === "connecting" || run.status === "running";
+
+  /** A turn's prose and steps in order, each steps block knowing whether it is still growing. */
+  function turn(run: Run) {
+    const blocks = shape(run.segments, (text) => !!cleanText(text).trim());
+    return blocks.map((block, i) => ({ block, active: isActive(blocks, i, isLive(run)) }));
+  }
+
   /**
-   * Consecutive tool calls fold into one line that overwrites itself, the way
-   * a terminal does with 
-: the latest tool shows, earlier ones become a count.
+   * Restored turns whose steps the human asked to see. They come back with
+   * their text only; the steps are replayed from the store when opened, and
+   * open already when they arrive.
    */
-  type Shown = Exclude<Segment, { kind: "tool" }> | { kind: "tools"; tools: Tool[] };
-  function collapse(segments: Segment[]): Shown[] {
-    const out: Shown[] = [];
-    for (const seg of segments) {
-      const last = out.at(-1);
-      if (seg.kind === "tool") {
-        if (last && last.kind === "tools") last.tools.push(seg.tool);
-        else out.push({ kind: "tools", tools: [seg.tool] });
-      } else if (seg.kind === "text" && !cleanText(seg.text).trim()) {
-        continue;
-      } else {
-        out.push(seg);
-      }
-    }
-    return out;
+  let unfolded = $state<Record<string, true>>({});
+
+  function unfold(run: Run) {
+    unfolded[run.id] = true;
+    void store.hydrate(run);
   }
 
   /** Decisions sit under the conductor turn that asked; the rest (asked
@@ -260,11 +260,6 @@
     return answer ? `${id} · ${answer}` : id;
   }
 
-  /** Tool titles from MCP arrive as `mcp__divixi__spawn_worker`; show the tool. */
-  function toolLabel(title: string): string {
-    return title.replace(/^mcp__[a-z0-9_-]+__/i, "").replace(/^mcp\.[a-z0-9_-]+\./i, "");
-  }
-
 </script>
 
 <div class="tl">
@@ -337,25 +332,19 @@
               <span class="mono stopped">{t("timeline.stopped")}</span>
             {/if}
           </div>
-          <!-- The turn as it unfolds: prose and tool lines in order, like a native session. -->
-          {#each collapse(run.segments) as seg, i (i)}
-            {#if seg.kind === "text"}
-              <div class="ctext"><Markdown source={cleanText(seg.text)} /></div>
-            {:else if seg.kind === "thought"}
-              {#if cleanText(seg.text).trim()}<p class="ctext thought">{cleanText(seg.text).trim()}</p>{/if}
+          <!-- The turn as it unfolds: prose, and the steps between it piling up
+               until the answer starts, when they fold into one line. -->
+          {#each turn(run) as { block, active }, i (block.kind === "steps" ? `s${block.at}` : `t${i}`)}
+            {#if block.kind === "text"}
+              <div class="ctext"><Markdown source={cleanText(block.text)} /></div>
             {:else}
-              {@const tool = seg.tools[seg.tools.length - 1]}
-              {@const running = tool.status !== "completed" && tool.status !== "failed"}
-              <div class="toolline mono" class:running>
-                <span class="tdot" class:pulse={running}></span>
-                <span class="tk">{tool.toolKind}</span>
-                <span class="tt">{toolLabel(tool.title)}</span>
-                {#if seg.tools.length > 1}<span class="tcount">+{seg.tools.length - 1}</span>{/if}
-                <span class="grow"></span>
-                <span class="tst" class:bad={tool.status === "failed"}>{tool.status}</span>
-              </div>
+              <StepGroup steps={block.steps} live={isLive(run)} {active} initial={unfolded[run.id]} />
             {/if}
           {/each}
+          {#if !run.loaded && run.segments.length === 0 && run.toolCount > 0}
+            <!-- Restored from the store: the steps are counted, and read when asked for. -->
+            <StepGroup steps={[]} live={false} active={false} count={run.toolCount} onopen={() => unfold(run)} />
+          {/if}
           {#if run.segments.length === 0 && run.message.trim()}
             <!-- Restored from the store: only the folded text survives. -->
             <div class="ctext"><Markdown source={cleanText(run.message)} /></div>
@@ -771,75 +760,9 @@
     color: var(--lab);
   }
 
-  /* Thinking: quieter than speech. */
-  .ctext.thought {
-    color: var(--lab);
-    font-style: italic;
-    font-size: calc(var(--chat-fs) - 1px);
-  }
-
-  .ctext + .ctext,
-  .toolline + .ctext,
-  .ctext + .toolline {
+  .ctext + .ctext {
     margin-top: 8px;
   }
-
-  /* One line per tool call, as a native session prints them. */
-  .toolline {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    height: 22px;
-    font-size: 11px;
-    color: var(--lab);
-  }
-
-  .toolline.running {
-    color: var(--dim);
-  }
-
-  .tdot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--idle);
-    flex-shrink: 0;
-  }
-
-  .toolline.running .tdot {
-    background: var(--ok);
-  }
-
-  .tk {
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    font-size: 9px;
-  }
-
-  .tt {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--body);
-  }
-
-  .tst {
-    font-size: 9px;
-    letter-spacing: 0.12em;
-  }
-
-  .tst.bad {
-    color: var(--acct);
-  }
-
-  .tcount {
-    font-size: 9px;
-    letter-spacing: 0.1em;
-    color: var(--lab);
-    border: 1px solid var(--line);
-    padding: 1px 5px;
-  }
-
 
   .meta {
     font-size: 10px;
