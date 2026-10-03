@@ -127,6 +127,12 @@
   /** Start drawing again (the layout or the view changed). */
   function kick() {
     if (frame || !canvas) return;
+    readInk();
+    frame = requestAnimationFrame(loop);
+  }
+
+  function readInk() {
+    if (!canvas) return;
     const styles = getComputedStyle(canvas);
     const v = (name: string, fallback: string) => styles.getPropertyValue(name).trim() || fallback;
     ink = {
@@ -141,7 +147,6 @@
       meta: v("--lab", ink.meta),
       mono: v("--mono", ink.mono),
     };
-    frame = requestAnimationFrame(loop);
   }
 
   function step() {
@@ -221,6 +226,11 @@
   function spaced(ctx: CanvasRenderingContext2D, px: number) {
     (ctx as CanvasRenderingContext2D & { letterSpacing?: string }).letterSpacing = `${px}px`;
   }
+
+  /** A graph this small labels every node it has room for, not just the often mentioned. */
+  const SMALL_GRAPH = 40;
+  /** Characters a label shows before it is cut short. */
+  const LABEL_MAX = 28;
 
   /** The hub ring's radius on screen at zoom k. */
   const ringOf = (k: number) => 14 * Math.min(1.4, Math.max(0.8, k));
@@ -387,7 +397,7 @@
     // Placed in order of importance (what is lit, the hub, the most mentioned), and a
     // label that would land on one already placed is left out rather than overprinted.
     const order = bodies
-      .filter((b) => (!faded(b) || seeded.has(b.node.id)) && (b === hub || lit(b) || seeded.has(b.node.id) || b.node.mentions >= 2 || k > 1.4))
+      .filter((b) => (!faded(b) || seeded.has(b.node.id)) && (b === hub || lit(b) || seeded.has(b.node.id) || b.node.mentions >= 2 || bodies.length <= SMALL_GRAPH || k > 1.4))
       .sort(
         (p, q) =>
           Number(lit(q)) - Number(lit(p)) ||
@@ -400,6 +410,9 @@
       const r = b === hub ? ringOf(k) : size(b) * 1.3;
       return [sx(b.x) - r, sy(b.y) - r, sx(b.x) + r, sy(b.y) + r];
     });
+    // Nor may one run under the overview rail on the right edge.
+    const railH = sections.length * 24;
+    taken.push([w - (picked ? 304 : 0) - 150, h / 2 - railH / 2 - 8, w - (picked ? 304 : 0), h / 2 + railH / 2 + 8]);
     const free = (x0: number, y0: number, x1: number, y1: number) =>
       !taken.some(([a0, b0, a1, b1]) => x0 < a1 && x1 > a0 && y0 < b1 && y1 > b0);
     for (const b of order) {
@@ -408,7 +421,9 @@
       const x = sx(b.x);
       const y = sy(b.y);
       if (x < -240 || x > w + 40 || y < -30 || y > h + 30) continue;
-      const name = b.node.name.toUpperCase();
+      // Long names (hosts, URLs) are cut short until pointed at or picked.
+      const full = b.node.name.toUpperCase();
+      const name = on || full.length <= LABEL_MAX ? full : `${full.slice(0, LABEL_MAX - 1)}…`;
       const meta = isHub ? t("kb.graphHub", { n: hubLinks }).toUpperCase() : t("kb.graphMeta", { kind: b.node.kind, n: b.node.mentions });
       const showMeta = isHub || on || k > 1.2;
       ctx.font = `${isHub ? 500 : 400} 10px ${ink.mono}`;
@@ -573,6 +588,17 @@
       cancelAnimationFrame(frame);
       frame = 0;
     };
+  });
+
+  $effect(() => {
+    // The theme is a class on <html>: when it turns, take the new inks at once,
+    // even mid-animation (kick alone only reads them when a loop starts).
+    const seen = new MutationObserver(() => {
+      readInk();
+      kick();
+    });
+    seen.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => seen.disconnect();
   });
 
   $effect(() => {
