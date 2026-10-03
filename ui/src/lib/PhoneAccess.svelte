@@ -31,7 +31,7 @@
     tailnet: string;
     detail: string;
   };
-  type Serve = { published: boolean | null; port_free: boolean | null; detail: string };
+  type Serve = { published: boolean | null; port_free: boolean | null; detail: string; https: number; taken: boolean };
   type Step = "install" | "start_tailscale" | "sign_in" | "enable_magicdns" | "enable_https" | "occupied" | "publish" | "ready";
   type Status = {
     on: boolean;
@@ -166,11 +166,14 @@
         <button class="btn" disabled={busy} onclick={() => turn(false)}>{t("phone.turnOff")}</button>
       {:else if canTurnOn}
         <button class="btn btn-acc" disabled={busy} onclick={() => turn(true)}>{t("phone.turnOn")}</button>
-      {:else if s.replaceable && replacing}
+      {/if}
+      <!-- 443/ is another app's and running. Turning on goes beside it; this
+           takes 443 instead, once confirmed. -->
+      {#if !on && s.replaceable && replacing}
         <button class="btn btn-acc" disabled={busy} onclick={replace}>{t("phone.replaceYes")}</button>
         <button class="btn" disabled={busy} onclick={() => (replacing = false)}>{t("phone.replaceNo")}</button>
-      {:else if s.replaceable}
-        <button class="btn btn-acc" disabled={busy} onclick={() => (replacing = true)}>{t("phone.replace")}</button>
+      {:else if !on && s.replaceable}
+        <button class="btn" class:btn-acc={!canTurnOn} disabled={busy} onclick={() => (replacing = true)}>{t("phone.replace")}</button>
       {/if}
       <button class="btn" disabled={busy} onclick={() => refresh(true)} title={t("phone.checkHint")}>{t("phone.check")}</button>
     </div>
