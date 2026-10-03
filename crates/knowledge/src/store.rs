@@ -222,6 +222,16 @@ pub struct Graph {
     pub edges: Vec<GraphEdge>,
 }
 
+/// The entities a query reaches, as the graph leg of [`KnowledgeDb::search`]
+/// reaches them: the ones it names, and what lies within two relations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryEntities {
+    /// Named by the query.
+    pub seeds: Vec<i64>,
+    /// The seeds and everything within two relations of them.
+    pub related: Vec<i64>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stats {
     pub sources: i64,
@@ -763,33 +773,23 @@ impl KnowledgeDb {
 
     /// Entities named in the query, their neighbours two hops out, and the
     /// items that mention most of them.
+    /// The entities a query names, and those within two relations of them:
+    /// what the graph view lights up for the search it shows.
+    pub fn query_entities(&self, query: &str) -> anyhow::Result<QueryEntities> {
+        let conn = self.conn.lock();
+        let (seeds, seen) = reach(&conn, query)?;
+        let mut seeds: Vec<i64> = seeds.into_iter().collect();
+        let mut related: Vec<i64> = seen.into_iter().collect();
+        seeds.sort_unstable();
+        related.sort_unstable();
+        Ok(QueryEntities { seeds, related })
+    }
+
     fn graph_search(&self, query: &str, limit: usize, source: Option<&str>) -> anyhow::Result<Vec<i64>> {
         let conn = self.conn.lock();
-        let mut seeds: HashSet<i64> = HashSet::new();
-        for term in fts::entity_candidates(query) {
-            if let Some(id) = conn
-                .query_row("SELECT id FROM entities WHERE name_key = ?1", params![term.to_lowercase()], |r| r.get::<_, i64>(0))
-                .optional()?
-            {
-                seeds.insert(id);
-            }
-        }
+        let (seeds, seen) = reach(&conn, query)?;
         if seeds.is_empty() {
             return Ok(Vec::new());
-        }
-        let mut seen: HashSet<i64> = seeds.clone();
-        let mut queue: VecDeque<(i64, usize)> = seeds.iter().map(|s| (*s, 0)).collect();
-        let mut stmt = conn.prepare("SELECT target FROM relations WHERE source = ?1 UNION SELECT source FROM relations WHERE target = ?1")?;
-        while let Some((id, depth)) = queue.pop_front() {
-            if depth == 2 {
-                continue;
-            }
-            let next: Vec<i64> = stmt.query_map(params![id], |r| r.get(0))?.collect::<Result<_, _>>()?;
-            for n in next {
-                if seen.insert(n) {
-                    queue.push_back((n, depth + 1));
-                }
-            }
         }
         let list = seen.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
         let mut stmt = conn.prepare(&format!(
@@ -800,6 +800,39 @@ impl KnowledgeDb {
         let rows = stmt.query_map(params![source, limit as i64], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+}
+
+/// The entities a query names (its seeds), and the seeds with everything
+/// within two relations of them. Shared by the graph leg of search and by
+/// [`KnowledgeDb::query_entities`], so the view lights what search followed.
+fn reach(conn: &Connection, query: &str) -> anyhow::Result<(HashSet<i64>, HashSet<i64>)> {
+    let mut seeds: HashSet<i64> = HashSet::new();
+    for term in fts::entity_candidates(query) {
+        if let Some(id) = conn
+            .query_row("SELECT id FROM entities WHERE name_key = ?1", params![term.to_lowercase()], |r| r.get::<_, i64>(0))
+            .optional()?
+        {
+            seeds.insert(id);
+        }
+    }
+    let mut seen: HashSet<i64> = seeds.clone();
+    if seeds.is_empty() {
+        return Ok((seeds, seen));
+    }
+    let mut queue: VecDeque<(i64, usize)> = seeds.iter().map(|s| (*s, 0)).collect();
+    let mut stmt = conn.prepare("SELECT target FROM relations WHERE source = ?1 UNION SELECT source FROM relations WHERE target = ?1")?;
+    while let Some((id, depth)) = queue.pop_front() {
+        if depth == 2 {
+            continue;
+        }
+        let next: Vec<i64> = stmt.query_map(params![id], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        for n in next {
+            if seen.insert(n) {
+                queue.push_back((n, depth + 1));
+            }
+        }
+    }
+    Ok((seeds, seen))
 }
 
 /// The vector leg's weight in the fusion (Kiro Crew's `VECTOR_RRF_WEIGHT`).
@@ -1043,5 +1076,19 @@ mod tests {
         assert_eq!(g.edges.len(), 1);
         let bc = g.nodes[0].id;
         assert_eq!(db.entity_items(bc).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_query_reaches_the_entities_search_follows() {
+        let db = seeded();
+        let g = db.graph(100).unwrap();
+        let id = |name: &str| g.nodes.iter().find(|n| n.name == name).unwrap().id;
+        let q = db.query_entities("Rust").unwrap();
+        assert_eq!(q.seeds, vec![id("Rust")]);
+        let mut want = vec![id("Rust"), id("Borrow checker")];
+        want.sort_unstable();
+        assert_eq!(q.related, want, "a relation away; SQLite shares no relation");
+        assert_eq!(db.query_entities("nightly backups").unwrap(), QueryEntities::default(), "names no entity");
+        assert_eq!(db.query_entities("").unwrap(), QueryEntities::default());
     }
 }

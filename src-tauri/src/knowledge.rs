@@ -757,6 +757,13 @@ pub fn knowledge_graph(state: State<'_, AppState>) -> Result<Graph, String> {
     state.library.db.graph(300).map_err(|e| e.to_string())
 }
 
+/// The entities a search reaches (named, and within two relations), for the
+/// graph view to light up beside the query it shows.
+#[tauri::command(async)]
+pub fn knowledge_query_entities(state: State<'_, AppState>, query: String) -> Result<orchestra_knowledge::store::QueryEntities, String> {
+    state.library.db.query_entities(query.trim()).map_err(|e| e.to_string())
+}
+
 #[tauri::command(async)]
 pub fn knowledge_entity_items(state: State<'_, AppState>, id: i64) -> Result<Vec<Item>, String> {
     state.library.db.entity_items(id).map_err(|e| e.to_string())

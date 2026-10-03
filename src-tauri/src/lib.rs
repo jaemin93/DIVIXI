@@ -1750,6 +1750,7 @@ pub fn run() {
             knowledge::knowledge_items,
             knowledge::knowledge_graph,
             knowledge::knowledge_entity_items,
+            knowledge::knowledge_query_entities,
             knowledge::knowledge_stats,
             knowledge::knowledge_overlaps,
             knowledge::knowledge_formats,
