@@ -1,6 +1,6 @@
 # Security Policy
 
-Divixi launches coding-agent CLIs on your machine, holds the tokens those agents and the
+DIVIXI launches coding-agent CLIs on your machine, holds the tokens those agents and the
 remote bridge need, and opens SSH tunnels to other hosts. So a private way to report a
 flaw is not decoration here.
 
@@ -25,8 +25,8 @@ What helps, in rough order:
   path? a malicious repository? a hostile agent?).
 - Steps to reproduce, and the version — the version block from **Settings → About →
   Diagnostics** is ideal.
-- Your platform. Divixi's exposure is not the same on Windows, Linux and macOS.
-- Whether the flaw is in Divixi itself or in something it launches or downloads (an ACP
+- Your platform. DIVIXI's exposure is not the same on Windows, Linux and macOS.
+- Whether the flaw is in DIVIXI itself or in something it launches or downloads (an ACP
   adapter, an agent CLI). Both are worth reporting; the fix is in a different place.
 
 **Please redact your own secrets** before attaching a log. `*Copy diagnostics*` masks
@@ -39,7 +39,7 @@ no security release train: a fix lands on `main` and goes out in the next releas
 
 ## Supported versions
 
-Divixi is pre-1.0. Only the **latest release** gets fixes, and `main` is where they land
+DIVIXI is pre-1.0. Only the **latest release** gets fixes, and `main` is where they land
 first. Older releases are not patched.
 
 ## In scope
@@ -50,23 +50,23 @@ first. Older releases are not patched.
   decide that a caller is its owner, the `127.0.0.1` default, the remote webview bridge.
   Anything that lets someone who is not the owner reach a `divixi-server`, or lets one
   Track reach another's tools, is in scope.
-- **Secrets that escape.** Divixi masks values that look like a key or a token before
+- **Secrets that escape.** DIVIXI masks values that look like a key or a token before
   anything is written to the log; the diagnostics report deliberately reads no settings
   and no environment; nothing that holds a secret derives `Debug`. A token that still
   ends up in `divixi.db`, in the log, in `crash.log`, or in the diagnostics report is a
   vulnerability — report it here, not in an issue.
-- Anything that lets a repository you merely *open* in Divixi run code without your
+- Anything that lets a repository you merely *open* in DIVIXI run code without your
   going along with it.
 
 ## Not vulnerabilities
 
-Two of Divixi's design decisions look alarming from the outside and are deliberate:
+Two of DIVIXI's design decisions look alarming from the outside and are deliberate:
 
-- **Agents run in their most autonomous mode.** Divixi's whole purpose is to let a
+- **Agents run in their most autonomous mode.** DIVIXI's whole purpose is to let a
   conductor agent delegate work to worker agents that edit files and run commands in the
   folder you pointed them at. An agent doing something destructive because it was asked
   to, or because it misunderstood, is the risk you take by running coding agents at all —
-  per-Track settings can tighten it. Divixi is not a sandbox and does not claim to be.
+  per-Track settings can tighten it. DIVIXI is not a sandbox and does not claim to be.
   Point it at a folder you would let an agent loose in.
 - **A server listening on every network is plain HTTP.** This is documented in the
   README and in [docs/divixi-server.md](docs/divixi-server.md): the default is
@@ -76,10 +76,10 @@ Two of Divixi's design decisions look alarming from the outside and are delibera
 
 Also not for this channel: bugs in the agent CLIs themselves (Claude Code, Codex,
 Antigravity), in their npm ACP adapters, or in what their providers do with your prompts.
-Report those upstream. If Divixi's use of one of them makes an upstream flaw worse, that
+Report those upstream. If DIVIXI's use of one of them makes an upstream flaw worse, that
 part is ours.
 
-Divixi sends no telemetry. Nothing about you or your use goes anywhere, so there is no
+DIVIXI sends no telemetry. Nothing about you or your use goes anywhere, so there is no
 collection pipeline to attack.
 
 ## Fixes

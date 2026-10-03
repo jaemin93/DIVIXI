@@ -8,6 +8,6 @@ contact_links:
   - name: 🔒 Security vulnerability
     url: https://github.com/jaemin93/divixi/security/advisories/new
     about: Report it privately, not as an issue. See SECURITY.md for what to include.
-  - name: 📖 Building and working on Divixi
+  - name: 📖 Building and working on DIVIXI
     url: https://github.com/jaemin93/divixi/blob/main/CONTRIBUTING.md
     about: Setup, the checks to run, and what CI does and does not prove.

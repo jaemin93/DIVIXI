@@ -1254,6 +1254,16 @@ mod tests {
     }
 
     #[test]
+    fn the_product_name_in_front_is_not_matched_on() {
+        // The installers were `Divixi_...` and are `DIVIXI_...` since the
+        // product name went upper case. A release named either way is found.
+        for name in ["Divixi_0.1.0_x64-setup.exe", "DIVIXI_0.1.0_x64-setup.exe"] {
+            let assets = vec![asset(name, Some("sha256:00")), asset("DIVIXI_0.1.0_x64_en-US.msi", Some("sha256:00"))];
+            assert_eq!(pick(&assets, &windows_x64()).map(|a| a.name.as_str()), Some(name));
+        }
+    }
+
+    #[test]
     fn a_release_without_this_platforms_bundle_has_nothing_to_offer() {
         let assets: Vec<Asset> = a_release().into_iter().filter(|a| !a.name.ends_with("-setup.exe")).collect();
         assert!(pick(&assets, &windows_x64()).is_none());

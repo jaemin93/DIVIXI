@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Divixi",
+  "productName": "DIVIXI",
   "version": "0.1.0",
   "identifier": "app.divixi",
   "mainBinaryName": "divixi",
@@ -22,7 +22,7 @@
   "app": {
     "windows": [
       {
-        "title": "Divixi",
+        "title": "DIVIXI",
         "width": 1440,
         "height": 900,
         "minWidth": 1040,
@@ -37,14 +37,19 @@
   },
   "bundle": {
     "active": true,
-    "publisher": "The divixi contributors",
+    "publisher": "The DIVIXI contributors",
     "homepage": "https://github.com/jaemin93/divixi",
-    "copyright": "Copyright 2026 The divixi contributors",
+    "copyright": "Copyright 2026 The DIVIXI contributors",
     "shortDescription": "One conductor, many agents.",
     "longDescription": "One conductor, many agents. A desktop app for directing coding agents: you talk to one conductor, and it divides the work among worker sessions that run side by side.",
     "licenseFile": "../LICENSE",
     "category": "DeveloperTool",
     "createUpdaterArtifacts": true,
+    "windows": {
+      "wix": {
+        "upgradeCode": "33c40d9b-8bfb-5f4d-918f-476e78b8845f"
+      }
+    },
     "targets": "all",
     "icon": [
       "icons/32x32.png",

@@ -1863,7 +1863,7 @@ pub fn run() {
                     // Two Divixis side by side while a change is checked:
                     // the title bar is the one place both are always
                     // labelled, whichever has focus.
-                    let _ = window.set_title(if cfg!(debug_assertions) { "Divixi (dev)" } else { "Divixi" });
+                    let _ = window.set_title(if cfg!(debug_assertions) { "DIVIXI (dev)" } else { "DIVIXI" });
                 }
                 tray(app.handle())?;
             }
@@ -1897,7 +1897,7 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("failed to start Divixi");
+        .expect("failed to start DIVIXI");
 }
 
 /// A pairing link for another PC's Divixi app (it takes the token from it), made without the running app (the
@@ -1933,7 +1933,7 @@ pub fn set_owner(login: Option<&str>) -> anyhow::Result<String> {
     let auth = remote::auth::Auth::open(&data_dir)?;
     remote::github::set_owner(&store, &auth, login)?;
     Ok(match login {
-        Some(l) => format!("{l} owns this Divixi"),
+        Some(l) => format!("{l} owns this DIVIXI"),
         None => "no owner: nobody comes in by GitHub".to_string(),
     })
 }
@@ -2013,11 +2013,11 @@ fn show_main(app: &AppHandle) {
 fn tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-    let show = MenuItem::with_id(app, "show", "Show Divixi", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Show DIVIXI", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
     let mut builder = TrayIconBuilder::with_id("divixi")
-        .tooltip("Divixi")
+        .tooltip("DIVIXI")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {

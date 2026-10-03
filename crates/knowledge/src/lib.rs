@@ -1,4 +1,4 @@
-// Copyright 2026 The divixi contributors
+// Copyright 2026 The DIVIXI contributors
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,9 +20,9 @@
 // (https://github.com/kirodotdev/KiroCrew), Copyright Amazon.com, Inc. or its
 // affiliates, licensed under the Apache License, Version 2.0.
 //
-// This file has been modified by the divixi contributors: the formatting is
+// This file has been modified by the DIVIXI contributors: the formatting is
 // reimplemented in Rust and the source line carries our own identifiers. The
-// rest of the module is the divixi contributors' own; no Python source was
+// rest of the module is the DIVIXI contributors' own; no Python source was
 // copied.
 //
 // See the NOTICE file at the root of this repository.

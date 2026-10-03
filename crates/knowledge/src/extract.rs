@@ -1,4 +1,4 @@
-// Copyright 2026 The divixi contributors
+// Copyright 2026 The DIVIXI contributors
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,12 +20,12 @@
 // `src/kiro_crew/knowledge/extractor.py`, Copyright Amazon.com, Inc. or its
 // affiliates, licensed under the Apache License, Version 2.0.
 //
-// This file has been modified by the divixi contributors. The changes to the
+// This file has been modified by the DIVIXI contributors. The changes to the
 // prompt are:
 //   - added the rule "Write title, descriptions and summary in the language
 //     the chunk is written in";
 //   - added the rule "Do not use any tools. Reply with the JSON object only.".
-// The surrounding Rust code is the divixi contributors' own; no Python source
+// The surrounding Rust code is the DIVIXI contributors' own; no Python source
 // was copied.
 //
 // See the NOTICE file at the root of this repository.
