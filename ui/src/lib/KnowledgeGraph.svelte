@@ -41,6 +41,16 @@
   /** Where the pointer is, in world units, for the coordinate readout. */
   let pointer: { x: number; y: number } | null = null;
 
+  /**
+   * The overview rail's current section: "*" for the whole plate, an
+   * entity kind for that kind's nodes, null once nothing has been chosen.
+   * A kind keeps its nodes in full ink and fades the rest.
+   */
+  let section = $state<string | null>(null);
+  /** A camera move in progress, eased from one view to another. */
+  let glide: { from: typeof view; to: typeof view; t0: number } | null = null;
+  const GLIDE_MS = 420;
+
   function build() {
     const g = kb.graph;
     const old = new Map(bodies.map((b) => [b.node.id, b]));
@@ -80,6 +90,8 @@
     }
     if (hubLinks < 3) hub = null;
     if (hovered && !bodies.includes(hovered)) hovered = null;
+    // A reload may take the chosen kind away.
+    if (section && section !== "*" && !g.nodes.some((n) => n.kind === section)) section = null;
     heat = 1;
     kick();
   }
@@ -249,6 +261,8 @@
 
     const pick = picked ? bodies.find((b) => b.node.id === picked!.id) : undefined;
     const lit = (b: Body) => b === pick || b === hovered;
+    const focus = section && section !== "*" ? section : null;
+    const faded = (b: Body) => !!focus && b.node.kind !== focus && !lit(b);
     const size = (b: Body) => Math.max(2.5, b.r * Math.min(1.6, Math.max(0.7, k)));
 
     // The hub's orbit: a dotted ring at the mean distance of its neighbours.
@@ -306,6 +320,7 @@
       const y = snap(sy(b.y));
       const on = lit(b);
       const solid = g === "block" || g === "dot";
+      ctx.globalAlpha = faded(b) ? 0.25 : 1;
       glyphPath(ctx, g, x, y, r);
       ctx.fillStyle = b === pick ? ink.acc : solid ? (on ? ink.acc : ink.node) : ink.paper;
       ctx.fill();
@@ -316,11 +331,13 @@
         ctx.strokeRect(x - r - 4, y - r - 4, (r + 4) * 2, (r + 4) * 2);
       }
     }
+    ctx.globalAlpha = 1;
 
     // The hub: a red ring with a dot at its centre.
     if (hub) {
       const x = sx(hub.x);
       const y = sy(hub.y);
+      ctx.globalAlpha = faded(hub) ? 0.35 : 1;
       ctx.beginPath();
       ctx.arc(x, y, ringOf(k), 0, Math.PI * 2);
       ctx.fillStyle = ink.paper;
@@ -333,13 +350,14 @@
       ctx.arc(x, y, 2.6, 0, Math.PI * 2);
       ctx.fill();
       ctx.lineWidth = 1;
+      ctx.globalAlpha = 1;
     }
 
     // Labels: spaced mono capitals; under the ones that matter, a line of grey meta.
     // Placed in order of importance (what is lit, the hub, the most mentioned), and a
     // label that would land on one already placed is left out rather than overprinted.
     const order = bodies
-      .filter((b) => b === hub || lit(b) || b.node.mentions >= 2 || k > 1.4)
+      .filter((b) => !faded(b) && (b === hub || lit(b) || b.node.mentions >= 2 || k > 1.4))
       .sort((p, q) => Number(lit(q)) - Number(lit(p)) || Number(q === hub) - Number(p === hub) || q.node.mentions - p.node.mentions);
     // Markers are already on the plate: no label may cover one.
     const taken: [number, number, number, number][] = bodies.map((b) => {
@@ -451,10 +469,53 @@
 
   function loop() {
     if (running) step();
+    if (glide) {
+      const p = Math.min(1, (performance.now() - glide.t0) / GLIDE_MS);
+      const e = 1 - (1 - p) ** 3;
+      const { from, to } = glide;
+      view = { x: from.x + (to.x - from.x) * e, y: from.y + (to.y - from.y) * e, k: from.k + (to.k - from.k) * e };
+      if (p === 1) glide = null;
+    }
     draw();
-    // Keep going while the layout moves or a node is held; otherwise rest until kicked.
-    frame = (running && heat > SETTLED) || drag ? requestAnimationFrame(loop) : 0;
+    // Keep going while the layout moves, a node is held or the camera glides; otherwise rest until kicked.
+    frame = (running && heat > SETTLED) || drag || glide ? requestAnimationFrame(loop) : 0;
   }
+
+  /** Move the camera to frame a section of the plate: everything, or one kind's nodes. */
+  function goTo(next: string) {
+    section = next;
+    const set = next === "*" ? bodies : bodies.filter((b) => b.node.kind === next);
+    if (!set.length || !canvas) {
+      kick();
+      return;
+    }
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    for (const b of set) {
+      x0 = Math.min(x0, b.x);
+      y0 = Math.min(y0, b.y);
+      x1 = Math.max(x1, b.x);
+      y1 = Math.max(y1, b.y);
+    }
+    // Room for labels to the right, and for the rail, caption and scale bar round the edge.
+    const w = canvas.clientWidth - 240;
+    const h = canvas.clientHeight - 120;
+    const k = Math.min(2.5, Math.max(0.25, Math.min(w / Math.max(1, x1 - x0 + 120), h / Math.max(1, y1 - y0 + 40))));
+    const cx = (x0 + x1) / 2 + 40;
+    const cy = (y0 + y1) / 2;
+    glide = { from: { ...view }, to: { x: -cx * k, y: -cy * k, k }, t0: performance.now() };
+    kick();
+  }
+
+  /** The rail: the whole plate first, then one stop per kind, most numerous first. */
+  const sections = $derived.by(() => {
+    const count = new Map<string, number>();
+    for (const n of kb.graph.nodes) count.set(n.kind, (count.get(n.kind) ?? 0) + 1);
+    const byKind = [...count].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    return [{ id: "*", label: t("kb.graphOverview"), n: kb.graph.nodes.length }, ...byKind.map(([id, n]) => ({ id, label: id, n }))];
+  });
 
   $effect(() => {
     // Rebuild whenever the graph is reloaded.
@@ -521,6 +582,7 @@
       drag.body.y = p.y;
       heat = Math.max(heat, 0.3);
     } else {
+      glide = null;
       view.x = drag.vx + e.clientX - drag.sx;
       view.y = drag.vy + e.clientY - drag.sy;
     }
@@ -555,6 +617,7 @@
 
   function wheel(e: WheelEvent) {
     e.preventDefault();
+    glide = null;
     const before = toWorld(e);
     const k = Math.min(4, Math.max(0.25, view.k * Math.exp(-e.deltaY * 0.0015)));
     view.k = k;
@@ -566,6 +629,8 @@
 
   function recenter() {
     view = { x: 0, y: 0, k: 1 };
+    glide = null;
+    section = null;
     for (const b of bodies) b.pinned = false;
     heat = 1;
     kick();
@@ -616,6 +681,24 @@
         <span class="fdot" class:pulse={running}></span>
         <span>{t("kb.graphFig")} · {running ? t("kb.graphLive") : t("kb.graphStill")}</span>
       </div>
+    {/if}
+    {#if kb.graph.nodes.length}
+      <nav class="rail" class:shifted={!!picked} aria-label={t("kb.graphSections")}>
+        {#each sections as sec, i (sec.id)}
+          <button
+            class="stop"
+            class:on={section === sec.id}
+            class:head={i === 0}
+            aria-current={section === sec.id ? "true" : undefined}
+            title="{sec.label} · {sec.n}"
+            onclick={() => goTo(sec.id)}
+          >
+            <span class="slab">{sec.label}</span>
+            <span class="snum">{String(i).padStart(2, "0")}</span>
+            <span class="sline"></span>
+          </button>
+        {/each}
+      </nav>
     {/if}
     {#if picked}
       <aside class="detail">
@@ -744,6 +827,72 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
+    background: var(--kg-acc);
+  }
+
+  /* The overview rail, right edge: OVERVIEW 00 ——, then 01, 02… one per kind.
+     The chosen stop carries the red rule; the others show their label on hover. */
+  .rail {
+    position: absolute;
+    top: 50%;
+    right: 0;
+    transform: translateY(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+  }
+
+  .rail.shifted {
+    right: 304px;
+  }
+
+  .stop {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 22px;
+    padding: 0 0 0 10px;
+    background: transparent;
+    border: 0;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--lab);
+  }
+
+  .slab {
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .stop:hover .slab,
+  .stop:focus-visible .slab,
+  .stop.head .slab,
+  .stop.on .slab {
+    opacity: 1;
+  }
+
+  .stop:hover,
+  .stop.on {
+    color: var(--hi);
+  }
+
+  .sline {
+    width: 12px;
+    height: 1px;
+    background: var(--kg-edge);
+    transition: width 0.2s;
+  }
+
+  .stop:hover .sline {
+    width: 20px;
+    background: var(--lab);
+  }
+
+  .stop.on .sline {
+    width: 36px;
     background: var(--kg-acc);
   }
 
