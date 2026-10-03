@@ -1639,6 +1639,7 @@ pub fn run() {
             remote::remote_server_drop,
             remote::phone_status,
             remote::phone_set,
+            remote::phone_replace,
             remote::phone_pair_link,
             remote::phone_set_days,
             remote::remote_server_drop_all,

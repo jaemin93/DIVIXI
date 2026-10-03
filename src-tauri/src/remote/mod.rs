@@ -308,7 +308,8 @@ pub enum Step {
     /// Tailnet-wide consent that an app cannot give itself.
     EnableHttps,
     /// Serve holds 443/ for something else, or we could not tell. Publishing
-    /// would REPLACE it, so this refuses and offers the command instead.
+    /// would REPLACE it, so this refuses; a mapping read as another's can be
+    /// replaced on a confirmed press ([`PhoneStatus::replaceable`]).
     Occupied,
     /// Everything is in place; one press left.
     Publish,
@@ -346,6 +347,14 @@ pub struct PhoneStatus {
     /// right, and then the phone cannot connect with nothing on this machine
     /// wrong -- so it is said before that happens, not after.
     pub alone: bool,
+    /// Serve holds 443/ for something this check read and found not to be
+    /// this Divixi, so the card may offer to put this one there instead.
+    /// Never for a mapping it could not read.
+    pub replaceable: bool,
+}
+
+fn replaceable(step: Step, serve: &tailscale::ServeState) -> bool {
+    step == Step::Occupied && serve.published == Some(false) && serve.port_free == Some(false)
 }
 
 fn step_of(probe: &tailscale::Probe, serve: &tailscale::ServeState) -> Step {
@@ -456,6 +465,7 @@ async fn phone_status_now(app: &AppHandle, fresh: bool) -> PhoneStatus {
         port: running.unwrap_or(want),
         running: running.is_some(),
         listen_all: listen_all(app),
+        replaceable: replaceable(step, &serve),
         probe,
         serve,
     }
@@ -481,6 +491,17 @@ pub async fn phone_status(app: AppHandle, fresh: Option<bool>) -> PhoneStatus {
 /// that is a thing a person decides.
 #[tauri::command]
 pub async fn phone_set(app: AppHandle, on: bool) -> Result<PhoneStatus, String> {
+    switch(app, on, false).await
+}
+
+/// Turn phone access on in place of the mapping serve holds at 443/ for
+/// something else. Only from the card's confirmed press.
+#[tauri::command]
+pub async fn phone_replace(app: AppHandle) -> Result<PhoneStatus, String> {
+    switch(app, true, true).await
+}
+
+async fn switch(app: AppHandle, on: bool, replace: bool) -> Result<PhoneStatus, String> {
     let want = port(&app);
     if on {
         // The server first: publishing in front of a port nothing is listening
@@ -490,7 +511,7 @@ pub async fn phone_set(app: AppHandle, on: bool) -> Result<PhoneStatus, String> 
             let _ = set(&app, "phone.enabled", "false");
             return Err(err);
         }
-        let result = tailscale::publish(want).await;
+        let result = if replace { tailscale::replace(want).await } else { tailscale::publish(want).await };
         if !result.ok {
             // The stored intent goes back: a switch left reading "on" over an
             // address nobody can reach is the working-looking control this
@@ -648,6 +669,18 @@ mod tests {
         assert_eq!(step_of(&ready_probe(), &unknown), Step::Occupied);
         let strangers = ServeState { published: Some(false), port_free: Some(false), detail: String::new() };
         assert_eq!(step_of(&ready_probe(), &strangers), Step::Occupied);
+    }
+
+    #[test]
+    fn only_a_mapping_read_as_someone_elses_offers_replacing_it() {
+        let strangers = ServeState { published: Some(false), port_free: Some(false), detail: String::new() };
+        assert!(replaceable(step_of(&ready_probe(), &strangers), &strangers));
+        let unread = ServeState { published: None, port_free: Some(false), detail: String::new() };
+        assert!(!replaceable(step_of(&ready_probe(), &unread), &unread));
+        assert!(!replaceable(step_of(&ready_probe(), &ServeState::default()), &ServeState::default()));
+        assert!(!replaceable(step_of(&ready_probe(), &free()), &free()), "a free port is a plain publish");
+        // Tailscale itself not ready: the errand is that, not the mapping.
+        assert!(!replaceable(step_of(&Probe { https: Some(false), ..ready_probe() }, &strangers), &strangers));
     }
 
     #[test]

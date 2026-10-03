@@ -45,6 +45,7 @@
     listen_all: boolean;
     alone: boolean;
     days: number;
+    replaceable: boolean;
   };
 
   let status = $state<Status | null>(null);
@@ -92,6 +93,14 @@
         pairing.forget();
       }
       return next;
+    });
+
+  /** Serve holds 443/ for another target: put this Divixi there, once confirmed. */
+  let replacing = $state(false);
+  const replace = () =>
+    run(async () => {
+      replacing = false;
+      return await invoke<Status>("phone_replace");
     });
 
   /** The span the next code grants. Links already out keep the span they had. */
@@ -157,6 +166,11 @@
         <button class="btn" disabled={busy} onclick={() => turn(false)}>{t("phone.turnOff")}</button>
       {:else if canTurnOn}
         <button class="btn btn-acc" disabled={busy} onclick={() => turn(true)}>{t("phone.turnOn")}</button>
+      {:else if s.replaceable && replacing}
+        <button class="btn btn-acc" disabled={busy} onclick={replace}>{t("phone.replaceYes")}</button>
+        <button class="btn" disabled={busy} onclick={() => (replacing = false)}>{t("phone.replaceNo")}</button>
+      {:else if s.replaceable}
+        <button class="btn btn-acc" disabled={busy} onclick={() => (replacing = true)}>{t("phone.replace")}</button>
       {/if}
       <button class="btn" disabled={busy} onclick={() => refresh(true)} title={t("phone.checkHint")}>{t("phone.check")}</button>
     </div>
