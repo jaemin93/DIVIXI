@@ -325,6 +325,7 @@ mod tests {
             "update_download",
             "update_open",
             "phone_set",
+            "phone_replace",
             "phone_pair_link",
             "remote_server_set",
             "remote_server_drop_all",

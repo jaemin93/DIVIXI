@@ -456,10 +456,16 @@ fn key_port(key: &str) -> Option<u16> {
 /// "Is this Divixi served anywhere" is the wrong question for a withdrawal: a
 /// Divixi published on 8443 with something unrelated on 443 would read as ours,
 /// and the removal would take out the unrelated mapping.
+///
+/// `Services` is skipped: a Tailscale Service has an address of its own, so
+/// its 443 is not this machine's and a mapping there holds nothing of ours.
 fn port_subtrees<'a>(node: &'a Value, port: u16, out: &mut Vec<&'a Value>) {
     match node {
         Value::Object(map) => {
             for (k, v) in map {
+                if k == "Services" {
+                    continue;
+                }
                 if key_port(k) == Some(port) {
                     out.push(v);
                 }
@@ -490,18 +496,39 @@ fn mount_subtrees<'a>(node: &'a Value, mount: &str, out: &mut Vec<&'a Value>) {
     }
 }
 
-/// Whether any string anywhere under `node` is one of `needles`.
+/// Whether a proxy target is Divixi's own server on `port`, however it is
+/// spelled: `http://127.0.0.1:7488`, `http://localhost:7488/`,
+/// `HTTP://[::1]:7488`, `127.0.0.1:7488` or a bare `7488`.
+///
+/// HTTPS targets are not ours even on our port: Divixi's server speaks plain
+/// HTTP, so a mapping like that answers nothing and calling it published
+/// would put a dead address on the card.
+fn points_at(target: &str, port: u16) -> bool {
+    let t = target.trim().to_ascii_lowercase();
+    let rest = t.strip_prefix("http://").unwrap_or(&t);
+    if rest.contains("://") {
+        return false;
+    }
+    let rest = rest.trim_end_matches('/');
+    if rest.contains('/') {
+        return false;
+    }
+    let (host, p) = rest.rsplit_once(':').unwrap_or(("127.0.0.1", rest));
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]") && p.parse::<u16>() == Ok(port)
+}
+
+/// Whether any string anywhere under `node` is Divixi on `port`.
 ///
 /// Structure-agnostic on purpose: the exact schema of
 /// `tailscale serve status --json` is barely observed here, so reading a key
 /// path would be a guess that fails *silently* -- reporting "not published" for
 /// a Divixi that is. Walking values only asks that the proxy target appear
 /// somewhere, which is true of any shape that records it at all.
-fn finds_target(node: &Value, needles: &[String]) -> bool {
+fn finds_target(node: &Value, port: u16) -> bool {
     match node {
-        Value::String(s) => needles.iter().any(|n| s.trim_end_matches('/') == n),
-        Value::Object(map) => map.values().any(|v| finds_target(v, needles)),
-        Value::Array(items) => items.iter().any(|v| finds_target(v, needles)),
+        Value::String(s) => points_at(s, port),
+        Value::Object(map) => map.values().any(|v| finds_target(v, port)),
+        Value::Array(items) => items.iter().any(|v| finds_target(v, port)),
         _ => false,
     }
 }
@@ -576,26 +603,41 @@ fn classify_doc(doc: &Value, port: u16) -> ServeState {
     for sub in &scoped {
         mount_subtrees(sub, SERVE_MOUNT, &mut mounts);
     }
+    let ours = ServeState {
+        published: Some(true),
+        port_free: Some(false),
+        detail: format!("Serve is proxying {SERVE_PORT}{SERVE_MOUNT} to Divixi on port {port}."),
+    };
+    let theirs = ServeState {
+        published: Some(false),
+        port_free: Some(false),
+        detail: format!("Serve is configured on {SERVE_PORT}{SERVE_MOUNT}, but not for this Divixi."),
+    };
     if mounts.is_empty() {
-        return ServeState {
-            published: None,
-            port_free: Some(false),
-            detail: format!("Serve is configured on port {SERVE_PORT}, but this build could not tell what is at {SERVE_MOUNT}."),
-        };
+        // No web handler, but a TCP forward on the port says what is there
+        // just as plainly. Ours only when serve terminates TLS in front of it:
+        // a raw forward hands the phone's TLS to a server speaking HTTP.
+        let forwards: Vec<(&str, bool)> = scoped
+            .iter()
+            .filter_map(|s| {
+                let to = s.get("TCPForward")?.as_str()?;
+                let tls = s.get("TerminateTLS").and_then(Value::as_str).is_some_and(|t| !t.trim().is_empty());
+                Some((to, tls))
+            })
+            .collect();
+        if forwards.is_empty() {
+            return ServeState {
+                published: None,
+                port_free: Some(false),
+                detail: format!("Serve is configured on port {SERVE_PORT}, but this build could not tell what is at {SERVE_MOUNT}."),
+            };
+        }
+        return if forwards.iter().any(|(to, tls)| *tls && points_at(to, port)) { ours } else { theirs };
     }
-    let needles = [format!("http://127.0.0.1:{port}"), format!("http://localhost:{port}")];
-    if mounts.iter().any(|m| finds_target(m, &needles)) {
-        ServeState {
-            published: Some(true),
-            port_free: Some(false),
-            detail: format!("Serve is proxying {SERVE_PORT}{SERVE_MOUNT} to Divixi on port {port}."),
-        }
+    if mounts.iter().any(|m| finds_target(m, port)) {
+        ours
     } else {
-        ServeState {
-            published: Some(false),
-            port_free: Some(false),
-            detail: format!("Serve is configured on {SERVE_PORT}{SERVE_MOUNT}, but not for this Divixi."),
-        }
+        theirs
     }
 }
 
@@ -696,6 +738,33 @@ pub async fn publish(port: u16) -> Outcome {
             ),
         );
     }
+    write(port).await
+}
+
+/// Put this Divixi at [`SERVE_PORT`]`[`SERVE_MOUNT`] in place of what serve
+/// holds there now. Only from a press the human confirmed.
+///
+/// Still refuses a state this check could not read: "replace" was offered for
+/// a mapping it saw and found to be another's, and nothing else.
+pub async fn replace(port: u16) -> Outcome {
+    if cli_path().is_none() {
+        return Outcome::bad(Code::NoCli, "Tailscale was not found in a standard install location, so nothing was published.");
+    }
+    let state = serve_state(port).await;
+    match state.published {
+        Some(true) => Outcome {
+            ok: true,
+            code: Code::Ok,
+            detail: format!("Divixi was already published on this machine's tailnet ({SERVE_PORT} → 127.0.0.1:{port})."),
+        },
+        Some(false) => write(port).await,
+        None => Outcome::bad(Code::NotOurs, format!("{} Nothing was replaced.", state.detail)),
+    }
+}
+
+/// `serve --bg` for Divixi on `port`. Whatever was at the mount is replaced,
+/// which is why every caller decides first whether that is allowed.
+async fn write(port: u16) -> Outcome {
     match run(&["serve", "--bg", &format!("--https={SERVE_PORT}"), &format!("http://127.0.0.1:{port}")], WRITE_TIMEOUT).await {
         Ran::NoCli => Outcome::bad(Code::NoCli, "Tailscale was not found, so nothing was published."),
         Ran::NoStart(e) => Outcome::bad(Code::Failed, format!("Tailscale is installed but could not be started: {e}")),
@@ -929,6 +998,106 @@ mod tests {
         // loopback-shaped".
         assert_eq!(state_of(OURS, 7488).0, Some(true));
         assert_eq!(state_of(OURS, 9999).0, Some(false));
+    }
+
+    /// Also verbatim from this machine (Windows Tailscale 1.102.3): what a dev
+    /// build (`npm run app`, port 7489) left published, read by the installed
+    /// app on 7488. Somebody else's mapping to that app, and the one case the
+    /// card names as such.
+    const DEV_BUILDS: &str = r#"{
+      "TCP": { "443": { "HTTPS": true } },
+      "Web": {
+        "laptop-mc28nnvi.tailb45a71.ts.net:443": {
+          "Handlers": { "/": { "Proxy": "http://127.0.0.1:7489" } }
+        }
+      }
+    }"#;
+
+    #[test]
+    fn a_mapping_to_another_port_is_someone_elses_and_says_so() {
+        let v: Value = serde_json::from_str(DEV_BUILDS).unwrap();
+        let st = classify_doc(&v, 7488);
+        assert_eq!((st.published, st.port_free), (Some(false), Some(false)));
+        assert_eq!(st.detail, "Serve is configured on 443/, but not for this Divixi.");
+        assert_eq!(state_of(DEV_BUILDS, 7489), (Some(true), Some(false)), "and the dev build's own");
+    }
+
+    #[test]
+    fn an_empty_serve_is_free_and_never_someone_elses() {
+        // `{}` is what this machine's daemon printed after `serve ... off`.
+        for doc in [r#"{}"#, r#"null"#, r#"{"TCP":null,"Web":null}"#, r#"{"TCP":{},"Web":{},"Services":{}}"#] {
+            let v: Value = serde_json::from_str(doc).unwrap();
+            let st = classify_doc(&v, 7488);
+            assert_eq!((st.published, st.port_free), (Some(false), Some(true)), "{doc}");
+            assert!(!st.detail.contains("not for this Divixi"), "{doc}: {}", st.detail);
+        }
+    }
+
+    #[test]
+    fn our_own_mapping_reads_as_ours_however_it_is_spelled() {
+        for target in [
+            "http://127.0.0.1:7488",
+            "http://127.0.0.1:7488/",
+            "http://localhost:7488",
+            "http://localhost:7488/",
+            "HTTP://LocalHost:7488",
+            "http://[::1]:7488",
+            " http://127.0.0.1:7488 ",
+            "127.0.0.1:7488",
+            "localhost:7488",
+            "7488",
+        ] {
+            assert!(points_at(target, 7488), "{target:?}");
+            let doc = json!({"TCP":{"443":{"HTTPS":true}},"Web":{"Desk.Tail.ts.net:443":{"Handlers":{"/":{"Proxy": target}}}}});
+            assert_eq!(classify_doc(&doc, 7488).published, Some(true), "{target:?}");
+        }
+    }
+
+    #[test]
+    fn a_target_that_cannot_reach_divixi_is_not_ours() {
+        for target in [
+            "http://127.0.0.1:7489",
+            "http://127.0.0.1:74880",
+            "http://127.0.0.1:7488/divixi",
+            "http://192.168.0.2:7488",
+            "https://127.0.0.1:7488",
+            "https+insecure://127.0.0.1:7488",
+            "localhost",
+            "",
+        ] {
+            assert!(!points_at(target, 7488), "{target:?}");
+        }
+    }
+
+    #[test]
+    fn a_tcp_forward_on_443_is_read_rather_than_left_unknown() {
+        let tls = r#"{"TCP":{"443":{"TCPForward":"127.0.0.1:7488","TerminateTLS":"desk.tail.ts.net"}}}"#;
+        assert_eq!(state_of(tls, 7488), (Some(true), Some(false)), "TLS ends at serve: ours");
+        let raw = r#"{"TCP":{"443":{"TCPForward":"127.0.0.1:7488"}}}"#;
+        assert_eq!(state_of(raw, 7488), (Some(false), Some(false)), "raw TLS at an HTTP server answers nothing");
+        let other = r#"{"TCP":{"443":{"TCPForward":"127.0.0.1:5432"}}}"#;
+        assert_eq!(state_of(other, 7488), (Some(false), Some(false)));
+        let bare = r#"{"TCP":{"443":{"HTTPS":true}}}"#;
+        assert_eq!(state_of(bare, 7488), (None, Some(false)), "nothing says what is there");
+    }
+
+    #[test]
+    fn a_tailscale_service_on_443_is_not_this_machines_443() {
+        let svc = r#"{"Services":{"svc:web":{"TCP":{"443":{"HTTPS":true}},"Web":{"web.tail.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}}}"#;
+        assert_eq!(state_of(svc, 7488), (Some(false), Some(true)));
+        let both = format!(r#"{{"Services":{{"svc:web":{{"Web":{{"web.tail.ts.net:443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:3000"}}}}}}}}}}}},{}"#, &OURS.trim()[1..]);
+        assert_eq!(state_of(&both, 7488), (Some(true), Some(false)), "{both}");
+    }
+
+    /// Against this machine's real daemon, read only. Ignored by default: CI
+    /// has no tailnet. `DIVIXI_SERVE_EXPECT` is the port serve should be
+    /// fronting here (`cargo test -- --ignored live_serve`).
+    #[tokio::test]
+    #[ignore]
+    async fn live_serve() {
+        let port: u16 = std::env::var("DIVIXI_SERVE_EXPECT").ok().and_then(|p| p.parse().ok()).unwrap_or(7488);
+        let st = serve_state(port).await;
+        assert_eq!(st.published, Some(true), "{}", st.detail);
     }
 
     #[test]
