@@ -2,8 +2,8 @@
 
 [English](divixi-server.md) | **한국어**
 
-`divixi-server`는 **화면 없는 Divixi**입니다. 앱과 같은 코드로 Track, 지휘자, 작업자, 지식, 터미널을 돌리고,
-다른 PC의 Divixi 앱이 **원격 인스턴스**로 붙어서 씁니다. 창 왼쪽 위 메뉴에서 고르면 같은 창에 그 서버가 뜹니다.
+`divixi-server`는 **화면 없는 DIVIXI**입니다. 앱과 같은 코드로 Track, 지휘자, 작업자, 지식, 터미널을 돌리고,
+다른 PC의 DIVIXI 앱이 **원격 인스턴스**로 붙어서 씁니다. 창 왼쪽 위 메뉴에서 고르면 같은 창에 그 서버가 뜹니다.
 
 아래 순서는 Ubuntu 24.04(x86_64), Rust 1.96에서 확인했습니다.
 
@@ -65,7 +65,7 @@ source ~/.cargo/env
 **Node.js 22.18 이상과 npm.** UI를 빌드할 때 쓰고, Claude Code·Codex의 ACP 어댑터(JS 프로그램)를 받고 실행할 때도 씁니다.
 nvm이든 배포판 패키지든 상관없습니다.
 
-**에이전트 CLI.** 서버에서 쓸 것을 그 서버 사용자로 설치하고 **한 번 로그인**해 둡니다. Divixi는 그 로그인을 그대로 씁니다.
+**에이전트 CLI.** 서버에서 쓸 것을 그 서버 사용자로 설치하고 **한 번 로그인**해 둡니다. DIVIXI는 그 로그인을 그대로 씁니다.
 
 | 에이전트 | 설치 | 로그인 |
 |---|---|---|
@@ -147,7 +147,7 @@ divixi-server help
 1. PC에서 **암호를 묻지 않고** `ssh user@server`가 되어야 합니다(키 + ssh-agent, 또는 `~/.ssh/config` 별칭).
    앱은 SSH를 BatchMode로 돌려서 암호나 호스트 키 확인을 물을 수 없습니다. 처음 붙는 서버라면 PC의
    터미널에서 한 번 `ssh user@server`를 해서 호스트 키를 받아 두세요.
-2. Divixi 앱에서 **설정 › 원격 인스턴스 › 원격 인스턴스 추가**(Settings › Remote instances › Add remote
+2. DIVIXI 앱에서 **설정 › 원격 인스턴스 › 원격 인스턴스 추가**(Settings › Remote instances › Add remote
    instance)를 누르고 아래처럼 채운 뒤 저장합니다.
    - 연결 방식: SSH 터널
    - SSH 호스트: `user@server`
@@ -174,7 +174,7 @@ pkill -x divixi-server; setsid -f ~/.local/bin/divixi-server serve >/dev/null 2>
 - 앱에서는 설정 › 원격 인스턴스로 가서 먼저 **GitHub 계정**에 로그인합니다. OAuth 앱 Client ID가 필요하고,
   화면의 안내를 따르면 됩니다.
 - 그다음 **원격 인스턴스 추가**에서 연결 방식은 **직접 주소**, 주소는 `http://<Tailscale IP>:7488`로 넣습니다.
-- 데스크톱 Divixi도 설정의 "이 PC를 원격 인스턴스로 열기"로 같은 방식의 서버가 됩니다.
+- 데스크톱 DIVIXI도 설정의 "이 PC를 원격 인스턴스로 열기"로 같은 방식의 서버가 됩니다.
 
 ---
 
@@ -194,7 +194,7 @@ pkill -x divixi-server                                                  # 끄기
 mkdir -p ~/.config/systemd/user
 cat > ~/.config/systemd/user/divixi-server.service <<'EOF'
 [Unit]
-Description=Divixi server (remote instance)
+Description=DIVIXI server (remote instance)
 After=network-online.target
 
 [Service]
@@ -237,7 +237,7 @@ sudo loginctl enable-linger "$USER"     # 로그인하지 않아도 부팅 때 �
 pkill -x divixi-server            # systemd면: systemctl --user restart divixi-server
 ```
 
-앱은 서버의 빌드가 자기와 다르면 왼쪽 위 칩에 **"!"**를 붙이고 "원격 Divixi를 업데이트하세요"라고 알립니다. 이 비교는
+앱은 서버의 빌드가 자기와 다르면 왼쪽 위 칩에 **"!"**를 붙이고 "원격 DIVIXI를 업데이트하세요"라고 알립니다. 이 비교는
 Rust 코드 기준이라, 화면만 바뀐 앱 업데이트에서는 뜨지 않습니다. 앱과 서버를 **같은 커밋**으로 맞추면 사라집니다 —
 받는 방법은 2절에 있습니다. 앱만 업데이트했다면 서버도 그 커밋에서 다시 빌드하세요.
 
@@ -253,7 +253,7 @@ Rust 코드 기준이라, 화면만 바뀐 앱 업데이트에서는 뜨지 않�
 | `did not answer through the tunnel` | 대개 서버가 꺼져 있습니다. 그 인스턴스 카드의 **서버 시작**을 누르세요. 그래도 안 뜨면 직접 돌려 보기: `~/.local/bin/divixi-server serve` (로그가 보임) |
 | 에이전트가 "설치 안 됨" | 서버 쪽 PATH. 인스턴스 설정의 "원격 PATH"나 systemd의 `Environment=PATH`에 CLI·node 경로 추가 |
 | 직접 주소가 "no owner yet" | 서버에서 `divixi-server owner <GitHub 아이디>` |
-| 직접 주소가 "… does not own this Divixi" | 앱의 GitHub 로그인 계정과 서버 주인이 같은지 |
+| 직접 주소가 "… does not own this DIVIXI" | 앱의 GitHub 로그인 계정과 서버 주인이 같은지 |
 | 원격 셸이 남음 | 앱이 비정상 종료되면 2분 뒤 서버가 그 기기의 셸을 닫음 |
 | "빌드가 이 앱과 다릅니다" | 서버와 앱이 같은 커밋에서 나왔는지(2절). 한쪽만 업데이트한 것이면 7절 |
 

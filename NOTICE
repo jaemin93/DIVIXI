@@ -1,5 +1,5 @@
-Divixi
-Copyright 2026 The divixi contributors
+DIVIXI
+Copyright 2026 The DIVIXI contributors
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not
 use this product except in compliance with the License. You may obtain a copy
@@ -17,27 +17,27 @@ This product includes software developed as part of Kiro Crew
     http://www.apache.org/licenses/LICENSE-2.0
 
 The knowledge-extraction prompts in crates/knowledge/src/extract.rs are adapted
-from Kiro Crew's src/kiro_crew/knowledge/extractor.py. The divixi contributors
+from Kiro Crew's src/kiro_crew/knowledge/extractor.py. The DIVIXI contributors
 modified them by adding a rule that the title, descriptions and summary be
 written in the language of the chunk, and a rule forbidding tool use. The
 search-result formatting in crates/knowledge/src/lib.rs follows Kiro Crew's
 local_knowledge_search output format.
 
 The chunking strategy, retrieval-fusion weighting, supervised SSH tunnel options
-and dashboard token-auth scheme in Divixi were reimplemented in Rust from Kiro
+and dashboard token-auth scheme in DIVIXI were reimplemented in Rust from Kiro
 Crew's published design and source. No Python source was copied for these.
 
-Divixi's user interface was designed by studying Kiro Crew's. No code,
+DIVIXI's user interface was designed by studying Kiro Crew's. No code,
 stylesheet, icon, font or image was copied.
 
-Divixi is an independent project. It is not affiliated with, endorsed by, or
+DIVIXI is an independent project. It is not affiliated with, endorsed by, or
 sponsored by Kiro, AWS, or Amazon. "Kiro" and "Kiro Crew" are trademarks of
 Amazon.com, Inc. or its affiliates, used here only to describe the origin of
 the work above.
 
 --------------------------------------------------------------------------------
 
-The licences of Divixi's dependency tree, which of them are redistributed in a
+The licences of DIVIXI's dependency tree, which of them are redistributed in a
 release, and which are fetched on the user's own machine, are described in
 THIRD-PARTY-NOTICES.md. That file is a courtesy summary; this one is the
-attribution Divixi owes under Apache-2.0 section 4.
+attribution DIVIXI owes under Apache-2.0 section 4.

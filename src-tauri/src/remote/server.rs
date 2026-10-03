@@ -94,7 +94,7 @@ async fn guard(State(ctx): State<Ctx>, request: Request<Body>, next: axum::middl
     }
     let writes = request.method() != Method::GET && request.method() != Method::HEAD;
     if writes && request.headers().get("x-divixi").is_none() {
-        return (StatusCode::FORBIDDEN, "missing X-Divixi").into_response();
+        return (StatusCode::FORBIDDEN, "missing X-DIVIXI").into_response();
     }
     next.run(request).await
 }
@@ -207,7 +207,7 @@ impl SignIn {
         }
         match headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()) {
             Some(ua) if !ua.is_empty() => device_name(ua),
-            _ => "Divixi app".into(),
+            _ => "DIVIXI app".into(),
         }
     }
 }
@@ -303,7 +303,7 @@ async fn github(State(ctx): State<Ctx>, request: Request<Body>) -> Response<Body
     let Ok(body) = axum::body::to_bytes(request.into_body(), 64 * 1024).await else { return StatusCode::BAD_REQUEST.into_response() };
     let Some(b) = SignIn::parse(&body) else { return (StatusCode::BAD_REQUEST, "expected {\"token\"}").into_response() };
     let Some(owner) = super::github::owner(&ctx.state().store) else {
-        return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": "this Divixi has no owner yet: sign in to GitHub on it (Settings › Remote instances)" }))).into_response();
+        return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": "this DIVIXI has no owner yet: sign in to GitHub on it (Settings › Remote instances)" }))).into_response();
     };
     let pinned = signing_in_from(&ctx, from.parse().ok().map(|a: SocketAddr| a.ip()), &headers).await;
     let login = match super::github::login_of(&b.token).await {
@@ -311,8 +311,8 @@ async fn github(State(ctx): State<Ctx>, request: Request<Body>) -> Response<Body
         Err(e) => return (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": e }))).into_response(),
     };
     if !login.eq_ignore_ascii_case(&owner) {
-        tracing::warn!(%login, %from, "a GitHub account that does not own this Divixi tried to sign in");
-        return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": format!("{login} does not own this Divixi") }))).into_response();
+        tracing::warn!(%login, %from, "a GitHub account that does not own this DIVIXI tried to sign in");
+        return (StatusCode::FORBIDDEN, axum::Json(json!({ "error": format!("{login} does not own this DIVIXI") }))).into_response();
     }
     let st = ctx.state();
     tokens(st.remote.auth.admit(&st.store, &b.name(&headers), Some(login), super::auth::Scope::Full, super::auth::REFRESH_SECS, pinned))
@@ -647,7 +647,7 @@ mod tests {
         assert_eq!(shown_name("Android · Samsung Internet"), "Android");
         assert_eq!(shown_name("Windows · Edge"), "Windows");
         assert_eq!(shown_name("iPad"), "iPad");
-        assert_eq!(shown_name("Divixi app"), "Divixi app");
+        assert_eq!(shown_name("DIVIXI app"), "DIVIXI app");
         // Only that exact tail: a name chosen otherwise is shown as it is.
         assert_eq!(shown_name("Lab · Rack 2"), "Lab · Rack 2");
         assert_eq!(shown_name("Safari"), "Safari");

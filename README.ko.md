@@ -2,7 +2,7 @@
   <img src="docs/images/divixi.png" alt="" width="120" height="120">
 </p>
 
-<h1 align="center">Divixi</h1>
+<h1 align="center">DIVIXI</h1>
 
 <p align="center"><strong>지휘자 하나, 여러 에이전트.</strong></p>
 
@@ -11,7 +11,7 @@
 코딩 에이전트를 지휘하는 데스크톱 앱입니다. 당신은 지휘자 하나와 이야기하고, 지휘자가
 나란히 돌아가는 작업자 세션들에게 일을 나눕니다.
 
-Divixi는 당신이 이미 쓰는 에이전트들(Claude Code, Codex, GitHub Copilot, Antigravity)을
+DIVIXI는 당신이 이미 쓰는 에이전트들(Claude Code, Codex, GitHub Copilot, Antigravity)을
 [Agent Client Protocol](https://agentclientprotocol.com) 위에서, 당신 자신의 로그인으로
 구동합니다. 일의 단위 하나하나가 **Track**입니다. 폴더 하나, 오래 사는 지휘자 세션 하나,
 그리고 그것이 여는 작업자들. 당신에게 닿는 것은 당신이 필요한 것뿐입니다. 내려야 할 결정,
@@ -35,13 +35,13 @@ x는 여러 제공자를 가로지른다는 뜻입니다.
 
 ## 설치
 
-Divixi는 초기 단계 소프트웨어입니다. 주 플랫폼은 Windows이고, `divixi-server`는
+DIVIXI는 초기 단계 소프트웨어입니다. 주 플랫폼은 Windows이고, `divixi-server`는
 Linux에서 돌며, macOS는 검증되지 않았습니다.
 
 **필요한 것:**
 
 - **Node.js 22.18 이상.** Claude Code와 Codex 어댑터가 Node 프로그램입니다.
-  Divixi가 첫 사용 시 자기 데이터 폴더에 설치합니다.
+  DIVIXI가 첫 사용 시 자기 데이터 폴더에 설치합니다.
 - **에이전트 최소 하나, 설치되고 로그인된 상태:**
 
 | 에이전트 | 설치 | 로그인 |
@@ -49,9 +49,9 @@ Linux에서 돌며, macOS는 검증되지 않았습니다.
 | Claude Code | [claude.com/claude-code](https://claude.com/claude-code) | `claude`를 한 번 실행 |
 | Codex | [openai.com/codex](https://openai.com/codex) | `codex login` |
 | GitHub Copilot | [github.com/github/copilot-cli](https://github.com/github/copilot-cli) | `copilot login` |
-| Antigravity | [antigravity.google/cli](https://antigravity.google/cli) | `agy login` (Divixi가 그 ACP 서버를 받아 옵니다) |
+| Antigravity | [antigravity.google/cli](https://antigravity.google/cli) | `agy login` (DIVIXI가 그 ACP 서버를 받아 옵니다) |
 
-첫 실행 때 Divixi는 당신이 가진 에이전트를 찾아내고, 각각이 세션을 열 수 있는지
+첫 실행 때 DIVIXI는 당신이 가진 에이전트를 찾아내고, 각각이 세션을 열 수 있는지
 확인합니다.
 
 **소스에서 빌드** (Rust stable, Node.js 22.18+):
@@ -66,7 +66,7 @@ npx tauri build                                 # 설치 파일이 target/releas
 
 ## 원격 인스턴스
 
-`divixi-server`는 창이 없는 Divixi로, 서버용입니다. 데스크톱 앱은 SSH 터널을 통해, 또는
+`divixi-server`는 창이 없는 DIVIXI로, 서버용입니다. 데스크톱 앱은 SSH 터널을 통해, 또는
 당신의 GitHub 계정으로 특정 주소에서 여기에 닿습니다. 서버가 떠 있지 않으면 앱이 SSH로
 서버를 시작시킵니다.
 
@@ -75,10 +75,10 @@ npx tauri build                                 # 설치 파일이 target/releas
 
 ## 데이터와 프라이버시
 
-- **텔레메트리 없음.** Divixi는 당신이나 당신의 사용에 관한 어떤 것도 어디로도 보내지
-  않습니다. 보고도, 집계도, 몰래 알리는 것도 없습니다. Divixi가 서버에 보내는 요청은
+- **텔레메트리 없음.** DIVIXI는 당신이나 당신의 사용에 관한 어떤 것도 어디로도 보내지
+  않습니다. 보고도, 집계도, 몰래 알리는 것도 없습니다. DIVIXI가 서버에 보내는 요청은
   아래의 업데이트 확인 하나뿐입니다.
-- **업데이트 확인.** Divixi는 두 경우에 이 저장소의 가장 최근 릴리스를 GitHub 공개
+- **업데이트 확인.** DIVIXI는 두 경우에 이 저장소의 가장 최근 릴리스를 GitHub 공개
   API에 물어봅니다. **설정 → 정보**(Settings → About)에서 *업데이트 확인*(Check
   for updates)을 누를 때, 그리고 앱을 켜는 때 하루에 한 번까지입니다. 요청에는 로그인
   정보도, 버전도, 플랫폼도, 당신이나 이 컴퓨터를 알아볼 수 있는 어떤 것도 담기지
@@ -87,9 +87,9 @@ npx tauri build                                 # 설치 파일이 target/releas
   있을 때만 알려 주며, 최신이거나 확인에 실패했으면 아무것도 띄우지 않고 실패는 그
   카드에만 남습니다.
 - **업데이트는 당신의 몫.** 내려받기와 설치는 누를 때만 일어납니다. 새 릴리스가
-  있으면 Divixi가 설치 파일을 받아(지금은 Windows) GitHub이 공개한 그 파일의
+  있으면 DIVIXI가 설치 파일을 받아(지금은 Windows) GitHub이 공개한 그 파일의
   SHA-256과 대조한 다음, 열어 주는 버튼을 내줍니다. 설치 마법사는 당신이 직접
-  진행합니다. Divixi가 저절로 설치하는 일은 없습니다. 코드 서명 인증서가 없으므로,
+  진행합니다. DIVIXI가 저절로 설치하는 일은 없습니다. 코드 서명 인증서가 없으므로,
   받아 온 서명 없는 코드를 당신이 요청하지 않았는데 실행하지는 않습니다.
 - **데이터가 있는 곳.** Track, 대화, 보드, 지식 라이브러리는 앱의 데이터 폴더에 있습니다.
   Windows는 `%APPDATA%\app.divixi`, Linux는 `~/.local/share/app.divixi`.
@@ -118,7 +118,7 @@ npx tauri build                                 # 설치 파일이 target/releas
 ### 버그 신고
 
 **설정 → 정보 → 진단**(Settings → About → Diagnostics)을 열고 *진단 정보 복사*(Copy
-diagnostics)를 누르세요. 버전, 당신의 OS, Divixi가 찾아낸 에이전트들, 그리고 마지막
+diagnostics)를 누르세요. 버전, 당신의 OS, DIVIXI가 찾아낸 에이전트들, 그리고 마지막
 경고와 오류가 하나의 마크다운 블록으로 클립보드에 담깁니다. 붙여넣기 전에 읽을 수
 있도록 화면에 먼저 보여 줍니다. 그것을
 [버그 리포트](https://github.com/jaemin93/divixi/issues/new?template=bug_report.yml)
@@ -131,7 +131,7 @@ diagnostics)를 누르세요. 버전, 당신의 OS, Divixi가 찾아낸 에이�
 
 ### Kiro Crew
 
-Divixi 인터페이스의 상당 부분은 [Kiro Crew](https://github.com/kirodotdev/KiroCrew)를
+DIVIXI 인터페이스의 상당 부분은 [Kiro Crew](https://github.com/kirodotdev/KiroCrew)를
 연구하며 설계했습니다. AWS가 만든 오픈소스 에이전트 워크스페이스입니다 (Apache License
 2.0, Copyright Amazon.com, Inc. or its affiliates).
 
@@ -150,16 +150,16 @@ Divixi 인터페이스의 상당 부분은 [Kiro Crew](https://github.com/kirodo
   발상은 Kiro Crew의 원격 인스턴스에서 왔고, 감시되는 SSH 터널 옵션들도 마찬가지입니다.
   우리 구현은 다릅니다 (iframe이 아니라 네이티브 webview).
 
-Divixi가 제 길을 가는 지점: 작업자 에이전트들을 지휘하는 지휘자 에이전트 하나,
+DIVIXI가 제 길을 가는 지점: 작업자 에이전트들을 지휘하는 지휘자 에이전트 하나,
 프롬프트마다 승인받는 대신 쓰는 결정 카드, 그리고 로컬 임베딩 모델이 필요 없는 지식
 라이브러리.
 
-**Divixi는 독립적인 프로젝트입니다. Kiro, AWS, Amazon과 제휴 관계가 없으며, 이들의
+**DIVIXI는 독립적인 프로젝트입니다. Kiro, AWS, Amazon과 제휴 관계가 없으며, 이들의
 보증이나 후원을 받지 않습니다. "Kiro"와 "Kiro Crew"는 Amazon.com, Inc. 또는 그 계열사의
-상표이며, 여기서는 오직 Divixi가 빌려 온 아이디어의 출처를 밝히기 위해서만
+상표이며, 여기서는 오직 DIVIXI가 빌려 온 아이디어의 출처를 밝히기 위해서만
 사용되었습니다.**
 
 ## 라이선스
 
-Divixi는 [Apache License, Version 2.0](LICENSE) 아래 배포됩니다. 그 라이선스가 요구하는
+DIVIXI는 [Apache License, Version 2.0](LICENSE) 아래 배포됩니다. 그 라이선스가 요구하는
 귀속 표기는 [NOTICE](NOTICE)를 보세요.

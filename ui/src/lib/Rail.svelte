@@ -83,7 +83,7 @@
         <Mark size={16} live={store.anyLive} />
       </button>
     {:else}
-      <span class="brand" title="Divixi"><Mark size={16} live={store.anyLive} /><span class="mono name">DIVIXI</span></span>
+      <span class="brand" title="DIVIXI"><Mark size={16} live={store.anyLive} /><span class="mono name">DIVIXI</span></span>
       <span class="grow"></span>
       <button class="toggle" onclick={() => store.setRail(true)} title={t("rail.collapse")} aria-label={t("rail.collapse")} aria-expanded="true">
         <Icon name="collapse" />

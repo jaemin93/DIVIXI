@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "license": "Apache-2.0",
   "description": "One conductor, many agents. A desktop app for directing coding agents: you talk to one conductor, and it divides the work among worker sessions that run side by side.",
-  "author": "The divixi contributors",
+  "author": "The DIVIXI contributors",
   "homepage": "https://github.com/jaemin93/divixi#readme",
   "repository": {
     "type": "git",

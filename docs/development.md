@@ -1,4 +1,4 @@
-# Working on Divixi
+# Working on DIVIXI
 
 Rust + Tauri 2 + Svelte 5. The crates still carry their first name, `orchestra-*`.
 
@@ -68,14 +68,14 @@ cargo run -p orchestra-agents --example adapters -- <folder>  # install the npm 
 ## The dev app beside the installed one
 
 `npm run app` starts a debug build that runs **alongside** an installed
-Divixi. Nothing to set up: start it with the app already open and a second
-window comes up, titled **Divixi (dev)**.
+DIVIXI. Nothing to set up: start it with the app already open and a second
+window comes up, titled **DIVIXI (dev)**.
 
 Two things make that work, and both are debug-only — a release build behaves
 exactly as it always did.
 
 - **No single-instance handover.** A release build hands over to the running
-  Divixi and exits (`one_instance_only` in `src-tauri/src/lib.rs`), which is
+  DIVIXI and exits (`one_instance_only` in `src-tauri/src/lib.rs`), which is
   what a second launch of an app that lives in the tray should do. It is also
   what made `npm run app` look like it did nothing at all: it started, found
   the installed app, showed *that* window and quit.
@@ -108,11 +108,20 @@ $env:DIVIXI_DATA_DIR = "C:\tmp\divixi-try"; npm run app   # PowerShell
 the `divixi-server` subcommands read the same setting. `DIVIXI_DB` still
 moves just the store, on top of whichever folder is chosen.
 
-Two Divixis will happily run the same agent CLIs at the same time. Watch the
+Two copies of DIVIXI will happily run the same agent CLIs at the same time. Watch the
 disk: each worker checkout is a full copy of the repository.
 
 ## Things to know
 
+- **The product name is `DIVIXI`; everything that identifies the app is still lowercase.**
+  `productName` names the window, the installers (`DIVIXI_<version>_x64-setup.exe`), the
+  install folder, the shortcuts and the macOS `.app`. The identifier (`app.divixi`, and with
+  it the data folder), the binaries (`divixi`, `divixi-server`), `~/.divixi`, the
+  localStorage keys and the environment variables did not change with it, so data and
+  remote servers carry over. The MSI's `upgradeCode` in `tauri.conf.json` is pinned to the
+  one Tauri derived from the old name `Divixi` (`npx tauri inspect wix-upgrade-code`):
+  Tauri derives it from `productName` case-sensitively, and without the pin a new MSI
+  would install beside the old one instead of replacing it. Do not change or remove it.
 - **Running inside a Claude Code session breaks Claude Code workers.** Claude Code treats
   inherited `CLAUDECODE` / `CLAUDE_CODE_*` variables as a nested session and exits at
   once. You see "Query closed before response received" at `session/new`.

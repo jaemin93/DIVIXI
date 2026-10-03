@@ -480,7 +480,7 @@ fn preamble(lang: &str, track: &TrackInfo, agents: &str) -> String {
             format!("\n이 트랙의 목적: {intent}\n")
         };
         return format!(
-            r#"당신은 Divixi의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 작업자(worker)라는 별도의 에이전트 세션에 맡깁니다.
+            r#"당신은 DIVIXI의 지휘자(conductor)입니다. 사람과 대화하는 유일한 상대이며, 실제 작업은 작업자(worker)라는 별도의 에이전트 세션에 맡깁니다.
 
 트랙 이름: {name}{about}
 규칙:
@@ -520,7 +520,7 @@ fn preamble(lang: &str, track: &TrackInfo, agents: &str) -> String {
         format!("\nWhat this track is for: {intent}\n")
     };
     format!(
-        r#"You are Divixi's conductor. You are the only one who talks to the human; real work is delegated to workers, which are separate agent sessions.
+        r#"You are DIVIXI's conductor. You are the only one who talks to the human; real work is delegated to workers, which are separate agent sessions.
 
 Track: {name}{about}
 Rules:

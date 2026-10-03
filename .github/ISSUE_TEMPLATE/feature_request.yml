@@ -1,5 +1,5 @@
 name: 🚀 Feature request
-description: Propose something Divixi should do
+description: Propose something DIVIXI should do
 labels: ["enhancement"]
 body:
   - type: markdown
@@ -19,7 +19,7 @@ body:
     attributes:
       label: The problem
       description: >
-        What are you trying to get done, and where does Divixi get in the way today?
+        What are you trying to get done, and where does DIVIXI get in the way today?
         Describe the situation before the solution.
       placeholder: |
         I run four workers on one Track and I cannot tell at a glance which of them is
@@ -48,7 +48,7 @@ body:
   - type: dropdown
     id: area
     attributes:
-      label: Which part of Divixi
+      label: Which part of DIVIXI
       description: Your best guess is fine.
       multiple: true
       options:

@@ -1368,7 +1368,7 @@ pub fn context(state: &AppState, id: &str, selected: &[String]) -> Result<String
 pub fn preamble(lang: &str, title: &str) -> String {
     if lang == "ko" {
         return format!(
-            r#"당신은 Divixi의 디자인 파트너입니다. 사람과 함께 스케치 보드에서 "{title}"의 설계 초안을 잡습니다. 이 디자인은 나중에 트랙의 지휘자에게 참고 자료로 첨부됩니다. 지금은 생각을 꺼내 놓고, 모양을 잡고, 무엇을 만들지 분명히 하는 단계입니다.
+            r#"당신은 DIVIXI의 디자인 파트너입니다. 사람과 함께 스케치 보드에서 "{title}"의 설계 초안을 잡습니다. 이 디자인은 나중에 트랙의 지휘자에게 참고 자료로 첨부됩니다. 지금은 생각을 꺼내 놓고, 모양을 잡고, 무엇을 만들지 분명히 하는 단계입니다.
 
 보드:
 - 메모(note), 손그림(sketch), 화살표(edge), 레퍼런스 파일(file: 이미지·PDF·문서), 링크(link: 웹 페이지), 틀(frame: 제목 붙은 묶음), 질문(question: 사람이 답을 적는 카드)이 있습니다. 메모에는 태그를 붙일 수 있습니다: goal(목표), constraint(제약), question(미해결 질문), idea(아이디어).
@@ -1389,7 +1389,7 @@ pub fn preamble(lang: &str, title: &str) -> String {
         );
     }
     format!(
-        r#"You are Divixi's design partner. With the human you rough out a first design of "{title}" on a sketch board. The design will later be attached to a track's conductor as reference. This is the stage of getting thoughts out, giving them shape, and making clear what should be built.
+        r#"You are DIVIXI's design partner. With the human you rough out a first design of "{title}" on a sketch board. The design will later be attached to a track's conductor as reference. This is the stage of getting thoughts out, giving them shape, and making clear what should be built.
 
 The board:
 - Notes, freehand sketches, arrows (edges), reference files (file: images, PDFs, documents), links (link: web pages), frames (a titled group) and questions (a card the human answers). Notes can carry a tag: goal, constraint, question (open question) or idea.

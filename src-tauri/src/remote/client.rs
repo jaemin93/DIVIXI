@@ -378,7 +378,7 @@ async fn start_and_token(host: &Host) -> Result<String, String> {
 
 /// This PC as the remote's device list names it.
 fn device_name() -> String {
-    format!("Divixi · {}", sysinfo::System::host_name().unwrap_or_else(|| "PC".into()))
+    format!("DIVIXI · {}", sysinfo::System::host_name().unwrap_or_else(|| "PC".into()))
 }
 
 /// Sign in for the device's tokens: a pairing token minted over SSH, or
@@ -395,7 +395,7 @@ async fn sign_in(app: &AppHandle, http: &reqwest::Client, base: &str, host: &Hos
     };
     let res = http
         .post(format!("{base}/auth/{path}"))
-        .header("X-Divixi", "1")
+        .header("X-DIVIXI", "1")
         .header("Content-Type", "application/json")
         .body(json!({ "token": token, "name": device_name() }).to_string())
         .send()
@@ -419,7 +419,7 @@ async fn renew(app: &AppHandle, conn: &Conn, stale: &str) -> Result<(), String> 
         return Ok(());
     }
     let refresh = conn.tokens.lock().refresh.clone();
-    let res = conn.http.post(format!("{}/auth/refresh", conn.base)).header("X-Divixi", "1").bearer_auth(refresh).send().await;
+    let res = conn.http.post(format!("{}/auth/refresh", conn.base)).header("X-DIVIXI", "1").bearer_auth(refresh).send().await;
     let tokens = match res {
         Ok(r) if r.status().is_success() => serde_json::from_slice(&r.bytes().await.map_err(why)?).map_err(|e| e.to_string())?,
         _ => sign_in(app, &conn.http, &conn.base, &conn.host).await?,
@@ -473,7 +473,7 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
     let (base, local_port, mut child, said) = if host.kind == "direct" {
         let base = host.url.trim_end_matches('/').to_string();
         let Some(said) = health(&http, &base).await else {
-            return Err(format!("{base} did not answer: is that Divixi serving on its network?"));
+            return Err(format!("{base} did not answer: is that DIVIXI serving on its network?"));
         };
         (base, None, None, said)
     } else {
@@ -530,7 +530,7 @@ async fn call(app: &AppHandle, conn: &Conn, cmd: &str, args: &Value) -> Result<V
         let res = conn
             .http
             .post(&url)
-            .header("X-Divixi", "1")
+            .header("X-DIVIXI", "1")
             .header("Content-Type", "application/json")
             .bearer_auth(&access)
             .body(body.clone())
