@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store, agentLabel, type AgentStatus, type Readiness } from "./store.svelte";
   import { t } from "./i18n.svelte";
+  import Working from "./Working.svelte";
 
   /** Status chip text and colour. Colour says state, nothing else. */
   const chips = $derived<Record<Readiness, { label: string; color: string }>>({
@@ -47,7 +48,7 @@
 <div class="list">
   {#if store.detecting}
     <div class="detecting" class:tall={store.agents === null}>
-      <span class="spinner" aria-hidden="true"></span>
+      <Working size={store.agents === null ? 28 : 16} />
       <span class="mono">{t("agents.detecting")}</span>
     </div>
   {:else if store.agents === null}
@@ -150,30 +151,10 @@
     color: var(--lab);
   }
 
-  /* Empty list: the spinner owns the space. */
+  /* Empty list: the mark owns the space. */
   .detecting.tall {
     flex-direction: column;
     padding: 96px 0;
-  }
-
-  .spinner {
-    width: 16px;
-    height: 16px;
-    border: 1px solid var(--lines);
-    border-top-color: var(--acc);
-    border-radius: 50%;
-    animation: spin 0.9s linear infinite;
-  }
-
-  .tall .spinner {
-    width: 28px;
-    height: 28px;
-  }
-
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
 
   .row {
