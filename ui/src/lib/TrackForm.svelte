@@ -5,6 +5,8 @@
   import Mark from "./Mark.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
+  import { startup } from "./startup.svelte";
+  import { empty } from "./startup";
 
   /**
    * Making or changing a track: a name, one line of intent, the folder it
@@ -15,7 +17,8 @@
   let { track }: { track?: Track } = $props();
 
   const editing = $derived(!!track);
-  const first = $derived(store.tracks.length === 0);
+  // Only once the tracks are in: before that, none is not the same as none yet.
+  const first = $derived(empty(startup.phase, store.tracks.length));
   const ready = $derived(store.readyAgents);
 
   // The form seeds from the track as it was when opened; App remounts the

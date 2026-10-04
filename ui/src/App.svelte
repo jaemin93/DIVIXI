@@ -22,6 +22,9 @@
   import ErrorToasts from "./lib/ErrorToasts.svelte";
   import CrashBanner from "./lib/CrashBanner.svelte";
   import UpdateBanner from "./lib/UpdateBanner.svelte";
+  import Connecting from "./lib/Connecting.svelte";
+  import { startup } from "./lib/startup.svelte";
+  import { waiting } from "./lib/startup";
   import { inTauri, instance, overWeb, session } from "./lib/ipc.svelte";
   import { ZOOM_STEP } from "./lib/store.svelte";
   import { visibleFrame } from "./lib/viewport";
@@ -119,6 +122,13 @@
   <div class="shell" class:web={overWeb}>
     <WindowChrome />
     <Unreachable />
+  </div>
+{:else if waiting(startup.phase)}
+  <!-- Reaching the instance, or reading its tracks: not yet the app, and
+       above all not its first-track screen, which says there are none. -->
+  <div class="shell" class:web={overWeb}>
+    {#if inTauri}<WindowChrome />{/if}
+    <Connecting />
   </div>
 {:else}
 <div class="shell" class:web={overWeb}>
