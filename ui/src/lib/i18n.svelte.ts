@@ -99,6 +99,9 @@ const ko = {
   "tracks.tagsTitle": "태그",
   "tracks.noTagsYet": "태그가 없습니다",
   "tracks.clear": "필터 지우기",
+  "tracks.clearShort": "지우기",
+  "tracks.filterOn": "필터 켜짐",
+  "tracks.tagsAll": "고른 태그를 모두 포함",
 
   // Track header
   "track.activate": "활성화",
@@ -1108,6 +1111,9 @@ const en: Record<Key, string> = {
   "tracks.tagsTitle": "Tags",
   "tracks.noTagsYet": "No tags",
   "tracks.clear": "Clear filters",
+  "tracks.clearShort": "Clear",
+  "tracks.filterOn": "filters on",
+  "tracks.tagsAll": "Has every picked tag",
 
   // Track header
   "track.activate": "Activate",
