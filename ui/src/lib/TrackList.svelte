@@ -4,6 +4,7 @@
   import SplitHandle from "./SplitHandle.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel, whenFull, WINDOWS } from "./time";
+  import { anyFilterOn, CLEARED, passesFilter, toggleTag } from "./trackFilter";
 
   /**
    * Second column: every track, newest activity first, each unfolding into
@@ -59,7 +60,8 @@
 
   // ----- filter, sort, fold -----
   const filter = $derived(store.trackFilter);
-  const filterActive = $derived(filter.running || filter.active || filter.recent !== "" || filter.tags.length > 0);
+  const filterActive = $derived(anyFilterOn(filter));
+  const filterLabel = $derived(filterActive ? `${t("tracks.filter")} · ${t("tracks.filterOn")}` : t("tracks.filter"));
   let filterOpen = $state(false);
   let filterEl = $state<HTMLDivElement>();
   let showDormant = $state(false);
@@ -78,11 +80,8 @@
       .filter((tr) => {
         const q = query.trim().toLowerCase();
         if (q && !(tr.name.toLowerCase().includes(q) || tr.intent.toLowerCase().includes(q) || tr.tags.some((g) => g.toLowerCase().includes(q)))) return false;
-        if (filter.running && !tr.live) return false;
-        if (filter.active && !store.isActive(tr.id)) return false;
-        if (filter.recent && store.now - tr.lastAt > WINDOWS[filter.recent]) return false;
-        if (filter.tags.length && !filter.tags.every((g) => tr.tags.includes(g))) return false;
-        return true;
+        const recentMs = filter.recent ? WINDOWS[filter.recent] : 0;
+        return passesFilter({ live: tr.live, active: store.isActive(tr.id), lastAt: tr.lastAt, tags: tr.tags }, filter, store.now, recentMs);
       })
       .sort(sorters[filter.sort]),
   );
@@ -98,8 +97,11 @@
   }
 
   function toggleTagFilter(tag: string) {
-    const tags = filter.tags.includes(tag) ? filter.tags.filter((x) => x !== tag) : [...filter.tags, tag];
-    void store.setTrackFilter({ tags });
+    void store.setTrackFilter({ tags: toggleTag(filter.tags, tag) });
+  }
+
+  function clearFilter() {
+    void store.setTrackFilter({ ...CLEARED });
   }
 
   function isOpen(id: string): boolean {
@@ -323,21 +325,28 @@
 
   <div class="searchrow" bind:this={filterEl}>
     <input class="search" type="text" bind:value={query} placeholder={t("tracks.search")} aria-label={t("tracks.search")} />
-    <button class="fbtn" class:on={filterActive || filterOpen} onclick={() => (filterOpen = !filterOpen)} title={t("tracks.filter")} aria-haspopup="menu" aria-expanded={filterOpen}>
+    <button class="fbtn" class:on={filterActive || filterOpen} class:set={filterActive} onclick={() => (filterOpen = !filterOpen)} title={filterLabel} aria-label={filterLabel} aria-haspopup="menu" aria-expanded={filterOpen}>
       <Icon name="filter" size={14} />
     </button>
 
     {#if filterOpen}
       <!-- The filter menu, after Kiro Crew's: what to show, in what order, what to fold, which tags. -->
       <div class="fmenu" role="menu" aria-label={t("tracks.filter")}>
-        <div class="mlab-sm fhead">{t("tracks.filterTitle")}</div>
-        <button class="fitem" class:on={filter.running} role="menuitemcheckbox" aria-checked={filter.running} onclick={() => store.setTrackFilter({ running: !filter.running })}>
+        <div class="fhead fheadrow">
+          <span class="mlab-sm">{t("tracks.filterTitle")}</span>
+          <span class="grow"></span>
+          {#if filterActive}<button class="mono fclear" onclick={clearFilter}>{t("tracks.clearShort")}</button>{/if}
+        </div>
+        <!-- A filter that is on says so three ways: the accent bar, bold text and a ✓. -->
+        <button class="fitem narrow" class:on={filter.running} role="menuitemcheckbox" aria-checked={filter.running} onclick={() => store.setTrackFilter({ running: !filter.running })}>
           <span class="dot" style="background: var(--ok)"></span>{t("tracks.running")}
+          <span class="grow"></span>{#if filter.running}<span class="mono check" aria-hidden="true">✓</span>{/if}
         </button>
-        <button class="fitem" class:on={filter.active} role="menuitemcheckbox" aria-checked={filter.active} onclick={() => store.setTrackFilter({ active: !filter.active })}>
+        <button class="fitem narrow" class:on={filter.active} role="menuitemcheckbox" aria-checked={filter.active} onclick={() => store.setTrackFilter({ active: !filter.active })}>
           <span class="dot" style="background: var(--idle)"></span>{t("tracks.active")}
+          <span class="grow"></span>{#if filter.active}<span class="mono check" aria-hidden="true">✓</span>{/if}
         </button>
-        <div class="fitem sub" class:on={filter.recent !== ""} role="menuitem" aria-haspopup="menu">
+        <div class="fitem sub narrow" class:on={filter.recent !== ""} role="menuitem" aria-haspopup="menu">
           <span>{t("tracks.recent")}{filter.recent ? ` · ${filter.recent}` : ""}</span>
           <span class="grow"></span>
           <span class="mono arrow">›</span>
@@ -375,13 +384,18 @@
         </div>
 
         <div class="rule"></div>
-        <div class="mlab-sm fhead">{t("tracks.tagsTitle")}</div>
+        <div class="fhead fheadrow">
+          <span class="mlab-sm">{t("tracks.tagsTitle")}</span>
+          {#if store.tagPool.length > 1}<span class="fhint">{t("tracks.tagsAll")}</span>{/if}
+        </div>
         <div class="taglist">
         {#each store.tagPool as tag (tag.name)}
-          <button class="fitem" class:on={filter.tags.includes(tag.name)} role="menuitemcheckbox" aria-checked={filter.tags.includes(tag.name)} onclick={() => toggleTagFilter(tag.name)}>
-            <span class="box" class:on={filter.tags.includes(tag.name)} style="border-color: {tag.color}; background: {filter.tags.includes(tag.name) ? tag.color : 'transparent'}"></span>
+          {@const picked = filter.tags.includes(tag.name)}
+          <button class="fitem narrow" class:on={picked} role="menuitemcheckbox" aria-checked={picked} onclick={() => toggleTagFilter(tag.name)}>
+            <span class="box" class:on={picked} style="border-color: {tag.color}; background: {picked ? tag.color : 'transparent'}"></span>
             <span class="mono">{tag.name}</span>
             <span class="grow"></span>
+            {#if picked}<span class="mono check" aria-hidden="true">✓</span>{/if}
             <span class="mono count">{tagCount(tag.name)}</span>
           </button>
         {/each}
@@ -391,7 +405,7 @@
         </div>
         {#if filterActive}
           <div class="rule"></div>
-          <button class="fitem" onclick={() => store.setTrackFilter({ running: false, active: false, recent: "", tags: [] })}>{t("tracks.clear")}</button>
+          <button class="fitem" onclick={clearFilter}>{t("tracks.clear")}</button>
         {/if}
       </div>
     {/if}
@@ -654,6 +668,11 @@
     border-color: var(--acc);
   }
 
+  /* A filter is on: the button is tinted. */
+  .fbtn.set {
+    background: var(--accbg);
+  }
+
   /* The filter menu hangs under the search row. */
   .fmenu {
     position: absolute;
@@ -716,6 +735,31 @@
     padding: 10px 14px 4px;
   }
 
+  .fheadrow {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .fhint {
+    font-size: 10px;
+    color: var(--lab);
+  }
+
+  .fclear {
+    padding: 0;
+    background: transparent;
+    border: 0;
+    font-size: 10px;
+    color: var(--lab);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .fclear:hover {
+    color: var(--hi);
+  }
+
   .fitem {
     width: 100%;
     min-height: 30px;
@@ -737,6 +781,23 @@
 
   .fitem.on {
     color: var(--hi);
+  }
+
+  /* A filter that narrows the list, when on: the instance menu's accent bar
+     on the left, a tinted row and bold text, besides the ✓ at the right. */
+  .fitem.narrow {
+    border-left: 2px solid transparent;
+    padding-left: 12px;
+  }
+
+  .fitem.narrow.on {
+    border-left-color: var(--acc);
+    background: var(--accbg);
+    font-weight: 600;
+  }
+
+  .fitem.narrow.on:hover {
+    background: var(--sel);
   }
 
   .fitem.dim {
