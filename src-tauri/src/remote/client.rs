@@ -801,6 +801,9 @@ pub async fn remote_host_delete(app: AppHandle, id: String) -> Result<Vec<HostVi
     let mut list = hosts(&app);
     list.retain(|h| h.id != id);
     save(&app, &list)?;
+    // What this PC remembered of its screen (its zoom, `instanceZoomKey` in
+    // ui/src/lib/uiMemory.ts) goes with it.
+    let _ = app.state::<AppState>().store.delete_meta(&format!("{}instance:{id}:zoom", crate::CLIENT_SETTING_PREFIX));
     Ok(remote_hosts(app).await)
 }
 

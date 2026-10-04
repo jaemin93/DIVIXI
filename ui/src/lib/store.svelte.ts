@@ -1,4 +1,4 @@
-import { invoke, listen, inTauri, local, overWeb, bring, boardBase } from "./ipc.svelte";
+import { invoke, listen, inTauri, local, overWeb, bring, boardBase, instanceId } from "./ipc.svelte";
 import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Key, type Lang, type LangPref } from "./i18n.svelte";
@@ -32,6 +32,7 @@ import {
 import { addError, dropError, errorLife, type AppError } from "./errors";
 import { withTrack } from "./tracks";
 import { keepsSetting } from "./layoutSettings";
+import { clampZoom, foldsOnPick, instanceZoomKey, parseZoom, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen } from "./uiMemory";
 import { pairing, type Paired } from "./pairing.svelte";
 import { openKey, parseMemory, pruneOpen, remember, treeReply, underOpen, type WsEntry as WsEntryType } from "./fileTree";
 
@@ -650,10 +651,7 @@ export type ChatFont = "s" | "m" | "l";
 /** Interface typeface. */
 export type UiFont = "sans" | "mono" | "system" | "serif";
 
-/** Zoom bounds in percent; steps of 10, as Ctrl+= / Ctrl+- move. */
-export const ZOOM_MIN = 50;
-export const ZOOM_MAX = 200;
-export const ZOOM_STEP = 10;
+export { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP } from "./uiMemory";
 
 /** Settings sections, in the settings column. */
 export type SettingsSection = "overview" | "appearance" | "chat" | "agents" | "knowledge" | "remote" | "about";
@@ -705,6 +703,28 @@ export type AppInfo = {
 };
 
 const scheme = typeof window !== "undefined" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+
+/** A screen with no room for the track list beside a track (as App.svelte's `narrow`). */
+const narrowScreen = () => typeof matchMedia === "function" && matchMedia("(max-width: 640px)").matches;
+/** A phone's screen: narrow, or a touch screen held sideways. */
+const phoneScreen = () => narrowScreen() || (typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches);
+
+/** This browser's own memory; nothing when storage is off (private browsing). */
+function readLocal(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeLocal(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // It lasts as long as the page, then.
+  }
+}
 
 /** Mirrors the `agent_download` event payload. */
 export type DownloadProgress = {
@@ -833,10 +853,10 @@ class Store {
   setupOpen = $state(false);
   /** Setup step: 1 agents, 2 appearance. */
   setupStep = $state<1 | 2>(1);
-  /** Left rail folded to icons. Persisted. */
-  railCollapsed = $state(false);
-  /** Second column (tracks and their workers) shown. Persisted. */
-  trackListOpen = $state(true);
+  /** Left rail folded to icons. Persisted; in a browser, by that browser (folded on a phone). */
+  railCollapsed = $state(overWeb && !webPanelOpen(readLocal(WEB_RAIL_KEY), phoneScreen()));
+  /** Second column (tracks and their workers) shown. Persisted; in a browser, by that browser (closed on a phone). */
+  trackListOpen = $state(!overWeb || webPanelOpen(readLocal(WEB_TRACKLIST_KEY), phoneScreen()));
   /** Which settings section is open. */
   settingsSection = $state<SettingsSection>("overview");
   /** The rail's phone dialog: show a pairing code for this PC's Divixi. */
@@ -2655,6 +2675,7 @@ class Store {
   /** Fold or unfold the rail; persisted. */
   async setRail(collapsed: boolean) {
     this.railCollapsed = collapsed;
+    if (overWeb) return writeLocal(WEB_RAIL_KEY, collapsed ? "closed" : "open");
     if (!this.keeps("rail")) return;
     try {
       await invoke("set_setting", { key: "rail", value: collapsed ? "collapsed" : "expanded" });
@@ -2729,7 +2750,7 @@ class Store {
    * webview's native zoom; if that is refused, CSS zoom on the root.
    */
   async setZoom(percent: number, persist = true) {
-    const z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(percent / ZOOM_STEP) * ZOOM_STEP));
+    const z = clampZoom(percent);
     this.zoom = z;
     try {
       await getCurrentWebview().setZoom(z / 100);
@@ -2737,11 +2758,28 @@ class Store {
     } catch {
       (document.documentElement.style as unknown as { zoom: string }).zoom = `${z}%`;
     }
-    if (!persist || !this.keeps("zoom")) return;
+    if (!persist) return;
     try {
-      await invoke("set_setting", { key: "zoom", value: String(z) });
+      // A remote instance's zoom is this monitor's: kept on this PC, one per
+      // instance, not on the instance where a phone would pick it up.
+      if (instanceId) await invoke("client_set_setting", { key: instanceZoomKey(instanceId), value: String(z) });
+      else if (this.keeps("zoom")) await invoke("set_setting", { key: "zoom", value: String(z) });
     } catch (err) {
       this.lastError = String(err);
+    }
+  }
+
+  /**
+   * A remote instance's webview: its zoom as this PC last left it. Read from
+   * this PC, so it comes back before the instance answers, or if it never does.
+   */
+  async restoreInstanceZoom() {
+    if (!instanceId) return;
+    try {
+      const z = parseZoom(await invoke<string | null>("client_get_setting", { key: instanceZoomKey(instanceId) }));
+      if (z !== null && z !== 100) await this.setZoom(z, false);
+    } catch {
+      // Not remembered: 100%, as before.
     }
   }
 
@@ -2778,8 +2816,21 @@ class Store {
     if (persist) this.persistWidth("terminal_height", this.termHeight);
   }
 
+  /** A track picked in the list. On a phone the list has done its job and folds away. */
+  async pickTrack(id: string) {
+    await this.selectTrack(id);
+    await this.foldListAfterPick();
+  }
+
+  /** After a pick in the track list (a track, a worker): fold it, on a phone only. */
+  async foldListAfterPick() {
+    if (this.trackListOpen && foldsOnPick(overWeb, narrowScreen())) await this.setTrackList(false);
+  }
+
   async setTrackList(open: boolean) {
     this.trackListOpen = open;
+    // A browser keeps its own (a phone's list open or shut is not the PC's).
+    if (overWeb) return writeLocal(WEB_TRACKLIST_KEY, open ? "open" : "closed");
     if (!this.keeps("tracklist")) return;
     try {
       await invoke("set_setting", { key: "tracklist", value: open ? "open" : "closed" });
@@ -2845,8 +2896,8 @@ class Store {
       document.documentElement.lang = i18n.lang;
       if (uiFont === "sans" || uiFont === "mono" || uiFont === "system" || uiFont === "serif") this.uiFont = uiFont;
       document.documentElement.dataset.uiFont = this.uiFont;
-      const z = Number(zoom);
-      if (Number.isFinite(z) && z >= ZOOM_MIN && z <= ZOOM_MAX && z !== 100) void this.setZoom(z, false);
+      const z = parseZoom(zoom);
+      if (z !== null && z !== 100) void this.setZoom(z, false);
       const w = Number(panelWidth);
       if (Number.isFinite(w) && w > 0) this.setPanelWidth(w);
       this.panelOpen = panel === "open";
@@ -2864,8 +2915,11 @@ class Store {
       if (Number.isFinite(tw) && tw > 0) this.setTrackListWidth(tw);
       if (theme === "system" || theme === "dark" || theme === "light") this.themePref = theme;
       this.applyTheme();
-      this.railCollapsed = rail === "collapsed";
-      this.trackListOpen = tracklist !== "closed";
+      // A browser's panels were read from the browser as it started (above).
+      if (!overWeb) {
+        this.railCollapsed = rail === "collapsed";
+        this.trackListOpen = tracklist !== "closed";
+      }
       if (chatFont === "s" || chatFont === "m" || chatFont === "l") this.chatFont = chatFont;
       document.documentElement.dataset.chatFont = this.chatFont;
       // The core closes runs left live by a previous process, so nothing
@@ -3816,6 +3870,8 @@ export function agentLabel(id: string): string {
 }
 
 export const store = new Store();
+// Before the instance is asked anything: its zoom is this PC's to give.
+void store.restoreInstanceZoom();
 
 /** Subscribe once; the core emits one `agent` event per agent event. */
 export async function connectEvents() {

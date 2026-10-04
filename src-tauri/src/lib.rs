@@ -1205,6 +1205,32 @@ fn set_setting(state: State<'_, AppState>, key: String, value: String) -> Result
         .map_err(|e| e.to_string())
 }
 
+/// Namespace for what this PC's window remembers about a remote instance it
+/// shows (its zoom), apart from this PC's own preferences.
+pub(crate) const CLIENT_SETTING_PREFIX: &str = "setting:client:";
+
+/// Read a preference this PC keeps for a screen of its own, whichever Divixi
+/// that screen shows. A remote instance's webview calls this (as one of the
+/// commands that stay here, `ipc.svelte.ts`) for what is this monitor's
+/// rather than the instance's: the instance's other clients (a phone) never
+/// see it.
+#[tauri::command]
+fn client_get_setting(state: State<'_, AppState>, key: String) -> Result<Option<String>, String> {
+    state
+        .store
+        .get_meta(&format!("{CLIENT_SETTING_PREFIX}{key}"))
+        .map_err(|e| e.to_string())
+}
+
+/// Write a preference this PC keeps for a screen of its own.
+#[tauri::command]
+fn client_set_setting(state: State<'_, AppState>, key: String, value: String) -> Result<(), String> {
+    state
+        .store
+        .set_meta(&format!("{CLIENT_SETTING_PREFIX}{key}"), &value)
+        .map_err(|e| e.to_string())
+}
+
 /// A line from the interface, for the log file.
 ///
 /// Everything that goes wrong in the UI is shown to the human as a toast
@@ -1724,6 +1750,8 @@ pub fn run() {
             download_agent,
             get_setting,
             set_setting,
+            client_get_setting,
+            client_set_setting,
             ui_log,
             app_info,
             logs_open,

@@ -134,6 +134,10 @@ const OWN = new Set([
   // PC's log and in the report made from it — not in the log of whatever
   // Divixi the webview happens to be showing.
   "ui_log",
+  // What this PC remembers of its own screen of an instance (its zoom): this
+  // monitor's, so kept here and never seen by the instance's other clients.
+  "client_get_setting",
+  "client_set_setting",
 ]);
 
 /** Call a command of the Divixi shown. */
