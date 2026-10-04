@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { store, agentLabel, withoutReportBlock, REPORT_REMINDER, type Run, type Segment, type Tool } from "./store.svelte";
+  import { store, agentLabel, withoutReportBlock, REPORT_REMINDER, type Run } from "./store.svelte";
   import Markdown from "./Markdown.svelte";
   import ReportCard from "./ReportCard.svelte";
+  import StepGroup from "./StepGroup.svelte";
+  import { isActive, shape } from "./steps";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
   import { untrack } from "svelte";
@@ -117,25 +119,12 @@
       .replace(/\n{3,}/g, "\n\n");
   }
 
-  type Shown = Exclude<Segment, { kind: "tool" }> | { kind: "tools"; tools: Tool[] };
-  function collapse(segments: Segment[]): Shown[] {
-    const out: Shown[] = [];
-    for (const seg of segments) {
-      const last = out.at(-1);
-      if (seg.kind === "tool") {
-        if (last && last.kind === "tools") last.tools.push(seg.tool);
-        else out.push({ kind: "tools", tools: [seg.tool] });
-      } else if (seg.kind === "text" && !cleanText(seg.text).trim()) {
-        continue;
-      } else {
-        out.push(seg);
-      }
-    }
-    return out;
-  }
+  const isLive = (run: Run) => run.status === "running" || run.status === "connecting";
 
-  function toolLabel(title: string): string {
-    return title.replace(/^mcp__[a-z0-9_-]+__/i, "").replace(/^mcp\.[a-z0-9_-]+\./i, "");
+  /** A turn's prose and steps in order, each steps block knowing whether it is still growing. */
+  function turn(run: Run) {
+    const blocks = shape(run.segments, (text) => !!cleanText(text).trim());
+    return blocks.map((block, i) => ({ block, active: isActive(blocks, i, isLive(run)) }));
   }
 
   /**
@@ -194,22 +183,11 @@
             {#if stopped(run)}<span class="mono stopmark">{t("worker.stopped")}</span>{/if}
             {#if run.status === "running" || run.status === "connecting"}<Working />{/if}
           </div>
-          {#each collapse(run.segments) as seg, i (i)}
-            {#if seg.kind === "text"}
-              <div class="ctext"><Markdown source={cleanText(seg.text)} /></div>
-            {:else if seg.kind === "thought"}
-              {#if cleanText(seg.text).trim()}<p class="ctext thought">{cleanText(seg.text).trim()}</p>{/if}
+          {#each turn(run) as { block, active }, i (block.kind === "steps" ? `s${block.at}` : `t${i}`)}
+            {#if block.kind === "text"}
+              <div class="ctext"><Markdown source={cleanText(block.text)} /></div>
             {:else}
-              {@const tool = seg.tools[seg.tools.length - 1]}
-              {@const running = tool.status !== "completed" && tool.status !== "failed"}
-              <div class="toolline mono" class:running>
-                <span class="tdot" class:pulse={running}></span>
-                <span class="tk">{tool.toolKind}</span>
-                <span class="tt">{toolLabel(tool.title)}</span>
-                {#if seg.tools.length > 1}<span class="tcount">+{seg.tools.length - 1}</span>{/if}
-                <span class="grow"></span>
-                <span class="tst" class:bad={tool.status === "failed"}>{tool.status}</span>
-              </div>
+              <StepGroup steps={block.steps} live={isLive(run)} {active} />
             {/if}
           {/each}
           {#if run.segments.length === 0 && run.message.trim()}
@@ -283,7 +261,6 @@
   .grow {
     flex: 1;
   }
-
 
   .scroll {
     flex: 1;
@@ -364,70 +341,16 @@
     color: var(--acct);
   }
 
-  .ctext.thought {
-    color: var(--lab);
-    font-style: italic;
-    font-size: calc(var(--chat-fs) - 1px);
-  }
-
-  .ctext + .ctext,
-  .toolline + .ctext,
-  .ctext + .toolline {
+  .ctext + .ctext {
     margin-top: 8px;
   }
 
-  .toolline {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    height: 22px;
-    font-size: 11px;
-    color: var(--lab);
-  }
 
-  .toolline.running {
-    color: var(--dim);
-  }
 
-  .tdot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--idle);
-    flex-shrink: 0;
-  }
 
-  .toolline.running .tdot {
-    background: var(--ok);
-  }
 
-  .tk {
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    font-size: 9px;
-  }
 
-  .tt {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--body);
-  }
 
-  .tst {
-    font-size: 9px;
-    letter-spacing: 0.12em;
-  }
 
-  .tst.bad {
-    color: var(--acct);
-  }
 
-  .tcount {
-    font-size: 9px;
-    letter-spacing: 0.1em;
-    color: var(--lab);
-    border: 1px solid var(--line);
-    padding: 1px 5px;
-  }
 </style>

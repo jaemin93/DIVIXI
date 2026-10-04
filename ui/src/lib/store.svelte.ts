@@ -287,7 +287,15 @@ export type AgentStatus = {
   install_hint: string;
 };
 
-export type Tool = { id: string; title: string; toolKind: string; status: string };
+export type Tool = {
+  id: string;
+  title: string;
+  toolKind: string;
+  status: string;
+  /** When the call began and ended, in the run's milliseconds; the step list shows the difference. */
+  startedMs?: number;
+  endedMs?: number;
+};
 
 /** The turn as it happened: prose and tool calls in arrival order. */
 export type Segment = { kind: "text"; text: string } | { kind: "thought"; text: string } | { kind: "tool"; tool: Tool };
@@ -3220,8 +3228,14 @@ class Store {
     }
   }
 
+  /** Runs being replayed, so a second ask for one waits on nothing. */
+  private hydrating = new Set<string>();
+
   /** Replay a run's event log into its below-membrane fields. */
   async hydrate(run: Run) {
+    if (this.hydrating.has(run.id)) return;
+    this.hydrating.add(run.id);
+    const kept = run.message;
     try {
       const events = await invoke<StoredEvent[]>("run_events", { run: run.id });
       // Replaying folds the message back together; start from empty so the
@@ -3233,9 +3247,14 @@ class Store {
       run.transcript = [];
       run.segments = [];
       for (const e of events) fold(run, e.at_ms, e.event);
+      // A log with no prose in it (pruned, or older than the log) must not
+      // take away the text the summary already had.
+      if (!run.message && kept) run.message = kept;
       run.loaded = true;
     } catch (err) {
       this.lastError = String(err);
+    } finally {
+      this.hydrating.delete(run.id);
     }
   }
 
@@ -3685,7 +3704,8 @@ function fold(run: Run, ms: number, ev: AgentEvent) {
       break;
     }
     case "tool_call": {
-      const tool: Tool = { id: ev.id, title: ev.title, toolKind: ev.tool_kind, status: ev.status };
+      const tool: Tool = { id: ev.id, title: ev.title, toolKind: ev.tool_kind, status: ev.status, startedMs: ms };
+      if (ev.status === "completed" || ev.status === "failed") tool.endedMs = ms;
       run.tools.push(tool);
       run.segments.push({ kind: "tool", tool });
       run.toolCount = run.tools.length;
@@ -3701,6 +3721,7 @@ function fold(run: Run, ms: number, ev: AgentEvent) {
         if (!t) continue;
         if (ev.title) t.title = ev.title;
         if (ev.status) t.status = ev.status;
+        if (ev.status === "completed" || ev.status === "failed") t.endedMs = ms;
       }
       break;
     }
