@@ -456,7 +456,7 @@
             {isOpen(tr.id) ? "▾" : "▸"}
           </button>
         </div>
-        <button class="pick" onclick={() => store.selectTrack(tr.id)} title={tr.intent}>
+        <button class="pick" onclick={() => store.pickTrack(tr.id)} title={tr.intent}>
           <!-- The small line: tags on the left, last activity on the right. -->
           <span class="top">
             <!-- Tags give way first: the run of chips is cut with an ellipsis; the time always shows. -->
@@ -516,6 +516,7 @@
     onclick={async () => {
       if (store.track !== tr.id) await store.selectTrack(tr.id);
       store.openWorkerView(worker.name);
+      void store.foldListAfterPick();
     }}
   >
     <span class="dot" class:pulse={worker.live} class:hollow={!worker.open && !worker.live} style="background: {worker.live || worker.open ? 'var(--ok)' : 'var(--idle)'}"></span>
