@@ -2788,8 +2788,9 @@ class Store {
     }
   }
 
-  /** Rebuild the timeline, agent list and preferences from the store. Called once at startup. */
-  async restore() {
+  /** Rebuild the timeline, agent list and preferences from the store. Called once at startup; false if it could not be read. */
+  async restore(): Promise<boolean> {
+    let ok = true;
     scheme?.addEventListener("change", () => {
       if (this.themePref === "system") this.applyTheme();
     });
@@ -2929,10 +2930,12 @@ class Store {
         this.setupOpen = true;
       }
     } catch (err) {
+      ok = false;
       this.lastError = String(err);
     } finally {
       this.restored = true;
     }
+    return ok;
   }
 
   /** Keep the selected agent on one that is ready. */
