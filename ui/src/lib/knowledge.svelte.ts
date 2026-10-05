@@ -1,5 +1,9 @@
 import { invoke, listen, local, bring } from "./ipc.svelte";
 import { store, type ArtifactInfo } from "./store.svelte";
+import { t } from "./i18n.svelte";
+import { addTarget, displayName, keepLibrary, parseLibrary, sourcesIn, type KLibrary } from "./libraries";
+
+export type { KLibrary } from "./libraries";
 
 /** Mirrors `orchestra_knowledge::Source`: a document in the library. */
 export type KSource = {
@@ -19,6 +23,8 @@ export type KSource = {
   total: number;
   items: number;
   created_at: number;
+  /** The library it is in (one only). */
+  library_id: number;
 };
 
 /** Mirrors `knowledge::Listed`: an item, with its score when searched. */
@@ -72,7 +78,12 @@ export {
  */
 class Knowledge {
   tab = $state<KTab>("list");
+  /** Every document, of every library. */
   sources = $state<KSource[]>([]);
+  /** The libraries, General first. */
+  libraries = $state<KLibrary[]>([]);
+  /** The library the page shows; null: all of them. */
+  library = $state<number | null>(null);
   /** Sources that share most of their passages with another, by source id. */
   overlaps = $state<Record<string, { other: string; shared: number; percent: number }>>({});
   items = $state<KItem[]>([]);
@@ -103,13 +114,33 @@ class Knowledge {
     return this.artifactOf(s.id)?.title ?? s.uri.split(/[\\/]/).at(-1) ?? s.uri;
   }
 
+  /** The documents of the library shown (all of them for "all"). */
+  get shown(): KSource[] {
+    return sourcesIn(this.sources, this.library);
+  }
+
+  /** The library shown, or undefined for all of them. */
+  get current(): KLibrary | undefined {
+    return this.libraries.find((l) => l.id === this.library);
+  }
+
+  /** A library's name as shown (General in the person's language until renamed). */
+  libraryName(l: Pick<KLibrary, "id" | "name">): string {
+    return displayName(l, t("kb.lib.general"));
+  }
+
+  libraryNameOf(id: number): string {
+    const l = this.libraries.find((x) => x.id === id);
+    return l ? this.libraryName(l) : String(id);
+  }
+
   get indexing(): KSource[] {
     return this.sources.filter((s) => s.status === "pending" || s.status === "indexing");
   }
 
-  /** Sources fully indexed, of all. */
+  /** Sources fully indexed, of those shown. */
   get syncedCount(): number {
-    return this.sources.filter((s) => s.status === "synced").length;
+    return this.shown.filter((s) => s.status === "synced").length;
   }
 
   async show(tab?: KTab) {
@@ -130,13 +161,16 @@ class Knowledge {
 
   async load() {
     try {
-      const [sources, stats, formats] = await Promise.all([
+      const [sources, libraries, formats] = await Promise.all([
         invoke<KSource[]>("knowledge_sources"),
-        invoke<KStats>("knowledge_stats"),
+        invoke<KLibrary[]>("knowledge_libraries"),
         this.formats.length ? Promise.resolve(this.formats) : invoke<string[]>("knowledge_formats"),
       ]);
       this.sources = sources;
-      this.stats = stats;
+      this.libraries = libraries;
+      // The first time, the library shown last; after, the one shown if it is still there.
+      this.setShownLibrary(keepLibrary(this.loaded ? this.library : parseLibrary(store.kbLibrarySaved), libraries));
+      this.stats = await invoke<KStats>("knowledge_stats", { library: this.library });
       this.formats = formats;
       void this.loadOverlaps();
       this.loaded = true;
@@ -157,6 +191,94 @@ class Knowledge {
     await this.refreshTab();
   }
 
+  /** The library shown, without loading anything: what the graph conversation is told follows it. */
+  private setShownLibrary(library: number | null) {
+    this.library = library;
+    store.graphLibrary = library;
+    // A document of another library is no filter here.
+    if (this.sourceFilter && !this.shown.some((s) => s.id === this.sourceFilter)) this.sourceFilter = "";
+  }
+
+  /** Show one library (or all, `null`): the tabs, counts and graph follow; remembered. */
+  async showLibrary(library: number | null) {
+    if (library === this.library) return;
+    this.setShownLibrary(library);
+    void store.rememberKbLibrary(library === null ? "all" : String(library));
+    await this.loadStats();
+    await this.refreshTab();
+  }
+
+  async loadStats() {
+    try {
+      this.stats = await invoke<KStats>("knowledge_stats", { library: this.library });
+    } catch {
+      /* counts can wait */
+    }
+  }
+
+  async loadLibraries() {
+    try {
+      this.libraries = await invoke<KLibrary[]>("knowledge_libraries");
+    } catch (err) {
+      store.lastError = String(err);
+      return;
+    }
+    const keep = keepLibrary(this.library, this.libraries);
+    if (keep !== this.library) {
+      // Deleted (here or from another window): back to all of them.
+      this.setShownLibrary(keep);
+      void store.rememberKbLibrary("all");
+      await this.loadStats();
+      if (store.view === "knowledge") await this.refreshTab();
+    }
+  }
+
+  /** Make a library and show it. Returns why not, or "". */
+  async createLibrary(name: string): Promise<string> {
+    try {
+      const made = await invoke<KLibrary>("knowledge_library_create", { name });
+      await this.loadLibraries();
+      await this.showLibrary(made.id);
+      return "";
+    } catch (err) {
+      return String(err);
+    }
+  }
+
+  /** Returns why not, or "". */
+  async renameLibrary(id: number, name: string): Promise<string> {
+    try {
+      await invoke<KLibrary>("knowledge_library_rename", { id, name });
+      await this.loadLibraries();
+      return "";
+    } catch (err) {
+      return String(err);
+    }
+  }
+
+  /** Delete an empty library (not General). Returns why not, or "". */
+  async deleteLibrary(id: number): Promise<string> {
+    try {
+      await invoke("knowledge_library_delete", { id });
+    } catch (err) {
+      return String(err);
+    }
+    if (this.library === id) await this.showLibrary(null);
+    await this.loadLibraries();
+    return "";
+  }
+
+  /** Move a document to another library. */
+  async move(id: string, library: number) {
+    try {
+      const moved = await invoke<KSource>("knowledge_move", { id, library });
+      this.upsert(moved);
+      await this.loadLibraries();
+    } catch (err) {
+      store.lastError = String(err);
+    }
+  }
+
   /** Only the newest search may land. */
   private searchSeq = 0;
 
@@ -168,6 +290,7 @@ class Knowledge {
       const items = await invoke<KItem[]>("knowledge_items", {
         source: this.sourceFilter || null,
         query: query.trim() || null,
+        library: this.library,
       });
       if (seq !== this.searchSeq) return;
       // What the query reaches lands with the query itself: the graph's focus
@@ -197,7 +320,7 @@ class Knowledge {
 
   async loadGraph() {
     try {
-      this.graph = await invoke<KGraph>("knowledge_graph");
+      this.graph = await invoke<KGraph>("knowledge_graph", { library: this.library });
     } catch (err) {
       store.lastError = String(err);
     }
@@ -205,17 +328,20 @@ class Knowledge {
 
   async entityItems(id: number): Promise<KItem[]> {
     try {
-      return await invoke<KItem[]>("knowledge_entity_items", { id });
+      return await invoke<KItem[]>("knowledge_entity_items", { id, library: this.library });
     } catch (err) {
       store.lastError = String(err);
       return [];
     }
   }
 
-  /** Add a file; `track` makes `path` relative to that track's folder. Returns why not, or "". */
+  /**
+   * Add a file to the library shown (General from the view of all); `track`
+   * makes `path` relative to that track's folder. Returns why not, or "".
+   */
   async add(path: string, track?: string): Promise<string> {
     try {
-      const added = await invoke<{ source: KSource; artifact: ArtifactInfo }>("knowledge_add", { path, track: track ?? null });
+      const added = await invoke<{ source: KSource; artifact: ArtifactInfo }>("knowledge_add", { path, track: track ?? null, library: addTarget(this.library) });
       if (!store.artifacts.some((a) => a.id === added.artifact.id)) store.artifacts = [added.artifact, ...store.artifacts];
       this.upsert(added.source);
       return "";
@@ -317,11 +443,7 @@ class Knowledge {
     this.timer = setTimeout(async () => {
       const changed = this.contentChanged;
       this.contentChanged = false;
-      try {
-        this.stats = await invoke<KStats>("knowledge_stats");
-      } catch {
-        /* counts can wait */
-      }
+      await this.loadStats();
       await this.loadEmbedding();
       // A source synced or removed changes what the others share.
       if (changed) await this.loadOverlaps();
@@ -338,5 +460,9 @@ export async function connectKnowledge() {
     listen<KSource>("knowledge", (e) => kb.upsert(e.payload)),
     listen<string>("knowledge-removed", (e) => kb.drop(e.payload)),
     listen("knowledge-embedding", () => kb.loadEmbedding()),
+    // Made, renamed, deleted, a document moved: here or in another window.
+    listen("knowledge-libraries", () => {
+      if (kb.loaded) void kb.loadLibraries();
+    }),
   ]);
 }

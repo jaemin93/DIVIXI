@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store } from "./store.svelte";
+  import { kb } from "./knowledge.svelte";
   import type { Chip } from "./graphContext";
   import SplitHandle from "./SplitHandle.svelte";
   import Timeline from "./Timeline.svelte";
@@ -71,6 +72,10 @@
   {#if !design}
   <div class="ctx">
     <div class="mono ctxlab">{t("kb.agentContext")}</div>
+    <!-- The library on screen goes with every message (all of them: nothing to say). -->
+    {#if kb.current}
+      <p class="ctxlib">{t("kb.lib.onScreen", { name: kb.libraryName(kb.current) })}</p>
+    {/if}
     {#if store.graphChips.length}
       <div class="chips">
         {#each store.graphChips as c (c.key)}
@@ -163,6 +168,12 @@
     text-transform: uppercase;
     color: var(--kg-acc);
     margin-bottom: 6px;
+  }
+
+  .ctxlib {
+    margin: 0 0 7px;
+    font-size: 12px;
+    color: var(--txt);
   }
 
   .ctxnone {
