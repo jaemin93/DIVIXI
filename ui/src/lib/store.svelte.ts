@@ -981,8 +981,16 @@ class Store {
     this.graphChatWidth = Math.min(640, Math.max(320, Math.round(px)));
   }
 
+  /** An opening under way: a second press waits for it instead of starting another conversation. */
+  private openingGraphChat: Promise<void> | null = null;
+
   /** Open the graph's conversation, starting it (on the default agent, as a new design is) the first time. */
-  async openGraphChat() {
+  openGraphChat(): Promise<void> {
+    this.openingGraphChat ??= this.startGraphChat().finally(() => (this.openingGraphChat = null));
+    return this.openingGraphChat;
+  }
+
+  private async startGraphChat() {
     if (!this.artifacts.length) await this.loadArtifacts();
     let chat = this.artifacts.filter((a) => a.kind === GRAPH_KIND).sort((a, b) => b.updated_at - a.updated_at)[0];
     if (!chat) {
@@ -1035,6 +1043,15 @@ class Store {
     if (this.view === "design") return this.artifact;
     if (this.view === "knowledge" && this.graphChatOpen) return this.graphChat;
     return "";
+  }
+
+  /**
+   * What the person picked for the on-screen artifact conversation's next
+   * message: a design's board items, the graph's chips. Unlike chatSelected,
+   * not the library on screen, which goes along but is not a message.
+   */
+  get chatPicks(): string[] {
+    return this.view === "design" ? this.designSelected : picksOf(this.graphChips, this.graphExcluded);
   }
 
   /** What goes with the on-screen artifact conversation's next message. */
@@ -3586,10 +3603,11 @@ class Store {
     const files = this.attachments.map((a) => a.path);
     const artifact = this.chatArtifact;
     const selected = artifact ? [...this.chatSelected] : [];
+    const picked = artifact ? this.chatPicks.length : 0;
     const target = artifact ? this.chatArtifactId : this.track;
     if (!target) return null;
     if (artifact && !this.currentArtifact) return null;
-    if (!text && !files.length && !this.kbPicked.length && !selected.length) return null;
+    if (!text && !files.length && !this.kbPicked.length && !picked) return null;
     this.attachments = [];
     const picks = this.takeKnowledge(key);
     return {

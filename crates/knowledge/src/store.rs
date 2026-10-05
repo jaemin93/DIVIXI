@@ -1185,14 +1185,18 @@ fn ensure_general(conn: &Connection) -> anyhow::Result<()> {
 }
 
 /// Before an upgrade, a copy of the file as it was, beside it
-/// (`knowledge.db.v4.bak`), unless one is there already. A failed copy is
-/// logged, not fatal: each step of the upgrade is a transaction of its own.
+/// (`knowledge.db.v4.bak`; `knowledge.db.v4.<ms>.bak` when that name is taken
+/// by an earlier upgrade's copy, which is kept). A failed copy is logged,
+/// not fatal: each step of the upgrade is a transaction of its own.
 fn backup_before_upgrade(conn: &Connection, path: &Path, from: i64) {
-    let mut name = path.as_os_str().to_owned();
-    name.push(format!(".v{from}.bak"));
-    let backup = std::path::PathBuf::from(name);
+    let named = |suffix: String| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        std::path::PathBuf::from(name)
+    };
+    let mut backup = named(format!(".v{from}.bak"));
     if backup.exists() {
-        return;
+        backup = named(format!(".v{from}.{}.bak", now_ms()));
     }
     match conn.execute("VACUUM INTO ?1", params![backup.to_string_lossy()]) {
         Ok(_) => tracing::info!(backup = %backup.display(), "kept a copy of the knowledge library before upgrading it"),
@@ -1468,7 +1472,24 @@ mod tests {
         assert_eq!(db.libraries().unwrap().len(), 1);
         assert_eq!(db.sources().unwrap().len(), 2);
         drop(db);
-        for p in [path.clone(), backup] {
+
+        // A file put back at version 4 and upgraded again: its own copy, the first one kept.
+        let _ = std::fs::remove_file(&path);
+        for ext in ["db-wal", "db-shm"] {
+            let _ = std::fs::remove_file(path.with_extension(ext));
+        }
+        std::fs::copy(&backup, &path).unwrap();
+        drop(KnowledgeDb::open(&path).unwrap());
+        let dir = path.parent().unwrap();
+        let stem = path.file_name().unwrap().to_string_lossy().to_string();
+        let copies: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&format!("{stem}.v4."))))
+            .collect();
+        assert_eq!(copies.len(), 2, "{copies:?}");
+        for p in copies.into_iter().chain([path.clone()]) {
             let _ = std::fs::remove_file(p);
         }
     }

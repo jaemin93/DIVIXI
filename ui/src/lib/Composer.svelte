@@ -45,7 +45,7 @@
     const text = draft;
     // "@kb …" typed but not picked from is a search, not a message.
     if (kbQuery !== null) return;
-    const something = text.trim() || store.attachments.length || store.kbPicked.length || (store.chatArtifact && store.chatSelected.length);
+    const something = text.trim() || store.attachments.length || store.kbPicked.length || (store.chatArtifact && store.chatPicks.length);
     // A design picked a moment ago is still being written out: wait for it.
     // A turn in flight is no reason to wait: the message joins the line.
     if (!something || store.attaching > 0) return;

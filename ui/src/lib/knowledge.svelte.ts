@@ -170,7 +170,7 @@ class Knowledge {
       this.libraries = libraries;
       // The first time, the library shown last; after, the one shown if it is still there.
       this.setShownLibrary(keepLibrary(this.loaded ? this.library : parseLibrary(store.kbLibrarySaved), libraries));
-      this.stats = await invoke<KStats>("knowledge_stats", { library: this.library });
+      await this.loadStats();
       this.formats = formats;
       void this.loadOverlaps();
       this.loaded = true;
@@ -209,8 +209,11 @@ class Knowledge {
   }
 
   async loadStats() {
+    const library = this.library;
     try {
-      this.stats = await invoke<KStats>("knowledge_stats", { library: this.library });
+      const stats = await invoke<KStats>("knowledge_stats", { library });
+      // Another library picked meanwhile: its own counts are on the way.
+      if (library === this.library) this.stats = stats;
     } catch {
       /* counts can wait */
     }
@@ -319,8 +322,11 @@ class Knowledge {
   }
 
   async loadGraph() {
+    const library = this.library;
     try {
-      this.graph = await invoke<KGraph>("knowledge_graph", { library: this.library });
+      const graph = await invoke<KGraph>("knowledge_graph", { library });
+      // Another library picked meanwhile: its own graph is on the way.
+      if (library === this.library) this.graph = graph;
     } catch (err) {
       store.lastError = String(err);
     }

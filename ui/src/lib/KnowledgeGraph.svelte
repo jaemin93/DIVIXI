@@ -9,10 +9,16 @@
   /** Keyed by id and name together: another instance's library reuses the same ids for other entities. */
   const placeKey = (n: { id: number; name: string }) => `${n.id}:${n.name}`;
   let rememberedView: { x: number; y: number; k: number } | null = null;
+  /** The library that camera was on (null: all): another library's plate is framed afresh. */
+  let rememberedViewLibrary: number | null = null;
   /** The entity card's folds, kept across picks and visits to the tab. */
   let rememberedCard: CardPrefs = DEFAULT_PREFS;
-  /** The picked node, the centre and its depth, and "related only": the graph's selection, kept across tabs. */
-  let rememberedFocus: { picked: number | null; centre: number | null; depth: number; relatedOnly: boolean } = { picked: null, centre: null, depth: 1, relatedOnly: true };
+  /**
+   * The picked node and the centre (by placeKey, so another instance's entity
+   * of the same id is not taken for them), the centre's depth, and "related
+   * only": the graph's selection, kept across tabs.
+   */
+  let rememberedFocus: { picked: string | null; centre: string | null; depth: number; relatedOnly: boolean } = { picked: null, centre: null, depth: 1, relatedOnly: true };
 
   /** A marker's shape; the template's legend draws them too, so the type lives here. */
   type Glyph = "square" | "diamond" | "circle" | "block" | "dot" | "triangle";
@@ -82,7 +88,7 @@
    * shown query shows only the entities it reaches, unless the person asked
    * for everything. `visible` is null when the whole graph is shown.
    */
-  let centre = $state<number | null>(rememberedFocus.centre);
+  let centre = $state<number | null>(kb.graph.nodes.find((n) => placeKey(n) === rememberedFocus.centre)?.id ?? null);
   let depth = $state(rememberedFocus.depth);
   let relatedOnly = $state(rememberedFocus.relatedOnly);
   let visible = $state<Set<number> | null>(null);
@@ -166,18 +172,27 @@
     if (section && section !== "*" && !g.nodes.some((n) => n.kind === section)) section = null;
     // The node picked before the tab was left is picked again.
     if (!picked && rememberedFocus.picked !== null) {
-      const again = g.nodes.find((n) => n.id === rememberedFocus.picked);
+      const again = g.nodes.find((n) => placeKey(n) === rememberedFocus.picked);
       if (again) void pick(again);
     }
+    // A centre the reload (another library) took away is let go.
+    if (centre !== null && !g.nodes.some((n) => n.id === centre)) centre = null;
     // The camera is framed the first time this tab draws anything (unless it
-    // remembers where it was); a later reload leaves it where the person put it.
+    // remembers where it was, on this library); after, a reload leaves it
+    // where the person put it, and another library's graph is framed.
     const first = !built;
+    const otherLibrary = first ? rememberedViewLibrary !== kb.library : builtLibrary !== kb.library;
     built = true;
-    applyFocus(first && !rememberedView ? "jump" : "keep");
+    builtLibrary = kb.library;
+    builtGraph = g;
+    applyFocus(first && (!rememberedView || otherLibrary) ? "jump" : otherLibrary ? "ease" : "keep");
   }
 
   /** Whether this mount has drawn the graph yet. */
   let built = false;
+  /** The library and the graph it last drew: a reload is told from a new question by them. */
+  let builtLibrary: number | null = null;
+  let builtGraph: unknown = null;
 
   /** The best-connected node of what is shown: most links, then most mentions; none without a web. */
   function findHub() {
@@ -251,6 +266,12 @@
     kick();
   }
 
+  // The card's height lands after layout; labels it covers are placed again then.
+  $effect(() => {
+    void cardH;
+    untrack(() => kick());
+  });
+
   /** A focus's inputs changed: the query's entities, "show all", the centre or its depth. */
   $effect(() => {
     void queried;
@@ -258,8 +279,9 @@
     void centre;
     void depth;
     // Only the inputs above: what applyFocus reads besides is not a reason to run it.
+    // A reloaded graph changes them too; build() frames that one, and runs after.
     untrack(() => {
-      if (bodies.length) applyFocus("ease");
+      if (bodies.length && kb.graph === builtGraph) applyFocus("ease");
     });
   });
 
@@ -661,6 +683,7 @@
     frame = heat > SETTLED || drag || glide ? requestAnimationFrame(loop) : 0;
     if (!frame) {
       rememberedView = { ...view };
+      rememberedViewLibrary = kb.library;
       remember();
     }
   }
@@ -869,7 +892,8 @@
   }
 
   $effect(() => {
-    rememberedFocus = { picked: picked?.id ?? null, centre, depth, relatedOnly };
+    const centreNode = centre === null ? undefined : kb.graph.nodes.find((n) => n.id === centre);
+    rememberedFocus = { picked: picked ? placeKey(picked) : null, centre: centreNode ? placeKey(centreNode) : null, depth, relatedOnly };
   });
 
   function focusOn(id: number) {

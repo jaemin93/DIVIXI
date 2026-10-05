@@ -33,9 +33,10 @@ use crate::{embed, AppState, SETTING_PREFIX};
 
 /// The artifact kind a library document is listed as.
 pub const KIND: &str = "knowledge";
-/// The knowledge graph's conversation: one per library, an artifact so it
-/// runs like a design's (its own agent, session and turns), apart from the
-/// documents (`KIND`), which are artifacts too.
+/// The knowledge graph's conversation: one for every library (it is told the
+/// library on screen with each message), an artifact so it runs like a
+/// design's (its own agent, session and turns), apart from the documents
+/// (`KIND`), which are artifacts too.
 pub const GRAPH_KIND: &str = "graph";
 /// Window event carrying a source whenever it changes.
 const EVENT: &str = "knowledge";
@@ -999,8 +1000,8 @@ pub fn library_tools(app: AppHandle) -> Vec<orchestra_mcp::Tool> {
                         }
                     }
                     let library = match &library_name {
-                        Some(name) => match db.library_named(name).map_err(|e| e.to_string())? {
-                            Some(l) => Some(l.id),
+                        Some(name) => match find_library(&db, name).map_err(|e| e.to_string())? {
+                            Some(id) => Some(id),
                             None => return Err(format!("No knowledge library named {name}. Call knowledge_list_sources to see the libraries, or leave library out to search them all.")),
                         },
                         None => None,
@@ -1033,6 +1034,53 @@ pub fn library_tools(app: AppHandle) -> Vec<orchestra_mcp::Tool> {
             },
         ),
     ]
+}
+
+/// What the person may call the General library while it keeps its stored
+/// name: the UI shows it in their language (`kb.lib.general`).
+const GENERAL_SHOWN_AS: [&str; 1] = ["일반"];
+
+/// A library by the name an agent gives: as stored (case aside), or General
+/// by the name the person sees it under.
+fn find_library(db: &KnowledgeDb, name: &str) -> anyhow::Result<Option<i64>> {
+    if let Some(l) = db.library_named(name)? {
+        return Ok(Some(l.id));
+    }
+    if GENERAL_SHOWN_AS.contains(&name.trim()) {
+        if let Some(g) = db.library(GENERAL)? {
+            if g.name == orchestra_knowledge::store::GENERAL_NAME {
+                return Ok(Some(GENERAL));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The tools of [`library_tools`], by name.
+const LIBRARY_TOOLS: [&str; 2] = ["knowledge_search", "knowledge_list_sources"];
+
+/// Whether a permission question is about one of Divixi's library tools: its
+/// title is the tool's name, or names Divixi's server and ends in it
+/// (`mcp__divixi__knowledge_search`, `divixi.knowledge_search`). Another
+/// server's tool of the same name is not.
+pub fn is_library_tool(title: &str) -> bool {
+    let title = title.trim();
+    LIBRARY_TOOLS.iter().any(|tool| {
+        title == *tool
+            || title
+                .strip_suffix(tool)
+                .is_some_and(|head| head.ends_with(['_', '.', '/', ':']) && head.trim_end_matches(['_', '.', '/', ':']).rsplit(['_', '.', '/', ':', ' ']).next() == Some("divixi"))
+    })
+}
+
+/// The answer that lets a tool run this once: the agent's "allow once", else
+/// another allowing answer; never one that allows from now on.
+pub fn allow_choice(options: &[orchestra_core::PermissionChoice]) -> Option<String> {
+    options
+        .iter()
+        .find(|o| o.kind == "allow_once")
+        .or_else(|| options.iter().find(|o| o.kind.starts_with("allow") && o.kind != "allow_always"))
+        .map(|o| o.id.clone())
 }
 
 /// Most entities and passages one message carries; past these the picks are cut.
@@ -1074,9 +1122,8 @@ pub fn library_line(name: &str) -> String {
 
 /// The text that goes with a graph conversation's message: the library on
 /// screen, when the page shows one, then what was picked.
-pub fn graph_context(state: &AppState, selected: &[String]) -> Result<String, String> {
+pub fn graph_context(db: &KnowledgeDb, selected: &[String]) -> Result<String, String> {
     let (entities, items) = parse_picks(selected);
-    let db = &state.library.db;
     let picked = db.selection_context(&entities, &items, PASSAGE_CHARS).map_err(|e| e.to_string())?;
     let library = match picked_library(selected) {
         Some(id) => db.library(id).map_err(|e| e.to_string())?,
@@ -1109,6 +1156,33 @@ mod tests {
         let (e, i) = parse_picks(&many);
         assert_eq!((e.len(), i.len()), (MAX_PICKED_ENTITIES, MAX_PICKED_PASSAGES), "cut at the limits");
         assert_eq!(parse_picks(&[]), (vec![], vec![]));
+    }
+
+    #[test]
+    fn the_graph_agent_may_read_the_library_and_nothing_else() {
+        for yes in ["mcp__divixi__knowledge_search", "mcp__divixi__knowledge_list_sources", "divixi.knowledge_search", "knowledge_search", " divixi/knowledge_search "] {
+            assert!(is_library_tool(yes), "{yes}");
+        }
+        for no in ["mcp__other__knowledge_search", "Bash", "mcp__divixi__design_apply", "knowledge_search_all", "rm -rf x knowledge_search", "notdivixi.knowledge_search", ""] {
+            assert!(!is_library_tool(no), "{no}");
+        }
+        let choice = |id: &str, kind: &str| orchestra_core::PermissionChoice { id: id.into(), name: id.into(), kind: kind.into() };
+        assert_eq!(allow_choice(&[choice("a", "allow_always"), choice("o", "allow_once"), choice("r", "reject_once")]).as_deref(), Some("o"));
+        assert_eq!(allow_choice(&[choice("a", "allow_always"), choice("r", "reject_once")]), None, "never from now on");
+        assert_eq!(allow_choice(&[]), None);
+    }
+
+    #[test]
+    fn an_agent_finds_general_by_the_name_the_person_sees() {
+        let db = KnowledgeDb::in_memory().unwrap();
+        let work = db.create_library("Work").unwrap().id;
+        assert_eq!(find_library(&db, "work").unwrap(), Some(work));
+        assert_eq!(find_library(&db, "General").unwrap(), Some(GENERAL));
+        assert_eq!(find_library(&db, " 일반 ").unwrap(), Some(GENERAL));
+        assert_eq!(find_library(&db, "Elsewhere").unwrap(), None);
+        db.rename_library(GENERAL, "Inbox").unwrap();
+        assert_eq!(find_library(&db, "일반").unwrap(), None, "renamed: only its own name");
+        assert_eq!(find_library(&db, "inbox").unwrap(), Some(GENERAL));
     }
 
     #[test]
