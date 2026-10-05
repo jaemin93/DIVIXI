@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import { DEFAULT_PREFS, type CardPrefs } from "./detailCard";
   /**
    * Where each entity was last laid out, and where the camera was, kept for as
    * long as the app runs. The graph tab is mounted afresh every time it is
@@ -8,6 +9,8 @@
   /** Keyed by id and name together: another instance's library reuses the same ids for other entities. */
   const placeKey = (n: { id: number; name: string }) => `${n.id}:${n.name}`;
   let rememberedView: { x: number; y: number; k: number } | null = null;
+  /** The entity card's folds, kept across picks and visits to the tab. */
+  let rememberedCard: CardPrefs = DEFAULT_PREFS;
 
   /** A marker's shape; the template's legend draws them too, so the type lives here. */
   type Glyph = "square" | "diamond" | "circle" | "block" | "dot" | "triangle";
@@ -18,6 +21,7 @@
   import { untrack } from "svelte";
   import { t } from "./i18n.svelte";
   import { placeNew, queryReach, settle, settleBudget, tick, visibleIds, STILL } from "./graphLayout";
+  import { cardRect, cardShape, railRight, toggled } from "./detailCard";
 
   /**
    * The entity graph, drawn as a plate: a small force layout on a canvas
@@ -43,6 +47,17 @@
   let running = $state(true);
   let picked = $state<KNode | null>(null);
   let pickedItems = $state<KItem[]>([]);
+  /** Whether the entity card is folded to its header, and whether its sources are listed. */
+  let card = $state<CardPrefs>(rememberedCard);
+  /** The open card's height, for labels to keep clear of it. */
+  let cardH = $state(0);
+  const shape = $derived(cardShape(!!picked, card));
+
+  function flip(key: keyof CardPrefs) {
+    card = toggled(card, key);
+    rememberedCard = card;
+    kick();
+  }
 
   let bodies: Body[] = [];
   let links: { a: Body; b: Body }[] = [];
@@ -504,7 +519,11 @@
     });
     // Nor may one run under the overview rail on the right edge.
     const railH = sections.length * 24;
-    taken.push([w - (picked ? 304 : 0) - 150, h / 2 - railH / 2 - 8, w - (picked ? 304 : 0), h / 2 + railH / 2 + 8]);
+    const rr = railRight(shape);
+    taken.push([w - rr - 150, h / 2 - railH / 2 - 8, w - rr, h / 2 + railH / 2 + 8]);
+    // Nor under the entity card, open or folded.
+    const covered = cardRect(shape, w, cardH);
+    if (covered) taken.push(covered);
     const free = (x0: number, y0: number, x1: number, y1: number) =>
       !taken.some(([a0, b0, a1, b1]) => x0 < a1 && x1 > a0 && y0 < b1 && y1 > b0);
     for (const b of order) {
@@ -930,7 +949,7 @@
       </div>
     {/if}
     {#if kb.graph.nodes.length}
-      <nav class="rail" class:shifted={!!picked} aria-label={t("kb.graphSections")}>
+      <nav class="rail" style="right: {railRight(shape)}px" aria-label={t("kb.graphSections")}>
         {#each sections as sec, i (sec.id)}
           <button
             class="stop"
@@ -948,23 +967,46 @@
       </nav>
     {/if}
     {#if picked}
-      <aside class="detail">
+      <aside class="detail" class:folded={card.folded} bind:clientHeight={cardH}>
         <div class="dhead">
-          <span class="mono dlab">{t("kb.graphEntity")} · {picked.kind}</span>
+          {#if card.folded}
+            <span class="dname small">{@render glyph(glyphOf(picked.kind), true)}<span>{picked.name}</span></span>
+            <span class="mono dlab kindtag">{picked.kind}</span>
+          {:else}
+            <span class="mono dlab">{t("kb.graphEntity")} · {picked.kind}</span>
+          {/if}
+          <button
+            class="x fold"
+            onclick={() => flip("folded")}
+            aria-expanded={!card.folded}
+            aria-label={card.folded ? t("kb.graphUnfoldCard") : t("kb.graphFoldCard")}
+            title={card.folded ? t("kb.graphUnfoldCard") : t("kb.graphFoldCard")}>{card.folded ? "▾" : "▴"}</button
+          >
           <button class="x" onclick={() => { picked = null; pickedItems = []; kick(); }} aria-label={t("kb.close")}>×</button>
         </div>
-        <div class="dname">{@render glyph(glyphOf(picked.kind), true)}<span>{picked.name}</span></div>
-        {#if picked.description}<p class="desc">{picked.description}</p>{/if}
-        {#if centre !== picked.id}
-          <button class="btn sm focusbtn" onclick={() => focusOn(picked!.id)}>{t("kb.graphFocusNode")}</button>
+        {#if !card.folded}
+          <div class="dname">{@render glyph(glyphOf(picked.kind), true)}<span>{picked.name}</span></div>
+          {#if picked.description}<p class="desc">{picked.description}</p>{/if}
+          {#if centre !== picked.id}
+            <button class="btn sm focusbtn" onclick={() => focusOn(picked!.id)}>{t("kb.graphFocusNode")}</button>
+          {/if}
+          {#if pickedItems.length}
+            <button class="srcs mono" onclick={() => flip("sourcesOpen")} aria-expanded={card.sourcesOpen}>
+              <span>{card.sourcesOpen ? t("kb.graphHideSources") : t("kb.graphShowSources", { n: pickedItems.length })}</span>
+              <span aria-hidden="true">{card.sourcesOpen ? "▴" : "▾"}</span>
+            </button>
+            {#if card.sourcesOpen}
+              {#each pickedItems as item (item.id)}
+                <div class="mention">
+                  <div class="mtitle">{item.title}</div>
+                  <div class="mono msrc">{sourceName(item.source_id)} · {item.line_start}-{item.line_end}</div>
+                </div>
+              {/each}
+            {/if}
+          {:else}
+            <div class="mlab">{t("kb.mentionedIn", { n: 0 })}</div>
+          {/if}
         {/if}
-        <div class="mlab">{t("kb.mentionedIn", { n: pickedItems.length })}</div>
-        {#each pickedItems as item (item.id)}
-          <div class="mention">
-            <div class="mtitle">{item.title}</div>
-            <div class="mono msrc">{sourceName(item.source_id)} · {item.line_start}-{item.line_end}</div>
-          </div>
-        {/each}
       </aside>
     {/if}
   </div>
@@ -1179,8 +1221,8 @@
     gap: 2px;
   }
 
-  .rail.shifted {
-    right: 304px;
+  .rail {
+    transition: right 0.18s ease;
   }
 
   .stop {
@@ -1248,6 +1290,7 @@
     top: 12px;
     right: 12px;
     width: 280px;
+    z-index: 1;
     max-height: calc(100% - 24px);
     overflow-y: auto;
     background: var(--card);
@@ -1256,6 +1299,45 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  /* Folded: the header alone, one line. */
+  .detail.folded {
+    padding: 8px 10px 8px 12px;
+  }
+
+  .dname.small {
+    flex: 1;
+    font-size: 14px;
+    gap: 6px;
+  }
+
+  .kindtag {
+    flex: none;
+  }
+
+  .x.fold {
+    font-size: 13px;
+  }
+
+  /* The passages that mention the entity: a list of its own, closed at first. */
+  .srcs {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0;
+    background: transparent;
+    border: 0;
+    border-top: 1px solid var(--line);
+    color: var(--lab);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    text-align: left;
+  }
+
+  .srcs:hover {
+    color: var(--hi);
   }
 
   .dhead {
