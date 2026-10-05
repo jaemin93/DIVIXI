@@ -1070,7 +1070,8 @@
     flex-direction: column;
     border: 1px solid var(--line);
     min-height: 480px;
-    height: calc(100vh - 330px);
+    /* The page's head is one thin bar now: the plate takes the height it gave up. */
+    height: calc(100vh - 200px);
   }
 
   .bar {

@@ -107,36 +107,52 @@
 </script>
 
 <section class="page">
-  <div class="inner">
-    <header>
-      <div class="mlab">KNOWLEDGE</div>
-      <div class="titlerow">
-        <h1 class="serif">{t("kb.title")}</h1>
-        <span class="grow"></span>
-        <!-- The graph's agent opens from any tab; the graph's own Agent button shows the same state. -->
-        <button
-          class="btn agent"
-          class:on={store.graphChatOpen}
-          aria-pressed={store.graphChatOpen}
-          title={store.graphChatOpen ? t("kb.agentClose") : t("kb.agentOpen")}
-          onclick={() => (store.graphChatOpen ? store.closeGraphChat() : void store.openGraphChat())}>{t("kb.agentToggle")}</button
-        >
-        <button class="btn" onclick={() => store.openSettings("knowledge")}>{t("kb.openSettings")}</button>
-      </div>
-      <p class="sub">{t("kb.sub")}</p>
-    </header>
-
+  <!-- One thin bar: the page's name (what it is for, on hover), its tabs, what
+       the index is doing when there is something to say, and the page's buttons. -->
+  <header class="kbar">
+    <h1 class="serif kt" title={t("kb.sub")}>{t("kb.title")}</h1>
     <div class="tabs" role="tablist">
       {#each tabs as tab (tab.id)}
         <button role="tab" aria-selected={kb.tab === tab.id} class:on={kb.tab === tab.id} onclick={() => kb.setTab(tab.id)}>{tab.label}</button>
       {/each}
     </div>
-
+    {#if kb.tab !== "sources" && (progress || trouble)}
+      <!-- On List and Graph, only when there is something to say: indexing under way, and
+           documents that need the person (gone, or failed), the latter a link to them on Sources.
+           The Sources tab has the full line instead. -->
+      <div class="indexing mono" role="status">
+        {#if progress}
+          <span class="pulse"></span>
+          <span class="itext">{t("kb.indexingSmall", { done: progress.done, total: progress.total })}</span>
+        {/if}
+        {#if progress && trouble}<span class="sep" aria-hidden="true">·</span>{/if}
+        {#if trouble}
+          <button class="trouble" onclick={showTrouble} title={t("kb.troubleHint")}>
+            <span class="tdot" aria-hidden="true"></span><span class="itext">{t("kb.troubleSmall", { n: trouble.count })}</span>
+          </button>
+        {/if}
+      </div>
+    {/if}
+    <div class="kbtns">
+      <!-- The graph's agent opens from any tab; the graph's own Agent button shows the same state. -->
+      <button
+        class="btn sm agent"
+        class:on={store.graphChatOpen}
+        aria-pressed={store.graphChatOpen}
+        title={store.graphChatOpen ? t("kb.agentClose") : t("kb.agentOpen")}
+        onclick={() => (store.graphChatOpen ? store.closeGraphChat() : void store.openGraphChat())}>{t("kb.agentToggle")}</button
+      >
+      <button class="btn sm" onclick={() => store.openSettings("knowledge")}>{t("kb.openSettings")}</button>
+    </div>
+  </header>
+  <div class="inner">
     {#if kb.embedding.enabled && kb.embedding.error}
       <div class="banner err">{t("kb.embedError", { done: kb.embedding.embedded, total: kb.embedding.total, error: kb.embedding.error })}</div>
     {/if}
-    <!-- Search readiness, embedding and sync: about the documents, so on the Sources tab only. -->
+    <!-- Search readiness, embedding and sync: about the documents, so on the Sources tab only,
+         under what the library is for (the sentence the old header carried). -->
     {#if kb.tab === "sources"}
+    <p class="sub">{t("kb.sub")}</p>
     <div class="banner" class:busy={!!kb.indexing.length}>
       {#if current}
         <span class="pulse"></span>
@@ -156,21 +172,6 @@
         <span class="dim">· {t("kb.syncedCount", { done: kb.syncedCount, total: kb.sources.length })}</span>
       {/if}
     </div>
-    {:else if progress || trouble}
-      <!-- Elsewhere, only when there is something to say: indexing under way, and documents
-           that need the person (gone, or failed), the latter a link to them on Sources. -->
-      <div class="indexing mono" role="status">
-        {#if progress}
-          <span class="pulse"></span>
-          <span>{t("kb.indexingSmall", { done: progress.done, total: progress.total })}</span>
-        {/if}
-        {#if progress && trouble}<span class="sep" aria-hidden="true">·</span>{/if}
-        {#if trouble}
-          <button class="trouble" onclick={showTrouble} title={t("kb.troubleHint")}>
-            <span class="tdot" aria-hidden="true"></span>{t("kb.troubleSmall", { n: trouble.count })}
-          </button>
-        {/if}
-      </div>
     {/if}
 
     {#if kb.tab === "list"}
@@ -333,44 +334,52 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 30px 40px 40px;
+    padding: 20px 40px 40px;
     width: 100%;
     box-sizing: border-box;
   }
 
-  .titlerow {
+  /* The page's one bar: as thin as the other pages' heads (44 px), the tabs in it. */
+  .kbar {
+    flex-shrink: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    column-gap: 18px;
+    min-height: 44px;
+    padding: 0 24px 0 40px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .kbar > * {
+    min-height: 44px;
+  }
+
+  .kt {
     display: flex;
     align-items: center;
-    gap: 10px;
-  }
-
-  header h1 {
-    margin: 6px 0 4px;
-    font-size: 30px;
+    margin: 0;
+    font-size: 18px;
     font-weight: 400;
     color: var(--hi);
-  }
-
-  .sub {
-    margin: 0 0 18px;
-    color: var(--dim);
-    font-size: 13.5px;
+    white-space: nowrap;
+    cursor: default;
   }
 
   .tabs {
     display: flex;
-    gap: 4px;
-    border-bottom: 1px solid var(--line);
-    margin-bottom: 16px;
+    align-items: stretch;
+    gap: 2px;
   }
 
   .tabs button {
     background: transparent;
     border: 0;
     border-bottom: 2px solid transparent;
-    padding: 9px 14px;
-    font-size: 13.5px;
+    padding: 0 12px;
+    font-size: 13px;
     color: var(--dim);
+    white-space: nowrap;
     margin-bottom: -1px;
   }
 
@@ -383,21 +392,41 @@
     border-bottom-color: var(--acc);
   }
 
+  /* Right-hand, on the first row or, in a narrow window, the next. */
+  .kbtns {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+  }
+
+  .sub {
+    margin: 0 0 12px;
+    color: var(--dim);
+    font-size: 13px;
+  }
+
   .btn.agent.on {
     color: var(--hi);
     background: var(--sel);
   }
 
-  /* The List and Graph tabs' only status: indexing under way. */
+  /* The List and Graph tabs' only status, in the bar: indexing, documents to look at. */
   .indexing {
     display: flex;
     align-items: center;
     gap: 7px;
-    margin: -4px 0 12px;
+    min-width: 0;
     font-size: 10px;
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--lab);
+  }
+
+  .indexing .itext {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .indexing .sep {
