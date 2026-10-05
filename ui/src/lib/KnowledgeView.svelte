@@ -7,6 +7,7 @@
   import Icon from "./Icon.svelte";
   import { whenFull, whenLabel } from "./time";
   import { t } from "./i18n.svelte";
+  import { indexProgress } from "./indexProgress";
 
   /**
    * The knowledge library, after Kiro Crew's: the items agents can search
@@ -46,6 +47,8 @@
   });
 
   const current = $derived(kb.indexing.find((s) => s.status === "indexing"));
+  /** Indexing under way, for the small mark on the List and Graph tabs; null when done. */
+  const progress = $derived(indexProgress(kb.sources, kb.embedding));
 
   function name(s: KSource | undefined, id: string): string {
     return s ? kb.nameOf(s) : id;
@@ -92,6 +95,14 @@
       <div class="titlerow">
         <h1 class="serif">{t("kb.title")}</h1>
         <span class="grow"></span>
+        <!-- The graph's agent opens from any tab; the graph's own Agent button shows the same state. -->
+        <button
+          class="btn agent"
+          class:on={store.graphChatOpen}
+          aria-pressed={store.graphChatOpen}
+          title={store.graphChatOpen ? t("kb.agentClose") : t("kb.agentOpen")}
+          onclick={() => (store.graphChatOpen ? store.closeGraphChat() : void store.openGraphChat())}>{t("kb.agentToggle")}</button
+        >
         <button class="btn" onclick={() => store.openSettings("knowledge")}>{t("kb.openSettings")}</button>
       </div>
       <p class="sub">{t("kb.sub")}</p>
@@ -127,6 +138,12 @@
         <span class="dim">· {t("kb.syncedCount", { done: kb.syncedCount, total: kb.sources.length })}</span>
       {/if}
     </div>
+    {:else if progress}
+      <!-- Elsewhere, only while indexing runs: a small mark, gone when it is done. -->
+      <div class="indexing mono" role="status">
+        <span class="pulse"></span>
+        <span>{t("kb.indexingSmall", { done: progress.done, total: progress.total })}</span>
+      </div>
     {/if}
 
     {#if kb.tab === "list"}
@@ -335,6 +352,28 @@
   .tabs button.on {
     color: var(--hi);
     border-bottom-color: var(--acc);
+  }
+
+  .btn.agent.on {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  /* The List and Graph tabs' only status: indexing under way. */
+  .indexing {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: -4px 0 12px;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--lab);
+  }
+
+  .indexing .pulse {
+    width: 6px;
+    height: 6px;
   }
 
   .banner {
