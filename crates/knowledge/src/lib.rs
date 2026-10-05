@@ -41,12 +41,12 @@ pub mod store;
 
 pub use chunk::{chunk_document, Chunk, Shape};
 pub use extract::{Extraction, SourceSummary};
-pub use store::{FileState, Graph, Hit, Item, KnowledgeDb, NewItem, Source, Stats, ToEmbed};
+pub use store::{FileState, Graph, Hit, Item, KnowledgeDb, Library, NewItem, Source, Stats, ToEmbed};
 
 /// Search results as the agent reads them: each hit's title, where it comes
-/// from (file, section, lines), and its text. After Kiro Crew's
-/// `local_knowledge_search` output.
-pub fn format_hits(hits: &[Hit]) -> String {
+/// from (file, section, lines, and its library when there is more than one),
+/// and its text. After Kiro Crew's `local_knowledge_search` output.
+pub fn format_hits(hits: &[Hit], libraries: usize) -> String {
     if hits.is_empty() {
         return "No relevant knowledge found.".to_string();
     }
@@ -61,23 +61,103 @@ pub fn format_hits(hits: &[Hit]) -> String {
             out.push_str(&format!(" — {s}"));
         }
         out.push_str(&format!(" (lines {}-{})", i.line_start, i.line_end));
+        if libraries > 1 && !h.library.is_empty() {
+            out.push_str(&format!("\n**Library:** {}", h.library));
+        }
         out.push_str(&format!("\n**File:** {}\n\n{}", h.source_uri, i.content));
     }
     out
 }
 
-/// The library as the agent reads it: one line per source.
-pub fn format_sources(sources: &[Source], stats: &Stats) -> String {
+/// The library as the agent reads it: one line per source; with more than
+/// one library, the sources under each library's name.
+pub fn format_sources(sources: &[Source], stats: &Stats, libraries: &[Library]) -> String {
     let mut out = format!(
         "Knowledge library: {} sources, {} items, {} entities, {} relations.",
         stats.sources, stats.items, stats.entities, stats.relations
     );
-    for s in sources {
+    let line = |out: &mut String, s: &Source| {
         let name = std::path::Path::new(&s.uri).file_name().and_then(|n| n.to_str()).unwrap_or(&s.uri);
         out.push_str(&format!("\n- {name} — id: {} ({} items, {})", s.id, s.items, s.status));
         if !s.topic.is_empty() {
             out.push_str(&format!(": {}", s.topic));
         }
+    };
+    if libraries.len() <= 1 {
+        for s in sources {
+            line(&mut out, s);
+        }
+        return out;
+    }
+    out.push_str(&format!(" {} libraries; knowledge_search takes `library` to search one.", libraries.len()));
+    for lib in libraries {
+        out.push_str(&format!("\n\n## Library: {} ({} sources)", lib.name, lib.sources));
+        for s in sources.iter().filter(|s| s.library_id == lib.id) {
+            line(&mut out, s);
+        }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(id: &str, uri: &str, library: i64) -> Source {
+        Source {
+            id: id.into(),
+            source_type: "local_file".into(),
+            uri: uri.into(),
+            status: "synced".into(),
+            error: String::new(),
+            content_hash: String::new(),
+            mtime_ms: 0,
+            size: 0,
+            last_synced: None,
+            topic: String::new(),
+            themes: vec![],
+            extracted: false,
+            done: 0,
+            total: 0,
+            items: 1,
+            created_at: 0,
+            library_id: library,
+        }
+    }
+
+    #[test]
+    fn sources_are_listed_by_library_only_when_there_are_several() {
+        let stats = Stats { sources: 2, items: 2, entities: 0, relations: 0 };
+        let sources = [source("ar1", "/d/a.md", 1), source("ar2", "/d/b.md", 2)];
+        let one = [Library { id: 1, name: "General".into(), created_at: 0, sources: 2 }];
+        let text = format_sources(&sources, &stats, &one);
+        assert!(!text.contains("Library:"), "{text}");
+        assert!(text.contains("- a.md — id: ar1") && text.contains("- b.md — id: ar2"), "{text}");
+        let two = [Library { id: 1, name: "General".into(), created_at: 0, sources: 1 }, Library { id: 2, name: "Work".into(), created_at: 1, sources: 1 }];
+        let text = format_sources(&sources, &stats, &two);
+        let (general, work) = (text.find("## Library: General").unwrap(), text.find("## Library: Work").unwrap());
+        let (a, b) = (text.find("a.md").unwrap(), text.find("b.md").unwrap());
+        assert!(general < a && a < work && work < b, "each source under its library: {text}");
+    }
+
+    #[test]
+    fn a_hit_names_its_library_only_when_there_are_several() {
+        let item = Item {
+            id: 1,
+            source_id: "ar1".into(),
+            chunk_index: 0,
+            title: "Backups".into(),
+            content: "nightly".into(),
+            summary: String::new(),
+            category: "document".into(),
+            tags: vec![],
+            section: None,
+            line_start: 1,
+            line_end: 2,
+            created_at: 0,
+        };
+        let hit = Hit { item, score: 1.0, match_type: "keyword".into(), source_uri: "/d/a.md".into(), library: "Work".into() };
+        assert!(!format_hits(std::slice::from_ref(&hit), 1).contains("**Library:**"));
+        assert!(format_hits(&[hit], 2).contains("**Library:** Work"));
+    }
 }
