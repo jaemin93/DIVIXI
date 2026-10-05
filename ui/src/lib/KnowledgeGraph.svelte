@@ -886,6 +886,20 @@
   let listFilter = $state("");
   const rows = $derived(listKind ? nodesOfKind(kb.graph.nodes, kb.graph.edges, listKind, listFilter) : []);
 
+  /** The legend's buttons by kind, and the plate: the list hangs under its kind's button. */
+  const legendEls: Record<string, HTMLButtonElement> = $state({});
+  let stageEl = $state<HTMLDivElement>();
+  /** The list's width: 280 px, or the plate less its margins when the plate is narrower. */
+  const listW = $derived(Math.max(0, Math.min(280, stageW - 24)));
+  /** The list's left edge in the plate: under its legend entry, kept inside the plate. */
+  const listLeft = $derived.by(() => {
+    const button = listKind ? legendEls[listKind] : undefined;
+    if (!button || !stageEl) return 12;
+    void stageW; // again when the plate's width (and so the legend's wrap) changes
+    const x = button.getBoundingClientRect().left - stageEl.getBoundingClientRect().left;
+    return Math.round(Math.max(12, Math.min(x, stageW - listW - 12)));
+  });
+
   /** A legend entry: list its kind's nodes and frame them, or (again) close the list and show everything. */
   function toggleKind(kind: string) {
     if (listKind === kind) {
@@ -989,26 +1003,31 @@
       }}
     />
     <button class="btn sm" onclick={recenter}>{t("kb.recenter")}</button>
-    <span class="grow"></span>
-    {#each kinds as k (k.kind)}
-      <!-- A kind: its nodes as a list, and the graph framed on them (the rail's section, the same choice). -->
-      <button
-        class="legend"
-        class:on={listKind === k.kind}
-        aria-expanded={listKind === k.kind}
-        title={t("kb.kindOpen", { kind: k.kind })}
-        onclick={() => toggleKind(k.kind)}>{@render glyph(glyphOf(k.kind))}{k.kind}<span class="lcount">{k.count}</span></button
-      >
-    {/each}
   </div>
+  {#if kinds.length}
+    <!-- The legend, a row of its own: it wraps when the kinds are many. -->
+    <div class="kinds">
+      {#each kinds as k (k.kind)}
+        <!-- A kind: its nodes as a list, and the graph framed on them (the rail's section, the same choice). -->
+        <button
+          class="legend"
+          class:on={listKind === k.kind}
+          aria-expanded={listKind === k.kind}
+          title={t("kb.kindOpen", { kind: k.kind })}
+          bind:this={legendEls[k.kind]}
+          onclick={() => toggleKind(k.kind)}>{@render glyph(glyphOf(k.kind))}{k.kind}<span class="lcount">{k.count}</span></button
+        >
+      {/each}
+    </div>
+  {/if}
   <div class="body">
-  <div class="stage" bind:clientWidth={stageW}>
+  <div class="stage" bind:this={stageEl} bind:clientWidth={stageW}>
     {#if !kb.graph.nodes.length}
       <p class="empty">{t("kb.graphEmpty")}</p>
     {/if}
     <canvas bind:this={canvas} onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={() => (drag = null)} onpointerleave={leave} onwheel={wheel}></canvas>
     {#if listKind}
-      <div class="kindlist" role="dialog" aria-label={t("kb.kindOpen", { kind: listKind })}>
+      <div class="kindlist" style="left: {listLeft}px; width: {listW}px" role="dialog" aria-label={t("kb.kindOpen", { kind: listKind })}>
         <div class="klhead">
           {@render glyph(glyphOf(listKind))}
           <span class="mono kllab">{listKind}</span>
@@ -1152,9 +1171,11 @@
     display: flex;
     flex-direction: column;
     border: 1px solid var(--line);
-    min-height: 480px;
-    /* The page's head is one thin bar now: the plate takes the height it gave up. */
-    height: calc(100vh - 213px);
+    /* The legend's row took 33 px of the plate: the smallest plate stays as it was. */
+    min-height: 513px;
+    /* The page's body, whatever its head took (one row or, narrow, two): no
+       guessed head height to keep in step, and the page does not scroll. */
+    height: 100%;
   }
 
   .bar {
@@ -1181,11 +1202,20 @@
     flex: 1;
   }
 
+  /* The bar's second row: the legend alone, wrapping when the kinds are many. */
+  .kinds {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 4px;
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--line);
+  }
+
   .legend {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    margin-left: 2px;
     height: 24px;
     padding: 0 6px;
     background: transparent;
@@ -1211,14 +1241,12 @@
     letter-spacing: 0.04em;
   }
 
-  /* A kind's nodes, under the plate's caption on the left: the graph keeps its middle and right. */
+  /* A kind's nodes, hanging under its legend entry (left set inline). */
   .kindlist {
     position: absolute;
-    top: 38px;
-    left: 16px;
+    top: 6px;
     z-index: 2;
-    width: 280px;
-    max-height: min(440px, calc(100% - 60px));
+    max-height: min(440px, calc(100% - 18px));
     display: flex;
     flex-direction: column;
     background: var(--card);
@@ -1423,9 +1451,12 @@
     border-color: var(--kg-acc);
   }
 
+  /* Up to 200 px, down to 80 before the bar wraps: a narrow plate keeps a one-row bar. */
   .gsearch {
     height: 26px;
-    width: 200px;
+    flex: 1 1 80px;
+    min-width: 80px;
+    max-width: 200px;
     padding: 0 8px;
     background: var(--inp);
     border: 1px solid var(--lines);
