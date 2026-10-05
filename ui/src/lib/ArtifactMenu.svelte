@@ -32,8 +32,10 @@
     busyNote?: string;
     onclose: () => void;
     onrename: (name: string) => void | Promise<void>;
-    ontags: () => void;
-    oncolor: (color: string) => void | Promise<void>;
+    /** Without it (a library has no tags), the menu has no Tags item. */
+    ontags?: () => void;
+    /** Without it (a library has no colour), the menu has no colours. */
+    oncolor?: (color: string) => void | Promise<void>;
     /** Resolves to why it was refused, or "" when it is gone. */
     ondelete: () => Promise<string>;
   } = $props();
@@ -82,7 +84,7 @@
   }
 
   async function pick(c: string) {
-    await oncolor(c);
+    await oncolor?.(c);
     onclose();
   }
 
@@ -109,15 +111,19 @@
     </form>
   {:else}
     <button class="item" role="menuitem" onclick={startRename}>{t("track.rename")}</button>
-    <button class="item" role="menuitem" onclick={() => { ontags(); onclose(); }}>{t("track.tags")}</button>
+    {#if ontags}
+      <button class="item" role="menuitem" onclick={() => { ontags(); onclose(); }}>{t("track.tags")}</button>
+    {/if}
     <div class="rule"></div>
-    <div class="colors" role="group" aria-label={t("track.color")}>
-      <button class="sw none" class:on={!color} title={t("track.noColor")} onclick={() => pick("")}></button>
-      {#each TRACK_COLORS as c (c)}
-        <button class="sw" class:on={color === c} style="background: {c}" title={c} onclick={() => pick(c)}></button>
-      {/each}
-    </div>
-    <div class="rule"></div>
+    {#if oncolor}
+      <div class="colors" role="group" aria-label={t("track.color")}>
+        <button class="sw none" class:on={!color} title={t("track.noColor")} onclick={() => pick("")}></button>
+        {#each TRACK_COLORS as c (c)}
+          <button class="sw" class:on={color === c} style="background: {c}" title={c} onclick={() => pick(c)}></button>
+        {/each}
+      </div>
+      <div class="rule"></div>
+    {/if}
     {#if mode === "confirm"}
       <div class="mono note">{busy ? busyNote : deleteNote}</div>
       {#if deleteError}<div class="mono note err">{deleteError}</div>{/if}

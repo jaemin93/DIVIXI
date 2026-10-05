@@ -45,7 +45,7 @@
     const text = draft;
     // "@kb …" typed but not picked from is a search, not a message.
     if (kbQuery !== null) return;
-    const something = text.trim() || store.attachments.length || store.kbPicked.length || (store.chatArtifact && store.chatSelected.length);
+    const something = text.trim() || store.attachments.length || store.kbPicked.length || (store.chatArtifact && store.chatPicks.length);
     // A design picked a moment ago is still being written out: wait for it.
     // A turn in flight is no reason to wait: the message joins the line.
     if (!something || store.attaching > 0) return;
@@ -764,8 +764,8 @@
         bind:value={draft}
         rows="1"
         placeholder={narrow
-          ? store.busy ? t("composer.queueingShort") : store.chatArtifact ? t(graphChat ? "kb.agentPlaceholderShort" : "design.placeholderShort") : t("composer.placeholderShort")
-          : store.busy ? t("composer.queueing") : store.chatArtifact ? t(graphChat ? "kb.agentPlaceholder" : "design.placeholder") : t("composer.placeholder")}
+          ? store.busy ? t("composer.responding") : store.chatArtifact ? t(graphChat ? "kb.agentPlaceholderShort" : "design.placeholderShort") : t("composer.placeholderShort")
+          : store.busy ? t("composer.responding") : store.chatArtifact ? t(graphChat ? "kb.agentPlaceholder" : "design.placeholder") : t("composer.placeholder")}
         aria-label={t("composer.placeholder")}
         onkeydown={onKey}
         oninput={() => {
@@ -788,8 +788,8 @@
       class:queueing={store.busy}
       type="submit"
       disabled={(!draft.trim() && !store.attachments.length && !store.kbPicked.length) || store.attaching > 0 || kbQuery !== null}
-      title={store.busy ? t("composer.queueTitle") : t("composer.send")}
-      aria-label={store.busy ? t("composer.queueTitle") : t("composer.send")}>→</button
+      title={t("composer.send")}
+      aria-label={t("composer.send")}>→</button
     >
   </form>
 

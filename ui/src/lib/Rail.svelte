@@ -32,7 +32,19 @@
       },
     },
     { id: "design", icon: "draft", label: "rail.design", go: () => void store.showDesigns() },
-    { id: "knowledge", icon: "book", label: "rail.knowledge", go: () => void kb.show() },
+    {
+      id: "knowledge",
+      icon: "book",
+      label: "rail.knowledge",
+      go: () => {
+        // As the designs: a second click folds the libraries column away, and back.
+        if (store.view === "knowledge") void store.setKbList(!store.kbListOpen);
+        else {
+          if (!store.kbListOpen) void store.setKbList(true);
+          void kb.show();
+        }
+      },
+    },
     { id: "routines", icon: "routines", label: "rail.routines", go: () => void store.showRoutines() },
   ];
 

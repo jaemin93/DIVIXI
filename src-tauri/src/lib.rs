@@ -1787,6 +1787,11 @@ pub fn run() {
             knowledge::knowledge_embed_test,
             knowledge::knowledge_embed_now,
             knowledge::knowledge_default_config,
+            knowledge::knowledge_libraries,
+            knowledge::knowledge_library_create,
+            knowledge::knowledge_library_rename,
+            knowledge::knowledge_library_delete,
+            knowledge::knowledge_move,
         ])
         // The side panel's HTML preview, on an origin apart from the app's.
         // Both read files, so they answer off the UI thread.

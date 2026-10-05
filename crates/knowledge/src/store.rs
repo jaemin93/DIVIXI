@@ -14,7 +14,7 @@ use crate::chunk::Chunk;
 use crate::extract::Extraction;
 use crate::fts;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Upgrades from each version to the next; `MIGRATIONS[v - 1]` takes v to v + 1.
 const MIGRATIONS: &[&str] = &[
@@ -26,9 +26,29 @@ const MIGRATIONS: &[&str] = &[
     // 3 -> 4: the same passage in two documents is one passage (filled in on open).
     "ALTER TABLE items ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';
      CREATE INDEX IF NOT EXISTS items_by_hash ON items(content_hash);",
+    // 4 -> 5: libraries. Every document there is goes to the General one
+    // (made on open, see `ensure_general`), the column's default.
+    "CREATE TABLE IF NOT EXISTS libraries (
+         id          INTEGER PRIMARY KEY,
+         name        TEXT NOT NULL,
+         name_key    TEXT NOT NULL UNIQUE,
+         created_at  INTEGER NOT NULL
+     );
+     ALTER TABLE sources ADD COLUMN library_id INTEGER NOT NULL DEFAULT 1;
+     CREATE INDEX IF NOT EXISTS sources_by_library ON sources(library_id);",
 ];
 
+// `sources.library_id` names a row of `libraries` without a REFERENCES
+// clause: SQLite cannot add such a column to a table that has rows (the
+// migration above), and a new library and a migrated one should be the same.
+// The library methods keep it right instead.
 const SCHEMA: &str = r#"
+CREATE TABLE libraries (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    name_key    TEXT NOT NULL UNIQUE,
+    created_at  INTEGER NOT NULL
+);
 CREATE TABLE sources (
     id             TEXT PRIMARY KEY,
     source_type    TEXT NOT NULL,
@@ -44,8 +64,10 @@ CREATE TABLE sources (
     extracted      INTEGER NOT NULL DEFAULT 0,
     done           INTEGER NOT NULL DEFAULT 0,
     total          INTEGER NOT NULL DEFAULT 0,
-    created_at     INTEGER NOT NULL
+    created_at     INTEGER NOT NULL,
+    library_id     INTEGER NOT NULL DEFAULT 1
 );
+CREATE INDEX sources_by_library ON sources(library_id);
 CREATE TABLE items (
     id           INTEGER PRIMARY KEY,
     source_id    TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -110,6 +132,25 @@ pub mod status {
     pub const ERROR: &str = "error";
 }
 
+/// The library every document is in until it is moved, and that every
+/// document already there went to when libraries came. It is never deleted.
+pub const GENERAL: i64 = 1;
+/// Its name as stored; the UI shows it in the person's language until renamed.
+pub const GENERAL_NAME: &str = "General";
+/// Longest library name, in characters.
+pub const MAX_LIBRARY_NAME: usize = 80;
+
+/// A library: a named set of documents. Search, the conductor's tools and
+/// `@kb` see every library; the knowledge page shows one, or all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Library {
+    pub id: i64,
+    pub name: String,
+    pub created_at: i64,
+    /// Documents in it.
+    pub sources: i64,
+}
+
 /// A document in the library.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Source {
@@ -134,6 +175,8 @@ pub struct Source {
     pub total: i64,
     pub items: i64,
     pub created_at: i64,
+    /// The library it is in (one only).
+    pub library_id: i64,
 }
 
 /// One chunk of a document, as listed and searched.
@@ -172,6 +215,8 @@ pub struct Hit {
     /// Which searches found it: `keyword`, `graph`, or both joined by `+`.
     pub match_type: String,
     pub source_uri: String,
+    /// The name of the library its document is in.
+    pub library: String,
 }
 
 /// An item waiting for its vector.
@@ -245,7 +290,7 @@ fn now_ms() -> i64 {
 }
 
 const SOURCE_SELECT: &str = "SELECT id, source_type, uri, status, error, content_hash, mtime_ms, size, last_synced, topic, themes,
-    extracted, done, total, (SELECT COUNT(*) FROM items i WHERE i.source_id = s.id), created_at FROM sources s";
+    extracted, done, total, (SELECT COUNT(*) FROM items i WHERE i.source_id = s.id), created_at, library_id FROM sources s";
 
 fn row_to_source(r: &rusqlite::Row<'_>) -> rusqlite::Result<Source> {
     Ok(Source {
@@ -265,7 +310,32 @@ fn row_to_source(r: &rusqlite::Row<'_>) -> rusqlite::Result<Source> {
         total: r.get(13)?,
         items: r.get(14)?,
         created_at: r.get(15)?,
+        library_id: r.get(16)?,
     })
+}
+
+const LIBRARY_SELECT: &str = "SELECT l.id, l.name, l.created_at, (SELECT COUNT(*) FROM sources s WHERE s.library_id = l.id) FROM libraries l";
+
+fn row_to_library(r: &rusqlite::Row<'_>) -> rusqlite::Result<Library> {
+    Ok(Library { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)?, sources: r.get(3)? })
+}
+
+/// A library's name as kept: spaces at the ends dropped and runs of them
+/// made one; refused when empty or longer than [`MAX_LIBRARY_NAME`].
+pub fn library_name(name: &str) -> anyhow::Result<String> {
+    let clean = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.is_empty() {
+        anyhow::bail!("a library needs a name");
+    }
+    if clean.chars().count() > MAX_LIBRARY_NAME {
+        anyhow::bail!("a library's name is at most {MAX_LIBRARY_NAME} characters");
+    }
+    Ok(clean)
+}
+
+/// Two names that differ only in case are one name.
+fn name_key(name: &str) -> String {
+    name.to_lowercase()
 }
 
 const ITEM_SELECT: &str = "SELECT id, source_id, chunk_index, title, content, summary, category, tags, section, line_start, line_end, created_at FROM items";
@@ -298,14 +368,16 @@ pub struct KnowledgeDb {
 
 impl KnowledgeDb {
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        Self::init(Connection::open(path)?)
+        let path = path.as_ref();
+        Self::init(Connection::open(path)?, Some(path))
     }
 
     pub fn in_memory() -> anyhow::Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, None)
     }
 
-    fn init(mut conn: Connection) -> anyhow::Result<Self> {
+    /// `path` is the file's, for the copy kept before an upgrade.
+    fn init(mut conn: Connection, path: Option<&Path>) -> anyhow::Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -323,6 +395,9 @@ impl KnowledgeDb {
             }
             Some(v) if v == SCHEMA_VERSION => {}
             Some(v) if (1..SCHEMA_VERSION).contains(&v) => {
+                if let Some(path) = path {
+                    backup_before_upgrade(&conn, path, v);
+                }
                 for step in v..SCHEMA_VERSION {
                     let tx = conn.transaction()?;
                     tx.execute_batch(MIGRATIONS[(step - 1) as usize])?;
@@ -332,6 +407,7 @@ impl KnowledgeDb {
             }
             Some(v) => anyhow::bail!("knowledge schema version {v} is not supported by this build ({SCHEMA_VERSION})"),
         }
+        ensure_general(&conn)?;
         backfill_hashes(&mut conn)?;
         // A sync cut short by a quit resumes from the start next time.
         conn.execute(
@@ -341,13 +417,103 @@ impl KnowledgeDb {
         Ok(Self { conn: Mutex::new(conn) })
     }
 
-    /// Register a document. Errors when the id or the path is taken.
+    /// Register a document in the General library. Errors when the id or the path is taken.
     pub fn add_source(&self, id: &str, source_type: &str, uri: &str) -> anyhow::Result<Source> {
-        self.conn.lock().execute(
-            "INSERT INTO sources(id, source_type, uri, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, source_type, uri, status::PENDING, now_ms()],
-        )?;
+        self.add_source_in(id, source_type, uri, GENERAL)
+    }
+
+    /// Register a document in a library. Errors when the id or the path is
+    /// taken (a file is in one library only), or there is no such library.
+    pub fn add_source_in(&self, id: &str, source_type: &str, uri: &str, library: i64) -> anyhow::Result<Source> {
+        {
+            let conn = self.conn.lock();
+            require_library(&conn, library)?;
+            conn.execute(
+                "INSERT INTO sources(id, source_type, uri, status, created_at, library_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, source_type, uri, status::PENDING, now_ms(), library],
+            )?;
+        }
         self.source(id)?.ok_or_else(|| anyhow::anyhow!("source {id} vanished"))
+    }
+
+    /// Move a document to another library, with everything extracted from it.
+    pub fn move_source(&self, id: &str, library: i64) -> anyhow::Result<Source> {
+        {
+            let conn = self.conn.lock();
+            require_library(&conn, library)?;
+            if conn.execute("UPDATE sources SET library_id = ?2 WHERE id = ?1", params![id, library])? == 0 {
+                anyhow::bail!("no knowledge source {id}");
+            }
+        }
+        self.source(id)?.ok_or_else(|| anyhow::anyhow!("source {id} vanished"))
+    }
+
+    /// Every library, General first, then oldest first.
+    pub fn libraries(&self) -> anyhow::Result<Vec<Library>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&format!("{LIBRARY_SELECT} ORDER BY l.id != {GENERAL}, l.created_at, l.id"))?;
+        let rows = stmt.query_map([], row_to_library)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn library(&self, id: i64) -> anyhow::Result<Option<Library>> {
+        let conn = self.conn.lock();
+        Ok(conn.query_row(&format!("{LIBRARY_SELECT} WHERE l.id = ?1"), params![id], row_to_library).optional()?)
+    }
+
+    /// The library of that name (case aside).
+    pub fn library_named(&self, name: &str) -> anyhow::Result<Option<Library>> {
+        let key = name_key(&library_name(name)?);
+        let conn = self.conn.lock();
+        Ok(conn.query_row(&format!("{LIBRARY_SELECT} WHERE l.name_key = ?1"), params![key], row_to_library).optional()?)
+    }
+
+    /// A new, empty library. Errors when the name is empty, too long, or taken (case aside).
+    pub fn create_library(&self, name: &str) -> anyhow::Result<Library> {
+        let name = library_name(name)?;
+        let id = {
+            let conn = self.conn.lock();
+            if name_taken(&conn, &name, None)? {
+                anyhow::bail!("there is already a library named {name}");
+            }
+            conn.execute(
+                "INSERT INTO libraries(name, name_key, created_at) VALUES (?1, ?2, ?3)",
+                params![name, name_key(&name), now_ms()],
+            )?;
+            conn.last_insert_rowid()
+        };
+        self.library(id)?.ok_or_else(|| anyhow::anyhow!("library {id} vanished"))
+    }
+
+    /// Rename a library (General too). The same rules as [`Self::create_library`].
+    pub fn rename_library(&self, id: i64, name: &str) -> anyhow::Result<Library> {
+        let name = library_name(name)?;
+        {
+            let conn = self.conn.lock();
+            require_library(&conn, id)?;
+            if name_taken(&conn, &name, Some(id))? {
+                anyhow::bail!("there is already a library named {name}");
+            }
+            conn.execute("UPDATE libraries SET name = ?2, name_key = ?3 WHERE id = ?1", params![id, name, name_key(&name)])?;
+        }
+        self.library(id)?.ok_or_else(|| anyhow::anyhow!("library {id} vanished"))
+    }
+
+    /// Delete an empty library. General is never deleted (so there is always
+    /// one), and a library with documents is refused: they are moved or
+    /// removed first, by the person, so nothing goes anywhere unasked.
+    pub fn delete_library(&self, id: i64) -> anyhow::Result<()> {
+        if id == GENERAL {
+            anyhow::bail!("the General library cannot be deleted");
+        }
+        let conn = self.conn.lock();
+        require_library(&conn, id)?;
+        let docs: i64 = conn.query_row("SELECT COUNT(*) FROM sources WHERE library_id = ?1", params![id], |r| r.get(0))?;
+        if docs > 0 {
+            anyhow::bail!("{docs} documents are still in this library; move or remove them first");
+        }
+        conn.execute("DELETE FROM libraries WHERE id = ?1", params![id])?;
+        Ok(())
     }
 
     pub fn source(&self, id: &str) -> anyhow::Result<Option<Source>> {
@@ -402,12 +568,15 @@ impl KnowledgeDb {
         Ok(())
     }
 
-    /// Another source already holding exactly this text.
+    /// Another source in the same library already holding exactly this text
+    /// (the same file in two libraries is two documents); General's, for an
+    /// id not in the library.
     pub fn hash_owner(&self, hash: &str, except: &str) -> anyhow::Result<Option<String>> {
         let conn = self.conn.lock();
         Ok(conn
             .query_row(
-                "SELECT id FROM sources WHERE content_hash = ?1 AND id != ?2 AND status = ?3 LIMIT 1",
+                "SELECT id FROM sources WHERE content_hash = ?1 AND id != ?2 AND status = ?3
+                 AND library_id = COALESCE((SELECT library_id FROM sources WHERE id = ?2), 1) LIMIT 1",
                 params![hash, except, status::SYNCED],
                 |r| r.get(0),
             )
@@ -503,11 +672,17 @@ impl KnowledgeDb {
     /// Items, in document order, of one source or of all (newest
     /// documents first), at most `limit`.
     pub fn items(&self, source: Option<&str>, limit: usize) -> anyhow::Result<Vec<Item>> {
+        self.items_in(source, None, limit)
+    }
+
+    /// [`Self::items`] of one library, or of every one (`None`).
+    pub fn items_in(&self, source: Option<&str>, library: Option<i64>, limit: usize) -> anyhow::Result<Vec<Item>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&format!(
-            "{ITEM_SELECT_BY_SOURCE} WHERE ?1 IS NULL OR i.source_id = ?1 ORDER BY s.created_at DESC, i.source_id, i.chunk_index LIMIT ?2"
+            "{ITEM_SELECT_BY_SOURCE} WHERE (?1 IS NULL OR i.source_id = ?1) AND (?3 IS NULL OR s.library_id = ?3)
+             ORDER BY s.created_at DESC, i.source_id, i.chunk_index LIMIT ?2"
         ))?;
-        let rows = stmt.query_map(params![source, limit as i64], row_to_item)?;
+        let rows = stmt.query_map(params![source, limit as i64, library], row_to_item)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -528,10 +703,12 @@ impl KnowledgeDb {
                 totals.insert(s, n);
             }
         }
+        // Within a library: a document copied into another library is not a duplicate to tidy.
         let mut stmt = conn.prepare(
             "SELECT a.source_id, b.source_id, COUNT(DISTINCT a.content_hash)
              FROM items a JOIN items b ON a.content_hash = b.content_hash AND a.source_id != b.source_id
-             WHERE a.content_hash != ''
+             JOIN sources sa ON sa.id = a.source_id JOIN sources sb ON sb.id = b.source_id
+             WHERE a.content_hash != '' AND sa.library_id = sb.library_id
              GROUP BY a.source_id, b.source_id",
         )?;
         let mut best: HashMap<String, Overlap> = HashMap::new();
@@ -650,32 +827,57 @@ impl KnowledgeDb {
     }
 
     pub fn stats(&self) -> anyhow::Result<Stats> {
+        self.stats_in(None)
+    }
+
+    /// Counts of one library, or of every one (`None`). Entities are shared
+    /// by the libraries; a library counts those its documents mention, and
+    /// the relations its documents state.
+    pub fn stats_in(&self, library: Option<i64>) -> anyhow::Result<Stats> {
         let conn = self.conn.lock();
-        let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0));
+        let count = |sql: &str| conn.query_row(sql, params![library], |r| r.get::<_, i64>(0));
         Ok(Stats {
-            sources: count("SELECT COUNT(*) FROM sources")?,
-            items: count("SELECT COUNT(*) FROM items")?,
-            entities: count("SELECT COUNT(*) FROM entities")?,
-            relations: count("SELECT COUNT(*) FROM relations")?,
+            sources: count("SELECT COUNT(*) FROM sources WHERE ?1 IS NULL OR library_id = ?1")?,
+            items: count("SELECT COUNT(*) FROM items i JOIN sources s ON s.id = i.source_id WHERE ?1 IS NULL OR s.library_id = ?1")?,
+            entities: count(
+                "SELECT COUNT(DISTINCT m.entity_id) FROM mentions m JOIN items i ON i.id = m.item_id
+                 JOIN sources s ON s.id = i.source_id WHERE ?1 IS NULL OR s.library_id = ?1",
+            )?,
+            relations: count(
+                "SELECT COUNT(*) FROM relations r JOIN items i ON i.id = r.item_id
+                 JOIN sources s ON s.id = i.source_id WHERE ?1 IS NULL OR s.library_id = ?1",
+            )?,
         })
     }
 
     /// The entity graph, the most mentioned entities first, up to `limit`.
     pub fn graph(&self, limit: usize) -> anyhow::Result<Graph> {
+        self.graph_in(None, limit)
+    }
+
+    /// The entity graph of one library, or of every one (`None`): the
+    /// entities its documents mention (counted there), and the relations its
+    /// documents state among them.
+    pub fn graph_in(&self, library: Option<i64>, limit: usize) -> anyhow::Result<Graph> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT e.id, e.name, e.kind, e.description, (SELECT COUNT(*) FROM mentions m WHERE m.entity_id = e.id) AS n
-             FROM entities e ORDER BY n DESC, e.id LIMIT ?1",
+            "SELECT e.id, e.name, e.kind, e.description, COUNT(*) AS n
+             FROM entities e JOIN mentions m ON m.entity_id = e.id JOIN items i ON i.id = m.item_id JOIN sources s ON s.id = i.source_id
+             WHERE ?1 IS NULL OR s.library_id = ?1
+             GROUP BY e.id ORDER BY n DESC, e.id LIMIT ?2",
         )?;
         let nodes: Vec<GraphNode> = stmt
-            .query_map(params![limit as i64], |r| {
+            .query_map(params![library, limit as i64], |r| {
                 Ok(GraphNode { id: r.get(0)?, name: r.get(1)?, kind: r.get(2)?, description: r.get(3)?, mentions: r.get(4)? })
             })?
             .collect::<Result<_, _>>()?;
         let shown: HashSet<i64> = nodes.iter().map(|n| n.id).collect();
-        let mut stmt = conn.prepare("SELECT DISTINCT source, target, kind FROM relations")?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT r.source, r.target, r.kind FROM relations r JOIN items i ON i.id = r.item_id JOIN sources s ON s.id = i.source_id
+             WHERE ?1 IS NULL OR s.library_id = ?1",
+        )?;
         let edges = stmt
-            .query_map([], |r| Ok(GraphEdge { source: r.get(0)?, target: r.get(1)?, kind: r.get(2)? }))?
+            .query_map(params![library], |r| Ok(GraphEdge { source: r.get(0)?, target: r.get(1)?, kind: r.get(2)? }))?
             .filter_map(Result::ok)
             .filter(|e| shown.contains(&e.source) && shown.contains(&e.target))
             .collect();
@@ -684,11 +886,17 @@ impl KnowledgeDb {
 
     /// Items that mention an entity.
     pub fn entity_items(&self, entity: i64) -> anyhow::Result<Vec<Item>> {
+        self.entity_items_in(entity, None)
+    }
+
+    /// Items of one library, or of every one (`None`), that mention an entity.
+    pub fn entity_items_in(&self, entity: i64, library: Option<i64>) -> anyhow::Result<Vec<Item>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&format!(
-            "{ITEM_SELECT} WHERE id IN (SELECT item_id FROM mentions WHERE entity_id = ?1) ORDER BY source_id, chunk_index"
+            "{ITEM_SELECT_BY_SOURCE} WHERE i.id IN (SELECT item_id FROM mentions WHERE entity_id = ?1) AND (?2 IS NULL OR s.library_id = ?2)
+             ORDER BY i.source_id, i.chunk_index"
         ))?;
-        let rows = stmt.query_map(params![entity], row_to_item)?;
+        let rows = stmt.query_map(params![entity, library], row_to_item)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -698,11 +906,16 @@ impl KnowledgeDb {
     /// match is always kept, so up to `limit + 1` come back. Results under
     /// [`MIN_SCORE`] are dropped.
     pub fn search(&self, query: &str, limit: usize, source: Option<&str>, vector: Option<(&[f32], &str)>) -> anyhow::Result<Vec<Hit>> {
+        self.search_in(query, limit, source, None, vector)
+    }
+
+    /// [`Self::search`] in one library, or in every one (`None`).
+    pub fn search_in(&self, query: &str, limit: usize, source: Option<&str>, library: Option<i64>, vector: Option<(&[f32], &str)>) -> anyhow::Result<Vec<Hit>> {
         let limit = limit.max(1);
-        let keyword = self.keyword_search(query, 20, source)?;
-        let graph = self.graph_search(query, 20, source)?;
+        let keyword = self.keyword_search(query, 20, source, library)?;
+        let graph = self.graph_search(query, 20, source, library)?;
         let semantic = match vector {
-            Some((v, sig)) => self.vector_search(v, sig, 20, source)?,
+            Some((v, sig)) => self.vector_search(v, sig, 20, source, library)?,
             None => Vec::new(),
         };
         let mut scores: BTreeMap<i64, (f64, Vec<&str>)> = BTreeMap::new();
@@ -748,8 +961,13 @@ impl KnowledgeDb {
                 continue;
             }
             let Some(item) = self.item(id)? else { continue };
-            let source_uri = self.source(&item.source_id)?.map(|s| s.uri).unwrap_or_default();
-            hits.push(Hit { item, score, match_type, source_uri });
+            let source = self.source(&item.source_id)?;
+            let library = match &source {
+                Some(s) => self.library(s.library_id)?.map(|l| l.name).unwrap_or_default(),
+                None => String::new(),
+            };
+            let source_uri = source.map(|s| s.uri).unwrap_or_default();
+            hits.push(Hit { item, score, match_type, source_uri, library });
         }
         Ok(hits)
     }
@@ -757,17 +975,18 @@ impl KnowledgeDb {
     /// Items closest to `query` by cosine similarity, among those embedded
     /// in the space `sig` names. A brute-force scan: fine for the tens of
     /// thousands of items a personal library holds.
-    fn vector_search(&self, query: &[f32], sig: &str, limit: usize, source: Option<&str>) -> anyhow::Result<Vec<i64>> {
+    fn vector_search(&self, query: &[f32], sig: &str, limit: usize, source: Option<&str>, library: Option<i64>) -> anyhow::Result<Vec<i64>> {
         let qn = norm(query);
         if qn == 0.0 {
             return Ok(Vec::new());
         }
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, embedding FROM items WHERE embedding IS NOT NULL AND embedding_sig = ?1 AND (?2 IS NULL OR source_id = ?2)",
+            "SELECT id, embedding FROM items WHERE embedding IS NOT NULL AND embedding_sig = ?1 AND (?2 IS NULL OR source_id = ?2)
+             AND (?3 IS NULL OR source_id IN (SELECT id FROM sources WHERE library_id = ?3))",
         )?;
         let mut scored: Vec<(i64, f32)> = stmt
-            .query_map(params![sig, source], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .query_map(params![sig, source, library], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
             .filter_map(Result::ok)
             .filter_map(|(id, blob)| {
                 let v = from_blob(&blob);
@@ -850,16 +1069,17 @@ impl KnowledgeDb {
         )?)
     }
 
-    fn keyword_search(&self, query: &str, limit: usize, source: Option<&str>) -> anyhow::Result<Vec<i64>> {
+    fn keyword_search(&self, query: &str, limit: usize, source: Option<&str>, library: Option<i64>) -> anyhow::Result<Vec<i64>> {
         let Some(expr) = fts::match_query(query) else {
             return Ok(Vec::new());
         };
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT i.id FROM items_fts f JOIN items i ON i.id = f.rowid
-             WHERE items_fts MATCH ?1 AND (?2 IS NULL OR i.source_id = ?2) ORDER BY f.rank LIMIT ?3",
+             WHERE items_fts MATCH ?1 AND (?2 IS NULL OR i.source_id = ?2)
+             AND (?4 IS NULL OR i.source_id IN (SELECT id FROM sources WHERE library_id = ?4)) ORDER BY f.rank LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![expr, source, limit as i64], |r| r.get(0))?;
+        let rows = stmt.query_map(params![expr, source, limit as i64, library], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -877,7 +1097,7 @@ impl KnowledgeDb {
         Ok(QueryEntities { seeds, related })
     }
 
-    fn graph_search(&self, query: &str, limit: usize, source: Option<&str>) -> anyhow::Result<Vec<i64>> {
+    fn graph_search(&self, query: &str, limit: usize, source: Option<&str>, library: Option<i64>) -> anyhow::Result<Vec<i64>> {
         let conn = self.conn.lock();
         let (seeds, seen) = reach(&conn, query)?;
         if seeds.is_empty() {
@@ -887,9 +1107,10 @@ impl KnowledgeDb {
         let mut stmt = conn.prepare(&format!(
             "SELECT m.item_id FROM mentions m JOIN items i ON i.id = m.item_id
              WHERE m.entity_id IN ({list}) AND (?1 IS NULL OR i.source_id = ?1)
+             AND (?3 IS NULL OR i.source_id IN (SELECT id FROM sources WHERE library_id = ?3))
              GROUP BY m.item_id ORDER BY COUNT(*) DESC, m.item_id DESC LIMIT ?2"
         ))?;
-        let rows = stmt.query_map(params![source, limit as i64], |r| r.get(0))?;
+        let rows = stmt.query_map(params![source, limit as i64, library], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 }
@@ -949,6 +1170,57 @@ fn passage_hash(content: &str) -> String {
     use sha2::{Digest, Sha256};
     let words = content.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
     Sha256::digest(words.as_bytes()).iter().take(12).map(|b| format!("{b:02x}")).collect()
+}
+
+/// The General library exists, and every document is in a library that
+/// does (one whose library went missing goes back to General). Safe to run
+/// on every open.
+fn ensure_general(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO libraries(id, name, name_key, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![GENERAL, GENERAL_NAME, name_key(GENERAL_NAME), now_ms()],
+    )?;
+    conn.execute("UPDATE sources SET library_id = ?1 WHERE library_id NOT IN (SELECT id FROM libraries)", params![GENERAL])?;
+    Ok(())
+}
+
+/// Before an upgrade, a copy of the file as it was, beside it
+/// (`knowledge.db.v4.bak`; `knowledge.db.v4.<ms>.bak` when that name is taken
+/// by an earlier upgrade's copy, which is kept). A failed copy is logged,
+/// not fatal: each step of the upgrade is a transaction of its own.
+fn backup_before_upgrade(conn: &Connection, path: &Path, from: i64) {
+    let named = |suffix: String| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        std::path::PathBuf::from(name)
+    };
+    let mut backup = named(format!(".v{from}.bak"));
+    if backup.exists() {
+        backup = named(format!(".v{from}.{}.bak", now_ms()));
+    }
+    match conn.execute("VACUUM INTO ?1", params![backup.to_string_lossy()]) {
+        Ok(_) => tracing::info!(backup = %backup.display(), "kept a copy of the knowledge library before upgrading it"),
+        Err(err) => tracing::warn!(%err, "could not copy the knowledge library before upgrading it"),
+    }
+}
+
+fn require_library(conn: &Connection, id: i64) -> anyhow::Result<()> {
+    let found = conn.query_row("SELECT 1 FROM libraries WHERE id = ?1", params![id], |_| Ok(())).optional()?;
+    if found.is_none() {
+        anyhow::bail!("no library {id}");
+    }
+    Ok(())
+}
+
+fn name_taken(conn: &Connection, name: &str, except: Option<i64>) -> anyhow::Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM libraries WHERE name_key = ?1 AND (?2 IS NULL OR id != ?2)",
+            params![name_key(name), except],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 /// Items from before passages had hashes get theirs.
@@ -1138,13 +1410,206 @@ mod tests {
         assert!(db.search("restore", 3, None, Some((&[0.1, 0.9], "s2"))).unwrap().is_empty(), "no vectors in that space");
     }
 
+    /// Take `from` out of `text`, insisting it was there (so a changed schema
+    /// fails the test rather than quietly building the wrong old one).
+    fn cut(text: &str, from: &str) -> String {
+        assert!(text.contains(from), "the schema no longer has {from:?}");
+        text.replace(from, "")
+    }
+
+    /// The schema as it was before libraries (version 4).
+    fn schema_v4() -> String {
+        let s = cut(SCHEMA, "CREATE TABLE libraries (\n    id          INTEGER PRIMARY KEY,\n    name        TEXT NOT NULL,\n    name_key    TEXT NOT NULL UNIQUE,\n    created_at  INTEGER NOT NULL\n);\n");
+        let s = cut(&s, ",\n    library_id     INTEGER NOT NULL DEFAULT 1");
+        cut(&s, "CREATE INDEX sources_by_library ON sources(library_id);\n")
+    }
+
+    fn temp_db(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("kn-{name}-{}.db", std::process::id()));
+        for p in [path.clone(), path.with_extension("db.v4.bak"), path.with_extension("db.v1.bak")] {
+            let _ = std::fs::remove_file(p);
+        }
+        path
+    }
+
     #[test]
-    fn migrates_version_one() {
-        let path = std::env::temp_dir().join(format!("kn-migrate-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+    fn migrates_version_four_into_the_general_library() {
+        let path = temp_db("migrate-v4");
         {
             let conn = Connection::open(&path).unwrap();
-            let v1 = SCHEMA
+            conn.execute_batch(&schema_v4()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema_version', '4');
+                 INSERT INTO sources(id, source_type, uri, status, content_hash, created_at) VALUES ('ar001', 'local_file', '/docs/a.md', 'synced', 'h1', 1);
+                 INSERT INTO sources(id, source_type, uri, status, content_hash, created_at) VALUES ('ar002', 'local_file', '/docs/b.md', 'synced', 'h2', 2);
+                 INSERT INTO items(id, source_id, chunk_index, title, content, line_start, line_end, created_at) VALUES (1, 'ar001', 0, 'Backups', 'nightly copies of the store', 1, 2, 1);
+                 INSERT INTO items_fts(rowid, title, content, tags) VALUES (1, 'Backups', 'nightly copies of the store', '');",
+            )
+            .unwrap();
+        }
+        let db = KnowledgeDb::open(&path).unwrap();
+        let libs = db.libraries().unwrap();
+        assert_eq!(libs.len(), 1, "{libs:?}");
+        assert_eq!((libs[0].id, libs[0].name.as_str(), libs[0].sources), (GENERAL, GENERAL_NAME, 2), "every document went to General");
+        assert!(db.sources().unwrap().iter().all(|s| s.library_id == GENERAL));
+        let hits = db.search("nightly", 3, None, None).unwrap();
+        assert_eq!((hits.len(), hits[0].library.as_str()), (1, GENERAL_NAME), "found as before, and from General");
+        assert_eq!(db.stats_in(Some(GENERAL)).unwrap(), db.stats().unwrap());
+        drop(db);
+
+        // The file as it was, kept beside it before the upgrade.
+        let backup = path.with_extension("db.v4.bak");
+        {
+            let old = Connection::open(&backup).unwrap();
+            let v: String = old.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
+            let libs: i64 = old.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'libraries'", [], |r| r.get(0)).unwrap();
+            let docs: i64 = old.query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0)).unwrap();
+            assert_eq!((v.as_str(), libs, docs), ("4", 0, 2), "the copy is the old file, whole");
+        }
+
+        // Opening again changes nothing (and makes no second General).
+        let db = KnowledgeDb::open(&path).unwrap();
+        assert_eq!(db.libraries().unwrap().len(), 1);
+        assert_eq!(db.sources().unwrap().len(), 2);
+        drop(db);
+
+        // A file put back at version 4 and upgraded again: its own copy, the first one kept.
+        let _ = std::fs::remove_file(&path);
+        for ext in ["db-wal", "db-shm"] {
+            let _ = std::fs::remove_file(path.with_extension(ext));
+        }
+        std::fs::copy(&backup, &path).unwrap();
+        drop(KnowledgeDb::open(&path).unwrap());
+        let dir = path.parent().unwrap();
+        let stem = path.file_name().unwrap().to_string_lossy().to_string();
+        let copies: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&format!("{stem}.v4."))))
+            .collect();
+        assert_eq!(copies.len(), 2, "{copies:?}");
+        for p in copies.into_iter().chain([path.clone()]) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn a_document_whose_library_is_gone_goes_back_to_general() {
+        let path = temp_db("orphan");
+        {
+            let db = KnowledgeDb::open(&path).unwrap();
+            db.add_source("ar001", "local_file", "/docs/a.md").unwrap();
+        }
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute("UPDATE sources SET library_id = 42", []).unwrap();
+        }
+        let db = KnowledgeDb::open(&path).unwrap();
+        assert_eq!(db.source("ar001").unwrap().unwrap().library_id, GENERAL);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn libraries_are_made_renamed_and_deleted_by_the_rules() {
+        let db = seeded();
+        let general = db.library(GENERAL).unwrap().unwrap();
+        assert_eq!((general.name.as_str(), general.sources), (GENERAL_NAME, 2));
+        let work = db.create_library("  Work   notes ").unwrap();
+        assert_eq!((work.name.as_str(), work.sources), ("Work notes", 0), "spaces tidied");
+        assert!(db.create_library("work NOTES").is_err(), "a name differing only in case is taken");
+        assert!(db.create_library("general").is_err(), "General's name too");
+        assert!(db.create_library("   ").is_err(), "a name is needed");
+        assert!(db.create_library(&"x".repeat(MAX_LIBRARY_NAME + 1)).is_err(), "too long");
+        assert_eq!(db.libraries().unwrap().iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec![GENERAL_NAME, "Work notes"], "General first");
+        assert_eq!(db.library_named("WORK notes").unwrap().map(|l| l.id), Some(work.id));
+
+        let work = db.rename_library(work.id, "Work").unwrap();
+        assert_eq!(work.name, "Work");
+        assert!(db.rename_library(work.id, "General").is_err(), "not onto another's name");
+        assert_eq!(db.rename_library(work.id, "WORK").unwrap().name, "WORK", "its own name in another case is fine");
+        assert!(db.rename_library(999, "Elsewhere").is_err());
+
+        // A document goes to one library, and moves.
+        db.add_source_in("ar010", "local_file", "/docs/w.md", work.id).unwrap();
+        assert!(db.add_source_in("ar011", "local_file", "/docs/x.md", 999).is_err(), "no such library");
+        assert!(db.add_source_in("ar012", "local_file", "/docs/w.md", GENERAL).is_err(), "a file is in one library only");
+        assert_eq!(db.library(work.id).unwrap().unwrap().sources, 1);
+
+        assert!(db.delete_library(GENERAL).is_err(), "General is never deleted");
+        let refused = db.delete_library(work.id).unwrap_err().to_string();
+        assert!(refused.contains("1 documents"), "a library with documents is kept: {refused}");
+        assert_eq!(db.move_source("ar010", GENERAL).unwrap().library_id, GENERAL);
+        assert!(db.move_source("ar010", 999).is_err());
+        assert!(db.move_source("nope", GENERAL).is_err());
+        db.delete_library(work.id).unwrap();
+        assert!(db.library(work.id).unwrap().is_none());
+        assert!(db.delete_library(work.id).is_err(), "gone already");
+        assert_eq!(db.source("ar010").unwrap().unwrap().library_id, GENERAL, "the moved document stayed");
+    }
+
+    #[test]
+    fn reads_narrow_to_a_library_and_search_sees_them_all() {
+        let db = seeded();
+        let store = db.create_library("Store").unwrap().id;
+        db.move_source("ar002", store).unwrap();
+        let names = |g: &Graph| {
+            let mut n: Vec<String> = g.nodes.iter().map(|n| format!("{}:{}", n.name, n.mentions)).collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names(&db.graph_in(Some(GENERAL), 100).unwrap()), vec!["Borrow checker:1", "Rust:1"]);
+        assert_eq!(names(&db.graph_in(Some(store), 100).unwrap()), vec!["Borrow checker:1", "SQLite:1"], "the shared entity, counted in its library");
+        assert_eq!(names(&db.graph_in(None, 100).unwrap()), vec!["Borrow checker:2", "Rust:1", "SQLite:1"]);
+        assert_eq!(db.graph_in(Some(GENERAL), 100).unwrap().edges.len(), 1);
+        assert!(db.graph_in(Some(store), 100).unwrap().edges.is_empty(), "the relation is stated in rust.md only");
+        assert_eq!(db.graph(100).unwrap(), db.graph_in(None, 100).unwrap());
+
+        assert_eq!(db.stats_in(Some(store)).unwrap(), Stats { sources: 1, items: 2, entities: 2, relations: 0 });
+        assert_eq!(db.stats_in(Some(GENERAL)).unwrap(), Stats { sources: 1, items: 1, entities: 2, relations: 1 });
+        assert_eq!(db.stats_in(None).unwrap(), db.stats().unwrap());
+        assert_eq!(db.items_in(None, Some(store), 100).unwrap().len(), 2);
+        assert_eq!(db.items_in(None, Some(GENERAL), 100).unwrap().len(), 1);
+        assert!(db.items_in(Some("ar001"), Some(store), 100).unwrap().is_empty(), "a document outside the library");
+
+        let bc = db.graph(100).unwrap().nodes.iter().find(|n| n.name == "Borrow checker").unwrap().id;
+        assert_eq!(db.entity_items_in(bc, Some(store)).unwrap().len(), 1);
+        assert_eq!(db.entity_items_in(bc, None).unwrap().len(), 2);
+
+        // Search: every library unless narrowed, each hit naming its library.
+        let all = db.search("Rust", 5, None, None).unwrap();
+        let mut libs: Vec<&str> = all.iter().map(|h| h.library.as_str()).collect();
+        libs.sort();
+        assert_eq!(libs, vec![GENERAL_NAME, "Store"], "{all:?}");
+        let narrowed = db.search_in("Rust", 5, None, Some(store), None).unwrap();
+        assert!(narrowed.iter().all(|h| h.item.source_id == "ar002"), "graph leg, in Store only");
+        assert!(db.search_in("소유권은", 5, None, Some(store), None).unwrap().is_empty(), "keyword leg too");
+    }
+
+    #[test]
+    fn copies_are_told_within_a_library() {
+        let db = seeded();
+        let other = db.create_library("Other").unwrap().id;
+        db.add_source_in("ar009", "local_file", "/docs/rust-copy.md", other).unwrap();
+        assert_eq!(db.hash_owner("h1", "ar009").unwrap(), None, "the same text in another library is its own document");
+        db.move_source("ar009", GENERAL).unwrap();
+        assert_eq!(db.hash_owner("h1", "ar009").unwrap().as_deref(), Some("ar001"), "and a duplicate in the same one");
+
+        // A second version of store.md in another library: not a copy to tidy there.
+        db.add_source_in("ar003", "local_file", "/docs/store-v2.md", other).unwrap();
+        db.replace_items("ar003", &[NewItem { chunk: chunk(0, "The store keeps events in SQLite."), extraction: None, tags: vec![] }], false, &file("h3")).unwrap();
+        assert!(db.overlaps(30).unwrap().is_empty());
+        db.move_source("ar003", GENERAL).unwrap();
+        assert_eq!(db.overlaps(30).unwrap().iter().filter(|o| o.source == "ar003").count(), 1);
+    }
+
+    #[test]
+    fn migrates_version_one() {
+        let path = temp_db("migrate-v1");
+        {
+            let conn = Connection::open(&path).unwrap();
+            let v1 = schema_v4()
                 .replace(",\n    embedding    BLOB,\n    embedding_sig TEXT NOT NULL DEFAULT '',\n    content_hash TEXT NOT NULL DEFAULT ''", "")
                 .replace("CREATE INDEX items_by_sig ON items(embedding_sig);\n", "")
                 .replace("CREATE INDEX items_by_hash ON items(content_hash);\n", "");
@@ -1155,8 +1620,10 @@ mod tests {
         }
         let db = KnowledgeDb::open(&path).unwrap();
         assert_eq!(db.embedded("x").unwrap(), (0, 0, 0));
+        assert_eq!(db.libraries().unwrap().len(), 1, "on to libraries too");
         drop(db);
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db.v1.bak"));
     }
 
     #[test]

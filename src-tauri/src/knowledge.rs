@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use orchestra_acp::{AgentSession, ConfigOptionInfo};
 use orchestra_core::AgentEvent;
-use orchestra_knowledge::store::status;
-use orchestra_knowledge::{chunk_document, extract, read, Extraction, FileState, Graph, Item, KnowledgeDb, NewItem, Shape, Source, Stats, ToEmbed};
+use orchestra_knowledge::store::{status, GENERAL};
+use orchestra_knowledge::{chunk_document, extract, read, Extraction, FileState, Graph, Item, KnowledgeDb, Library as KLibrary, NewItem, Shape, Source, Stats, ToEmbed};
 use orchestra_store::ArtifactInfo;
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
@@ -33,9 +33,11 @@ use crate::{embed, AppState, SETTING_PREFIX};
 
 /// The artifact kind a library document is listed as.
 pub const KIND: &str = "knowledge";
-/// The knowledge graph's conversation: one per library, an artifact so it
-/// runs like a design's (its own agent, session and turns), apart from the
-/// documents (`KIND`), which are artifacts too.
+/// The knowledge agent's conversation (kind "graph", kept for the artifacts
+/// already stored): one for every library (it is told the library on screen
+/// with each message), an artifact so it runs like a design's (its own
+/// agent, session and turns), apart from the documents (`KIND`), which are
+/// artifacts too.
 pub const GRAPH_KIND: &str = "graph";
 /// Window event carrying a source whenever it changes.
 const EVENT: &str = "knowledge";
@@ -45,6 +47,8 @@ const LIST_LIMIT: usize = 1000;
 const EMBED_EVENT: &str = "knowledge-embedding";
 /// Window event when a source is gone.
 const REMOVED_EVENT: &str = "knowledge-removed";
+/// Window event when the libraries changed (made, renamed, deleted, a document moved).
+const LIBRARIES_EVENT: &str = "knowledge-libraries";
 
 /// How often files are checked for changes.
 const WATCH_EVERY: Duration = Duration::from_secs(5 * 60);
@@ -650,9 +654,9 @@ pub struct Added {
     artifact: ArtifactInfo,
 }
 
-/// Add a file to the library and start describing it.
+/// Add a file to a library (General when none is named) and start describing it.
 #[tauri::command]
-pub async fn knowledge_add(app: AppHandle, path: String, track: Option<String>) -> Result<Added, String> {
+pub async fn knowledge_add(app: AppHandle, path: String, track: Option<String>, library: Option<i64>) -> Result<Added, String> {
     let state = app.state::<AppState>();
     let full = locate(&state, &path, track.as_deref())?;
     if !full.is_file() {
@@ -665,9 +669,13 @@ pub async fn knowledge_add(app: AppHandle, path: String, track: Option<String>) 
     if state.library.db.source_by_uri(&uri).map_err(|e| e.to_string())?.is_some() {
         return Err("already in the knowledge library".to_string());
     }
+    let library = library.unwrap_or(GENERAL);
+    if state.library.db.library(library).map_err(|e| e.to_string())?.is_none() {
+        return Err(format!("no library {library}"));
+    }
     let title = full.file_name().and_then(|n| n.to_str()).unwrap_or("document").to_string();
     let artifact = state.store.create_artifact(KIND, &title, "", "{}").map_err(|e| e.to_string())?;
-    let source = match state.library.db.add_source(&artifact.id, "local_file", &uri) {
+    let source = match state.library.db.add_source_in(&artifact.id, "local_file", &uri, library) {
         Ok(s) => s,
         Err(err) => {
             let _ = state.store.delete_artifact(&artifact.id);
@@ -676,6 +684,7 @@ pub async fn knowledge_add(app: AppHandle, path: String, track: Option<String>) 
     };
     state.library.enqueue(&artifact.id);
     let _ = app.emit(EVENT, &source);
+    let _ = app.emit(LIBRARIES_EVENT, ());
     Ok(Added { source, artifact })
 }
 
@@ -692,6 +701,56 @@ pub fn remove(app: &AppHandle, id: &str) {
         }
     }
     let _ = app.emit(REMOVED_EVENT, id);
+    let _ = app.emit(LIBRARIES_EVENT, ());
+}
+
+// ----- libraries -----
+
+/// Every library, General first, each with its number of documents.
+#[tauri::command(async)]
+pub fn knowledge_libraries(state: State<'_, AppState>) -> Result<Vec<KLibrary>, String> {
+    state.library.db.libraries().map_err(|e| e.to_string())
+}
+
+/// A new, empty library.
+#[tauri::command(async)]
+pub fn knowledge_library_create(app: AppHandle, name: String) -> Result<KLibrary, String> {
+    let made = app.state::<AppState>().library.db.create_library(&name).map_err(|e| e.to_string())?;
+    let _ = app.emit(LIBRARIES_EVENT, ());
+    Ok(made)
+}
+
+#[tauri::command(async)]
+pub fn knowledge_library_rename(app: AppHandle, id: i64, name: String) -> Result<KLibrary, String> {
+    let renamed = app.state::<AppState>().library.db.rename_library(id, &name).map_err(|e| e.to_string())?;
+    let _ = app.emit(LIBRARIES_EVENT, ());
+    Ok(renamed)
+}
+
+/// Delete an empty library; General, and a library with documents, are refused.
+#[tauri::command(async)]
+pub fn knowledge_library_delete(app: AppHandle, id: i64) -> Result<(), String> {
+    app.state::<AppState>().library.db.delete_library(id).map_err(|e| e.to_string())?;
+    let _ = app.emit(LIBRARIES_EVENT, ());
+    Ok(())
+}
+
+/// Move a document to another library. Duplicates are told within a
+/// library, so whatever was a duplicate is looked at again: the moved
+/// document may be the only copy where it went, and one it left behind may
+/// now be the only copy there.
+#[tauri::command(async)]
+pub fn knowledge_move(app: AppHandle, id: String, library: i64) -> Result<Source, String> {
+    let state = app.state::<AppState>();
+    let moved = state.library.db.move_source(&id, library).map_err(|e| e.to_string())?;
+    for s in state.library.db.sources().unwrap_or_default() {
+        if s.status == status::DUPLICATE {
+            state.library.enqueue(&s.id);
+        }
+    }
+    let _ = app.emit(EVENT, &moved);
+    let _ = app.emit(LIBRARIES_EVENT, ());
+    Ok(moved)
 }
 
 #[tauri::command(async)]
@@ -729,9 +788,10 @@ pub struct Listed {
     match_type: Option<String>,
 }
 
-/// Items of one source or of all, or the matches of a search.
+/// Items of one source or of all, or the matches of a search; of one
+/// library, or of every one when `library` is not given.
 #[tauri::command]
-pub async fn knowledge_items(app: AppHandle, source: Option<String>, query: Option<String>) -> Result<Vec<Listed>, String> {
+pub async fn knowledge_items(app: AppHandle, source: Option<String>, query: Option<String>, library: Option<i64>) -> Result<Vec<Listed>, String> {
     let db = app.state::<AppState>().library.db.clone();
     let query = query.filter(|q| !q.trim().is_empty());
     let vector = match &query {
@@ -740,13 +800,13 @@ pub async fn knowledge_items(app: AppHandle, source: Option<String>, query: Opti
     };
     tokio::task::spawn_blocking(move || match query {
         Some(q) => Ok(db
-            .search(&q, 30, source.as_deref(), vector.as_ref().map(|(v, s)| (v.as_slice(), s.as_str())))
+            .search_in(&q, 30, source.as_deref(), library, vector.as_ref().map(|(v, s)| (v.as_slice(), s.as_str())))
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|h| Listed { item: h.item, score: Some(h.score), match_type: Some(h.match_type) })
             .collect()),
         None => Ok(db
-            .items(source.as_deref(), LIST_LIMIT)
+            .items_in(source.as_deref(), library, LIST_LIMIT)
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|item| Listed { item, score: None, match_type: None })
@@ -756,9 +816,10 @@ pub async fn knowledge_items(app: AppHandle, source: Option<String>, query: Opti
     .map_err(|e| e.to_string())?
 }
 
+/// The entity graph of one library, or of every one.
 #[tauri::command(async)]
-pub fn knowledge_graph(state: State<'_, AppState>) -> Result<Graph, String> {
-    state.library.db.graph(300).map_err(|e| e.to_string())
+pub fn knowledge_graph(state: State<'_, AppState>, library: Option<i64>) -> Result<Graph, String> {
+    state.library.db.graph_in(library, 300).map_err(|e| e.to_string())
 }
 
 /// The entities a search reaches (named, and within two relations), for the
@@ -769,8 +830,8 @@ pub fn knowledge_query_entities(state: State<'_, AppState>, query: String) -> Re
 }
 
 #[tauri::command(async)]
-pub fn knowledge_entity_items(state: State<'_, AppState>, id: i64) -> Result<Vec<Item>, String> {
-    state.library.db.entity_items(id).map_err(|e| e.to_string())
+pub fn knowledge_entity_items(state: State<'_, AppState>, id: i64, library: Option<i64>) -> Result<Vec<Item>, String> {
+    state.library.db.entity_items_in(id, library).map_err(|e| e.to_string())
 }
 
 /// Sources sharing at least half their passages with another: likely
@@ -781,8 +842,8 @@ pub fn knowledge_overlaps(state: State<'_, AppState>) -> Result<Vec<orchestra_kn
 }
 
 #[tauri::command(async)]
-pub fn knowledge_stats(state: State<'_, AppState>) -> Result<Stats, String> {
-    state.library.db.stats().map_err(|e| e.to_string())
+pub fn knowledge_stats(state: State<'_, AppState>, library: Option<i64>) -> Result<Stats, String> {
+    state.library.db.stats_in(library).map_err(|e| e.to_string())
 }
 
 /// A passage found for the human to attach to a message (`@kb`).
@@ -800,10 +861,12 @@ pub struct ContextHit {
     /// About how many tokens it adds to the message.
     tokens: usize,
     match_type: String,
+    /// The library its document is in.
+    library: String,
 }
 
 /// Passages for `@kb <query>`: the library searched as the conductor
-/// searches it, the best few with their size.
+/// searches it (every library), the best few with their size.
 #[tauri::command]
 pub async fn knowledge_context(app: AppHandle, query: String) -> Result<Vec<ContextHit>, String> {
     let query = query.trim().to_string();
@@ -831,6 +894,7 @@ pub async fn knowledge_context(app: AppHandle, query: String) -> Result<Vec<Cont
                 summary: h.item.summary,
                 content: h.item.content,
                 match_type: h.match_type,
+                library: h.library,
             }
         })
         .collect())
@@ -917,7 +981,8 @@ pub fn library_tools(app: AppHandle) -> Vec<orchestra_mcp::Tool> {
                 "properties": {
                     "query": { "type": "string", "description": "Words to find in the documents." },
                     "limit": { "type": "integer", "description": "Max results (default 3, max 5). One extra may be added when the best keyword match would otherwise be dropped.", "default": 3 },
-                    "source_id": { "type": "string", "description": "Optional source id (from knowledge_list_sources) to search one document." }
+                    "source_id": { "type": "string", "description": "Optional source id (from knowledge_list_sources) to search one document." },
+                    "library": { "type": "string", "description": "Optional library name (from knowledge_list_sources) to search one library. Every library is searched when it is left out, which is usually what you want." }
                 },
                 "required": ["query"]
             }),
@@ -927,6 +992,7 @@ pub fn library_tools(app: AppHandle) -> Vec<orchestra_mcp::Tool> {
                     let query = crate::conductor::str_arg(&args, "query")?;
                     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(3).clamp(1, 5) as usize;
                     let source = args.get("source_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                    let library_name = args.get("library").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
                     let vector = crate::knowledge::query_vector(&app, &query).await;
                     let db = app.state::<AppState>().library.db.clone();
                     if let Some(id) = &source {
@@ -934,31 +1000,61 @@ pub fn library_tools(app: AppHandle) -> Vec<orchestra_mcp::Tool> {
                             return Err(format!("No knowledge source with id {id}. Call knowledge_list_sources to see the valid ids."));
                         }
                     }
-                    let hits = tokio::task::spawn_blocking(move || db.search(&query, limit, source.as_deref(), vector.as_ref().map(|(v, s)| (v.as_slice(), s.as_str()))))
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .map_err(|e| e.to_string())?;
-                    Ok(Value::String(orchestra_knowledge::format_hits(&hits)))
+                    let library = match &library_name {
+                        Some(name) => match find_library(&db, name).map_err(|e| e.to_string())? {
+                            Some(id) => Some(id),
+                            None => return Err(format!("No knowledge library named {name}. Call knowledge_list_sources to see the libraries, or leave library out to search them all.")),
+                        },
+                        None => None,
+                    };
+                    let (hits, libraries) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                        let hits = db.search_in(&query, limit, source.as_deref(), library, vector.as_ref().map(|(v, s)| (v.as_slice(), s.as_str())))?;
+                        Ok((hits, db.libraries()?.len()))
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                    Ok(Value::String(orchestra_knowledge::format_hits(&hits, libraries)))
                 }
             },
         ),
         Tool::new(
             "knowledge_list_sources",
-            "What is in the human's knowledge library: counts, then one line per document with its id, item count, sync status and topic. Read-only. Use it to see which topics the library covers and to find a source_id for knowledge_search.",
+            "What is in the human's knowledge library: counts, then one line per document with its id, item count, sync status and topic, grouped by library when the human keeps several. Read-only. Use it to see which topics the library covers and to find a source_id or a library for knowledge_search.",
             json!({ "type": "object", "properties": {} }),
             move |_args| {
                 let app = list.clone();
                 async move {
                     let db = app.state::<AppState>().library.db.clone();
-                    let (sources, stats) = tokio::task::spawn_blocking(move || Ok::<_, anyhow::Error>((db.sources()?, db.stats()?)))
+                    let (sources, stats, libraries) = tokio::task::spawn_blocking(move || Ok::<_, anyhow::Error>((db.sources()?, db.stats()?, db.libraries()?)))
                         .await
                         .map_err(|e| e.to_string())?
                         .map_err(|e| e.to_string())?;
-                    Ok(Value::String(orchestra_knowledge::format_sources(&sources, &stats)))
+                    Ok(Value::String(orchestra_knowledge::format_sources(&sources, &stats, &libraries)))
                 }
             },
         ),
     ]
+}
+
+/// What the person may call the General library while it keeps its stored
+/// name: the UI shows it in their language (`kb.lib.general`).
+const GENERAL_SHOWN_AS: [&str; 1] = ["일반"];
+
+/// A library by the name an agent gives: as stored (case aside), or General
+/// by the name the person sees it under.
+fn find_library(db: &KnowledgeDb, name: &str) -> anyhow::Result<Option<i64>> {
+    if let Some(l) = db.library_named(name)? {
+        return Ok(Some(l.id));
+    }
+    if GENERAL_SHOWN_AS.contains(&name.trim()) {
+        if let Some(g) = db.library(GENERAL)? {
+            if g.name == orchestra_knowledge::store::GENERAL_NAME {
+                return Ok(Some(GENERAL));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Most entities and passages one message carries; past these the picks are cut.
@@ -968,8 +1064,9 @@ pub const MAX_PICKED_PASSAGES: usize = 12;
 const PASSAGE_CHARS: usize = 1500;
 
 /// What the graph view picked, as the composer sends it: `e:<id>` for an
-/// entity, `i:<id>` for a passage. Anything else is ignored; each list keeps
-/// its order, without repeats, cut at its limit.
+/// entity, `i:<id>` for a passage. Anything else (the library, `l:<id>`, see
+/// [`picked_library`]) is left out here; each list keeps its order, without
+/// repeats, cut at its limit.
 pub fn parse_picks(selected: &[String]) -> (Vec<i64>, Vec<i64>) {
     let (mut entities, mut items) = (Vec::new(), Vec::new());
     for s in selected {
@@ -986,18 +1083,39 @@ pub fn parse_picks(selected: &[String]) -> (Vec<i64>, Vec<i64>) {
     (entities, items)
 }
 
-/// The text that goes with a graph conversation's message: what was picked.
-pub fn graph_context(state: &AppState, selected: &[String]) -> Result<String, String> {
+/// The library the knowledge page shows, as the composer sends it (`l:<id>`);
+/// none when the page shows every library.
+pub fn picked_library(selected: &[String]) -> Option<i64> {
+    selected.iter().find_map(|s| s.strip_prefix("l:").and_then(|n| n.trim().parse::<i64>().ok()))
+}
+
+/// The line that tells the graph conversation's agent which library is on screen.
+pub fn library_line(name: &str) -> String {
+    format!("[library on screen: {name} — knowledge_search with library \"{name}\" searches it alone]")
+}
+
+/// The text that goes with a graph conversation's message: the library on
+/// screen, when the page shows one, then what was picked.
+pub fn graph_context(db: &KnowledgeDb, selected: &[String]) -> Result<String, String> {
     let (entities, items) = parse_picks(selected);
-    state.library.db.selection_context(&entities, &items, PASSAGE_CHARS).map_err(|e| e.to_string())
+    let picked = db.selection_context(&entities, &items, PASSAGE_CHARS).map_err(|e| e.to_string())?;
+    let library = match picked_library(selected) {
+        Some(id) => db.library(id).map_err(|e| e.to_string())?,
+        None => None,
+    };
+    Ok(match library {
+        Some(l) if picked.is_empty() => library_line(&l.name),
+        Some(l) => format!("{}\n{picked}", library_line(&l.name)),
+        None => picked,
+    })
 }
 
 /// What the graph conversation's agent is told once, at the start of its session.
 pub fn graph_preamble(lang: &str) -> String {
     if lang == "ko" {
-        return "당신은 DIVIXI 지식 라이브러리의 그래프 파트너입니다. 사람은 라이브러리 문서에서 뽑은 엔티티 그래프를 보면서, 그중 일부(엔티티, 그 사이 관계, 엔티티를 언급하는 구절)를 골라 질문합니다. 고른 것은 메시지 끝의 [selection from the knowledge graph] 블록으로 옵니다.\n\n- 고른 것에 근거해 답하고, 근거가 된 문서(파일 이름)를 밝힙니다.\n- 고른 것만으로 부족하면 knowledge_search로 라이브러리를 더 찾습니다(무엇이 있는지는 knowledge_list_sources). 그래도 없으면 없다고 말합니다. 추측은 추측이라고 밝힙니다.\n- 라이브러리는 읽기만 합니다. 파일을 고치거나 명령을 실행하지 않습니다.\n- 짧고 분명하게, 사람이 쓴 언어로 답합니다.".to_string();
+        return "당신은 DIVIXI 지식 라이브러리의 지식 에이전트입니다. 사람은 라이브러리 문서에서 뽑은 엔티티 그래프를 보면서, 그중 일부(엔티티, 그 사이 관계, 엔티티를 언급하는 구절)를 골라 질문합니다. 고른 것은 메시지 끝의 [selection from the knowledge graph] 블록으로 옵니다. 사람이 라이브러리 하나를 보고 있으면 [library on screen: …] 줄이 함께 옵니다.\n\n- 고른 것에 근거해 답하고, 근거가 된 문서(파일 이름)를 밝힙니다.\n- 고른 것만으로 부족하면 knowledge_search로 라이브러리를 더 찾습니다(무엇이 있는지는 knowledge_list_sources). 기본은 모든 라이브러리이고, 보고 있는 라이브러리만 찾으려면 library에 그 이름을 줍니다. 그래도 없으면 없다고 말합니다. 추측은 추측이라고 밝힙니다.\n- 라이브러리는 읽기만 합니다. 파일을 고치거나 명령을 실행하지 않습니다.\n- 짧고 분명하게, 사람이 쓴 언어로 답합니다.".to_string();
     }
-    "You are the graph partner for a DIVIXI knowledge library. The human is looking at the entity graph drawn from the library's documents, picks part of it (entities, the relations among them, passages that mention them) and asks about it. What was picked comes at the end of the message, in a [selection from the knowledge graph] block.\n\n- Answer from what was picked, and name the documents (file names) the answer rests on.\n- When the pick is not enough, search the library with knowledge_search (knowledge_list_sources shows what is there). If it is not there either, say so; say when something is a guess.\n- The library is read only to you: do not edit files or run commands.\n- Be brief and plain, in the language the human writes in.".to_string()
+    "You are the knowledge agent of a DIVIXI knowledge library. The human is looking at the entity graph drawn from the library's documents, picks part of it (entities, the relations among them, passages that mention them) and asks about it. What was picked comes at the end of the message, in a [selection from the knowledge graph] block; when the human is looking at one library, a [library on screen: …] line comes with it.\n\n- Answer from what was picked, and name the documents (file names) the answer rests on.\n- When the pick is not enough, search the library with knowledge_search (knowledge_list_sources shows what is there). It searches every library; give library the name on screen to search that one alone. If it is not there either, say so; say when something is a guess.\n- The library is read only to you: do not edit files or run commands.\n- Be brief and plain, in the language the human writes in.".to_string()
 }
 
 #[cfg(test)]
@@ -1015,11 +1133,36 @@ mod tests {
     }
 
     #[test]
-    fn the_graph_partner_is_told_where_the_pick_is_and_what_it_may_do() {
+    fn an_agent_finds_general_by_the_name_the_person_sees() {
+        let db = KnowledgeDb::in_memory().unwrap();
+        let work = db.create_library("Work").unwrap().id;
+        assert_eq!(find_library(&db, "work").unwrap(), Some(work));
+        assert_eq!(find_library(&db, "General").unwrap(), Some(GENERAL));
+        assert_eq!(find_library(&db, " 일반 ").unwrap(), Some(GENERAL));
+        assert_eq!(find_library(&db, "Elsewhere").unwrap(), None);
+        db.rename_library(GENERAL, "Inbox").unwrap();
+        assert_eq!(find_library(&db, "일반").unwrap(), None, "renamed: only its own name");
+        assert_eq!(find_library(&db, "inbox").unwrap(), Some(GENERAL));
+    }
+
+    #[test]
+    fn the_library_on_screen_rides_with_the_picks() {
+        let picks: Vec<String> = ["e:3", "l:2", "i:10", "l:5"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(picked_library(&picks), Some(2), "the first one");
+        assert_eq!(parse_picks(&picks), (vec![3], vec![10]), "not an entity or a passage");
+        assert_eq!(picked_library(&["e:1".to_string(), "l:x".to_string()]), None, "every library");
+        let line = library_line("Work");
+        assert!(line.starts_with("[library on screen: Work") && line.contains("library \"Work\""), "{line}");
+    }
+
+    #[test]
+    fn the_knowledge_agent_is_told_where_the_pick_is_and_what_it_may_do() {
         for lang in ["en", "ko"] {
             let p = graph_preamble(lang);
+            assert!(p.contains("knowledge agent") || p.contains("지식 에이전트"), "{lang}: its name");
             assert!(p.contains("[selection from the knowledge graph]"), "{lang}");
             assert!(p.contains("knowledge_search") && p.contains("knowledge_list_sources"), "{lang}");
+            assert!(p.contains("[library on screen:"), "{lang}");
         }
         assert_ne!(graph_preamble("en"), graph_preamble("ko"));
     }

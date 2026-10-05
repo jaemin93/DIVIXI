@@ -8,14 +8,17 @@
   import { whenFull, whenLabel } from "./time";
   import { t } from "./i18n.svelte";
   import PanelToggle from "./PanelToggle.svelte";
+  import KnowledgeLibraries from "./KnowledgeLibraries.svelte";
   import { docTrouble, indexProgress } from "./indexProgress";
   import { tick } from "svelte";
+  import { addTarget } from "./libraries";
 
   /**
    * The knowledge library, after Kiro Crew's: the items agents can search
    * (listed per document, or found by a search), the entity graph, the
    * documents themselves with their sync state, and how documents are
-   * described.
+   * described. The libraries column on the left picks what the three tabs
+   * show: one library, or all of them.
    */
   const tabs = $derived<{ id: KTab; label: string }[]>([
     { id: "list", label: t("kb.tab.list") },
@@ -51,8 +54,8 @@
   const current = $derived(kb.indexing.find((s) => s.status === "indexing"));
   /** Indexing under way, for the small mark on the List and Graph tabs; null when done. */
   const progress = $derived(indexProgress(kb.sources, kb.embedding));
-  /** Documents that are gone or failed to index, for the same small line. */
-  const trouble = $derived(docTrouble(kb.sources));
+  /** Documents of the library shown that are gone or failed to index, for the same small line. */
+  const trouble = $derived(docTrouble(kb.shown));
   /** A source just brought into view from that line, outlined for a moment. */
   let flashed = $state("");
 
@@ -107,10 +110,18 @@
   const menuArtifact = $derived(menu ? kb.artifactOf(menu.id) : undefined);
 </script>
 
+<div class="kpage">
+{#if store.kbListOpen}
+  <KnowledgeLibraries />
+{/if}
 <section class="page">
   <!-- One thin bar: the page's name (what it is for, on hover), its tabs, what
        the index is doing when there is something to say, and the page's buttons. -->
   <header class="kbar">
+    {#if !store.kbListOpen}
+      <!-- The libraries column folded away: which library the tabs show, still. -->
+      <span class="klib mono" title={t("kb.lib.title")}>{kb.current ? kb.libraryName(kb.current) : t("kb.lib.all")}</span>
+    {/if}
     <div class="tabs" role="tablist">
       {#each tabs as tab (tab.id)}
         <button role="tab" aria-selected={kb.tab === tab.id} class:on={kb.tab === tab.id} onclick={() => kb.setTab(tab.id)}>{tab.label}</button>
@@ -166,7 +177,7 @@
           <span>{t("kb.searchReady")}</span>
           <span class="dim">· {t("kb.keywordOnly")}</span>
         {/if}
-        <span class="dim">· {t("kb.syncedCount", { done: kb.syncedCount, total: kb.sources.length })}</span>
+        <span class="dim">· {t("kb.syncedCount", { done: kb.syncedCount, total: kb.shown.length })}</span>
       {/if}
     </div>
     {/if}
@@ -193,7 +204,7 @@
         </select>
         <select bind:value={kb.sourceFilter} onchange={() => kb.search(kb.shownQuery)} aria-label={t("kb.allSources")}>
           <option value="">{t("kb.allSources")}</option>
-          {#each kb.sources as s (s.id)}<option value={s.id}>{kb.nameOf(s)}</option>{/each}
+          {#each kb.shown as s (s.id)}<option value={s.id}>{kb.nameOf(s)}</option>{/each}
         </select>
       </div>
 
@@ -201,7 +212,7 @@
         <p class="note">{t("kb.results", { n: shown.length, q: kb.shownQuery })}</p>
       {/if}
 
-      {#if !kb.sources.length}
+      {#if !kb.shown.length}
         <div class="emptybox">
           <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
         </div>
@@ -250,9 +261,14 @@
     {:else if kb.tab === "sources"}
       <div class="actions">
         <span class="grow"></span>
+        <!-- Where an added document goes: the library shown, General from the view of all. -->
+        <span class="mono into">{t("kb.lib.addInto", { name: kb.libraryNameOf(addTarget(kb.library)) })}</span>
         <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
       </div>
-      {#each kb.sources as s (s.id)}
+      {#if !kb.shown.length}
+        <p class="none">{t("kb.lib.empty")}</p>
+      {/if}
+      {#each kb.shown as s (s.id)}
         {@const art = kb.artifactOf(s.id)}
         <div
           class="source"
@@ -280,6 +296,18 @@
               {#each art?.tags ?? [] as tag (tag)}<span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>{/each}
             </div>
           </div>
+          {#if kb.libraries.length > 1}
+            <!-- A document is in one library; it moves to another from here. -->
+            <select
+              class="move"
+              value={s.library_id}
+              aria-label={t("kb.lib.moveTo", { name: kb.nameOf(s) })}
+              title={t("kb.lib.moveTo", { name: kb.nameOf(s) })}
+              onchange={(e) => kb.move(s.id, Number(e.currentTarget.value))}
+            >
+              {#each kb.libraries as l (l.id)}<option value={l.id}>{kb.libraryName(l)}</option>{/each}
+            </select>
+          {/if}
           <span class="pill {s.status}">{statusLabel(s)}</span>
           <span class="mono meta">{t("kb.itemCount", { n: s.items })}</span>
           <span class="mono meta" title={s.last_synced ? whenFull(s.last_synced, store.lang) : ""}>{s.last_synced ? whenLabel(s.last_synced, store.now, store.lang) : "—"}</span>
@@ -301,6 +329,7 @@
     <span>{t("kb.stat.sources", { n: kb.stats.sources })}</span>
   </footer>
 </section>
+</div>
 
 {#if menu && menuSource}
   <ArtifactMenu
@@ -318,6 +347,14 @@
 {/if}
 
 <style>
+  /* The libraries column, then the page; as the designs column and a design. */
+  .kpage {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+  }
+
   .page {
     flex: 1;
     min-width: 0;
@@ -356,6 +393,31 @@
     display: flex;
     align-items: stretch;
     gap: 2px;
+  }
+
+  .klib {
+    align-self: center;
+    max-width: 180px;
+    margin-top: -2px;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--lab);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .into {
+    font-size: 10.5px;
+    color: var(--lab);
+  }
+
+  .move {
+    height: 26px;
+    max-width: 150px;
+    padding: 0 6px;
+    font-size: 12px;
   }
 
   .tabs button {
@@ -492,15 +554,17 @@
     }
   }
 
+  /* The search keeps room to type in; the two lists go to the next row before it is squeezed. */
   .filters {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     margin-bottom: 14px;
   }
 
   .search {
-    flex: 1;
-    min-width: 0;
+    flex: 1 1 220px;
+    min-width: 160px;
   }
 
   .search,

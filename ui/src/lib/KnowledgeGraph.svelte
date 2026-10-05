@@ -9,10 +9,16 @@
   /** Keyed by id and name together: another instance's library reuses the same ids for other entities. */
   const placeKey = (n: { id: number; name: string }) => `${n.id}:${n.name}`;
   let rememberedView: { x: number; y: number; k: number } | null = null;
+  /** The library that camera was on (null: all): another library's plate is framed afresh. */
+  let rememberedViewLibrary: number | null = null;
   /** The entity card's folds, kept across picks and visits to the tab. */
   let rememberedCard: CardPrefs = DEFAULT_PREFS;
-  /** The picked node, the centre and its depth, and "related only": the graph's selection, kept across tabs. */
-  let rememberedFocus: { picked: number | null; centre: number | null; depth: number; relatedOnly: boolean } = { picked: null, centre: null, depth: 1, relatedOnly: true };
+  /**
+   * The picked node and the centre (by placeKey, so another instance's entity
+   * of the same id is not taken for them), the centre's depth, and "related
+   * only": the graph's selection, kept across tabs.
+   */
+  let rememberedFocus: { picked: string | null; centre: string | null; depth: number; relatedOnly: boolean } = { picked: null, centre: null, depth: 1, relatedOnly: true };
 
   /** A marker's shape; the template's legend draws them too, so the type lives here. */
   type Glyph = "square" | "diamond" | "circle" | "block" | "dot" | "triangle";
@@ -23,7 +29,7 @@
   import { tick as nextTick, untrack } from "svelte";
   import { t } from "./i18n.svelte";
   import { placeNew, queryReach, settle, settleBudget, tick, visibleIds, STILL } from "./graphLayout";
-  import { cardRect, cardShape, railRight, railVisible, toggled } from "./detailCard";
+  import { cardMaxHeight, cardRect, cardShape, listMinLeft, railVisible, toggled } from "./detailCard";
   import { contextChips } from "./graphContext";
   import { kindCounts, nodesOfKind } from "./kindList";
   import { store } from "./store.svelte";
@@ -55,6 +61,11 @@
   let card = $state<CardPrefs>(rememberedCard);
   /** The open card's height, for labels to keep clear of it. */
   let cardH = $state(0);
+  /** The plate's height, and the query and centre boxes' at its bottom left, for the card to stop short of. */
+  let stageH = $state(0);
+  let boxesH = $state(0);
+  /** The boxes' distance from the plate's bottom (their CSS `bottom`). */
+  const BOXES_BOTTOM = 34;
   const shape = $derived(cardShape(!!picked, card));
   /** The plate's width, which the agent panel takes from. */
   let stageW = $state(0);
@@ -82,7 +93,7 @@
    * shown query shows only the entities it reaches, unless the person asked
    * for everything. `visible` is null when the whole graph is shown.
    */
-  let centre = $state<number | null>(rememberedFocus.centre);
+  let centre = $state<number | null>(kb.graph.nodes.find((n) => placeKey(n) === rememberedFocus.centre)?.id ?? null);
   let depth = $state(rememberedFocus.depth);
   let relatedOnly = $state(rememberedFocus.relatedOnly);
   let visible = $state<Set<number> | null>(null);
@@ -166,18 +177,27 @@
     if (section && section !== "*" && !g.nodes.some((n) => n.kind === section)) section = null;
     // The node picked before the tab was left is picked again.
     if (!picked && rememberedFocus.picked !== null) {
-      const again = g.nodes.find((n) => n.id === rememberedFocus.picked);
+      const again = g.nodes.find((n) => placeKey(n) === rememberedFocus.picked);
       if (again) void pick(again);
     }
+    // A centre the reload (another library) took away is let go.
+    if (centre !== null && !g.nodes.some((n) => n.id === centre)) centre = null;
     // The camera is framed the first time this tab draws anything (unless it
-    // remembers where it was); a later reload leaves it where the person put it.
+    // remembers where it was, on this library); after, a reload leaves it
+    // where the person put it, and another library's graph is framed.
     const first = !built;
+    const otherLibrary = first ? rememberedViewLibrary !== kb.library : builtLibrary !== kb.library;
     built = true;
-    applyFocus(first && !rememberedView ? "jump" : "keep");
+    builtLibrary = kb.library;
+    builtGraph = g;
+    applyFocus(first && (!rememberedView || otherLibrary) ? "jump" : otherLibrary ? "ease" : "keep");
   }
 
   /** Whether this mount has drawn the graph yet. */
   let built = false;
+  /** The library and the graph it last drew: a reload is told from a new question by them. */
+  let builtLibrary: number | null = null;
+  let builtGraph: unknown = null;
 
   /** The best-connected node of what is shown: most links, then most mentions; none without a web. */
   function findHub() {
@@ -251,6 +271,12 @@
     kick();
   }
 
+  // The card's height lands after layout; labels it covers are placed again then.
+  $effect(() => {
+    void cardH;
+    untrack(() => kick());
+  });
+
   /** A focus's inputs changed: the query's entities, "show all", the centre or its depth. */
   $effect(() => {
     void queried;
@@ -258,8 +284,9 @@
     void centre;
     void depth;
     // Only the inputs above: what applyFocus reads besides is not a reason to run it.
+    // A reloaded graph changes them too; build() frames that one, and runs after.
     untrack(() => {
-      if (bodies.length) applyFocus("ease");
+      if (bodies.length && kb.graph === builtGraph) applyFocus("ease");
     });
   });
 
@@ -531,9 +558,8 @@
     });
     // Nor may one run under the overview rail on the right edge.
     const railH = sections.length * 24;
-    const rr = railRight(shape);
-    if (railOn) taken.push([w - rr - 150, h / 2 - railH / 2 - 8, w - rr, h / 2 + railH / 2 + 8]);
-    // Nor under the entity card, open or folded.
+    if (railOn) taken.push([w - 150, h / 2 - railH / 2 - 8, w, h / 2 + railH / 2 + 8]);
+    // Nor under the entity card, open or folded, top left.
     const covered = cardRect(shape, w, cardH);
     if (covered) taken.push(covered);
     const free = (x0: number, y0: number, x1: number, y1: number) =>
@@ -661,6 +687,7 @@
     frame = heat > SETTLED || drag || glide ? requestAnimationFrame(loop) : 0;
     if (!frame) {
       rememberedView = { ...view };
+      rememberedViewLibrary = kb.library;
       remember();
     }
   }
@@ -869,7 +896,8 @@
   }
 
   $effect(() => {
-    rememberedFocus = { picked: picked?.id ?? null, centre, depth, relatedOnly };
+    const centreNode = centre === null ? undefined : kb.graph.nodes.find((n) => n.id === centre);
+    rememberedFocus = { picked: picked ? placeKey(picked) : null, centre: centreNode ? placeKey(centreNode) : null, depth, relatedOnly };
   });
 
   function focusOn(id: number) {
@@ -897,7 +925,8 @@
     if (!button || !stageEl) return 12;
     void stageW; // again when the plate's width (and so the legend's wrap) changes
     const x = button.getBoundingClientRect().left - stageEl.getBoundingClientRect().left;
-    return Math.round(Math.max(12, Math.min(x, stageW - listW - 12)));
+    // Beside the entity card when one is shown; on a plate too narrow for both, over it.
+    return Math.round(Math.max(12, Math.min(Math.max(x, listMinLeft(shape)), stageW - listW - 12)));
   });
 
   /** A legend entry: list its kind's nodes and frame them, or (again) close the list and show everything. */
@@ -1021,7 +1050,7 @@
     </div>
   {/if}
   <div class="body">
-  <div class="stage" bind:this={stageEl} bind:clientWidth={stageW}>
+  <div class="stage" bind:this={stageEl} bind:clientWidth={stageW} bind:clientHeight={stageH}>
     {#if !kb.graph.nodes.length}
       <p class="empty">{t("kb.graphEmpty")}</p>
     {/if}
@@ -1063,7 +1092,7 @@
       </div>
     {/if}
     {#if kb.shownQuery || centreNode}
-      <div class="boxes">
+      <div class="boxes" bind:clientHeight={boxesH}>
         {#if centreNode}
           <div class="query" aria-live="polite">
             <div class="qhead">
@@ -1102,7 +1131,7 @@
       </div>
     {/if}
     {#if kb.graph.nodes.length && railOn}
-      <nav class="rail" style="right: {railRight(shape)}px" aria-label={t("kb.graphSections")}>
+      <nav class="rail" aria-label={t("kb.graphSections")}>
         {#each sections as sec, i (sec.id)}
           <button
             class="stop"
@@ -1120,7 +1149,7 @@
       </nav>
     {/if}
     {#if picked}
-      <aside class="detail" class:folded={card.folded} bind:clientHeight={cardH}>
+      <aside class="detail" class:folded={card.folded} style="max-height: {cardMaxHeight(stageH, kb.shownQuery || centreNode ? boxesH : 0, BOXES_BOTTOM)}px" bind:clientHeight={cardH}>
         <div class="dhead">
           {#if card.folded}
             <span class="dname small">{@render glyph(glyphOf(picked.kind), true)}<span>{picked.name}</span></span>
@@ -1507,10 +1536,6 @@
     gap: 2px;
   }
 
-  .rail {
-    transition: right 0.18s ease;
-  }
-
   .stop {
     display: flex;
     align-items: center;
@@ -1571,13 +1596,14 @@
     pointer-events: none;
   }
 
+  /* Top left, under the caption (CARD_TOP, CARD_GAP); its height is capped inline (cardMaxHeight). */
   .detail {
     position: absolute;
-    top: 12px;
-    right: 12px;
+    top: 40px;
+    left: 12px;
     width: 280px;
+    max-width: calc(100% - 24px);
     z-index: 1;
-    max-height: calc(100% - 24px);
     overflow-y: auto;
     background: var(--card);
     border: 1px solid var(--accln);

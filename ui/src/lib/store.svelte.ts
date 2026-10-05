@@ -3,6 +3,7 @@ import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Key, type Lang, type LangPref } from "./i18n.svelte";
 import { picksOf, toggleChip, type Chip } from "./graphContext";
+import { libraryPick } from "./libraries";
 import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
 import {
   AUTO_KEY,
@@ -958,9 +959,18 @@ class Store {
   graphChips = $state<Chip[]>([]);
   graphExcluded = $state<Set<string>>(new Set());
 
-  /** What goes with the graph conversation's next message: `e:<entity id>`, `i:<item id>`. */
+  /**
+   * The library the knowledge page shows (null: all of them), set by the page;
+   * the graph conversation is told it with every message.
+   */
+  graphLibrary = $state<number | null>(null);
+
+  /**
+   * What goes with the graph conversation's next message: the library on
+   * screen (`l:<id>`), then `e:<entity id>`, `i:<item id>`.
+   */
   get graphSelected(): string[] {
-    return picksOf(this.graphChips, this.graphExcluded);
+    return [...libraryPick(this.graphLibrary), ...picksOf(this.graphChips, this.graphExcluded)];
   }
 
   toggleGraphChip(key: string) {
@@ -971,8 +981,16 @@ class Store {
     this.graphChatWidth = Math.min(640, Math.max(320, Math.round(px)));
   }
 
+  /** An opening under way: a second press waits for it instead of starting another conversation. */
+  private openingGraphChat: Promise<void> | null = null;
+
   /** Open the graph's conversation, starting it (on the default agent, as a new design is) the first time. */
-  async openGraphChat() {
+  openGraphChat(): Promise<void> {
+    this.openingGraphChat ??= this.startGraphChat().finally(() => (this.openingGraphChat = null));
+    return this.openingGraphChat;
+  }
+
+  private async startGraphChat() {
     if (!this.artifacts.length) await this.loadArtifacts();
     let chat = this.artifacts.filter((a) => a.kind === GRAPH_KIND).sort((a, b) => b.updated_at - a.updated_at)[0];
     if (!chat) {
@@ -1025,6 +1043,15 @@ class Store {
     if (this.view === "design") return this.artifact;
     if (this.view === "knowledge" && this.graphChatOpen) return this.graphChat;
     return "";
+  }
+
+  /**
+   * What the person picked for the on-screen artifact conversation's next
+   * message: a design's board items, the graph's chips. Unlike chatSelected,
+   * not the library on screen, which goes along but is not a message.
+   */
+  get chatPicks(): string[] {
+    return this.view === "design" ? this.designSelected : picksOf(this.graphChips, this.graphExcluded);
   }
 
   /** What goes with the on-screen artifact conversation's next message. */
@@ -1174,6 +1201,39 @@ class Store {
   routineListWidth = $state(260);
   /** Width of the settings column. Persisted. */
   settingsNavWidth = $state(232);
+
+  /** The knowledge page's libraries column shown. Persisted ("kblist"), as the designs column is. */
+  kbListOpen = $state(true);
+  /** Its width. Persisted. */
+  kbListWidth = $state(220);
+  /** The library the knowledge page showed ("all" or an id), as remembered ("kblibrary"). */
+  kbLibrarySaved = $state("");
+
+  async setKbList(open: boolean) {
+    this.kbListOpen = open;
+    if (!this.keeps("kblist")) return;
+    try {
+      await invoke("set_setting", { key: "kblist", value: open ? "open" : "closed" });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  setKbListWidth(px: number, persist = false) {
+    this.kbListWidth = Math.min(420, Math.max(180, Math.round(px)));
+    if (persist) this.persistWidth("kblist_width", this.kbListWidth);
+  }
+
+  /** Remember the library the knowledge page shows: "all", or its id. */
+  async rememberKbLibrary(value: string) {
+    this.kbLibrarySaved = value;
+    if (!this.keeps("kblibrary")) return;
+    try {
+      await invoke("set_setting", { key: "kblibrary", value });
+    } catch {
+      // Cosmetic: the page opens on all of them next time.
+    }
+  }
 
   setDesignListWidth(px: number, persist = false) {
     this.designListWidth = Math.min(480, Math.max(200, Math.round(px)));
@@ -3036,7 +3096,7 @@ class Store {
         this.lastError = String(err);
       }
       try {
-        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineListWidth, designChat] = await Promise.all([
+        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineListWidth, designChat, kbList, kbListWidth, kbLibrary] = await Promise.all([
           setting("terminal"),
           setting("terminal_height"),
           setting("artifact_chat_width"),
@@ -3045,6 +3105,9 @@ class Store {
           setting("settings_nav_width"),
           setting("routinelist_width"),
           setting("designchat"),
+          setting("kblist"),
+          setting("kblist_width"),
+          setting("kblibrary"),
         ]);
         const dc = Number(artifactChat);
         if (Number.isFinite(dc) && dc > 0) this.setArtifactChatWidth(dc);
@@ -3056,6 +3119,10 @@ class Store {
         if (Number.isFinite(rl) && rl > 0) this.setRoutineListWidth(rl);
         this.designListOpen = designList !== "closed";
         this.designChatOpen = designChat !== "closed";
+        this.kbListOpen = kbList !== "closed";
+        const kw = Number(kbListWidth);
+        if (Number.isFinite(kw) && kw > 0) this.setKbListWidth(kw);
+        this.kbLibrarySaved = kbLibrary ?? "";
         const h = Number(termHeight);
         if (Number.isFinite(h) && h > 0) this.setTermHeight(h);
         if (term === "open") void this.setTerminal(true);
@@ -3536,10 +3603,11 @@ class Store {
     const files = this.attachments.map((a) => a.path);
     const artifact = this.chatArtifact;
     const selected = artifact ? [...this.chatSelected] : [];
+    const picked = artifact ? this.chatPicks.length : 0;
     const target = artifact ? this.chatArtifactId : this.track;
     if (!target) return null;
     if (artifact && !this.currentArtifact) return null;
-    if (!text && !files.length && !this.kbPicked.length && !selected.length) return null;
+    if (!text && !files.length && !this.kbPicked.length && !picked) return null;
     this.attachments = [];
     const picks = this.takeKnowledge(key);
     return {

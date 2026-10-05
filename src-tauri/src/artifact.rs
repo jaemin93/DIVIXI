@@ -155,6 +155,8 @@ async fn open(app: &AppHandle, a: &ArtifactInfo) -> Result<(Arc<AgentSession>, b
         let spec = state.spec_for(&a.agent)?;
         let mcp = McpServer::start("divixi", tools).await.map_err(|e| e.to_string())?;
         let cwd = workdir(&state, &a.id)?;
+        // The knowledge agent opens as a design's does: the mode chosen in the
+        // composer, else the agent's most permissive one.
         let mut opts = session_options(&state, &a.agent, &cwd.display().to_string(), &a.config, Some(&mcp));
         let key = format!("artifact_session:{}:{}", a.id, a.agent);
         opts.resume = state.store.get_meta(&key).ok().flatten();
@@ -232,7 +234,11 @@ pub async fn turn(
                 (design::preamble(&lang, &a.title), design::context(&state, &id, &selected)?)
             }
             // What the graph view picked (entities, passages) goes with each message.
-            crate::knowledge::GRAPH_KIND => (crate::knowledge::graph_preamble(&lang), crate::knowledge::graph_context(&state, &selected)?),
+            crate::knowledge::GRAPH_KIND => {
+                let (db, picks) = (state.library.db.clone(), selected.clone());
+                let context = tokio::task::spawn_blocking(move || crate::knowledge::graph_context(&db, &picks)).await.map_err(|e| e.to_string())??;
+                (crate::knowledge::graph_preamble(&lang), context)
+            }
             other => return Err(format!("{other} artifacts have no agent yet")),
         };
         let body = if text.trim().is_empty() { "(look at it)".to_string() } else { text.clone() };
