@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { store } from "./store.svelte";
   import { kb, type KItem, type KSource, type KTab } from "./knowledge.svelte";
   import KnowledgeGraph from "./KnowledgeGraph.svelte";
@@ -24,6 +25,9 @@
   let copied = $state(0);
   let menu = $state<{ id: string; x: number; y: number } | null>(null);
   let confirmRemove = $state("");
+
+  // The graph's conversation belongs to this page: leaving it closes the panel.
+  onDestroy(() => store.closeGraphChat());
 
   const categories = $derived([...new Set(kb.items.map((i) => i.category))].sort());
   const shown = $derived(kb.category ? kb.items.filter((i) => i.category === kb.category) : kb.items);
@@ -102,6 +106,8 @@
     {#if kb.embedding.enabled && kb.embedding.error}
       <div class="banner err">{t("kb.embedError", { done: kb.embedding.embedded, total: kb.embedding.total, error: kb.embedding.error })}</div>
     {/if}
+    <!-- Search readiness, embedding and sync: about the documents, so on the Sources tab only. -->
+    {#if kb.tab === "sources"}
     <div class="banner" class:busy={!!kb.indexing.length}>
       {#if current}
         <span class="pulse"></span>
@@ -121,6 +127,7 @@
         <span class="dim">· {t("kb.syncedCount", { done: kb.syncedCount, total: kb.sources.length })}</span>
       {/if}
     </div>
+    {/if}
 
     {#if kb.tab === "list"}
       <div class="filters">

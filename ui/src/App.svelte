@@ -14,6 +14,7 @@
   import TrackHeader from "./lib/TrackHeader.svelte";
   import DesignView from "./lib/DesignView.svelte";
   import KnowledgeView from "./lib/KnowledgeView.svelte";
+  import GraphAgentPanel from "./lib/GraphAgentPanel.svelte";
   import RoutineList from "./lib/RoutineList.svelte";
   import RoutineView from "./lib/RoutineView.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
@@ -156,6 +157,10 @@
       <DesignView />
     {:else if store.view === "knowledge"}
       <KnowledgeView />
+      <!-- The graph's conversation: a column of the layout, beside the whole knowledge page. -->
+      {#if store.graphChatOpen && store.graphChat}
+        <GraphAgentPanel />
+      {/if}
     {:else if store.view === "routines"}
       <RoutineList />
       <RoutineView />

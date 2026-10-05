@@ -2,6 +2,7 @@ import { invoke, listen, inTauri, local, overWeb, bring, boardBase, instanceId }
 import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Key, type Lang, type LangPref } from "./i18n.svelte";
+import { picksOf, toggleChip, type Chip } from "./graphContext";
 import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
 import {
   AUTO_KEY,
@@ -940,16 +941,31 @@ class Store {
 
   /**
    * The knowledge graph's conversation: an artifact of kind "graph", one per
-   * library, talked to from a panel beside the graph the way a design is
-   * talked to beside its board. `graphChatOpen` is the panel; while it is
-   * open on the knowledge page, the composer and timeline are this
-   * conversation's (see `chatArtifactId`).
+   * library, talked to from a column on the right of the knowledge page the
+   * way a design is talked to beside its board. `graphChatOpen` is that
+   * column; while it is open on the knowledge page, the composer and timeline
+   * are this conversation's (see `chatArtifactId`). Leaving the knowledge
+   * page closes it.
    */
   graphChat = $state("");
   graphChatOpen = $state(false);
   graphChatWidth = $state(400);
-  /** What the graph view picked for the next message: `e:<entity id>`, `i:<item id>`. */
-  graphSelected = $state<string[]>([]);
+  /**
+   * What the graph view offers to send with the next message (set by the
+   * graph as picks and focus change; kept when another tab is shown), and the
+   * chips the person took out. The panel shows both.
+   */
+  graphChips = $state<Chip[]>([]);
+  graphExcluded = $state<Set<string>>(new Set());
+
+  /** What goes with the graph conversation's next message: `e:<entity id>`, `i:<item id>`. */
+  get graphSelected(): string[] {
+    return picksOf(this.graphChips, this.graphExcluded);
+  }
+
+  toggleGraphChip(key: string) {
+    this.graphExcluded = toggleChip(this.graphExcluded, key);
+  }
 
   setGraphChatWidth(px: number) {
     this.graphChatWidth = Math.min(640, Math.max(320, Math.round(px)));
