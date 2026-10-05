@@ -1154,7 +1154,7 @@
     border: 1px solid var(--line);
     min-height: 480px;
     /* The page's head is one thin bar now: the plate takes the height it gave up. */
-    height: calc(100vh - 200px);
+    height: calc(100vh - 213px);
   }
 
   .bar {

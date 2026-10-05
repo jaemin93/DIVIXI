@@ -338,20 +338,17 @@
 
   /* The page's one bar: as thin as the other pages' heads (44 px), the tabs in it,
      the panel toggle at its right. The page's settings are in the app's Settings. */
+  /* Top and right as a track's head (14 px, 10 px), so the panel toggle sits
+     exactly where it does there and on a design's; the tabs fill the rest of
+     the bar down to its rule. */
   .kbar {
     flex-shrink: 0;
     display: flex;
     flex-wrap: wrap;
     align-items: stretch;
     column-gap: 18px;
-    min-height: 44px;
-    /* Right as a track's head, so the panel toggle sits where it does there. */
-    padding: 0 10px 0 40px;
+    padding: 14px 10px 0 40px;
     border-bottom: 1px solid var(--line);
-  }
-
-  .kbar > * {
-    min-height: 44px;
   }
 
 
@@ -362,6 +359,7 @@
   }
 
   .tabs button {
+    min-height: 42px;
     background: transparent;
     border: 0;
     border-bottom: 2px solid transparent;
@@ -381,10 +379,10 @@
     border-bottom-color: var(--acc);
   }
 
-  /* Right-hand, on the first row or, in a narrow window, the next. */
+  /* Right-hand, on the first row or, in a narrow window, the next; at the top, as on a track. */
   .kbtns {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
     margin-left: auto;
   }

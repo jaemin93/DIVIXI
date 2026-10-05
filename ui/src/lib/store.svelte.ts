@@ -1001,12 +1001,19 @@ class Store {
   /**
    * A design's agent: a column on the right of the designs page, opened and
    * closed from the page's panel toggle like the working folder beside a
-   * track. Open by default; its width is artifactChatWidth, kept as before.
+   * track. Kept like the designs list ("designchat"): open the first time,
+   * then as it was left. Its width is artifactChatWidth, kept as before.
    */
   designChatOpen = $state(true);
 
-  setDesignChat(open: boolean) {
+  async setDesignChat(open: boolean) {
     this.designChatOpen = open;
+    if (!this.keeps("designchat")) return;
+    try {
+      await invoke("set_setting", { key: "designchat", value: open ? "open" : "closed" });
+    } catch (err) {
+      this.lastError = String(err);
+    }
   }
 
   /**
@@ -3029,7 +3036,7 @@ class Store {
         this.lastError = String(err);
       }
       try {
-        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineListWidth] = await Promise.all([
+        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineListWidth, designChat] = await Promise.all([
           setting("terminal"),
           setting("terminal_height"),
           setting("artifact_chat_width"),
@@ -3037,6 +3044,7 @@ class Store {
           setting("designlist_width"),
           setting("settings_nav_width"),
           setting("routinelist_width"),
+          setting("designchat"),
         ]);
         const dc = Number(artifactChat);
         if (Number.isFinite(dc) && dc > 0) this.setArtifactChatWidth(dc);
@@ -3047,6 +3055,7 @@ class Store {
         const rl = Number(routineListWidth);
         if (Number.isFinite(rl) && rl > 0) this.setRoutineListWidth(rl);
         this.designListOpen = designList !== "closed";
+        this.designChatOpen = designChat !== "closed";
         const h = Number(termHeight);
         if (Number.isFinite(h) && h > 0) this.setTermHeight(h);
         if (term === "open") void this.setTerminal(true);

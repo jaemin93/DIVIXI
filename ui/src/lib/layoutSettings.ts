@@ -19,6 +19,7 @@ export const LAYOUT_SETTINGS = [
   "tracks_filter",
   "designlist",
   "designlist_width",
+  "designchat",
   "artifact_chat_width",
   "settings_nav_width",
   "routinelist_width",
