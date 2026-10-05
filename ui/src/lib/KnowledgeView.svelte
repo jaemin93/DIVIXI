@@ -7,6 +7,7 @@
   import Icon from "./Icon.svelte";
   import { whenFull, whenLabel } from "./time";
   import { t } from "./i18n.svelte";
+  import PanelToggle from "./PanelToggle.svelte";
   import { docTrouble, indexProgress } from "./indexProgress";
   import { tick } from "svelte";
 
@@ -110,7 +111,6 @@
   <!-- One thin bar: the page's name (what it is for, on hover), its tabs, what
        the index is doing when there is something to say, and the page's buttons. -->
   <header class="kbar">
-    <h1 class="serif kt" title={t("kb.sub")}>{t("kb.title")}</h1>
     <div class="tabs" role="tablist">
       {#each tabs as tab (tab.id)}
         <button role="tab" aria-selected={kb.tab === tab.id} class:on={kb.tab === tab.id} onclick={() => kb.setTab(tab.id)}>{tab.label}</button>
@@ -134,15 +134,12 @@
       </div>
     {/if}
     <div class="kbtns">
-      <!-- The graph's agent opens from any tab; the graph's own Agent button shows the same state. -->
-      <button
-        class="btn sm agent"
-        class:on={store.graphChatOpen}
-        aria-pressed={store.graphChatOpen}
-        title={store.graphChatOpen ? t("kb.agentClose") : t("kb.agentOpen")}
-        onclick={() => (store.graphChatOpen ? store.closeGraphChat() : void store.openGraphChat())}>{t("kb.agentToggle")}</button
-      >
-      <button class="btn sm" onclick={() => store.openSettings("knowledge")}>{t("kb.openSettings")}</button>
+      <!-- The agent panel, from any tab: the same toggle, in the same place, as a track's working folder. -->
+      <PanelToggle
+        on={store.graphChatOpen}
+        title={t("panel.agent")}
+        onclick={() => (store.graphChatOpen ? store.closeGraphChat() : void store.openGraphChat())}
+      />
     </div>
   </header>
   <div class="inner">
@@ -339,7 +336,8 @@
     box-sizing: border-box;
   }
 
-  /* The page's one bar: as thin as the other pages' heads (44 px), the tabs in it. */
+  /* The page's one bar: as thin as the other pages' heads (44 px), the tabs in it,
+     the panel toggle at its right. The page's settings are in the app's Settings. */
   .kbar {
     flex-shrink: 0;
     display: flex;
@@ -347,7 +345,8 @@
     align-items: stretch;
     column-gap: 18px;
     min-height: 44px;
-    padding: 0 24px 0 40px;
+    /* Right as a track's head, so the panel toggle sits where it does there. */
+    padding: 0 10px 0 40px;
     border-bottom: 1px solid var(--line);
   }
 
@@ -355,16 +354,6 @@
     min-height: 44px;
   }
 
-  .kt {
-    display: flex;
-    align-items: center;
-    margin: 0;
-    font-size: 18px;
-    font-weight: 400;
-    color: var(--hi);
-    white-space: nowrap;
-    cursor: default;
-  }
 
   .tabs {
     display: flex;
@@ -406,10 +395,6 @@
     font-size: 13px;
   }
 
-  .btn.agent.on {
-    color: var(--hi);
-    background: var(--sel);
-  }
 
   /* The List and Graph tabs' only status, in the bar: indexing, documents to look at. */
   .indexing {

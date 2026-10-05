@@ -49,7 +49,6 @@
   type Body = { id: number; node: KNode; x: number; y: number; vx: number; vy: number; r: number; pinned: boolean };
 
   let canvas = $state<HTMLCanvasElement>();
-  let running = $state(true);
   let picked = $state<KNode | null>(null);
   let pickedItems = $state<KItem[]>([]);
   /** Whether the entity card is folded to its header, and whether its sources are listed. */
@@ -644,7 +643,7 @@
   }
 
   function loop() {
-    if (running && heat > SETTLED) {
+    if (heat > SETTLED) {
       const moved = tick(shown, shownLinks, heat);
       heat *= COOLING;
       // Stop as soon as nothing visibly moves, rather than idling warm and trembling.
@@ -659,7 +658,7 @@
     }
     draw();
     // Keep going while the layout moves, a node is held or the camera glides; otherwise rest until kicked.
-    frame = (running && heat > SETTLED) || drag || glide ? requestAnimationFrame(loop) : 0;
+    frame = heat > SETTLED || drag || glide ? requestAnimationFrame(loop) : 0;
     if (!frame) {
       rememberedView = { ...view };
       remember();
@@ -946,10 +945,6 @@
     store.graphChips = chips;
   });
 
-  function toggleAgent() {
-    if (store.graphChatOpen) store.closeGraphChat();
-    else void store.openGraphChat();
-  }
   const sourceName = (id: string) => {
     const s = kb.sources.find((x) => x.id === id);
     return s ? kb.nameOf(s) : id;
@@ -994,17 +989,6 @@
       }}
     />
     <button class="btn sm" onclick={recenter}>{t("kb.recenter")}</button>
-    <button
-      class="btn sm"
-      class:on={store.graphChatOpen}
-      aria-pressed={store.graphChatOpen}
-      title={store.graphChatOpen ? t("kb.agentClose") : t("kb.agentOpen")}
-      onclick={toggleAgent}>{t("kb.agentToggle")}</button
-    >
-    <button class="btn sm" class:on={running} onclick={() => {
-        running = !running;
-        kick();
-      }}>{t("kb.physics")}</button>
     <span class="grow"></span>
     {#each kinds as k (k.kind)}
       <!-- A kind: its nodes as a list, and the graph framed on them (the rail's section, the same choice). -->
@@ -1055,8 +1039,8 @@
     {/if}
     {#if kb.graph.nodes.length}
       <div class="fig mono" aria-hidden="true">
-        <span class="fdot" class:pulse={running}></span>
-        <span>{t("kb.graphFig")} · {running ? t("kb.graphLive") : t("kb.graphStill")}</span>
+        <span class="fdot"></span>
+        <span>{t("kb.graphFig")}</span>
       </div>
     {/if}
     {#if kb.shownQuery || centreNode}
@@ -1191,11 +1175,6 @@
   .btn.sm {
     height: 26px;
     padding: 0 10px;
-  }
-
-  .btn.on {
-    color: var(--hi);
-    background: var(--sel);
   }
 
   .grow {

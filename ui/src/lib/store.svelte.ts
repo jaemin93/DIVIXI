@@ -999,6 +999,17 @@ class Store {
   }
 
   /**
+   * A design's agent: a column on the right of the designs page, opened and
+   * closed from the page's panel toggle like the working folder beside a
+   * track. Open by default; its width is artifactChatWidth, kept as before.
+   */
+  designChatOpen = $state(true);
+
+  setDesignChat(open: boolean) {
+    this.designChatOpen = open;
+  }
+
+  /**
    * The artifact whose conversation is on screen: the open design on the
    * designs page, the graph's conversation on the knowledge page while its
    * panel is open, otherwise none (the track's conductor is).

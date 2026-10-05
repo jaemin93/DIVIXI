@@ -14,7 +14,7 @@
   import TrackHeader from "./lib/TrackHeader.svelte";
   import DesignView from "./lib/DesignView.svelte";
   import KnowledgeView from "./lib/KnowledgeView.svelte";
-  import GraphAgentPanel from "./lib/GraphAgentPanel.svelte";
+  import AgentPanel from "./lib/AgentPanel.svelte";
   import RoutineList from "./lib/RoutineList.svelte";
   import RoutineView from "./lib/RoutineView.svelte";
   import WindowChrome from "./lib/WindowChrome.svelte";
@@ -155,11 +155,15 @@
       <Settings />
     {:else if store.view === "design"}
       <DesignView />
+      <!-- The design's agent: a column of the layout, as the working folder is beside a track. -->
+      {#if store.designChatOpen && store.currentArtifact?.kind === "design"}
+        <AgentPanel kind="design" />
+      {/if}
     {:else if store.view === "knowledge"}
       <KnowledgeView />
       <!-- The graph's conversation: a column of the layout, beside the whole knowledge page. -->
       {#if store.graphChatOpen && store.graphChat}
-        <GraphAgentPanel />
+        <AgentPanel kind="graph" />
       {/if}
     {:else if store.view === "routines"}
       <RoutineList />

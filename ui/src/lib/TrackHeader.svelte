@@ -1,6 +1,6 @@
 <script lang="ts">
   import { store, agentLabel, type Track } from "./store.svelte";
-  import Icon from "./Icon.svelte";
+  import PanelToggle from "./PanelToggle.svelte";
   import { t } from "./i18n.svelte";
 
   /**
@@ -63,9 +63,7 @@
     >
       {folded ? "▸" : "▾"}
     </button>
-    <button class="tog" class:on={store.panelOpen} type="button" title={t("ws.toggle")} aria-pressed={store.panelOpen} onclick={() => store.setPanel(!store.panelOpen)}>
-      <Icon name="panel" size={14} />
-    </button>
+    <PanelToggle on={store.panelOpen} title={t("ws.toggle")} onclick={() => store.setPanel(!store.panelOpen)} />
   </div>
 
   {#if !folded}
@@ -167,11 +165,6 @@
   .tog:hover {
     color: var(--hi);
     background: var(--sel);
-  }
-
-  .tog.on {
-    color: var(--hi);
-    border-color: var(--acc);
   }
 
   /* The fold is a quieter control than the panel: no box around it. */

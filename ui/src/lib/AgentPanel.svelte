@@ -7,12 +7,16 @@
   import { t } from "./i18n.svelte";
 
   /**
-   * The knowledge graph's conversation, as a column on the right of the
-   * knowledge page — where a design's conversation sits beside its board:
-   * the same Timeline and Composer, on the graph's own artifact. Above them,
-   * what goes with the next message (store.graphChips, set by the graph
-   * view), as chips to take out and put back.
+   * The agent beside a page, as a column of the app's layout on its right —
+   * the same place, toggle and shape on the designs page and the knowledge
+   * page (and where a track has its working folder). The same Timeline and
+   * Composer as a track's, on the page's own artifact: the open design, or
+   * the knowledge graph's conversation. For the graph, what goes with the
+   * next message (store.graphChips) sits above it as chips to take out and
+   * put back; a design sends its board and the items picked on it.
    */
+  let { kind }: { kind: "design" | "graph" } = $props();
+  const design = $derived(kind === "design");
 
   function chipLabel(c: Chip): string {
     switch (c.kind) {
@@ -28,21 +32,43 @@
   }
 </script>
 
-<aside class="talk" style="width: {store.graphChatWidth}px" aria-label={t("kb.agentLabel")}>
-  <SplitHandle
-    edge="left"
-    width={store.graphChatWidth}
-    min={320}
-    max={640}
-    reset={400}
-    label={t("kb.agentResize")}
-    onchange={(px) => store.setGraphChatWidth(px)}
-  />
+<aside
+  class="talk"
+  style="width: {design ? store.artifactChatWidth : store.graphChatWidth}px"
+  aria-label={design ? t("design.agentLabel") : t("kb.agentLabel")}
+>
+  {#if design}
+    <SplitHandle
+      edge="left"
+      width={store.artifactChatWidth}
+      min={340}
+      max={760}
+      reset={460}
+      label={t("design.chatResize")}
+      onchange={(px, persist) => store.setArtifactChatWidth(px, persist)}
+    />
+  {:else}
+    <SplitHandle
+      edge="left"
+      width={store.graphChatWidth}
+      min={320}
+      max={640}
+      reset={400}
+      label={t("kb.agentResize")}
+      onchange={(px) => store.setGraphChatWidth(px)}
+    />
+  {/if}
   <div class="head">
-    <span class="mono hlab">{t("kb.agentLabel")}</span>
+    <span class="mono hlab">{design ? t("design.agentLabel") : t("kb.agentLabel")}</span>
     <span class="grow"></span>
-    <button class="x" onclick={() => store.closeGraphChat()} aria-label={t("kb.agentClose")} title={t("kb.agentClose")}>×</button>
+    <button
+      class="x"
+      onclick={() => (design ? store.setDesignChat(false) : store.closeGraphChat())}
+      aria-label={t("panel.agentClose")}
+      title={t("panel.agentClose")}>×</button
+    >
   </div>
+  {#if !design}
   <div class="ctx">
     <div class="mono ctxlab">{t("kb.agentContext")}</div>
     {#if store.graphChips.length}
@@ -65,6 +91,7 @@
       <p class="ctxnone">{t("kb.agentNothing")}</p>
     {/if}
   </div>
+  {/if}
   <Timeline />
   <Composer />
 </aside>
