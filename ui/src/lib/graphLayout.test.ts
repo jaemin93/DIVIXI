@@ -100,7 +100,7 @@ test("a query reaches nodes whose names hold its words, and their neighbours, be
   const nodes = [
     { id: 1, name: "Query Engine" },
     { id: 2, name: "Batch Query Engine" },
-    { id: 3, name: "Gateway" },
+    { id: 3, name: "Router" },
     { id: 4, name: "Scheduler" },
     { id: 5, name: "Theme Store" },
     { id: 6, name: "query-engine-cli" },
