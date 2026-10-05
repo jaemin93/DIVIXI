@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { indexProgress } from "./indexProgress.ts";
+import { docTrouble, indexProgress } from "./indexProgress.ts";
 
 const off = { enabled: false, embedded: 0, failed: 0, total: 0, error: "" };
 const docs = (...status: string[]) => status.map((s) => ({ status: s }));
@@ -27,4 +27,13 @@ test("embedding that is finished, off, or stopped by an error says nothing", () 
   assert.equal(indexProgress(docs("synced"), { enabled: true, embedded: 98, failed: 2, total: 100, error: "" }), null, "the refused ones are done too");
   assert.equal(indexProgress(docs("synced"), { enabled: false, embedded: 0, failed: 0, total: 100, error: "" }), null);
   assert.equal(indexProgress(docs("synced"), { enabled: true, embedded: 10, failed: 0, total: 100, error: "401" }), null, "the error banner says it instead");
+});
+
+test("documents that need the person: gone or failed, counted, the first in list order", () => {
+  const src = (id: string, status: string) => ({ id, status });
+  assert.equal(docTrouble([]), null);
+  assert.equal(docTrouble([src("a", "synced"), src("b", "indexing"), src("c", "pending")]), null, "work in progress is not trouble");
+  assert.equal(docTrouble([src("a", "synced"), src("b", "duplicate")]), null, "a duplicate is a copy, not a fault");
+  assert.deepEqual(docTrouble([src("a", "synced"), src("b", "missing"), src("c", "error")]), { count: 2, first: "b" });
+  assert.deepEqual(docTrouble([src("x", "error")]), { count: 1, first: "x" });
 });

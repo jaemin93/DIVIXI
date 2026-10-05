@@ -7,7 +7,8 @@
   import Icon from "./Icon.svelte";
   import { whenFull, whenLabel } from "./time";
   import { t } from "./i18n.svelte";
-  import { indexProgress } from "./indexProgress";
+  import { docTrouble, indexProgress } from "./indexProgress";
+  import { tick } from "svelte";
 
   /**
    * The knowledge library, after Kiro Crew's: the items agents can search
@@ -49,6 +50,23 @@
   const current = $derived(kb.indexing.find((s) => s.status === "indexing"));
   /** Indexing under way, for the small mark on the List and Graph tabs; null when done. */
   const progress = $derived(indexProgress(kb.sources, kb.embedding));
+  /** Documents that are gone or failed to index, for the same small line. */
+  const trouble = $derived(docTrouble(kb.sources));
+  /** A source just brought into view from that line, outlined for a moment. */
+  let flashed = $state("");
+
+  /** Go to the Sources tab and bring the first document that needs attention into view. */
+  async function showTrouble() {
+    const id = trouble?.first;
+    await kb.setTab("sources");
+    if (!id) return;
+    await tick();
+    document.getElementById(`kb-source-${id}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    flashed = id;
+    setTimeout(() => {
+      if (flashed === id) flashed = "";
+    }, 1800);
+  }
 
   function name(s: KSource | undefined, id: string): string {
     return s ? kb.nameOf(s) : id;
@@ -138,11 +156,20 @@
         <span class="dim">· {t("kb.syncedCount", { done: kb.syncedCount, total: kb.sources.length })}</span>
       {/if}
     </div>
-    {:else if progress}
-      <!-- Elsewhere, only while indexing runs: a small mark, gone when it is done. -->
+    {:else if progress || trouble}
+      <!-- Elsewhere, only when there is something to say: indexing under way, and documents
+           that need the person (gone, or failed), the latter a link to them on Sources. -->
       <div class="indexing mono" role="status">
-        <span class="pulse"></span>
-        <span>{t("kb.indexingSmall", { done: progress.done, total: progress.total })}</span>
+        {#if progress}
+          <span class="pulse"></span>
+          <span>{t("kb.indexingSmall", { done: progress.done, total: progress.total })}</span>
+        {/if}
+        {#if progress && trouble}<span class="sep" aria-hidden="true">·</span>{/if}
+        {#if trouble}
+          <button class="trouble" onclick={showTrouble} title={t("kb.troubleHint")}>
+            <span class="tdot" aria-hidden="true"></span>{t("kb.troubleSmall", { n: trouble.count })}
+          </button>
+        {/if}
       </div>
     {/if}
 
@@ -231,6 +258,8 @@
         {@const art = kb.artifactOf(s.id)}
         <div
           class="source"
+          class:flash={flashed === s.id}
+          id="kb-source-{s.id}"
           style="border-left-color: {art?.color || 'transparent'}"
           oncontextmenu={(e) => {
             e.preventDefault();
@@ -369,6 +398,41 @@
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--lab);
+  }
+
+  .indexing .sep {
+    color: var(--lines);
+  }
+
+  /* Documents that need the person: a quiet link to them on the Sources tab. */
+  .trouble {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    color: var(--deltx);
+  }
+
+  .trouble:hover {
+    text-decoration: underline;
+  }
+
+  .tdot {
+    width: 6px;
+    height: 6px;
+    border: 1px solid var(--deltx);
+    transform: rotate(45deg);
+  }
+
+  .source.flash {
+    outline: 1px solid var(--deltx);
+    outline-offset: 2px;
+    transition: outline-color 0.3s;
   }
 
   .indexing .pulse {

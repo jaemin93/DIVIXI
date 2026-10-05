@@ -26,3 +26,16 @@ export function indexProgress(
   if (e.enabled && !e.error && e.total > 0 && e.embedded + e.failed < e.total) return { kind: "embed", done: e.embedded, total: e.total };
   return null;
 }
+
+/**
+ * Documents that need the person: a file that is gone, or one indexing
+ * failed on. A duplicate is not counted: it is a copy, indexed once, and the
+ * Sources tab already says whose. `first` is the one to show first, in the
+ * order the Sources tab lists them.
+ */
+export type DocTrouble = { count: number; first: string };
+
+export function docTrouble(sources: { id: string; status: string }[]): DocTrouble | null {
+  const bad = sources.filter((s) => s.status === "missing" || s.status === "error");
+  return bad.length ? { count: bad.length, first: bad[0].id } : null;
+}
