@@ -981,6 +981,20 @@ async fn conductor_run(state: &AppState, track: &str) -> Option<String> {
 /// Where an agent's permission question goes. A worker's goes to its
 /// conductor, which answers for the human; the conductor's own, and an
 /// artifact agent's, go to the human as a card (nobody above them answers).
+/// Who a permission card says is asking.
+fn asker_name(artifact: bool, knowledge: bool, routine: bool, ko: bool) -> &'static str {
+    match (artifact, knowledge, routine, ko) {
+        (true, true, _, true) => "지식 에이전트",
+        (true, true, _, false) => "The knowledge agent",
+        (true, false, _, true) => "디자인 에이전트",
+        (true, false, _, false) => "The design agent",
+        (_, _, true, true) => "되풀이",
+        (_, _, true, false) => "The routine",
+        (_, _, _, true) => "지휘자",
+        (_, _, _, false) => "The conductor",
+    }
+}
+
 pub fn route_permission(app: &AppHandle, track: &str, session: &str, run: &str, event: &AgentEvent) {
     let AgentEvent::Permission { request, title, tool_kind, input, options } = event else {
         return;
@@ -992,14 +1006,13 @@ pub fn route_permission(app: &AppHandle, track: &str, session: &str, run: &str, 
     let routine = track.starts_with("routine:");
     if artifact || routine || session == CONDUCTOR_SESSION {
         let ko = state.store.get_meta("setting:language").ok().flatten().as_deref() != Some("en");
-        let who = match (artifact, routine, ko) {
-            (true, _, true) => "디자인 에이전트",
-            (true, _, false) => "The design agent",
-            (_, true, true) => "되풀이",
-            (_, true, false) => "The routine",
-            (_, _, true) => "지휘자",
-            (_, _, false) => "The conductor",
-        };
+        // An artifact's agent by its kind: a design's, or the knowledge agent.
+        let knowledge = artifact
+            && track
+                .strip_prefix("artifact:")
+                .and_then(|id| state.store.artifact(id).ok().flatten())
+                .is_some_and(|(a, _)| a.kind == crate::knowledge::GRAPH_KIND);
+        let who = asker_name(artifact, knowledge, routine, ko);
         let question = if ko { format!("{who}가 허락을 구합니다: {title}") } else { format!("{who} asks to: {title}") };
         let mut context = tool_kind.clone();
         if !input.is_empty() {
@@ -4212,5 +4225,20 @@ mod folder_tests {
         assert!(super::climbs_out("a/../../x"));
         assert!(!super::climbs_out("a/../b.md"));
         assert!(!super::climbs_out("./notes/x.md"));
+    }
+}
+
+#[cfg(test)]
+mod asker_tests {
+    use super::asker_name;
+
+    #[test]
+    fn a_permission_card_names_the_agent_that_asks() {
+        assert_eq!(asker_name(true, true, false, true), "지식 에이전트");
+        assert_eq!(asker_name(true, true, false, false), "The knowledge agent");
+        assert_eq!(asker_name(true, false, false, true), "디자인 에이전트");
+        assert_eq!(asker_name(true, false, false, false), "The design agent");
+        assert_eq!(asker_name(false, false, true, true), "되풀이");
+        assert_eq!(asker_name(false, false, false, false), "The conductor");
     }
 }

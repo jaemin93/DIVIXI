@@ -155,14 +155,9 @@ async fn open(app: &AppHandle, a: &ArtifactInfo) -> Result<(Arc<AgentSession>, b
         let spec = state.spec_for(&a.agent)?;
         let mcp = McpServer::start("divixi", tools).await.map_err(|e| e.to_string())?;
         let cwd = workdir(&state, &a.id)?;
+        // The knowledge agent opens as a design's does: the mode chosen in the
+        // composer, else the agent's most permissive one.
         let mut opts = session_options(&state, &a.agent, &cwd.display().to_string(), &a.config, Some(&mcp));
-        if a.kind == crate::knowledge::GRAPH_KIND {
-            // It reads the person's documents, untrusted text: never in a
-            // mode that acts unasked (as the documents' describing agents).
-            // Its library tools are let through as it asks (see `gate_graph`).
-            opts.restricted = true;
-            opts.mode = None;
-        }
         let key = format!("artifact_session:{}:{}", a.id, a.agent);
         opts.resume = state.store.get_meta(&key).ok().flatten();
         tracing::info!(artifact = %a.id, kind = %a.kind, agent = %a.agent, resume = ?opts.resume, "opening artifact session");
@@ -262,7 +257,6 @@ pub async fn turn(
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tauri::async_runtime::spawn(pump(app.clone(), run_key(&id), SESSION.to_string(), run.clone(), rx));
         let _ = tx.send(AgentEvent::Started { session_id: session.session_id().to_string(), cwd: cwd.display().to_string() });
-        let tx = if a.kind == crate::knowledge::GRAPH_KIND { gate_graph(session.clone(), tx) } else { tx };
 
         let app_t = app.clone();
         let (id_t, run_t) = (id.clone(), run.clone());
@@ -290,32 +284,6 @@ pub async fn turn(
         state.artifacts.busy.lock().remove(&id);
     }
     outcome
-}
-
-/// The graph conversation's events on their way to the timeline. Its session
-/// runs in a mode that asks before acting; what it may do is read the library
-/// through Divixi's two tools, so those questions are answered yes here and
-/// every other one no, and none of them waits on the person.
-fn gate_graph(session: Arc<AgentSession>, out: tokio::sync::mpsc::UnboundedSender<AgentEvent>) -> tokio::sync::mpsc::UnboundedSender<AgentEvent> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-    tauri::async_runtime::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            if let AgentEvent::Permission { request, title, options, .. } = &event {
-                let allow = if crate::knowledge::is_library_tool(title) { crate::knowledge::allow_choice(options) } else { None };
-                if allow.is_none() {
-                    tracing::warn!(%title, "the graph agent asked to do more than read the library; refused");
-                }
-                if let Err(err) = session.answer_permission(request, allow.as_deref()) {
-                    tracing::warn!(%err, "could not answer the graph agent's question");
-                }
-                continue;
-            }
-            if out.send(event).is_err() {
-                break;
-            }
-        }
-    });
-    tx
 }
 
 /// Answer a permission question an artifact's agent is waiting on.

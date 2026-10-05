@@ -33,10 +33,11 @@ use crate::{embed, AppState, SETTING_PREFIX};
 
 /// The artifact kind a library document is listed as.
 pub const KIND: &str = "knowledge";
-/// The knowledge graph's conversation: one for every library (it is told the
-/// library on screen with each message), an artifact so it runs like a
-/// design's (its own agent, session and turns), apart from the documents
-/// (`KIND`), which are artifacts too.
+/// The knowledge agent's conversation (kind "graph", kept for the artifacts
+/// already stored): one for every library (it is told the library on screen
+/// with each message), an artifact so it runs like a design's (its own
+/// agent, session and turns), apart from the documents (`KIND`), which are
+/// artifacts too.
 pub const GRAPH_KIND: &str = "graph";
 /// Window event carrying a source whenever it changes.
 const EVENT: &str = "knowledge";
@@ -1056,33 +1057,6 @@ fn find_library(db: &KnowledgeDb, name: &str) -> anyhow::Result<Option<i64>> {
     Ok(None)
 }
 
-/// The tools of [`library_tools`], by name.
-const LIBRARY_TOOLS: [&str; 2] = ["knowledge_search", "knowledge_list_sources"];
-
-/// Whether a permission question is about one of Divixi's library tools: its
-/// title is the tool's name, or names Divixi's server and ends in it
-/// (`mcp__divixi__knowledge_search`, `divixi.knowledge_search`). Another
-/// server's tool of the same name is not.
-pub fn is_library_tool(title: &str) -> bool {
-    let title = title.trim();
-    LIBRARY_TOOLS.iter().any(|tool| {
-        title == *tool
-            || title
-                .strip_suffix(tool)
-                .is_some_and(|head| head.ends_with(['_', '.', '/', ':']) && head.trim_end_matches(['_', '.', '/', ':']).rsplit(['_', '.', '/', ':', ' ']).next() == Some("divixi"))
-    })
-}
-
-/// The answer that lets a tool run this once: the agent's "allow once", else
-/// another allowing answer; never one that allows from now on.
-pub fn allow_choice(options: &[orchestra_core::PermissionChoice]) -> Option<String> {
-    options
-        .iter()
-        .find(|o| o.kind == "allow_once")
-        .or_else(|| options.iter().find(|o| o.kind.starts_with("allow") && o.kind != "allow_always"))
-        .map(|o| o.id.clone())
-}
-
 /// Most entities and passages one message carries; past these the picks are cut.
 pub const MAX_PICKED_ENTITIES: usize = 80;
 pub const MAX_PICKED_PASSAGES: usize = 12;
@@ -1139,9 +1113,9 @@ pub fn graph_context(db: &KnowledgeDb, selected: &[String]) -> Result<String, St
 /// What the graph conversation's agent is told once, at the start of its session.
 pub fn graph_preamble(lang: &str) -> String {
     if lang == "ko" {
-        return "당신은 DIVIXI 지식 라이브러리의 그래프 파트너입니다. 사람은 라이브러리 문서에서 뽑은 엔티티 그래프를 보면서, 그중 일부(엔티티, 그 사이 관계, 엔티티를 언급하는 구절)를 골라 질문합니다. 고른 것은 메시지 끝의 [selection from the knowledge graph] 블록으로 옵니다. 사람이 라이브러리 하나를 보고 있으면 [library on screen: …] 줄이 함께 옵니다.\n\n- 고른 것에 근거해 답하고, 근거가 된 문서(파일 이름)를 밝힙니다.\n- 고른 것만으로 부족하면 knowledge_search로 라이브러리를 더 찾습니다(무엇이 있는지는 knowledge_list_sources). 기본은 모든 라이브러리이고, 보고 있는 라이브러리만 찾으려면 library에 그 이름을 줍니다. 그래도 없으면 없다고 말합니다. 추측은 추측이라고 밝힙니다.\n- 라이브러리는 읽기만 합니다. 파일을 고치거나 명령을 실행하지 않습니다.\n- 짧고 분명하게, 사람이 쓴 언어로 답합니다.".to_string();
+        return "당신은 DIVIXI 지식 라이브러리의 지식 에이전트입니다. 사람은 라이브러리 문서에서 뽑은 엔티티 그래프를 보면서, 그중 일부(엔티티, 그 사이 관계, 엔티티를 언급하는 구절)를 골라 질문합니다. 고른 것은 메시지 끝의 [selection from the knowledge graph] 블록으로 옵니다. 사람이 라이브러리 하나를 보고 있으면 [library on screen: …] 줄이 함께 옵니다.\n\n- 고른 것에 근거해 답하고, 근거가 된 문서(파일 이름)를 밝힙니다.\n- 고른 것만으로 부족하면 knowledge_search로 라이브러리를 더 찾습니다(무엇이 있는지는 knowledge_list_sources). 기본은 모든 라이브러리이고, 보고 있는 라이브러리만 찾으려면 library에 그 이름을 줍니다. 그래도 없으면 없다고 말합니다. 추측은 추측이라고 밝힙니다.\n- 라이브러리는 읽기만 합니다. 파일을 고치거나 명령을 실행하지 않습니다.\n- 짧고 분명하게, 사람이 쓴 언어로 답합니다.".to_string();
     }
-    "You are the graph partner for a DIVIXI knowledge library. The human is looking at the entity graph drawn from the library's documents, picks part of it (entities, the relations among them, passages that mention them) and asks about it. What was picked comes at the end of the message, in a [selection from the knowledge graph] block; when the human is looking at one library, a [library on screen: …] line comes with it.\n\n- Answer from what was picked, and name the documents (file names) the answer rests on.\n- When the pick is not enough, search the library with knowledge_search (knowledge_list_sources shows what is there). It searches every library; give library the name on screen to search that one alone. If it is not there either, say so; say when something is a guess.\n- The library is read only to you: do not edit files or run commands.\n- Be brief and plain, in the language the human writes in.".to_string()
+    "You are the knowledge agent of a DIVIXI knowledge library. The human is looking at the entity graph drawn from the library's documents, picks part of it (entities, the relations among them, passages that mention them) and asks about it. What was picked comes at the end of the message, in a [selection from the knowledge graph] block; when the human is looking at one library, a [library on screen: …] line comes with it.\n\n- Answer from what was picked, and name the documents (file names) the answer rests on.\n- When the pick is not enough, search the library with knowledge_search (knowledge_list_sources shows what is there). It searches every library; give library the name on screen to search that one alone. If it is not there either, say so; say when something is a guess.\n- The library is read only to you: do not edit files or run commands.\n- Be brief and plain, in the language the human writes in.".to_string()
 }
 
 #[cfg(test)]
@@ -1156,20 +1130,6 @@ mod tests {
         let (e, i) = parse_picks(&many);
         assert_eq!((e.len(), i.len()), (MAX_PICKED_ENTITIES, MAX_PICKED_PASSAGES), "cut at the limits");
         assert_eq!(parse_picks(&[]), (vec![], vec![]));
-    }
-
-    #[test]
-    fn the_graph_agent_may_read_the_library_and_nothing_else() {
-        for yes in ["mcp__divixi__knowledge_search", "mcp__divixi__knowledge_list_sources", "divixi.knowledge_search", "knowledge_search", " divixi/knowledge_search "] {
-            assert!(is_library_tool(yes), "{yes}");
-        }
-        for no in ["mcp__other__knowledge_search", "Bash", "mcp__divixi__design_apply", "knowledge_search_all", "rm -rf x knowledge_search", "notdivixi.knowledge_search", ""] {
-            assert!(!is_library_tool(no), "{no}");
-        }
-        let choice = |id: &str, kind: &str| orchestra_core::PermissionChoice { id: id.into(), name: id.into(), kind: kind.into() };
-        assert_eq!(allow_choice(&[choice("a", "allow_always"), choice("o", "allow_once"), choice("r", "reject_once")]).as_deref(), Some("o"));
-        assert_eq!(allow_choice(&[choice("a", "allow_always"), choice("r", "reject_once")]), None, "never from now on");
-        assert_eq!(allow_choice(&[]), None);
     }
 
     #[test]
@@ -1196,9 +1156,10 @@ mod tests {
     }
 
     #[test]
-    fn the_graph_partner_is_told_where_the_pick_is_and_what_it_may_do() {
+    fn the_knowledge_agent_is_told_where_the_pick_is_and_what_it_may_do() {
         for lang in ["en", "ko"] {
             let p = graph_preamble(lang);
+            assert!(p.contains("knowledge agent") || p.contains("지식 에이전트"), "{lang}: its name");
             assert!(p.contains("[selection from the knowledge graph]"), "{lang}");
             assert!(p.contains("knowledge_search") && p.contains("knowledge_list_sources"), "{lang}");
             assert!(p.contains("[library on screen:"), "{lang}");
