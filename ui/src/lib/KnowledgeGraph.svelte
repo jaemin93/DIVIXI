@@ -1,6 +1,23 @@
+<script module lang="ts">
+  /**
+   * Where each entity was last laid out, and where the camera was, kept for as
+   * long as the app runs. The graph tab is mounted afresh every time it is
+   * opened; without this it started from scratch and shook into place again.
+   */
+  const remembered = new Map<string, { x: number; y: number }>();
+  /** Keyed by id and name together: another instance's library reuses the same ids for other entities. */
+  const placeKey = (n: { id: number; name: string }) => `${n.id}:${n.name}`;
+  let rememberedView: { x: number; y: number; k: number } | null = null;
+
+  /** A marker's shape; the template's legend draws them too, so the type lives here. */
+  type Glyph = "square" | "diamond" | "circle" | "block" | "dot" | "triangle";
+</script>
+
 <script lang="ts">
   import { kb, type KItem, type KNode } from "./knowledge.svelte";
+  import { untrack } from "svelte";
   import { t } from "./i18n.svelte";
+  import { placeNew, queryReach, settle, settleBudget, tick, visibleIds, STILL } from "./graphLayout";
 
   /**
    * The entity graph, drawn as a plate: a small force layout on a canvas
@@ -11,7 +28,6 @@
    * zoom, a node to move it; a click shows the node and the items that
    * mention it.
    */
-  type Glyph = "square" | "diamond" | "circle" | "block" | "dot" | "triangle";
   const KIND_GLYPHS: Record<string, Glyph> = {
     service: "square",
     technology: "diamond",
@@ -21,7 +37,7 @@
     api: "triangle",
   };
 
-  type Body = { node: KNode; x: number; y: number; vx: number; vy: number; r: number; pinned: boolean };
+  type Body = { id: number; node: KNode; x: number; y: number; vx: number; vy: number; r: number; pinned: boolean };
 
   let canvas = $state<HTMLCanvasElement>();
   let running = $state(true);
@@ -30,9 +46,26 @@
 
   let bodies: Body[] = [];
   let links: { a: Body; b: Body }[] = [];
-  let view = { x: 0, y: 0, k: 1 };
+  /** What is simulated and drawn: every body, or only a focus's. */
+  let shown: Body[] = [];
+  let shownLinks: { a: Body; b: Body }[] = [];
+  let view = rememberedView ? { ...rememberedView } : { x: 0, y: 0, k: 1 };
   let frame = 0;
-  let heat = 1;
+  /** The live layout's temperature. Zero once settled: a still plate stays still. */
+  let heat = 0;
+
+  /**
+   * Focus: a part of the graph instead of all of it. A node chosen as the
+   * centre shows it and its neighbours `depth` relations out; otherwise a
+   * shown query shows only the entities it reaches, unless the person asked
+   * for everything. `visible` is null when the whole graph is shown.
+   */
+  let centre = $state<number | null>(null);
+  let depth = $state(1);
+  let relatedOnly = $state(true);
+  let visible = $state<Set<number> | null>(null);
+  /** The whole graph's positions, put aside while a focus moves its part around. */
+  let fullPos: Map<number, { x: number; y: number }> | null = null;
 
   /** The best-connected entity, drawn as the plate's centre mark. */
   let hub: Body | null = null;
@@ -47,9 +80,16 @@
    * A kind keeps its nodes in full ink and fades the rest.
    */
   let section = $state<string | null>(null);
-  /** The entities the shown search reaches; empty when there is no query or it names none. */
-  const queried = $derived(new Set(kb.shownQuery ? kb.queryEntities.related : []));
-  const seeded = $derived(new Set(kb.shownQuery ? kb.queryEntities.seeds : []));
+  /**
+   * The entities the shown search reaches: the core's answer, widened to
+   * nodes whose names hold the query's words (see queryReach). Empty when
+   * there is no query or it reaches nothing.
+   */
+  const reach = $derived(
+    kb.shownQuery ? queryReach(kb.queryEntities, kb.graph.nodes, kb.graph.edges, kb.shownQuery) : { seeds: new Set<number>(), related: new Set<number>() },
+  );
+  const queried = $derived(reach.related);
+  const seeded = $derived(reach.seeds);
   /** Documents the shown search found passages in. */
   const querySources = $derived(new Set(kb.items.map((i) => i.source_id)).size);
 
@@ -65,18 +105,24 @@
 
   function build() {
     const g = kb.graph;
+    // A rebuild while focused starts from the whole layout, not the focus's.
+    if (fullPos) restore(fullPos);
+    fullPos = null;
+    visible = null;
     const old = new Map(bodies.map((b) => [b.node.id, b]));
-    bodies = g.nodes.map((node, i) => {
-      const prev = old.get(node.id);
-      const a = (i / Math.max(1, g.nodes.length)) * Math.PI * 2;
+    const placed = new Set<number>();
+    bodies = g.nodes.map((node) => {
+      const prev = old.get(node.id) ?? remembered.get(placeKey(node));
+      if (prev) placed.add(node.id);
       return {
+        id: node.id,
         node,
-        x: prev?.x ?? Math.cos(a) * 120 + (Math.random() - 0.5) * 20,
-        y: prev?.y ?? Math.sin(a) * 120 + (Math.random() - 0.5) * 20,
+        x: prev?.x ?? 0,
+        y: prev?.y ?? 0,
         vx: 0,
         vy: 0,
         r: 2.5 + Math.min(4, Math.sqrt(node.mentions) * 1.1),
-        pinned: prev?.pinned ?? false,
+        pinned: old.get(node.id)?.pinned ?? false,
       };
     });
     const byId = new Map(bodies.map((b) => [b.node.id, b]));
@@ -85,15 +131,37 @@
       const b = byId.get(e.target);
       return a && b ? [{ a, b }] : [];
     });
-    // Most links, then most mentions; only once there is a web to be the centre of.
+    // Lay out what has no place yet, off screen, before anything is drawn:
+    // the first frame shows a settled plate, not an explosion. Nodes that
+    // already had a place keep it, so a reload or a return to the tab does
+    // not move them.
+    const fresh = bodies.length - placed.size;
+    placeNew(bodies, g.edges, placed);
+    if (fresh) settle(bodies, links, fresh === bodies.length ? 1 : 0.35, settleBudget(bodies.length));
+    remember();
+    if (hovered && !bodies.includes(hovered)) hovered = null;
+    // A reload may take the chosen kind away.
+    if (section && section !== "*" && !g.nodes.some((n) => n.kind === section)) section = null;
+    // The camera is framed the first time this tab draws anything (unless it
+    // remembers where it was); a later reload leaves it where the person put it.
+    const first = !built;
+    built = true;
+    applyFocus(first && !rememberedView ? "jump" : "keep");
+  }
+
+  /** Whether this mount has drawn the graph yet. */
+  let built = false;
+
+  /** The best-connected node of what is shown: most links, then most mentions; none without a web. */
+  function findHub() {
     const degree = new Map<Body, number>();
-    for (const { a, b } of links) {
+    for (const { a, b } of shownLinks) {
       degree.set(a, (degree.get(a) ?? 0) + 1);
       degree.set(b, (degree.get(b) ?? 0) + 1);
     }
     hub = null;
     hubLinks = 0;
-    for (const b of bodies) {
+    for (const b of shown) {
       const d = degree.get(b) ?? 0;
       if (d > hubLinks || (d === hubLinks && hub && b.node.mentions > hub.node.mentions)) {
         hub = b;
@@ -101,12 +169,82 @@
       }
     }
     if (hubLinks < 3) hub = null;
-    if (hovered && !bodies.includes(hovered)) hovered = null;
-    // A reload may take the chosen kind away.
-    if (section && section !== "*" && !g.nodes.some((n) => n.kind === section)) section = null;
-    heat = 1;
+  }
+
+  function snapshot(): Map<number, { x: number; y: number }> {
+    return new Map(bodies.map((b) => [b.id, { x: b.x, y: b.y }]));
+  }
+
+  function restore(pos: Map<number, { x: number; y: number }>) {
+    for (const b of bodies) {
+      const p = pos.get(b.id);
+      if (p) {
+        b.x = p.x;
+        b.y = p.y;
+      }
+      b.vx = 0;
+      b.vy = 0;
+    }
+  }
+
+  /** Keep the whole layout for the next time the tab opens. */
+  function remember() {
+    const pos = fullPos ?? snapshot();
+    for (const b of bodies) {
+      const p = pos.get(b.id);
+      if (p) remembered.set(placeKey(b.node), p);
+    }
+  }
+
+  /**
+   * Show what the focus asks for. A focus lays its part out on its own,
+   * gathered round the middle and settled off screen, then frames it; leaving
+   * the focus puts the whole layout back exactly as it was.
+   */
+  function applyFocus(camera: "keep" | "ease" | "jump") {
+    const next = visibleIds({ nodes: kb.graph.nodes, edges: kb.graph.edges, related: [...queried], relatedOnly, centre, depth });
+    if (fullPos) restore(fullPos);
+    fullPos = next ? (fullPos ?? snapshot()) : null;
+    visible = next;
+    shown = next ? bodies.filter((b) => next.has(b.id)) : bodies;
+    const inShown = new Set(shown);
+    shownLinks = next ? links.filter((l) => inShown.has(l.a) && inShown.has(l.b)) : links;
+    if (next && shown.length) {
+      const cx = shown.reduce((sum, b) => sum + b.x, 0) / shown.length;
+      const cy = shown.reduce((sum, b) => sum + b.y, 0) / shown.length;
+      for (const b of shown) {
+        b.x -= cx;
+        b.y -= cy;
+      }
+      settle(shown, shownLinks, 0.6, settleBudget(shown.length));
+    }
+    findHub();
+    heat = 0;
+    if (camera !== "keep") frameAll(camera === "ease");
     kick();
   }
+
+  /** A focus's inputs changed: the query's entities, "show all", the centre or its depth. */
+  $effect(() => {
+    void queried;
+    void relatedOnly;
+    void centre;
+    void depth;
+    // Only the inputs above: what applyFocus reads besides is not a reason to run it.
+    untrack(() => {
+      if (bodies.length) applyFocus("ease");
+    });
+  });
+
+  /** A new search asks a new question: show what it reaches, not an old centre. */
+  let lastQuery = kb.shownQuery;
+  $effect(() => {
+    if (kb.shownQuery !== lastQuery) {
+      lastQuery = kb.shownQuery;
+      relatedOnly = true;
+      centre = null;
+    }
+  });
 
   /** Below this the layout has settled and the loop rests. */
   const SETTLED = 0.021;
@@ -149,54 +287,8 @@
     };
   }
 
-  function step() {
-    const n = bodies.length;
-    for (let i = 0; i < n; i++) {
-      const a = bodies[i];
-      for (let j = i + 1; j < n; j++) {
-        const b = bodies[j];
-        let dx = b.x - a.x;
-        let dy = b.y - a.y;
-        let d2 = dx * dx + dy * dy;
-        if (d2 < 0.01) {
-          dx = Math.random() - 0.5;
-          dy = Math.random() - 0.5;
-          d2 = 0.25;
-        }
-        if (d2 > 90000) continue;
-        const f = (1200 / d2) * heat;
-        const d = Math.sqrt(d2);
-        a.vx -= (dx / d) * f;
-        a.vy -= (dy / d) * f;
-        b.vx += (dx / d) * f;
-        b.vy += (dy / d) * f;
-      }
-    }
-    for (const { a, b } of links) {
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const d = Math.sqrt(dx * dx + dy * dy) || 1;
-      const f = (d - 90) * 0.02 * heat;
-      a.vx += (dx / d) * f;
-      a.vy += (dy / d) * f;
-      b.vx -= (dx / d) * f;
-      b.vy -= (dy / d) * f;
-    }
-    for (const b of bodies) {
-      b.vx -= b.x * 0.004 * heat;
-      b.vy -= b.y * 0.004 * heat;
-      if (b.pinned) {
-        b.vx = 0;
-        b.vy = 0;
-        continue;
-      }
-      b.vx *= 0.82;
-      b.vy *= 0.82;
-      b.x += b.vx;
-      b.y += b.vy;
-    }
-    heat = Math.max(0.02, heat * 0.995);
-  }
+  /** How fast the live layout cools after a drag; it is still within a second or so. */
+  const COOLING = 0.95;
 
   function glyphOf(kind: string): Glyph {
     return KIND_GLYPHS[kind] ?? "square";
@@ -281,7 +373,7 @@
       ctx.stroke();
     }
 
-    const pick = picked ? bodies.find((b) => b.node.id === picked!.id) : undefined;
+    const pick = picked ? shown.find((b) => b.node.id === picked!.id) : undefined;
     const lit = (b: Body) => b === pick || b === hovered;
     // Two things fade a node: the overview rail's kind, and the shown query.
     // The query is the question asked, so it outranks the rail: a node the
@@ -302,7 +394,7 @@
     if (hub) {
       let sum = 0;
       let n = 0;
-      for (const { a, b } of links) {
+      for (const { a, b } of shownLinks) {
         const o = a === hub ? b : b === hub ? a : null;
         if (!o) continue;
         sum += Math.hypot(o.x - hub.x, o.y - hub.y);
@@ -323,7 +415,7 @@
     const warm: typeof links = [];
     const hot: typeof links = [];
     const dim: typeof links = [];
-    for (const l of links) {
+    for (const l of shownLinks) {
       if (lit(l.a) || lit(l.b)) hot.push(l);
       else if (faded(l.a) || faded(l.b)) dim.push(l);
       else if (asked || l.a === hub || l.b === hub) warm.push(l);
@@ -350,7 +442,7 @@
 
     // Markers: hollow on paper, solid for the filled kinds, red when lit.
     ctx.lineWidth = 1;
-    for (const b of bodies) {
+    for (const b of shown) {
       if (b === hub) continue;
       const g = glyphOf(b.node.kind);
       const r = size(b);
@@ -396,8 +488,8 @@
     // Labels: spaced mono capitals; under the ones that matter, a line of grey meta.
     // Placed in order of importance (what is lit, the hub, the most mentioned), and a
     // label that would land on one already placed is left out rather than overprinted.
-    const order = bodies
-      .filter((b) => (!faded(b) || seeded.has(b.node.id)) && (b === hub || lit(b) || seeded.has(b.node.id) || b.node.mentions >= 2 || bodies.length <= SMALL_GRAPH || k > 1.4))
+    const order = shown
+      .filter((b) => (!faded(b) || seeded.has(b.node.id)) && (b === hub || lit(b) || seeded.has(b.node.id) || b.node.mentions >= 2 || shown.length <= SMALL_GRAPH || k > 1.4))
       .sort(
         (p, q) =>
           Number(lit(q)) - Number(lit(p)) ||
@@ -406,7 +498,7 @@
           q.node.mentions - p.node.mentions,
       );
     // Markers in full ink are already on the plate: no label may cover one. Faded ones may be written over.
-    const taken: [number, number, number, number][] = bodies.filter((b) => !faded(b)).map((b) => {
+    const taken: [number, number, number, number][] = shown.filter((b) => !faded(b)).map((b) => {
       const r = b === hub ? ringOf(k) : size(b) * 1.3;
       return [sx(b.x) - r, sy(b.y) - r, sx(b.x) + r, sy(b.y) + r];
     });
@@ -520,7 +612,12 @@
   }
 
   function loop() {
-    if (running) step();
+    if (running && heat > SETTLED) {
+      const moved = tick(shown, shownLinks, heat);
+      heat *= COOLING;
+      // Stop as soon as nothing visibly moves, rather than idling warm and trembling.
+      if (moved < STILL && !drag) heat = 0;
+    }
     if (glide) {
       const p = Math.min(1, (performance.now() - glide.t0) / GLIDE_MS);
       const e = 1 - (1 - p) ** 3;
@@ -531,6 +628,10 @@
     draw();
     // Keep going while the layout moves, a node is held or the camera glides; otherwise rest until kicked.
     frame = (running && heat > SETTLED) || drag || glide ? requestAnimationFrame(loop) : 0;
+    if (!frame) {
+      rememberedView = { ...view };
+      remember();
+    }
   }
 
   /** A section is never framed further out than this, however its nodes lie. */
@@ -544,14 +645,24 @@
     return [sorted[Math.floor((n - 1) * 0.1)], sorted[Math.ceil((n - 1) * 0.9)]];
   }
 
+  /** Frame what is shown; `ease` glides there, otherwise the camera is simply put there. */
+  function frameAll(ease: boolean) {
+    frame_(shown, ease);
+  }
+
   /** Move the camera to frame a section of the plate: everything, or one kind's nodes. */
   function goTo(next: string) {
     section = next;
-    const set = next === "*" ? bodies : bodies.filter((b) => b.node.kind === next);
+    const set = next === "*" ? shown : shown.filter((b) => b.node.kind === next);
     if (!set.length || !canvas) {
       kick();
       return;
     }
+    frame_(set, true);
+  }
+
+  function frame_(set: Body[], ease: boolean) {
+    if (!set.length || !canvas || !canvas.clientWidth) return;
     // Frame the bulk of the set, not its strays: one node flung far out would
     // otherwise zoom the whole plate away. Past a handful of nodes the box runs
     // from the 10th to the 90th percentile on each axis.
@@ -563,28 +674,40 @@
     const k = Math.min(2.5, Math.max(FRAME_MIN_K, Math.min(w / Math.max(1, x1 - x0 + 120), h / Math.max(1, y1 - y0 + 40))));
     const cx = (x0 + x1) / 2 + 40;
     const cy = (y0 + y1) / 2;
-    glide = { from: { ...view }, to: { x: -cx * k, y: -cy * k, k }, t0: performance.now() };
+    const to = { x: -cx * k, y: -cy * k, k };
+    if (ease) glide = { from: { ...view }, to, t0: performance.now() };
+    else {
+      glide = null;
+      view = to;
+    }
     kick();
   }
 
   /** The rail: the whole plate first, then one stop per kind, most numerous first. */
   const sections = $derived.by(() => {
     const count = new Map<string, number>();
-    for (const n of kb.graph.nodes) count.set(n.kind, (count.get(n.kind) ?? 0) + 1);
+    const nodes = visible ? kb.graph.nodes.filter((n) => visible!.has(n.id)) : kb.graph.nodes;
+    for (const n of nodes) count.set(n.kind, (count.get(n.kind) ?? 0) + 1);
     const byKind = [...count].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-    return [{ id: "*", label: t("kb.graphOverview"), n: kb.graph.nodes.length }, ...byKind.map(([id, n]) => ({ id, label: id, n }))];
+    return [{ id: "*", label: t("kb.graphOverview"), n: nodes.length }, ...byKind.map(([id, n]) => ({ id, label: id, n }))];
   });
 
   $effect(() => {
-    // Rebuild whenever the graph is reloaded.
+    // Rebuild whenever the graph is reloaded, and for nothing else.
     void kb.graph;
-    build();
+    untrack(build);
   });
 
   $effect(() => {
     if (!canvas) return;
     kick();
+    // A still plate draws once; when its box changes size (the window, the
+    // panels, the page settling in) it has to draw again, or the browser
+    // stretches the old picture to fit.
+    const sized = new ResizeObserver(() => kick());
+    sized.observe(canvas);
     return () => {
+      sized.disconnect();
       cancelAnimationFrame(frame);
       frame = 0;
     };
@@ -615,8 +738,8 @@
   }
 
   function hit(p: { x: number; y: number }): Body | undefined {
-    for (let i = bodies.length - 1; i >= 0; i--) {
-      const b = bodies[i];
+    for (let i = shown.length - 1; i >= 0; i--) {
+      const b = shown[i];
       const r = Math.max(b === hub ? 16 : b.r + 3, 6) / view.k;
       if ((b.x - p.x) ** 2 + (b.y - p.y) ** 2 <= r * r) return b;
     }
@@ -697,15 +820,22 @@
   }
 
   function recenter() {
-    view = { x: 0, y: 0, k: 1 };
-    glide = null;
     section = null;
     for (const b of bodies) b.pinned = false;
-    heat = 1;
-    kick();
+    frameAll(true);
+  }
+
+  function clearQuery() {
+    kb.query = "";
+    void kb.search("");
+  }
+
+  function focusOn(id: number) {
+    centre = id;
   }
 
   const kinds = $derived([...new Set(kb.graph.nodes.map((n) => n.kind))]);
+  const centreNode = $derived(centre === null ? null : (kb.graph.nodes.find((n) => n.id === centre) ?? null));
   const sourceName = (id: string) => {
     const s = kb.sources.find((x) => x.id === id);
     return s ? kb.nameOf(s) : id;
@@ -729,10 +859,19 @@
 <div class="graph">
   <div class="bar">
     <span class="mono count">{t("kb.graphCount", { nodes: kb.graph.nodes.length, edges: kb.graph.edges.length })}</span>
+    <input
+      class="gsearch"
+      placeholder={t("kb.graphSearch")}
+      aria-label={t("kb.graphSearch")}
+      bind:value={kb.query}
+      onkeydown={(e) => {
+        if (e.key === "Enter") void kb.search(kb.query);
+        else if (e.key === "Escape" && kb.query) clearQuery();
+      }}
+    />
     <button class="btn sm" onclick={recenter}>{t("kb.recenter")}</button>
     <button class="btn sm" class:on={running} onclick={() => {
         running = !running;
-        if (running) heat = Math.max(heat, 0.3);
         kick();
       }}>{t("kb.physics")}</button>
     <span class="grow"></span>
@@ -751,11 +890,43 @@
         <span>{t("kb.graphFig")} · {running ? t("kb.graphLive") : t("kb.graphStill")}</span>
       </div>
     {/if}
-    {#if kb.shownQuery}
-      <div class="query" aria-live="polite">
-        <div class="mono qlab">{t("kb.graphQuery")}</div>
-        <p class="qtext">{kb.shownQuery}</p>
-        <div class="mono qmeta">{t("kb.graphQueryMeta", { sources: querySources, entities: queried.size })}</div>
+    {#if kb.shownQuery || centreNode}
+      <div class="boxes">
+        {#if centreNode}
+          <div class="query" aria-live="polite">
+            <div class="qhead">
+              <span class="mono qlab">{t("kb.graphFocus")}</span>
+              <span class="grow"></span>
+              {#each [1, 2] as d (d)}
+                <button class="qbtn" class:on={depth === d} aria-pressed={depth === d} onclick={() => (depth = d)}>{t("kb.graphHops", { n: d })}</button>
+              {/each}
+              <button class="x" onclick={() => (centre = null)} aria-label={t("kb.graphLeaveFocus")} title={t("kb.graphLeaveFocus")}>×</button>
+            </div>
+            <p class="qtext">{centreNode.name}</p>
+            <div class="mono qmeta">{t("kb.graphFocusMeta", { nodes: visible?.size ?? 0 })}</div>
+          </div>
+        {/if}
+        {#if kb.shownQuery}
+          <div class="query" aria-live="polite">
+            <div class="qhead">
+              <span class="mono qlab">{t("kb.graphQuery")}</span>
+              <span class="grow"></span>
+              {#if queried.size}
+                <button class="qbtn" class:on={relatedOnly} aria-pressed={relatedOnly} onclick={() => (relatedOnly = true)}>{t("kb.graphRelatedOnly")}</button>
+                <button class="qbtn" class:on={!relatedOnly} aria-pressed={!relatedOnly} onclick={() => (relatedOnly = false)}>{t("kb.graphShowAll")}</button>
+              {/if}
+              <button class="x" onclick={clearQuery} aria-label={t("kb.graphClearQuery")} title={t("kb.graphClearQuery")}>×</button>
+            </div>
+            <p class="qtext">{kb.shownQuery}</p>
+            <div class="mono qmeta">
+              {#if queried.size}
+                {t("kb.graphQueryMeta", { sources: querySources, entities: queried.size })}
+              {:else}
+                {t("kb.graphNoRelated")}
+              {/if}
+            </div>
+          </div>
+        {/if}
       </div>
     {/if}
     {#if kb.graph.nodes.length}
@@ -784,6 +955,9 @@
         </div>
         <div class="dname">{@render glyph(glyphOf(picked.kind), true)}<span>{picked.name}</span></div>
         {#if picked.description}<p class="desc">{picked.description}</p>{/if}
+        {#if centre !== picked.id}
+          <button class="btn sm focusbtn" onclick={() => focusOn(picked!.id)}>{t("kb.graphFocusNode")}</button>
+        {/if}
         <div class="mlab">{t("kb.mentionedIn", { n: pickedItems.length })}</div>
         {#each pickedItems as item (item.id)}
           <div class="mention">
@@ -906,17 +1080,65 @@
     background: var(--kg-acc);
   }
 
-  /* The query box, bottom left above the coordinates: the search the list
-     shows, in serif italic inside a red hairline, and what it found. */
-  .query {
+  /* The query and focus boxes, bottom left above the coordinates: the search
+     the list shows (or a node chosen as centre), in serif italic inside a red
+     hairline, what it found, and the switches that change what is shown. */
+  .boxes {
     position: absolute;
     left: 16px;
     bottom: 34px;
-    width: min(340px, calc(100% - 32px));
-    padding: 9px 12px 10px;
+    width: min(360px, calc(100% - 32px));
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .query {
+    padding: 8px 10px 10px 12px;
     background: var(--kg-paper);
     border: 1px solid var(--kg-acc);
-    pointer-events: none;
+  }
+
+  .qhead {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .qbtn {
+    height: 20px;
+    padding: 0 7px;
+    background: transparent;
+    border: 1px solid var(--lines);
+    color: var(--lab);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .qbtn:hover {
+    color: var(--hi);
+  }
+
+  .qbtn.on {
+    color: var(--kg-acc);
+    border-color: var(--kg-acc);
+  }
+
+  .gsearch {
+    height: 26px;
+    width: 200px;
+    padding: 0 8px;
+    background: var(--inp);
+    border: 1px solid var(--lines);
+    color: var(--txt);
+    font-family: var(--sans);
+    font-size: 12px;
+  }
+
+  .focusbtn {
+    align-self: flex-start;
   }
 
   .qlab {

@@ -19,7 +19,6 @@
     { id: "sources", label: t("kb.tab.sources") },
   ]);
 
-  let query = $state(kb.query);
   let folded = $state<Record<string, boolean>>({});
   let open = $state<Record<number, boolean>>({});
   let copied = $state(0);
@@ -128,13 +127,12 @@
         <input
           class="search"
           placeholder={t("kb.searchPlaceholder")}
-          bind:value={query}
+          bind:value={kb.query}
           onkeydown={(e) => {
+            // The graph tab's search box edits the same query.
             if (e.key === "Enter") {
-              kb.query = query;
-              void kb.search(query);
-            } else if (e.key === "Escape" && query) {
-              query = "";
+              void kb.search(kb.query);
+            } else if (e.key === "Escape" && kb.query) {
               kb.query = "";
               void kb.search("");
             }
