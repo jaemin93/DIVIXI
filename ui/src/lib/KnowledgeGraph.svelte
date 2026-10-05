@@ -20,11 +20,12 @@
 
 <script lang="ts">
   import { kb, type KItem, type KNode } from "./knowledge.svelte";
-  import { untrack } from "svelte";
+  import { tick as nextTick, untrack } from "svelte";
   import { t } from "./i18n.svelte";
   import { placeNew, queryReach, settle, settleBudget, tick, visibleIds, STILL } from "./graphLayout";
   import { cardRect, cardShape, railRight, railVisible, toggled } from "./detailCard";
   import { contextChips } from "./graphContext";
+  import { kindCounts, nodesOfKind } from "./kindList";
   import { store } from "./store.svelte";
 
   /**
@@ -684,6 +685,8 @@
   /** Move the camera to frame a section of the plate: everything, or one kind's nodes. */
   function goTo(next: string) {
     section = next;
+    // The rail and the legend are one choice: an open list follows the rail.
+    if (listKind && next !== listKind) listKind = next === "*" ? null : next;
     const set = next === "*" ? shown : shown.filter((b) => b.node.kind === next);
     if (!set.length || !canvas) {
       kick();
@@ -874,7 +877,56 @@
     centre = id;
   }
 
-  const kinds = $derived([...new Set(kb.graph.nodes.map((n) => n.kind))]);
+  /** The legend: every kind the graph has, most numerous first, with its count. */
+  const kinds = $derived(kindCounts(kb.graph.nodes));
+
+  // ----- a kind's list: the legend opens it -----
+
+  /** The kind whose nodes are listed, or null. It is the rail's section too. */
+  let listKind = $state<string | null>(null);
+  let listFilter = $state("");
+  const rows = $derived(listKind ? nodesOfKind(kb.graph.nodes, kb.graph.edges, listKind, listFilter) : []);
+
+  /** A legend entry: list its kind's nodes and frame them, or (again) close the list and show everything. */
+  function toggleKind(kind: string) {
+    if (listKind === kind) {
+      listKind = null;
+      goTo("*");
+      return;
+    }
+    listKind = kind;
+    listFilter = "";
+    goTo(kind);
+  }
+
+  /** From the list: pick the node, bring it to the middle, and open the agent on it with the box ready. */
+  async function askAbout(id: number) {
+    const node = kb.graph.nodes.find((n) => n.id === id);
+    if (!node) return;
+    // A node outside the current focus is not drawn: show the whole graph so it can be.
+    if (visible && !visible.has(id)) {
+      centre = null;
+      relatedOnly = false;
+      await nextTick();
+    }
+    void pick(node);
+    const b = shown.find((x) => x.id === id);
+    if (b) {
+      const k = Math.max(view.k, 1);
+      glide = { from: { ...view }, to: { x: -b.x * k, y: -b.y * k, k }, t0: performance.now() };
+      kick();
+    }
+    // Its chip goes in even if it was taken out before.
+    if (store.graphExcluded.has(`entity:${id}`)) store.toggleGraphChip(`entity:${id}`);
+    if (!store.graphChatOpen) await store.openGraphChat();
+    await nextTick();
+    document.querySelector<HTMLTextAreaElement>("aside.talk textarea")?.focus();
+  }
+
+  function closeList(e?: Event) {
+    e?.stopPropagation();
+    listKind = null;
+  }
   const centreNode = $derived(centre === null ? null : (kb.graph.nodes.find((n) => n.id === centre) ?? null));
 
   // ----- the agent panel: what goes with a message -----
@@ -903,6 +955,16 @@
     return s ? kb.nameOf(s) : id;
   };
 </script>
+
+<!-- The kind list closes on Escape and on a click anywhere but the list and the legend. -->
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && listKind) listKind = null;
+  }}
+  onpointerdown={(e) => {
+    if (listKind && !(e.target as Element | null)?.closest?.(".kindlist, .legend")) listKind = null;
+  }}
+/>
 
 {#snippet glyph(g: Glyph, acc = false)}
   <svg class="glyph" class:acc viewBox="0 0 10 10" width="10" height="10" aria-hidden="true">
@@ -944,8 +1006,15 @@
         kick();
       }}>{t("kb.physics")}</button>
     <span class="grow"></span>
-    {#each kinds as k (k)}
-      <span class="legend">{@render glyph(glyphOf(k))}{k}</span>
+    {#each kinds as k (k.kind)}
+      <!-- A kind: its nodes as a list, and the graph framed on them (the rail's section, the same choice). -->
+      <button
+        class="legend"
+        class:on={listKind === k.kind}
+        aria-expanded={listKind === k.kind}
+        title={t("kb.kindOpen", { kind: k.kind })}
+        onclick={() => toggleKind(k.kind)}>{@render glyph(glyphOf(k.kind))}{k.kind}<span class="lcount">{k.count}</span></button
+      >
     {/each}
   </div>
   <div class="body">
@@ -954,6 +1023,36 @@
       <p class="empty">{t("kb.graphEmpty")}</p>
     {/if}
     <canvas bind:this={canvas} onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={() => (drag = null)} onpointerleave={leave} onwheel={wheel}></canvas>
+    {#if listKind}
+      <div class="kindlist" role="dialog" aria-label={t("kb.kindOpen", { kind: listKind })}>
+        <div class="klhead">
+          {@render glyph(glyphOf(listKind))}
+          <span class="mono kllab">{listKind}</span>
+          <span class="mono klcount">{rows.length}</span>
+          <span class="grow"></span>
+          <button class="x" onclick={closeList} aria-label={t("kb.kindClose")} title={t("kb.kindClose")}>×</button>
+        </div>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input
+          class="klfilter"
+          placeholder={t("kb.kindFilter")}
+          aria-label={t("kb.kindFilter")}
+          bind:value={listFilter}
+          autofocus
+        />
+        <ul class="klrows">
+          {#each rows as r (r.id)}
+            <li>
+              <button class="klrow" class:on={picked?.id === r.id} onclick={() => askAbout(r.id)} title={t("kb.kindAsk")}>
+                <span class="kname">{r.name}</span>
+                <span class="mono kmeta">{t("kb.kindMeta", { links: r.links, mentions: r.mentions })}</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+        {#if !rows.length}<p class="klnone">{t("kb.kindNone")}</p>{/if}
+      </div>
+    {/if}
     {#if kb.graph.nodes.length}
       <div class="fig mono" aria-hidden="true">
         <span class="fdot" class:pulse={running}></span>
@@ -1107,11 +1206,125 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    margin-left: 6px;
+    margin-left: 2px;
+    height: 24px;
+    padding: 0 6px;
+    background: transparent;
+    border: 1px solid transparent;
     font-family: var(--mono);
     font-size: 10px;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+    color: var(--lab);
+  }
+
+  .legend:hover {
+    color: var(--hi);
+  }
+
+  .legend.on {
+    color: var(--hi);
+    border-color: var(--kg-acc);
+  }
+
+  .lcount {
+    color: var(--lab);
+    letter-spacing: 0.04em;
+  }
+
+  /* A kind's nodes, under the plate's caption on the left: the graph keeps its middle and right. */
+  .kindlist {
+    position: absolute;
+    top: 38px;
+    left: 16px;
+    z-index: 2;
+    width: 280px;
+    max-height: min(440px, calc(100% - 60px));
+    display: flex;
+    flex-direction: column;
+    background: var(--card);
+    border: 1px solid var(--kg-acc);
+  }
+
+  .klhead {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 8px 6px 12px;
+  }
+
+  .kllab {
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--kg-acc);
+  }
+
+  .klcount {
+    font-size: 10px;
+    color: var(--lab);
+  }
+
+  .klfilter {
+    margin: 0 10px 6px;
+    height: 26px;
+    padding: 0 8px;
+    background: var(--inp);
+    border: 1px solid var(--lines);
+    color: var(--txt);
+    font-family: var(--sans);
+    font-size: 12px;
+  }
+
+  .klrows {
+    list-style: none;
+    margin: 0;
+    padding: 0 0 6px;
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  .klrow {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    width: 100%;
+    padding: 5px 12px;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    color: var(--txt);
+    font-size: 12.5px;
+  }
+
+  .klrow:hover,
+  .klrow.on {
+    background: var(--sel);
+    color: var(--hi);
+  }
+
+  .klrow.on .kname {
+    color: var(--kg-acc);
+  }
+
+  .kname {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .kmeta {
+    flex: none;
+    font-size: 9.5px;
+    color: var(--lab);
+  }
+
+  .klnone {
+    margin: 0;
+    padding: 4px 12px 10px;
+    font-size: 12px;
     color: var(--lab);
   }
 
