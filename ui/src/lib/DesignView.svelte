@@ -7,15 +7,15 @@
   import ArtifactMenu from "./ArtifactMenu.svelte";
   import { whenFull } from "./time";
   import Board from "./Board.svelte";
-  import Timeline from "./Timeline.svelte";
-  import Composer from "./Composer.svelte";
+  import PanelToggle from "./PanelToggle.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
 
   /**
-   * A design (an artifact): the list of designs, the board, and beside it
-   * the conversation with its agent — the same timeline and composer as a track's
-   * conductor (files, agent and model, context, stop). The header counts
+   * A design (an artifact): the list of designs and the board. The
+   * conversation with its agent is a column of the app's layout on the right
+   * (AgentPanel), opened from the panel toggle in the head as a track opens
+   * its working folder. The header counts
    * what the design has become (goals, constraints, open questions); a
    * design is attached to a track's conductor from the track's composer.
    */
@@ -133,7 +133,11 @@
   {#if d}
     <section class="main">
       <header>
-        <div class="mlab">DESIGN / {d.id}</div>
+        <div class="hrow">
+          <div class="mlab">DESIGN / {d.id}</div>
+          <span class="grow"></span>
+          <PanelToggle on={store.designChatOpen} title={t("panel.agent")} onclick={() => store.setDesignChat(!store.designChatOpen)} />
+        </div>
         <div class="titlerow">
           {#if renaming}
             <!-- svelte-ignore a11y_autofocus -->
@@ -184,20 +188,6 @@
               <button type="button" class="btn sm keep" onclick={() => store.designReview(store.designDoc.changes.map((c) => c.id), true)}>{t("design.keepAll")}</button>
             </div>
           {/if}
-        </div>
-        <!-- The conversation beside the board, as on a track. -->
-        <div class="talk" style="width: {store.artifactChatWidth}px">
-          <SplitHandle
-            edge="left"
-            width={store.artifactChatWidth}
-            min={340}
-            max={760}
-            reset={460}
-            label={t("design.chatResize")}
-            onchange={(px, persist) => store.setArtifactChatWidth(px, persist)}
-          />
-          <Timeline />
-          <Composer />
         </div>
       </div>
     </section>
@@ -394,7 +384,8 @@
 
   header {
     flex-shrink: 0;
-    padding: 18px 24px 14px;
+    /* Top and right as a track's head, so the panel toggle sits where it does there. */
+    padding: 14px 10px 14px 24px;
     border-bottom: 1px solid var(--line);
   }
 
@@ -477,31 +468,16 @@
     padding: 0 10px;
   }
 
+  /* The head's first row: the label, and the panel toggle at the right as on a track. */
+  .hrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
   .review .keep {
     border-color: var(--acc);
     color: var(--hi);
   }
 
-  /* The conversation: the track's timeline and composer, beside the board. */
-  .talk {
-    position: relative;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    border-left: 1px solid var(--line);
-    background-image: radial-gradient(var(--dot) 1px, transparent 1px);
-    background-size: 22px 22px;
-  }
-
-  /* The track's composer and timeline are laid out for a wide column. */
-  .talk :global(.composer) {
-    padding-left: 16px;
-    padding-right: 16px;
-  }
-
-  .talk :global(.scroll) {
-    padding-left: 18px;
-    padding-right: 18px;
-  }
 </style>

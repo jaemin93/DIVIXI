@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { store } from "./store.svelte";
   import { kb, type KItem, type KSource, type KTab } from "./knowledge.svelte";
   import KnowledgeGraph from "./KnowledgeGraph.svelte";
@@ -6,6 +7,9 @@
   import Icon from "./Icon.svelte";
   import { whenFull, whenLabel } from "./time";
   import { t } from "./i18n.svelte";
+  import PanelToggle from "./PanelToggle.svelte";
+  import { docTrouble, indexProgress } from "./indexProgress";
+  import { tick } from "svelte";
 
   /**
    * The knowledge library, after Kiro Crew's: the items agents can search
@@ -25,6 +29,9 @@
   let menu = $state<{ id: string; x: number; y: number } | null>(null);
   let confirmRemove = $state("");
 
+  // The graph's conversation belongs to this page: leaving it closes the panel.
+  onDestroy(() => store.closeGraphChat());
+
   const categories = $derived([...new Set(kb.items.map((i) => i.category))].sort());
   const shown = $derived(kb.category ? kb.items.filter((i) => i.category === kb.category) : kb.items);
   /** Items grouped by document, in the order they come (a search keeps its ranking). */
@@ -42,6 +49,25 @@
   });
 
   const current = $derived(kb.indexing.find((s) => s.status === "indexing"));
+  /** Indexing under way, for the small mark on the List and Graph tabs; null when done. */
+  const progress = $derived(indexProgress(kb.sources, kb.embedding));
+  /** Documents that are gone or failed to index, for the same small line. */
+  const trouble = $derived(docTrouble(kb.sources));
+  /** A source just brought into view from that line, outlined for a moment. */
+  let flashed = $state("");
+
+  /** Go to the Sources tab and bring the first document that needs attention into view. */
+  async function showTrouble() {
+    const id = trouble?.first;
+    await kb.setTab("sources");
+    if (!id) return;
+    await tick();
+    document.getElementById(`kb-source-${id}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    flashed = id;
+    setTimeout(() => {
+      if (flashed === id) flashed = "";
+    }, 1800);
+  }
 
   function name(s: KSource | undefined, id: string): string {
     return s ? kb.nameOf(s) : id;
@@ -82,26 +108,48 @@
 </script>
 
 <section class="page">
-  <div class="inner">
-    <header>
-      <div class="mlab">KNOWLEDGE</div>
-      <div class="titlerow">
-        <h1 class="serif">{t("kb.title")}</h1>
-        <span class="grow"></span>
-        <button class="btn" onclick={() => store.openSettings("knowledge")}>{t("kb.openSettings")}</button>
-      </div>
-      <p class="sub">{t("kb.sub")}</p>
-    </header>
-
+  <!-- One thin bar: the page's name (what it is for, on hover), its tabs, what
+       the index is doing when there is something to say, and the page's buttons. -->
+  <header class="kbar">
     <div class="tabs" role="tablist">
       {#each tabs as tab (tab.id)}
         <button role="tab" aria-selected={kb.tab === tab.id} class:on={kb.tab === tab.id} onclick={() => kb.setTab(tab.id)}>{tab.label}</button>
       {/each}
     </div>
-
+    {#if kb.tab !== "sources" && (progress || trouble)}
+      <!-- On List and Graph, only when there is something to say: indexing under way, and
+           documents that need the person (gone, or failed), the latter a link to them on Sources.
+           The Sources tab has the full line instead. -->
+      <div class="indexing mono" role="status">
+        {#if progress}
+          <span class="pulse"></span>
+          <span class="itext">{t("kb.indexingSmall", { done: progress.done, total: progress.total })}</span>
+        {/if}
+        {#if progress && trouble}<span class="sep" aria-hidden="true">·</span>{/if}
+        {#if trouble}
+          <button class="trouble" onclick={showTrouble} title={t("kb.troubleHint")}>
+            <span class="tdot" aria-hidden="true"></span><span class="itext">{t("kb.troubleSmall", { n: trouble.count })}</span>
+          </button>
+        {/if}
+      </div>
+    {/if}
+    <div class="kbtns">
+      <!-- The agent panel, from any tab: the same toggle, in the same place, as a track's working folder. -->
+      <PanelToggle
+        on={store.graphChatOpen}
+        title={t("panel.agent")}
+        onclick={() => (store.graphChatOpen ? store.closeGraphChat() : void store.openGraphChat())}
+      />
+    </div>
+  </header>
+  <div class="inner">
     {#if kb.embedding.enabled && kb.embedding.error}
       <div class="banner err">{t("kb.embedError", { done: kb.embedding.embedded, total: kb.embedding.total, error: kb.embedding.error })}</div>
     {/if}
+    <!-- Search readiness, embedding and sync: about the documents, so on the Sources tab only,
+         under what the library is for (the sentence the old header carried). -->
+    {#if kb.tab === "sources"}
+    <p class="sub">{t("kb.sub")}</p>
     <div class="banner" class:busy={!!kb.indexing.length}>
       {#if current}
         <span class="pulse"></span>
@@ -121,6 +169,7 @@
         <span class="dim">· {t("kb.syncedCount", { done: kb.syncedCount, total: kb.sources.length })}</span>
       {/if}
     </div>
+    {/if}
 
     {#if kb.tab === "list"}
       <div class="filters">
@@ -207,6 +256,8 @@
         {@const art = kb.artifactOf(s.id)}
         <div
           class="source"
+          class:flash={flashed === s.id}
+          id="kb-source-{s.id}"
           style="border-left-color: {art?.color || 'transparent'}"
           oncontextmenu={(e) => {
             e.preventDefault();
@@ -280,44 +331,42 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 30px 40px 40px;
+    padding: 20px 40px 40px;
     width: 100%;
     box-sizing: border-box;
   }
 
-  .titlerow {
+  /* The page's one bar: as thin as the other pages' heads (44 px), the tabs in it,
+     the panel toggle at its right. The page's settings are in the app's Settings. */
+  /* Top and right as a track's head (14 px, 10 px), so the panel toggle sits
+     exactly where it does there and on a design's; the tabs fill the rest of
+     the bar down to its rule. */
+  .kbar {
+    flex-shrink: 0;
     display: flex;
-    align-items: center;
-    gap: 10px;
+    flex-wrap: wrap;
+    align-items: stretch;
+    column-gap: 18px;
+    padding: 14px 10px 0 40px;
+    border-bottom: 1px solid var(--line);
   }
 
-  header h1 {
-    margin: 6px 0 4px;
-    font-size: 30px;
-    font-weight: 400;
-    color: var(--hi);
-  }
-
-  .sub {
-    margin: 0 0 18px;
-    color: var(--dim);
-    font-size: 13.5px;
-  }
 
   .tabs {
     display: flex;
-    gap: 4px;
-    border-bottom: 1px solid var(--line);
-    margin-bottom: 16px;
+    align-items: stretch;
+    gap: 2px;
   }
 
   .tabs button {
+    min-height: 42px;
     background: transparent;
     border: 0;
     border-bottom: 2px solid transparent;
-    padding: 9px 14px;
-    font-size: 13.5px;
+    padding: 0 12px;
+    font-size: 13px;
     color: var(--dim);
+    white-space: nowrap;
     margin-bottom: -1px;
   }
 
@@ -328,6 +377,79 @@
   .tabs button.on {
     color: var(--hi);
     border-bottom-color: var(--acc);
+  }
+
+  /* Right-hand, on the first row or, in a narrow window, the next; at the top, as on a track. */
+  .kbtns {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-left: auto;
+  }
+
+  .sub {
+    margin: 0 0 12px;
+    color: var(--dim);
+    font-size: 13px;
+  }
+
+
+  /* The List and Graph tabs' only status, in the bar: indexing, documents to look at. */
+  .indexing {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--lab);
+  }
+
+  .indexing .itext {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .indexing .sep {
+    color: var(--lines);
+  }
+
+  /* Documents that need the person: a quiet link to them on the Sources tab. */
+  .trouble {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    color: var(--deltx);
+  }
+
+  .trouble:hover {
+    text-decoration: underline;
+  }
+
+  .tdot {
+    width: 6px;
+    height: 6px;
+    border: 1px solid var(--deltx);
+    transform: rotate(45deg);
+  }
+
+  .source.flash {
+    outline: 1px solid var(--deltx);
+    outline-offset: 2px;
+    transition: outline-color 0.3s;
+  }
+
+  .indexing .pulse {
+    width: 6px;
+    height: 6px;
   }
 
   .banner {

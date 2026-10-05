@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import { DEFAULT_PREFS, type CardPrefs } from "./detailCard";
   /**
    * Where each entity was last laid out, and where the camera was, kept for as
    * long as the app runs. The graph tab is mounted afresh every time it is
@@ -8,6 +9,10 @@
   /** Keyed by id and name together: another instance's library reuses the same ids for other entities. */
   const placeKey = (n: { id: number; name: string }) => `${n.id}:${n.name}`;
   let rememberedView: { x: number; y: number; k: number } | null = null;
+  /** The entity card's folds, kept across picks and visits to the tab. */
+  let rememberedCard: CardPrefs = DEFAULT_PREFS;
+  /** The picked node, the centre and its depth, and "related only": the graph's selection, kept across tabs. */
+  let rememberedFocus: { picked: number | null; centre: number | null; depth: number; relatedOnly: boolean } = { picked: null, centre: null, depth: 1, relatedOnly: true };
 
   /** A marker's shape; the template's legend draws them too, so the type lives here. */
   type Glyph = "square" | "diamond" | "circle" | "block" | "dot" | "triangle";
@@ -15,9 +20,13 @@
 
 <script lang="ts">
   import { kb, type KItem, type KNode } from "./knowledge.svelte";
-  import { untrack } from "svelte";
+  import { tick as nextTick, untrack } from "svelte";
   import { t } from "./i18n.svelte";
   import { placeNew, queryReach, settle, settleBudget, tick, visibleIds, STILL } from "./graphLayout";
+  import { cardRect, cardShape, railRight, railVisible, toggled } from "./detailCard";
+  import { contextChips } from "./graphContext";
+  import { kindCounts, nodesOfKind } from "./kindList";
+  import { store } from "./store.svelte";
 
   /**
    * The entity graph, drawn as a plate: a small force layout on a canvas
@@ -40,9 +49,22 @@
   type Body = { id: number; node: KNode; x: number; y: number; vx: number; vy: number; r: number; pinned: boolean };
 
   let canvas = $state<HTMLCanvasElement>();
-  let running = $state(true);
   let picked = $state<KNode | null>(null);
   let pickedItems = $state<KItem[]>([]);
+  /** Whether the entity card is folded to its header, and whether its sources are listed. */
+  let card = $state<CardPrefs>(rememberedCard);
+  /** The open card's height, for labels to keep clear of it. */
+  let cardH = $state(0);
+  const shape = $derived(cardShape(!!picked, card));
+  /** The plate's width, which the agent panel takes from. */
+  let stageW = $state(0);
+  const railOn = $derived(railVisible(shape, stageW));
+
+  function flip(key: keyof CardPrefs) {
+    card = toggled(card, key);
+    rememberedCard = card;
+    kick();
+  }
 
   let bodies: Body[] = [];
   let links: { a: Body; b: Body }[] = [];
@@ -60,9 +82,9 @@
    * shown query shows only the entities it reaches, unless the person asked
    * for everything. `visible` is null when the whole graph is shown.
    */
-  let centre = $state<number | null>(null);
-  let depth = $state(1);
-  let relatedOnly = $state(true);
+  let centre = $state<number | null>(rememberedFocus.centre);
+  let depth = $state(rememberedFocus.depth);
+  let relatedOnly = $state(rememberedFocus.relatedOnly);
   let visible = $state<Set<number> | null>(null);
   /** The whole graph's positions, put aside while a focus moves its part around. */
   let fullPos: Map<number, { x: number; y: number }> | null = null;
@@ -142,6 +164,11 @@
     if (hovered && !bodies.includes(hovered)) hovered = null;
     // A reload may take the chosen kind away.
     if (section && section !== "*" && !g.nodes.some((n) => n.kind === section)) section = null;
+    // The node picked before the tab was left is picked again.
+    if (!picked && rememberedFocus.picked !== null) {
+      const again = g.nodes.find((n) => n.id === rememberedFocus.picked);
+      if (again) void pick(again);
+    }
     // The camera is framed the first time this tab draws anything (unless it
     // remembers where it was); a later reload leaves it where the person put it.
     const first = !built;
@@ -504,7 +531,11 @@
     });
     // Nor may one run under the overview rail on the right edge.
     const railH = sections.length * 24;
-    taken.push([w - (picked ? 304 : 0) - 150, h / 2 - railH / 2 - 8, w - (picked ? 304 : 0), h / 2 + railH / 2 + 8]);
+    const rr = railRight(shape);
+    if (railOn) taken.push([w - rr - 150, h / 2 - railH / 2 - 8, w - rr, h / 2 + railH / 2 + 8]);
+    // Nor under the entity card, open or folded.
+    const covered = cardRect(shape, w, cardH);
+    if (covered) taken.push(covered);
     const free = (x0: number, y0: number, x1: number, y1: number) =>
       !taken.some(([a0, b0, a1, b1]) => x0 < a1 && x1 > a0 && y0 < b1 && y1 > b0);
     for (const b of order) {
@@ -612,7 +643,7 @@
   }
 
   function loop() {
-    if (running && heat > SETTLED) {
+    if (heat > SETTLED) {
       const moved = tick(shown, shownLinks, heat);
       heat *= COOLING;
       // Stop as soon as nothing visibly moves, rather than idling warm and trembling.
@@ -627,7 +658,7 @@
     }
     draw();
     // Keep going while the layout moves, a node is held or the camera glides; otherwise rest until kicked.
-    frame = (running && heat > SETTLED) || drag || glide ? requestAnimationFrame(loop) : 0;
+    frame = heat > SETTLED || drag || glide ? requestAnimationFrame(loop) : 0;
     if (!frame) {
       rememberedView = { ...view };
       remember();
@@ -653,6 +684,8 @@
   /** Move the camera to frame a section of the plate: everything, or one kind's nodes. */
   function goTo(next: string) {
     section = next;
+    // The rail and the legend are one choice: an open list follows the rail.
+    if (listKind && next !== listKind) listKind = next === "*" ? null : next;
     const set = next === "*" ? shown : shown.filter((b) => b.node.kind === next);
     if (!set.length || !canvas) {
       kick();
@@ -795,12 +828,7 @@
     kick();
     if (body && !moved) {
       body.pinned = false;
-      const id = body.node.id;
-      picked = body.node;
-      pickedItems = [];
-      const items = await kb.entityItems(id);
-      // Another node may have been picked meanwhile.
-      if (picked?.id === id) pickedItems = items;
+      await pick(body.node);
     } else if (!body && !moved) {
       picked = null;
       pickedItems = [];
@@ -830,17 +858,122 @@
     void kb.search("");
   }
 
+  /** Pick a node: its card, and the passages that mention it. */
+  async function pick(node: KNode) {
+    const id = node.id;
+    picked = node;
+    pickedItems = [];
+    const items = await kb.entityItems(id);
+    // Another node may have been picked meanwhile.
+    if (picked?.id === id) pickedItems = items;
+  }
+
+  $effect(() => {
+    rememberedFocus = { picked: picked?.id ?? null, centre, depth, relatedOnly };
+  });
+
   function focusOn(id: number) {
     centre = id;
   }
 
-  const kinds = $derived([...new Set(kb.graph.nodes.map((n) => n.kind))]);
+  /** The legend: every kind the graph has, most numerous first, with its count. */
+  const kinds = $derived(kindCounts(kb.graph.nodes));
+
+  // ----- a kind's list: the legend opens it -----
+
+  /** The kind whose nodes are listed, or null. It is the rail's section too. */
+  let listKind = $state<string | null>(null);
+  let listFilter = $state("");
+  const rows = $derived(listKind ? nodesOfKind(kb.graph.nodes, kb.graph.edges, listKind, listFilter) : []);
+
+  /** The legend's buttons by kind, and the plate: the list hangs under its kind's button. */
+  const legendEls: Record<string, HTMLButtonElement> = $state({});
+  let stageEl = $state<HTMLDivElement>();
+  /** The list's width: 280 px, or the plate less its margins when the plate is narrower. */
+  const listW = $derived(Math.max(0, Math.min(280, stageW - 24)));
+  /** The list's left edge in the plate: under its legend entry, kept inside the plate. */
+  const listLeft = $derived.by(() => {
+    const button = listKind ? legendEls[listKind] : undefined;
+    if (!button || !stageEl) return 12;
+    void stageW; // again when the plate's width (and so the legend's wrap) changes
+    const x = button.getBoundingClientRect().left - stageEl.getBoundingClientRect().left;
+    return Math.round(Math.max(12, Math.min(x, stageW - listW - 12)));
+  });
+
+  /** A legend entry: list its kind's nodes and frame them, or (again) close the list and show everything. */
+  function toggleKind(kind: string) {
+    if (listKind === kind) {
+      listKind = null;
+      goTo("*");
+      return;
+    }
+    listKind = kind;
+    listFilter = "";
+    goTo(kind);
+  }
+
+  /** From the list: pick the node, bring it to the middle, and open the agent on it with the box ready. */
+  async function askAbout(id: number) {
+    const node = kb.graph.nodes.find((n) => n.id === id);
+    if (!node) return;
+    // A node outside the current focus is not drawn: show the whole graph so it can be.
+    if (visible && !visible.has(id)) {
+      centre = null;
+      relatedOnly = false;
+      await nextTick();
+    }
+    void pick(node);
+    const b = shown.find((x) => x.id === id);
+    if (b) {
+      const k = Math.max(view.k, 1);
+      glide = { from: { ...view }, to: { x: -b.x * k, y: -b.y * k, k }, t0: performance.now() };
+      kick();
+    }
+    // Its chip goes in even if it was taken out before.
+    if (store.graphExcluded.has(`entity:${id}`)) store.toggleGraphChip(`entity:${id}`);
+    if (!store.graphChatOpen) await store.openGraphChat();
+    await nextTick();
+    document.querySelector<HTMLTextAreaElement>("aside.talk textarea")?.focus();
+  }
+
+  function closeList(e?: Event) {
+    e?.stopPropagation();
+    listKind = null;
+  }
   const centreNode = $derived(centre === null ? null : (kb.graph.nodes.find((n) => n.id === centre) ?? null));
+
+  // ----- the agent panel: what goes with a message -----
+
+  const chips = $derived(
+    contextChips({
+      picked: picked ? { id: picked.id, name: picked.name } : null,
+      pickedItems,
+      centre: centreNode ? { id: centreNode.id, name: centreNode.name, depth } : null,
+      focusIds: centre !== null && visible ? [...visible] : [],
+      query: kb.shownQuery,
+      queryIds: kb.shownQuery ? [...queried] : [],
+    }),
+  );
+  $effect(() => {
+    // The panel (a column of the app's layout) shows these; the composer sends their picks.
+    store.graphChips = chips;
+  });
+
   const sourceName = (id: string) => {
     const s = kb.sources.find((x) => x.id === id);
     return s ? kb.nameOf(s) : id;
   };
 </script>
+
+<!-- The kind list closes on Escape and on a click anywhere but the list and the legend. -->
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && listKind) listKind = null;
+  }}
+  onpointerdown={(e) => {
+    if (listKind && !(e.target as Element | null)?.closest?.(".kindlist, .legend")) listKind = null;
+  }}
+/>
 
 {#snippet glyph(g: Glyph, acc = false)}
   <svg class="glyph" class:acc viewBox="0 0 10 10" width="10" height="10" aria-hidden="true">
@@ -870,24 +1003,63 @@
       }}
     />
     <button class="btn sm" onclick={recenter}>{t("kb.recenter")}</button>
-    <button class="btn sm" class:on={running} onclick={() => {
-        running = !running;
-        kick();
-      }}>{t("kb.physics")}</button>
-    <span class="grow"></span>
-    {#each kinds as k (k)}
-      <span class="legend">{@render glyph(glyphOf(k))}{k}</span>
-    {/each}
   </div>
-  <div class="stage">
+  {#if kinds.length}
+    <!-- The legend, a row of its own: it wraps when the kinds are many. -->
+    <div class="kinds">
+      {#each kinds as k (k.kind)}
+        <!-- A kind: its nodes as a list, and the graph framed on them (the rail's section, the same choice). -->
+        <button
+          class="legend"
+          class:on={listKind === k.kind}
+          aria-expanded={listKind === k.kind}
+          title={t("kb.kindOpen", { kind: k.kind })}
+          bind:this={legendEls[k.kind]}
+          onclick={() => toggleKind(k.kind)}>{@render glyph(glyphOf(k.kind))}{k.kind}<span class="lcount">{k.count}</span></button
+        >
+      {/each}
+    </div>
+  {/if}
+  <div class="body">
+  <div class="stage" bind:this={stageEl} bind:clientWidth={stageW}>
     {#if !kb.graph.nodes.length}
       <p class="empty">{t("kb.graphEmpty")}</p>
     {/if}
     <canvas bind:this={canvas} onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={() => (drag = null)} onpointerleave={leave} onwheel={wheel}></canvas>
+    {#if listKind}
+      <div class="kindlist" style="left: {listLeft}px; width: {listW}px" role="dialog" aria-label={t("kb.kindOpen", { kind: listKind })}>
+        <div class="klhead">
+          {@render glyph(glyphOf(listKind))}
+          <span class="mono kllab">{listKind}</span>
+          <span class="mono klcount">{rows.length}</span>
+          <span class="grow"></span>
+          <button class="x" onclick={closeList} aria-label={t("kb.kindClose")} title={t("kb.kindClose")}>×</button>
+        </div>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input
+          class="klfilter"
+          placeholder={t("kb.kindFilter")}
+          aria-label={t("kb.kindFilter")}
+          bind:value={listFilter}
+          autofocus
+        />
+        <ul class="klrows">
+          {#each rows as r (r.id)}
+            <li>
+              <button class="klrow" class:on={picked?.id === r.id} onclick={() => askAbout(r.id)} title={t("kb.kindAsk")}>
+                <span class="kname">{r.name}</span>
+                <span class="mono kmeta">{t("kb.kindMeta", { links: r.links, mentions: r.mentions })}</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+        {#if !rows.length}<p class="klnone">{t("kb.kindNone")}</p>{/if}
+      </div>
+    {/if}
     {#if kb.graph.nodes.length}
       <div class="fig mono" aria-hidden="true">
-        <span class="fdot" class:pulse={running}></span>
-        <span>{t("kb.graphFig")} · {running ? t("kb.graphLive") : t("kb.graphStill")}</span>
+        <span class="fdot"></span>
+        <span>{t("kb.graphFig")}</span>
       </div>
     {/if}
     {#if kb.shownQuery || centreNode}
@@ -929,8 +1101,8 @@
         {/if}
       </div>
     {/if}
-    {#if kb.graph.nodes.length}
-      <nav class="rail" class:shifted={!!picked} aria-label={t("kb.graphSections")}>
+    {#if kb.graph.nodes.length && railOn}
+      <nav class="rail" style="right: {railRight(shape)}px" aria-label={t("kb.graphSections")}>
         {#each sections as sec, i (sec.id)}
           <button
             class="stop"
@@ -948,25 +1120,49 @@
       </nav>
     {/if}
     {#if picked}
-      <aside class="detail">
+      <aside class="detail" class:folded={card.folded} bind:clientHeight={cardH}>
         <div class="dhead">
-          <span class="mono dlab">{t("kb.graphEntity")} · {picked.kind}</span>
+          {#if card.folded}
+            <span class="dname small">{@render glyph(glyphOf(picked.kind), true)}<span>{picked.name}</span></span>
+            <span class="mono dlab kindtag">{picked.kind}</span>
+          {:else}
+            <span class="mono dlab">{t("kb.graphEntity")} · {picked.kind}</span>
+          {/if}
+          <button
+            class="x fold"
+            onclick={() => flip("folded")}
+            aria-expanded={!card.folded}
+            aria-label={card.folded ? t("kb.graphUnfoldCard") : t("kb.graphFoldCard")}
+            title={card.folded ? t("kb.graphUnfoldCard") : t("kb.graphFoldCard")}>{card.folded ? "▾" : "▴"}</button
+          >
           <button class="x" onclick={() => { picked = null; pickedItems = []; kick(); }} aria-label={t("kb.close")}>×</button>
         </div>
-        <div class="dname">{@render glyph(glyphOf(picked.kind), true)}<span>{picked.name}</span></div>
-        {#if picked.description}<p class="desc">{picked.description}</p>{/if}
-        {#if centre !== picked.id}
-          <button class="btn sm focusbtn" onclick={() => focusOn(picked!.id)}>{t("kb.graphFocusNode")}</button>
+        {#if !card.folded}
+          <div class="dname">{@render glyph(glyphOf(picked.kind), true)}<span>{picked.name}</span></div>
+          {#if picked.description}<p class="desc">{picked.description}</p>{/if}
+          {#if centre !== picked.id}
+            <button class="btn sm focusbtn" onclick={() => focusOn(picked!.id)}>{t("kb.graphFocusNode")}</button>
+          {/if}
+          {#if pickedItems.length}
+            <button class="srcs mono" onclick={() => flip("sourcesOpen")} aria-expanded={card.sourcesOpen}>
+              <span>{card.sourcesOpen ? t("kb.graphHideSources") : t("kb.graphShowSources", { n: pickedItems.length })}</span>
+              <span aria-hidden="true">{card.sourcesOpen ? "▴" : "▾"}</span>
+            </button>
+            {#if card.sourcesOpen}
+              {#each pickedItems as item (item.id)}
+                <div class="mention">
+                  <div class="mtitle">{item.title}</div>
+                  <div class="mono msrc">{sourceName(item.source_id)} · {item.line_start}-{item.line_end}</div>
+                </div>
+              {/each}
+            {/if}
+          {:else}
+            <div class="mlab">{t("kb.mentionedIn", { n: 0 })}</div>
+          {/if}
         {/if}
-        <div class="mlab">{t("kb.mentionedIn", { n: pickedItems.length })}</div>
-        {#each pickedItems as item (item.id)}
-          <div class="mention">
-            <div class="mtitle">{item.title}</div>
-            <div class="mono msrc">{sourceName(item.source_id)} · {item.line_start}-{item.line_end}</div>
-          </div>
-        {/each}
       </aside>
     {/if}
+  </div>
   </div>
 </div>
 
@@ -975,8 +1171,11 @@
     display: flex;
     flex-direction: column;
     border: 1px solid var(--line);
-    min-height: 480px;
-    height: calc(100vh - 330px);
+    /* The legend's row took 33 px of the plate: the smallest plate stays as it was. */
+    min-height: 513px;
+    /* The page's body, whatever its head took (one row or, narrow, two): no
+       guessed head height to keep in step, and the page does not scroll. */
+    height: 100%;
   }
 
   .bar {
@@ -999,24 +1198,140 @@
     padding: 0 10px;
   }
 
-  .btn.on {
-    color: var(--hi);
-    background: var(--sel);
-  }
-
   .grow {
     flex: 1;
+  }
+
+  /* The bar's second row: the legend alone, wrapping when the kinds are many. */
+  .kinds {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 4px;
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--line);
   }
 
   .legend {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    margin-left: 6px;
+    height: 24px;
+    padding: 0 6px;
+    background: transparent;
+    border: 1px solid transparent;
     font-family: var(--mono);
     font-size: 10px;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+    color: var(--lab);
+  }
+
+  .legend:hover {
+    color: var(--hi);
+  }
+
+  .legend.on {
+    color: var(--hi);
+    border-color: var(--kg-acc);
+  }
+
+  .lcount {
+    color: var(--lab);
+    letter-spacing: 0.04em;
+  }
+
+  /* A kind's nodes, hanging under its legend entry (left set inline). */
+  .kindlist {
+    position: absolute;
+    top: 6px;
+    z-index: 2;
+    max-height: min(440px, calc(100% - 18px));
+    display: flex;
+    flex-direction: column;
+    background: var(--card);
+    border: 1px solid var(--kg-acc);
+  }
+
+  .klhead {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 8px 6px 12px;
+  }
+
+  .kllab {
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--kg-acc);
+  }
+
+  .klcount {
+    font-size: 10px;
+    color: var(--lab);
+  }
+
+  .klfilter {
+    margin: 0 10px 6px;
+    height: 26px;
+    padding: 0 8px;
+    background: var(--inp);
+    border: 1px solid var(--lines);
+    color: var(--txt);
+    font-family: var(--sans);
+    font-size: 12px;
+  }
+
+  .klrows {
+    list-style: none;
+    margin: 0;
+    padding: 0 0 6px;
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  .klrow {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    width: 100%;
+    padding: 5px 12px;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    color: var(--txt);
+    font-size: 12.5px;
+  }
+
+  .klrow:hover,
+  .klrow.on {
+    background: var(--sel);
+    color: var(--hi);
+  }
+
+  .klrow.on .kname {
+    color: var(--kg-acc);
+  }
+
+  .kname {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .kmeta {
+    flex: none;
+    font-size: 9.5px;
+    color: var(--lab);
+  }
+
+  .klnone {
+    margin: 0;
+    padding: 4px 12px 10px;
+    font-size: 12px;
     color: var(--lab);
   }
 
@@ -1043,12 +1358,22 @@
     fill: var(--kg-acc);
   }
 
+  /* The plate. (The agent panel is a column of the app's layout, beside the page.) */
+  .body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+
   .stage {
     position: relative;
     flex: 1;
+    min-width: 240px;
     min-height: 0;
     background: var(--kg-paper);
   }
+
+
 
   canvas {
     width: 100%;
@@ -1126,9 +1451,12 @@
     border-color: var(--kg-acc);
   }
 
+  /* Up to 200 px, down to 80 before the bar wraps: a narrow plate keeps a one-row bar. */
   .gsearch {
     height: 26px;
-    width: 200px;
+    flex: 1 1 80px;
+    min-width: 80px;
+    max-width: 200px;
     padding: 0 8px;
     background: var(--inp);
     border: 1px solid var(--lines);
@@ -1179,8 +1507,8 @@
     gap: 2px;
   }
 
-  .rail.shifted {
-    right: 304px;
+  .rail {
+    transition: right 0.18s ease;
   }
 
   .stop {
@@ -1248,6 +1576,7 @@
     top: 12px;
     right: 12px;
     width: 280px;
+    z-index: 1;
     max-height: calc(100% - 24px);
     overflow-y: auto;
     background: var(--card);
@@ -1256,6 +1585,45 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  /* Folded: the header alone, one line. */
+  .detail.folded {
+    padding: 8px 10px 8px 12px;
+  }
+
+  .dname.small {
+    flex: 1;
+    font-size: 14px;
+    gap: 6px;
+  }
+
+  .kindtag {
+    flex: none;
+  }
+
+  .x.fold {
+    font-size: 13px;
+  }
+
+  /* The passages that mention the entity: a list of its own, closed at first. */
+  .srcs {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0;
+    background: transparent;
+    border: 0;
+    border-top: 1px solid var(--line);
+    color: var(--lab);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    text-align: left;
+  }
+
+  .srcs:hover {
+    color: var(--hi);
   }
 
   .dhead {

@@ -552,6 +552,98 @@ impl KnowledgeDb {
         Ok(out)
     }
 
+    /// What the graph view's conversation is shown of the library: the
+    /// entities picked (name, kind, how often mentioned, description), the
+    /// relations among them, and the passages picked, each with its document
+    /// and lines, cut at `max_chars`. Ids that no longer exist are skipped;
+    /// nothing picked (or nothing left) is the empty string.
+    pub fn selection_context(&self, entities: &[i64], items: &[i64], max_chars: usize) -> anyhow::Result<String> {
+        let mut found: Vec<GraphNode> = Vec::new();
+        let mut rels: Vec<GraphEdge> = Vec::new();
+        {
+            let conn = self.conn.lock();
+            let mut stmt = conn.prepare("SELECT e.id, e.name, e.kind, e.description, (SELECT COUNT(*) FROM mentions m WHERE m.entity_id = e.id) FROM entities e WHERE e.id = ?1")?;
+            let mut seen = HashSet::new();
+            for id in entities {
+                if !seen.insert(*id) {
+                    continue;
+                }
+                let row = stmt
+                    .query_row(params![id], |r| {
+                        Ok(GraphNode {
+                            id: r.get(0)?,
+                            name: r.get(1)?,
+                            kind: r.get(2)?,
+                            description: r.get(3)?,
+                            mentions: r.get(4)?,
+                        })
+                    })
+                    .optional()?;
+                found.extend(row);
+            }
+            if found.len() > 1 {
+                let ids: HashSet<i64> = found.iter().map(|n| n.id).collect();
+                let mut stmt = conn.prepare("SELECT DISTINCT source, target, kind FROM relations ORDER BY source, target, kind")?;
+                rels = stmt
+                    .query_map([], |r| {
+                        Ok(GraphEdge {
+                            source: r.get(0)?,
+                            target: r.get(1)?,
+                            kind: r.get(2)?,
+                        })
+                    })?
+                    .filter_map(Result::ok)
+                    .filter(|e| e.source != e.target && ids.contains(&e.source) && ids.contains(&e.target))
+                    .collect();
+            }
+        }
+        let mut passages: Vec<(Item, String)> = Vec::new();
+        let mut seen = HashSet::new();
+        for id in items {
+            if !seen.insert(*id) {
+                continue;
+            }
+            let Some(item) = self.item(*id)? else { continue };
+            let doc = self.source(&item.source_id)?.map(|s| s.uri).unwrap_or_else(|| item.source_id.clone());
+            let doc = doc.rsplit(['/', '\\']).next().unwrap_or(&doc).to_string();
+            passages.push((item, doc));
+        }
+        if found.is_empty() && passages.is_empty() {
+            return Ok(String::new());
+        }
+        let name = |id: i64| found.iter().find(|n| n.id == id).map(|n| n.name.as_str()).unwrap_or("?");
+        let mut out = String::from("[selection from the knowledge graph]");
+        if !found.is_empty() {
+            out.push_str(&format!("\nentities ({}):", found.len()));
+            for n in &found {
+                let desc = n.description.trim();
+                out.push_str(&format!(
+                    "\n- {} ({}, mentioned {}x){}",
+                    n.name,
+                    n.kind,
+                    n.mentions,
+                    if desc.is_empty() { String::new() } else { format!(": {desc}") }
+                ));
+            }
+        }
+        if !rels.is_empty() {
+            out.push_str(&format!("\nrelations ({}):", rels.len()));
+            for e in &rels {
+                out.push_str(&format!("\n- {} -{}-> {}", name(e.source), e.kind, name(e.target)));
+            }
+        }
+        if !passages.is_empty() {
+            out.push_str(&format!("\npassages ({}):", passages.len()));
+            for (item, doc) in &passages {
+                let text = item.content.trim();
+                let cut: String = text.chars().take(max_chars).collect();
+                let more = if cut.len() < text.len() { " [...]" } else { "" };
+                out.push_str(&format!("\n### {} — {} · lines {}-{}\n{cut}{more}", item.title.trim(), doc, item.line_start, item.line_end));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn item(&self, id: i64) -> anyhow::Result<Option<Item>> {
         let conn = self.conn.lock();
         Ok(conn.query_row(&format!("{ITEM_SELECT} WHERE id = ?1"), params![id], row_to_item).optional()?)
@@ -1065,6 +1157,26 @@ mod tests {
         assert_eq!(db.embedded("x").unwrap(), (0, 0, 0));
         drop(db);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_selection_reads_as_entities_relations_and_passages() {
+        let db = seeded();
+        let g = db.graph(100).unwrap();
+        let id = |name: &str| g.nodes.iter().find(|n| n.name == name).unwrap().id;
+        let (rust, bc, sqlite) = (id("Rust"), id("Borrow checker"), id("SQLite"));
+        let item = db.entity_items(rust).unwrap()[0].id;
+        let text = db.selection_context(&[rust, bc, rust, 999_999], &[item, item], 20).unwrap();
+        assert!(text.starts_with("[selection from the knowledge graph]"), "{text}");
+        assert!(text.contains("entities (2):"), "repeats and missing ids are dropped: {text}");
+        assert!(text.contains("- Rust (technology, mentioned 1x)"), "{text}");
+        assert!(text.contains("relations (1):\n- Rust -uses-> Borrow checker"), "{text}");
+        assert!(text.contains("passages (1):\n### Ownership in Rust — rust.md · lines 1-1"), "the document by its file name: {text}");
+        assert!(text.contains("[...]"), "a long passage is cut: {text}");
+        let alone = db.selection_context(&[sqlite], &[], 500).unwrap();
+        assert!(!alone.contains("relations"), "no relation to show among one entity: {alone}");
+        assert_eq!(db.selection_context(&[], &[], 500).unwrap(), "");
+        assert_eq!(db.selection_context(&[999_999], &[888_888], 500).unwrap(), "", "nothing left is nothing");
     }
 
     #[test]

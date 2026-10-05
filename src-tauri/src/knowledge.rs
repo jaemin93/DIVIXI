@@ -33,6 +33,10 @@ use crate::{embed, AppState, SETTING_PREFIX};
 
 /// The artifact kind a library document is listed as.
 pub const KIND: &str = "knowledge";
+/// The knowledge graph's conversation: one per library, an artifact so it
+/// runs like a design's (its own agent, session and turns), apart from the
+/// documents (`KIND`), which are artifacts too.
+pub const GRAPH_KIND: &str = "graph";
 /// Window event carrying a source whenever it changes.
 const EVENT: &str = "knowledge";
 /// Items listed at most when nothing narrows the list.
@@ -895,9 +899,130 @@ pub fn knowledge_formats() -> Vec<&'static str> {
     read::supported_extensions()
 }
 
+// ----- the knowledge graph's conversation -----
+
+/// The library's two read-only tools, `knowledge_search` and
+/// `knowledge_list_sources`: the conductor's, and the graph conversation's.
+pub fn library_tools(app: AppHandle) -> Vec<orchestra_mcp::Tool> {
+    use orchestra_mcp::Tool;
+    use serde_json::{json, Value};
+    let search = app.clone();
+    let list = app;
+    vec![
+        Tool::new(
+            "knowledge_search",
+            "Search the human's knowledge library: documents they chose to add, split into sections, each with a title, a summary and the entities it names. Call it when the human asks what we know about something, refers to their docs or notes or to a stored document by name, or when a task you are about to delegate touches a topic the library covers (knowledge_list_sources shows the topics). Do NOT call it for general coding questions, file operations, debugging, or anything the working folder or the conversation already answers. Matching is by keyword, by entity and, when embeddings are set up, by meaning: use the distinctive words a document would contain, and try other wording once if nothing comes back. Workers cannot search the library; pass them what they need.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Words to find in the documents." },
+                    "limit": { "type": "integer", "description": "Max results (default 3, max 5). One extra may be added when the best keyword match would otherwise be dropped.", "default": 3 },
+                    "source_id": { "type": "string", "description": "Optional source id (from knowledge_list_sources) to search one document." }
+                },
+                "required": ["query"]
+            }),
+            move |args| {
+                let app = search.clone();
+                async move {
+                    let query = crate::conductor::str_arg(&args, "query")?;
+                    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(3).clamp(1, 5) as usize;
+                    let source = args.get("source_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+                    let vector = crate::knowledge::query_vector(&app, &query).await;
+                    let db = app.state::<AppState>().library.db.clone();
+                    if let Some(id) = &source {
+                        if db.source(id).map_err(|e| e.to_string())?.is_none() {
+                            return Err(format!("No knowledge source with id {id}. Call knowledge_list_sources to see the valid ids."));
+                        }
+                    }
+                    let hits = tokio::task::spawn_blocking(move || db.search(&query, limit, source.as_deref(), vector.as_ref().map(|(v, s)| (v.as_slice(), s.as_str()))))
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .map_err(|e| e.to_string())?;
+                    Ok(Value::String(orchestra_knowledge::format_hits(&hits)))
+                }
+            },
+        ),
+        Tool::new(
+            "knowledge_list_sources",
+            "What is in the human's knowledge library: counts, then one line per document with its id, item count, sync status and topic. Read-only. Use it to see which topics the library covers and to find a source_id for knowledge_search.",
+            json!({ "type": "object", "properties": {} }),
+            move |_args| {
+                let app = list.clone();
+                async move {
+                    let db = app.state::<AppState>().library.db.clone();
+                    let (sources, stats) = tokio::task::spawn_blocking(move || Ok::<_, anyhow::Error>((db.sources()?, db.stats()?)))
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .map_err(|e| e.to_string())?;
+                    Ok(Value::String(orchestra_knowledge::format_sources(&sources, &stats)))
+                }
+            },
+        ),
+    ]
+}
+
+/// Most entities and passages one message carries; past these the picks are cut.
+pub const MAX_PICKED_ENTITIES: usize = 80;
+pub const MAX_PICKED_PASSAGES: usize = 12;
+/// Characters of a picked passage that go with the message.
+const PASSAGE_CHARS: usize = 1500;
+
+/// What the graph view picked, as the composer sends it: `e:<id>` for an
+/// entity, `i:<id>` for a passage. Anything else is ignored; each list keeps
+/// its order, without repeats, cut at its limit.
+pub fn parse_picks(selected: &[String]) -> (Vec<i64>, Vec<i64>) {
+    let (mut entities, mut items) = (Vec::new(), Vec::new());
+    for s in selected {
+        let (list, limit) = match s.split_once(':') {
+            Some(("e", _)) => (&mut entities, MAX_PICKED_ENTITIES),
+            Some(("i", _)) => (&mut items, MAX_PICKED_PASSAGES),
+            _ => continue,
+        };
+        let Some(id) = s.split_once(':').and_then(|(_, n)| n.trim().parse::<i64>().ok()) else { continue };
+        if list.len() < limit && !list.contains(&id) {
+            list.push(id);
+        }
+    }
+    (entities, items)
+}
+
+/// The text that goes with a graph conversation's message: what was picked.
+pub fn graph_context(state: &AppState, selected: &[String]) -> Result<String, String> {
+    let (entities, items) = parse_picks(selected);
+    state.library.db.selection_context(&entities, &items, PASSAGE_CHARS).map_err(|e| e.to_string())
+}
+
+/// What the graph conversation's agent is told once, at the start of its session.
+pub fn graph_preamble(lang: &str) -> String {
+    if lang == "ko" {
+        return "당신은 DIVIXI 지식 라이브러리의 그래프 파트너입니다. 사람은 라이브러리 문서에서 뽑은 엔티티 그래프를 보면서, 그중 일부(엔티티, 그 사이 관계, 엔티티를 언급하는 구절)를 골라 질문합니다. 고른 것은 메시지 끝의 [selection from the knowledge graph] 블록으로 옵니다.\n\n- 고른 것에 근거해 답하고, 근거가 된 문서(파일 이름)를 밝힙니다.\n- 고른 것만으로 부족하면 knowledge_search로 라이브러리를 더 찾습니다(무엇이 있는지는 knowledge_list_sources). 그래도 없으면 없다고 말합니다. 추측은 추측이라고 밝힙니다.\n- 라이브러리는 읽기만 합니다. 파일을 고치거나 명령을 실행하지 않습니다.\n- 짧고 분명하게, 사람이 쓴 언어로 답합니다.".to_string();
+    }
+    "You are the graph partner for a DIVIXI knowledge library. The human is looking at the entity graph drawn from the library's documents, picks part of it (entities, the relations among them, passages that mention them) and asks about it. What was picked comes at the end of the message, in a [selection from the knowledge graph] block.\n\n- Answer from what was picked, and name the documents (file names) the answer rests on.\n- When the pick is not enough, search the library with knowledge_search (knowledge_list_sources shows what is there). If it is not there either, say so; say when something is a guess.\n- The library is read only to you: do not edit files or run commands.\n- Be brief and plain, in the language the human writes in.".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_picks_are_entities_and_passages_in_order_without_repeats() {
+        let picks: Vec<String> = ["e:3", "i:10", "e:1", "e:3", "x:5", "e:", "e:abc", "i:11", "nonsense"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(parse_picks(&picks), (vec![3, 1], vec![10, 11]));
+        let many: Vec<String> = (0..200).map(|i| format!("e:{i}")).chain((0..50).map(|i| format!("i:{i}"))).collect();
+        let (e, i) = parse_picks(&many);
+        assert_eq!((e.len(), i.len()), (MAX_PICKED_ENTITIES, MAX_PICKED_PASSAGES), "cut at the limits");
+        assert_eq!(parse_picks(&[]), (vec![], vec![]));
+    }
+
+    #[test]
+    fn the_graph_partner_is_told_where_the_pick_is_and_what_it_may_do() {
+        for lang in ["en", "ko"] {
+            let p = graph_preamble(lang);
+            assert!(p.contains("[selection from the knowledge graph]"), "{lang}");
+            assert!(p.contains("knowledge_search") && p.contains("knowledge_list_sources"), "{lang}");
+        }
+        assert_ne!(graph_preamble("en"), graph_preamble("ko"));
+    }
     use orchestra_acp::ConfigChoice;
 
     fn choices(ids: &[(&str, &str)]) -> Vec<ConfigChoice> {
