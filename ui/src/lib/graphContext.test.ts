@@ -32,7 +32,7 @@ test("the chips on offer: the entity, its passages, the centre's neighbourhood, 
 });
 
 test("a chip with nothing in it is not offered", () => {
-  const chips = contextChips({ ...none, picked: { id: 1, name: "Gateway" }, centre: { id: 1, name: "Gateway", depth: 1 }, query: "x" });
+  const chips = contextChips({ ...none, picked: { id: 1, name: "Router" }, centre: { id: 1, name: "Router", depth: 1 }, query: "x" });
   assert.deepEqual(
     chips.map((c) => c.kind),
     ["entity"],
@@ -65,9 +65,9 @@ test("taking a chip out and putting it back", () => {
 test("a message carries at most so many entities and passages", () => {
   const chips = contextChips({
     ...none,
-    picked: { id: 1, name: "Gateway" },
+    picked: { id: 1, name: "Router" },
     pickedItems: Array.from({ length: 40 }, (_, i) => ({ id: 1000 + i })),
-    centre: { id: 1, name: "Gateway", depth: 2 },
+    centre: { id: 1, name: "Router", depth: 2 },
     focusIds: Array.from({ length: 300 }, (_, i) => i + 1),
   });
   const picks = picksOf(chips, new Set());
