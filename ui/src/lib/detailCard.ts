@@ -17,6 +17,8 @@ export const DEFAULT_PREFS: CardPrefs = { folded: false, sourcesOpen: false };
 /** The card's width when open, and its gap from the plate's edge. */
 export const CARD_WIDTH = 280;
 export const CARD_GAP = 12;
+/** The card's top: under the plate's caption (FIG. 01 …), top left. */
+export const CARD_TOP = 40;
 /** A folded card is a header only, this tall. */
 export const FOLDED_HEIGHT = 38;
 
@@ -28,21 +30,16 @@ export function cardShape(picked: boolean, prefs: CardPrefs): CardShape {
 }
 
 /**
- * How far from the plate's right edge the overview rail sits. An open card
- * takes the right-hand column, so the rail moves to its left; a folded card is
- * only a header along the top, so the rail keeps its place on the edge.
+ * Below this plate width an open card (top left) and the overview rail
+ * (right edge, about 150 px with its labels) would meet.
  */
-export function railRight(shape: CardShape): number {
-  return shape === "open" ? CARD_WIDTH + CARD_GAP * 2 : 0;
-}
-
-/** Below this plate width an open card leaves the rail no room of its own. */
-export const RAIL_ROOM = 760;
+export const RAIL_ROOM = 480;
 
 /**
- * Whether the overview rail is shown. On a narrow plate (the agent panel
- * open beside it, a small window) an open card would push the rail into the
- * middle of the graph; it steps out until the card is folded or closed.
+ * Whether the overview rail is shown. The card is on the left and the rail
+ * on the right edge, so the rail keeps its place; only on a plate too narrow
+ * for both (the agent panel open beside it, a small window) does it step out
+ * until the card is folded or closed.
  */
 export function railVisible(shape: CardShape, plateWidth: number): boolean {
   return !(shape === "open" && plateWidth > 0 && plateWidth < RAIL_ROOM);
@@ -55,10 +52,29 @@ export function railVisible(shape: CardShape, plateWidth: number): boolean {
  */
 export function cardRect(shape: CardShape, plateWidth: number, height: number): [number, number, number, number] | null {
   if (shape === "none") return null;
-  const right = plateWidth - CARD_GAP;
-  const left = right - CARD_WIDTH;
-  const bottom = CARD_GAP + (shape === "folded" ? FOLDED_HEIGHT : Math.max(FOLDED_HEIGHT, height));
-  return [left, CARD_GAP, right, bottom];
+  const left = CARD_GAP;
+  const right = Math.min(plateWidth, left + CARD_WIDTH);
+  const bottom = CARD_TOP + (shape === "folded" ? FOLDED_HEIGHT : Math.max(FOLDED_HEIGHT, height));
+  return [left, CARD_TOP, right, bottom];
+}
+
+/**
+ * Where a kind's node list may start on the left: beside the card when one
+ * is shown (the list drops from the legend over the plate's top left, where
+ * the card is), else at the plate's margin.
+ */
+export function listMinLeft(shape: CardShape): number {
+  return shape === "none" ? CARD_GAP : CARD_GAP * 2 + CARD_WIDTH;
+}
+
+/**
+ * The card's tallest, in pixels of a plate `plateHeight` tall: down to the
+ * plate's margin, or, with the query and centre boxes shown at the bottom
+ * left (`boxes` px tall, their bottom `boxesBottom` px up), down to them.
+ */
+export function cardMaxHeight(plateHeight: number, boxes: number, boxesBottom: number): number {
+  const floor = boxes > 0 ? boxes + boxesBottom + CARD_GAP : CARD_GAP;
+  return Math.max(FOLDED_HEIGHT, plateHeight - CARD_TOP - floor);
 }
 
 /** Turn one preference over, keeping the other. */

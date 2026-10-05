@@ -29,7 +29,7 @@
   import { tick as nextTick, untrack } from "svelte";
   import { t } from "./i18n.svelte";
   import { placeNew, queryReach, settle, settleBudget, tick, visibleIds, STILL } from "./graphLayout";
-  import { cardRect, cardShape, railRight, railVisible, toggled } from "./detailCard";
+  import { cardMaxHeight, cardRect, cardShape, listMinLeft, railVisible, toggled } from "./detailCard";
   import { contextChips } from "./graphContext";
   import { kindCounts, nodesOfKind } from "./kindList";
   import { store } from "./store.svelte";
@@ -61,6 +61,11 @@
   let card = $state<CardPrefs>(rememberedCard);
   /** The open card's height, for labels to keep clear of it. */
   let cardH = $state(0);
+  /** The plate's height, and the query and centre boxes' at its bottom left, for the card to stop short of. */
+  let stageH = $state(0);
+  let boxesH = $state(0);
+  /** The boxes' distance from the plate's bottom (their CSS `bottom`). */
+  const BOXES_BOTTOM = 34;
   const shape = $derived(cardShape(!!picked, card));
   /** The plate's width, which the agent panel takes from. */
   let stageW = $state(0);
@@ -553,9 +558,8 @@
     });
     // Nor may one run under the overview rail on the right edge.
     const railH = sections.length * 24;
-    const rr = railRight(shape);
-    if (railOn) taken.push([w - rr - 150, h / 2 - railH / 2 - 8, w - rr, h / 2 + railH / 2 + 8]);
-    // Nor under the entity card, open or folded.
+    if (railOn) taken.push([w - 150, h / 2 - railH / 2 - 8, w, h / 2 + railH / 2 + 8]);
+    // Nor under the entity card, open or folded, top left.
     const covered = cardRect(shape, w, cardH);
     if (covered) taken.push(covered);
     const free = (x0: number, y0: number, x1: number, y1: number) =>
@@ -921,7 +925,8 @@
     if (!button || !stageEl) return 12;
     void stageW; // again when the plate's width (and so the legend's wrap) changes
     const x = button.getBoundingClientRect().left - stageEl.getBoundingClientRect().left;
-    return Math.round(Math.max(12, Math.min(x, stageW - listW - 12)));
+    // Beside the entity card when one is shown; on a plate too narrow for both, over it.
+    return Math.round(Math.max(12, Math.min(Math.max(x, listMinLeft(shape)), stageW - listW - 12)));
   });
 
   /** A legend entry: list its kind's nodes and frame them, or (again) close the list and show everything. */
@@ -1045,7 +1050,7 @@
     </div>
   {/if}
   <div class="body">
-  <div class="stage" bind:this={stageEl} bind:clientWidth={stageW}>
+  <div class="stage" bind:this={stageEl} bind:clientWidth={stageW} bind:clientHeight={stageH}>
     {#if !kb.graph.nodes.length}
       <p class="empty">{t("kb.graphEmpty")}</p>
     {/if}
@@ -1087,7 +1092,7 @@
       </div>
     {/if}
     {#if kb.shownQuery || centreNode}
-      <div class="boxes">
+      <div class="boxes" bind:clientHeight={boxesH}>
         {#if centreNode}
           <div class="query" aria-live="polite">
             <div class="qhead">
@@ -1126,7 +1131,7 @@
       </div>
     {/if}
     {#if kb.graph.nodes.length && railOn}
-      <nav class="rail" style="right: {railRight(shape)}px" aria-label={t("kb.graphSections")}>
+      <nav class="rail" aria-label={t("kb.graphSections")}>
         {#each sections as sec, i (sec.id)}
           <button
             class="stop"
@@ -1144,7 +1149,7 @@
       </nav>
     {/if}
     {#if picked}
-      <aside class="detail" class:folded={card.folded} bind:clientHeight={cardH}>
+      <aside class="detail" class:folded={card.folded} style="max-height: {cardMaxHeight(stageH, kb.shownQuery || centreNode ? boxesH : 0, BOXES_BOTTOM)}px" bind:clientHeight={cardH}>
         <div class="dhead">
           {#if card.folded}
             <span class="dname small">{@render glyph(glyphOf(picked.kind), true)}<span>{picked.name}</span></span>
@@ -1531,10 +1536,6 @@
     gap: 2px;
   }
 
-  .rail {
-    transition: right 0.18s ease;
-  }
-
   .stop {
     display: flex;
     align-items: center;
@@ -1595,13 +1596,14 @@
     pointer-events: none;
   }
 
+  /* Top left, under the caption (CARD_TOP, CARD_GAP); its height is capped inline (cardMaxHeight). */
   .detail {
     position: absolute;
-    top: 12px;
-    right: 12px;
+    top: 40px;
+    left: 12px;
     width: 280px;
+    max-width: calc(100% - 24px);
     z-index: 1;
-    max-height: calc(100% - 24px);
     overflow-y: auto;
     background: var(--card);
     border: 1px solid var(--accln);

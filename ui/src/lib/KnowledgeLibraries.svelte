@@ -3,6 +3,7 @@
   import { cubicOut } from "svelte/easing";
   import SplitHandle from "./SplitHandle.svelte";
   import Icon from "./Icon.svelte";
+  import ArtifactMenu from "./ArtifactMenu.svelte";
   import { store } from "./store.svelte";
   import { kb } from "./knowledge.svelte";
   import { t } from "./i18n.svelte";
@@ -11,9 +12,10 @@
   /**
    * The knowledge page's libraries, as the designs column lists designs: all
    * of them on top, then each library with its number of documents, and a
-   * box to make one. A library is renamed in place (double-click, or the
-   * pencil) and deleted from its row: General never, and one with documents
-   * only once they are moved or removed, which the row says.
+   * box to make one. A library is renamed and deleted from its right-click
+   * menu, as a design is (or in place: double-click, the pencil, the ×):
+   * General is never deleted, nor one with documents until they are moved or
+   * removed, which the menu or the column says.
    */
 
   /** Slides like the tracks and designs columns; not for those who asked for less motion. */
@@ -26,6 +28,27 @@
   let renaming = $state<number | null>(null);
   let draft = $state("");
   let confirmDelete = $state<number | null>(null);
+  /** The right-click menu: the designs list's, without tags and colours. */
+  let menu = $state<{ id: number; x: number; y: number } | null>(null);
+  const menuLibrary = $derived.by(() => {
+    const m = menu;
+    return m ? kb.libraries.find((l) => l.id === m.id) : undefined;
+  });
+
+  /** From the menu: the same rules as in place; what is wrong is said in the column. */
+  async function renameTo(l: KLibrary, raw: string) {
+    const name = cleanName(raw);
+    if (!name || name === kb.libraryName(l)) return;
+    const p = nameProblem(name, kb.libraries, l.id);
+    note = p ? nameNote(p) : await kb.renameLibrary(l.id, name);
+  }
+
+  /** From the menu: why not (shown in the menu), or "" once it is gone. */
+  async function deleteFromMenu(l: KLibrary): Promise<string> {
+    const block = deleteBlock(l);
+    if (block) return blockNote(block, l);
+    return kb.deleteLibrary(l.id);
+  }
 
   function nameNote(p: NameProblem): string {
     if (p === "long") return t("kb.lib.nameLong", { n: MAX_NAME });
@@ -115,7 +138,19 @@
       </div>
       <div class="rule" aria-hidden="true"></div>
       {#each kb.libraries as l (l.id)}
-        <div class="row" class:on={kb.library === l.id} class:asking={confirmDelete === l.id}>
+        <div
+          class="row"
+          class:on={kb.library === l.id}
+          class:asking={confirmDelete === l.id}
+          class:menued={menu?.id === l.id}
+          oncontextmenu={(e) => {
+            e.preventDefault();
+            confirmDelete = null;
+            note = "";
+            menu = { id: l.id, x: e.clientX, y: e.clientY };
+          }}
+          role="presentation"
+        >
           {#if renaming === l.id}
             <!-- svelte-ignore a11y_autofocus -->
             <input
@@ -157,6 +192,20 @@
     </div>
   </aside>
 </div>
+
+{#if menu && menuLibrary}
+  {@const ml = menuLibrary}
+  <ArtifactMenu
+    x={menu.x}
+    y={menu.y}
+    name={kb.libraryName(ml)}
+    color=""
+    deleteNote={deleteBlock(ml) ? blockNote(deleteBlock(ml), ml) : t("kb.lib.deleteNote")}
+    onclose={() => (menu = null)}
+    onrename={(name) => renameTo(ml, name)}
+    ondelete={() => deleteFromMenu(ml)}
+  />
+{/if}
 
 <style>
   /* As the designs column (DesignView .list), so the two read as one family. */
@@ -268,7 +317,8 @@
 
   .row:hover,
   .row.on,
-  .row.asking {
+  .row.asking,
+  .row.menued {
     background: var(--sel);
   }
 
