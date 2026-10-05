@@ -566,14 +566,13 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
     let close = (app.clone(), track.clone());
     let ask_human = (app.clone(), track.clone());
     let answer = (app.clone(), track.clone());
-    let search = app.clone();
-    let list = app.clone();
+    let library = app.clone();
     let save_routine = (app.clone(), track.clone());
     let list_routines = app.clone();
     let run_routine = app.clone();
     let decide = (app, track);
 
-    vec![
+    let mut tools = vec![
         Tool::new(
             "spawn_worker",
             &format!("Open a worker (a separate agent session) and give it a task. Returns at once with the run id; the worker works in the background and its report reaches you later as a message starting with {REPORT_PREFIX}. A closed worker with this name is reopened with its earlier conversation (the result says resumed=true); pass fresh=true to start it over without that memory. Use for real work; answer questions yourself instead."),
@@ -821,55 +820,6 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
             },
         ),
         Tool::new(
-            "knowledge_search",
-            "Search the human's knowledge library: documents they chose to add, split into sections, each with a title, a summary and the entities it names. Call it when the human asks what we know about something, refers to their docs or notes or to a stored document by name, or when a task you are about to delegate touches a topic the library covers (knowledge_list_sources shows the topics). Do NOT call it for general coding questions, file operations, debugging, or anything the working folder or the conversation already answers. Matching is by keyword, by entity and, when embeddings are set up, by meaning: use the distinctive words a document would contain, and try other wording once if nothing comes back. Workers cannot search the library; pass them what they need.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Words to find in the documents." },
-                    "limit": { "type": "integer", "description": "Max results (default 3, max 5). One extra may be added when the best keyword match would otherwise be dropped.", "default": 3 },
-                    "source_id": { "type": "string", "description": "Optional source id (from knowledge_list_sources) to search one document." }
-                },
-                "required": ["query"]
-            }),
-            move |args| {
-                let app = search.clone();
-                async move {
-                    let query = str_arg(&args, "query")?;
-                    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(3).clamp(1, 5) as usize;
-                    let source = args.get("source_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-                    let vector = crate::knowledge::query_vector(&app, &query).await;
-                    let db = app.state::<AppState>().library.db.clone();
-                    if let Some(id) = &source {
-                        if db.source(id).map_err(|e| e.to_string())?.is_none() {
-                            return Err(format!("No knowledge source with id {id}. Call knowledge_list_sources to see the valid ids."));
-                        }
-                    }
-                    let hits = tokio::task::spawn_blocking(move || db.search(&query, limit, source.as_deref(), vector.as_ref().map(|(v, s)| (v.as_slice(), s.as_str()))))
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .map_err(|e| e.to_string())?;
-                    Ok(Value::String(orchestra_knowledge::format_hits(&hits)))
-                }
-            },
-        ),
-        Tool::new(
-            "knowledge_list_sources",
-            "What is in the human's knowledge library: counts, then one line per document with its id, item count, sync status and topic. Read-only. Use it to see which topics the library covers and to find a source_id for knowledge_search.",
-            json!({ "type": "object", "properties": {} }),
-            move |_args| {
-                let app = list.clone();
-                async move {
-                    let db = app.state::<AppState>().library.db.clone();
-                    let (sources, stats) = tokio::task::spawn_blocking(move || Ok::<_, anyhow::Error>((db.sources()?, db.stats()?)))
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .map_err(|e| e.to_string())?;
-                    Ok(Value::String(orchestra_knowledge::format_sources(&sources, &stats)))
-                }
-            },
-        ),
-        Tool::new(
             "save_routine",
             "Write work down as a routine: a named instruction the human runs again whenever they want it, without dictating it to you a second time. Use when they say a job is one they will want repeatedly (\"make this a routine\", \"we will do this every release\", \"save this for next time\").
 
@@ -1009,10 +959,13 @@ The folder defaults to this track's and the agent to the one workers here use; s
                 }
             },
         ),
-    ]
+    ];
+    // The library: the same two tools the knowledge graph's conversation has.
+    tools.extend(crate::knowledge::library_tools(library));
+    tools
 }
 
-fn str_arg(args: &Value, key: &str) -> Result<String, String> {
+pub(crate) fn str_arg(args: &Value, key: &str) -> Result<String, String> {
     args.get(key)
         .and_then(Value::as_str)
         .map(|s| s.trim().to_string())

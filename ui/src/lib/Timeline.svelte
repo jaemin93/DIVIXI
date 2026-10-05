@@ -1,6 +1,6 @@
 <script lang="ts">
   import ReportCard from "./ReportCard.svelte";
-  import { store, agentLabel, splitAttachments, splitKnowledge, wasStopped, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Run } from "./store.svelte";
+  import { store, GRAPH_KIND, agentLabel, splitAttachments, splitKnowledge, wasStopped, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Run } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import DecisionCard from "./DecisionCard.svelte";
   import Working from "./Working.svelte";
@@ -269,7 +269,7 @@
         <div class="empty">
           <div class="emptymark"><Mark size={56} /></div>
           <div class="mlab">{t("timeline.empty")}</div>
-          <p class="serif">{store.chatArtifact ? t("design.chatEmpty") : t("timeline.emptyHint")}</p>
+          <p class="serif">{store.chatArtifact ? t(store.currentArtifact?.kind === GRAPH_KIND ? "kb.agentEmpty" : "design.chatEmpty") : t("timeline.emptyHint")}</p>
         </div>
       {/if}
 
@@ -323,7 +323,7 @@
         {/if}
         <div class="conductor" class:live={run.status === "connecting" || run.status === "running"}>
           <div class="chead">
-            <span class="mlab">{store.chatArtifact ? t("design.agentLabel") : t("timeline.conductor")}</span>
+            <span class="mlab">{store.chatArtifact ? t(store.currentArtifact?.kind === GRAPH_KIND ? "kb.agentLabel" : "design.agentLabel") : t("timeline.conductor")}</span>
             <span class="mono meta">{agentLabel(run.agent)}</span>
             {#if run.status === "connecting" || run.status === "running"}
               <Working />

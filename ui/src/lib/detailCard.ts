@@ -36,6 +36,18 @@ export function railRight(shape: CardShape): number {
   return shape === "open" ? CARD_WIDTH + CARD_GAP * 2 : 0;
 }
 
+/** Below this plate width an open card leaves the rail no room of its own. */
+export const RAIL_ROOM = 760;
+
+/**
+ * Whether the overview rail is shown. On a narrow plate (the agent panel
+ * open beside it, a small window) an open card would push the rail into the
+ * middle of the graph; it steps out until the card is folded or closed.
+ */
+export function railVisible(shape: CardShape, plateWidth: number): boolean {
+  return !(shape === "open" && plateWidth > 0 && plateWidth < RAIL_ROOM);
+}
+
 /**
  * The part of the plate (left, top, right, bottom, in pixels) the card covers,
  * for labels to keep out of; null when there is no card. `height` is the

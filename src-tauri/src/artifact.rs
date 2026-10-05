@@ -29,7 +29,7 @@ use crate::{design, pump, AppState};
 pub const SESSION: &str = "artifact";
 
 /// The kinds there are.
-pub const KINDS: [&str; 2] = [design::KIND, crate::knowledge::KIND];
+pub const KINDS: [&str; 3] = [design::KIND, crate::knowledge::KIND, crate::knowledge::GRAPH_KIND];
 
 /// Runs of an artifact are kept under this track key, apart from tracks.
 pub fn run_key(id: &str) -> String {
@@ -148,6 +148,8 @@ async fn open(app: &AppHandle, a: &ArtifactInfo) -> Result<(Arc<AgentSession>, b
     {
         let tools = match a.kind.as_str() {
             design::KIND => design::tools(app.clone(), a.id.clone()),
+            // The graph's conversation reads the library, and nothing else.
+            crate::knowledge::GRAPH_KIND => crate::knowledge::library_tools(app.clone()),
             other => return Err(format!("{other} artifacts have no agent yet")),
         };
         let spec = state.spec_for(&a.agent)?;
@@ -229,6 +231,8 @@ pub async fn turn(
                 }
                 (design::preamble(&lang, &a.title), design::context(&state, &id, &selected)?)
             }
+            // What the graph view picked (entities, passages) goes with each message.
+            crate::knowledge::GRAPH_KIND => (crate::knowledge::graph_preamble(&lang), crate::knowledge::graph_context(&state, &selected)?),
             other => return Err(format!("{other} artifacts have no agent yet")),
         };
         let body = if text.trim().is_empty() { "(look at it)".to_string() } else { text.clone() };

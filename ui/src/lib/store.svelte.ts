@@ -357,7 +357,7 @@ export type View = "track" | "settings" | "worker" | "new-track" | "edit-track" 
 
 // ----- artifacts: what the human keeps beside tracks and attaches to them —
 // designs (a sketch board worked out with an agent), knowledge later -----
-export type ArtifactKind = "design" | "knowledge";
+export type ArtifactKind = "design" | "knowledge" | "graph";
 export type ArtifactInfo = {
   id: string;
   kind: ArtifactKind;
@@ -492,6 +492,8 @@ export function withDelta(doc: DesignDoc, d: DesignDelta): DesignDoc {
 
 /** Artifact conversations are kept under this key, apart from tracks. */
 export const artifactKey = (id: string) => `artifact:${id}`;
+/** The knowledge graph's conversation is an artifact of this kind (src-tauri/src/knowledge.rs GRAPH_KIND). */
+export const GRAPH_KIND = "graph";
 const EMPTY_DOC: DesignDoc = { version: 0, nodes: [], edges: [], changes: [], next: 0 };
 
 /** Prefix of conductor prompts Divixi injects itself (worker reports). Language-neutral. */
@@ -935,6 +937,66 @@ class Store {
 
   /** Items picked on the board; they go with the next message. */
   designSelected = $state<string[]>([]);
+
+  /**
+   * The knowledge graph's conversation: an artifact of kind "graph", one per
+   * library, talked to from a panel beside the graph the way a design is
+   * talked to beside its board. `graphChatOpen` is the panel; while it is
+   * open on the knowledge page, the composer and timeline are this
+   * conversation's (see `chatArtifactId`).
+   */
+  graphChat = $state("");
+  graphChatOpen = $state(false);
+  graphChatWidth = $state(400);
+  /** What the graph view picked for the next message: `e:<entity id>`, `i:<item id>`. */
+  graphSelected = $state<string[]>([]);
+
+  setGraphChatWidth(px: number) {
+    this.graphChatWidth = Math.min(640, Math.max(320, Math.round(px)));
+  }
+
+  /** Open the graph's conversation, starting it (on the default agent, as a new design is) the first time. */
+  async openGraphChat() {
+    if (!this.artifacts.length) await this.loadArtifacts();
+    let chat = this.artifacts.filter((a) => a.kind === GRAPH_KIND).sort((a, b) => b.updated_at - a.updated_at)[0];
+    if (!chat) {
+      const agent = this.readyAgents.some((a) => a.kind === this.agent) ? this.agent : this.readyAgents[0]?.kind;
+      if (!agent) {
+        this.lastError = "no agent is ready";
+        return;
+      }
+      try {
+        chat = await invoke<ArtifactInfo>("create_artifact", { kind: GRAPH_KIND, title: t("kb.agentTitle"), agent });
+      } catch (err) {
+        this.lastError = String(err);
+        return;
+      }
+      this.artifacts = [chat, ...this.artifacts];
+    }
+    this.graphChat = chat.id;
+    this.graphChatOpen = true;
+    void this.refreshArtifactSession();
+  }
+
+  closeGraphChat() {
+    this.graphChatOpen = false;
+  }
+
+  /**
+   * The artifact whose conversation is on screen: the open design on the
+   * designs page, the graph's conversation on the knowledge page while its
+   * panel is open, otherwise none (the track's conductor is).
+   */
+  get chatArtifactId(): string {
+    if (this.view === "design") return this.artifact;
+    if (this.view === "knowledge" && this.graphChatOpen) return this.graphChat;
+    return "";
+  }
+
+  /** What goes with the on-screen artifact conversation's next message. */
+  get chatSelected(): string[] {
+    return this.view === "design" ? this.designSelected : this.graphSelected;
+  }
   /** The open artifact's agent session. */
   artifactSession = $state<{ open: boolean; busy: boolean }>({ open: false, busy: false });
 
@@ -980,7 +1042,7 @@ class Store {
 
   /** The conversation on screen, as a key for what waits in its composer. */
   get chatKey(): string {
-    return this.chatArtifact ? artifactKey(this.artifact) : `track:${this.track}`;
+    return this.chatArtifact ? artifactKey(this.chatArtifactId) : `track:${this.track}`;
   }
 
   /** Files waiting to go with the next message of the conversation on screen. */
@@ -1487,7 +1549,7 @@ class Store {
   /** Commands to complete in the composer: this track's session's, else the agent's last known. */
   /** The conversation on screen is an artifact's, not a track's conductor. */
   get chatArtifact(): boolean {
-    return this.view === "design" && !!this.artifact;
+    return !!this.chatArtifactId;
   }
 
   /** The turns of the conversation on screen, oldest first. */
@@ -1498,7 +1560,7 @@ class Store {
   /** Decision cards of the conversation on screen; artifacts have none. */
   get chatDecisions(): Decision[] {
     if (this.chatArtifact) {
-      const key = artifactKey(this.artifact);
+      const key = artifactKey(this.chatArtifactId);
       return this.decisions.filter((d) => d.track === key);
     }
     return this.trackDecisions;
@@ -1951,13 +2013,15 @@ class Store {
     }
   }
 
+  /** The artifact whose conversation is on screen, else the open design. */
   get currentArtifact(): ArtifactInfo | undefined {
-    return this.artifacts.find((d) => d.id === this.artifact);
+    const id = this.chatArtifactId || this.artifact;
+    return this.artifacts.find((d) => d.id === id);
   }
 
-  /** The open artifact's conversation, oldest first. */
+  /** The on-screen artifact's conversation, oldest first. */
   get artifactRuns(): Run[] {
-    const key = artifactKey(this.artifact);
+    const key = artifactKey(this.chatArtifactId || this.artifact);
     return this.runs.filter((r) => r.track === key);
   }
 
@@ -2332,7 +2396,8 @@ class Store {
       const typedWithKb = withKnowledge(typed, picks);
       // The board as it stands now, but only if it is still the one on
       // screen: a message queued here must not carry another's picture.
-      const image = this.artifact === id ? boardPng(this.designDoc) : null;
+      const isDesign = this.artifacts.find((a) => a.id === id)?.kind === "design";
+      const image = isDesign && this.artifact === id ? boardPng(this.designDoc) : null;
       const text = withAttachments(typedWithKb, files);
       this.runs.push({
         id: `pending-${Date.now()}`,
@@ -2367,18 +2432,19 @@ class Store {
   }
 
   async refreshArtifactSession() {
-    const id = this.artifact;
+    const id = this.chatArtifactId || this.artifact;
     if (!id) return;
     try {
       const s = await invoke<{ open: boolean; busy: boolean }>("artifact_state", { id });
-      if (this.artifact === id) this.artifactSession = s;
+      if ((this.chatArtifactId || this.artifact) === id) this.artifactSession = s;
     } catch {
       // Cosmetic.
     }
   }
 
   async artifactCancel() {
-    if (this.artifact) await invoke("artifact_cancel", { id: this.artifact }).catch(() => {});
+    const id = this.chatArtifactId || this.artifact;
+    if (id) await invoke("artifact_cancel", { id }).catch(() => {});
   }
 
   /** Take a decision the core sent or returned, new or changed. */
@@ -3433,8 +3499,8 @@ class Store {
     const text = prompt.trim();
     const files = this.attachments.map((a) => a.path);
     const artifact = this.chatArtifact;
-    const selected = artifact ? [...this.designSelected] : [];
-    const target = artifact ? this.artifact : this.track;
+    const selected = artifact ? [...this.chatSelected] : [];
+    const target = artifact ? this.chatArtifactId : this.track;
     if (!target) return null;
     if (artifact && !this.currentArtifact) return null;
     if (!text && !files.length && !this.kbPicked.length && !selected.length) return null;

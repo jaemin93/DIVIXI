@@ -21,7 +21,12 @@
   import { untrack } from "svelte";
   import { t } from "./i18n.svelte";
   import { placeNew, queryReach, settle, settleBudget, tick, visibleIds, STILL } from "./graphLayout";
-  import { cardRect, cardShape, railRight, toggled } from "./detailCard";
+  import { cardRect, cardShape, railRight, railVisible, toggled } from "./detailCard";
+  import { contextChips, picksOf, toggleChip, type Chip } from "./graphContext";
+  import { store } from "./store.svelte";
+  import SplitHandle from "./SplitHandle.svelte";
+  import Timeline from "./Timeline.svelte";
+  import Composer from "./Composer.svelte";
 
   /**
    * The entity graph, drawn as a plate: a small force layout on a canvas
@@ -52,6 +57,9 @@
   /** The open card's height, for labels to keep clear of it. */
   let cardH = $state(0);
   const shape = $derived(cardShape(!!picked, card));
+  /** The plate's width, which the agent panel takes from. */
+  let stageW = $state(0);
+  const railOn = $derived(railVisible(shape, stageW));
 
   function flip(key: keyof CardPrefs) {
     card = toggled(card, key);
@@ -520,7 +528,7 @@
     // Nor may one run under the overview rail on the right edge.
     const railH = sections.length * 24;
     const rr = railRight(shape);
-    taken.push([w - rr - 150, h / 2 - railH / 2 - 8, w - rr, h / 2 + railH / 2 + 8]);
+    if (railOn) taken.push([w - rr - 150, h / 2 - railH / 2 - 8, w - rr, h / 2 + railH / 2 + 8]);
     // Nor under the entity card, open or folded.
     const covered = cardRect(shape, w, cardH);
     if (covered) taken.push(covered);
@@ -855,6 +863,43 @@
 
   const kinds = $derived([...new Set(kb.graph.nodes.map((n) => n.kind))]);
   const centreNode = $derived(centre === null ? null : (kb.graph.nodes.find((n) => n.id === centre) ?? null));
+
+  // ----- the agent panel: what goes with a message -----
+
+  /** Chips the person took out; a new pick is a new chip and starts in. */
+  let excluded = $state<Set<string>>(new Set());
+  const chips = $derived(
+    contextChips({
+      picked: picked ? { id: picked.id, name: picked.name } : null,
+      pickedItems,
+      centre: centreNode ? { id: centreNode.id, name: centreNode.name, depth } : null,
+      focusIds: centre !== null && visible ? [...visible] : [],
+      query: kb.shownQuery,
+      queryIds: kb.shownQuery ? [...queried] : [],
+    }),
+  );
+  $effect(() => {
+    // What the composer sends with the graph conversation's next message.
+    store.graphSelected = picksOf(chips, excluded);
+  });
+
+  function chipLabel(c: Chip): string {
+    switch (c.kind) {
+      case "entity":
+        return t("kb.agentChipEntity", { name: c.name });
+      case "sources":
+        return t("kb.agentChipSources", { n: c.count, name: c.name });
+      case "focus":
+        return t("kb.agentChipFocus", { n: c.count, name: c.name });
+      default:
+        return t("kb.agentChipQuery", { n: c.count, name: c.name });
+    }
+  }
+
+  function toggleAgent() {
+    if (store.graphChatOpen) store.closeGraphChat();
+    else void store.openGraphChat();
+  }
   const sourceName = (id: string) => {
     const s = kb.sources.find((x) => x.id === id);
     return s ? kb.nameOf(s) : id;
@@ -889,6 +934,13 @@
       }}
     />
     <button class="btn sm" onclick={recenter}>{t("kb.recenter")}</button>
+    <button
+      class="btn sm"
+      class:on={store.graphChatOpen}
+      aria-pressed={store.graphChatOpen}
+      title={store.graphChatOpen ? t("kb.agentClose") : t("kb.agentOpen")}
+      onclick={toggleAgent}>{t("kb.agentToggle")}</button
+    >
     <button class="btn sm" class:on={running} onclick={() => {
         running = !running;
         kick();
@@ -898,7 +950,8 @@
       <span class="legend">{@render glyph(glyphOf(k))}{k}</span>
     {/each}
   </div>
-  <div class="stage">
+  <div class="body">
+  <div class="stage" bind:clientWidth={stageW}>
     {#if !kb.graph.nodes.length}
       <p class="empty">{t("kb.graphEmpty")}</p>
     {/if}
@@ -948,7 +1001,7 @@
         {/if}
       </div>
     {/if}
-    {#if kb.graph.nodes.length}
+    {#if kb.graph.nodes.length && railOn}
       <nav class="rail" style="right: {railRight(shape)}px" aria-label={t("kb.graphSections")}>
         {#each sections as sec, i (sec.id)}
           <button
@@ -1009,6 +1062,45 @@
         {/if}
       </aside>
     {/if}
+  </div>
+  {#if store.graphChatOpen && store.graphChat}
+    <!-- The graph's conversation beside it, as a design's beside its board. -->
+    <div class="talk" style="width: {store.graphChatWidth}px">
+      <SplitHandle
+        edge="left"
+        width={store.graphChatWidth}
+        min={320}
+        max={640}
+        reset={400}
+        label={t("kb.agentResize")}
+        onchange={(px) => store.setGraphChatWidth(px)}
+      />
+      <div class="ctx">
+        <div class="mono ctxlab">{t("kb.agentContext")}</div>
+        {#if chips.length}
+          <div class="chips">
+            {#each chips as c (c.key)}
+              {@const out = excluded.has(c.key)}
+              <button
+                class="kchip"
+                class:out
+                aria-pressed={!out}
+                title={out ? t("kb.agentChipAdd") : t("kb.agentChipRemove")}
+                onclick={() => (excluded = toggleChip(excluded, c.key))}
+              >
+                <span class="clabel">{chipLabel(c)}</span>
+                <span class="cx" aria-hidden="true">{out ? "+" : "×"}</span>
+              </button>
+            {/each}
+          </div>
+        {:else}
+          <p class="ctxnone">{t("kb.agentNothing")}</p>
+        {/if}
+      </div>
+      <Timeline />
+      <Composer />
+    </div>
+  {/if}
   </div>
 </div>
 
@@ -1085,11 +1177,100 @@
     fill: var(--kg-acc);
   }
 
+  /* The plate and, when open, the agent panel beside it: the plate gives up the width. */
+  .body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+
   .stage {
     position: relative;
     flex: 1;
+    min-width: 240px;
     min-height: 0;
     background: var(--kg-paper);
+  }
+
+  /* As a design's conversation column (DesignView .talk). */
+  .talk {
+    position: relative;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-left: 1px solid var(--line);
+    background: var(--bg);
+  }
+
+  .talk :global(.composer) {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .talk :global(.scroll) {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  /* What goes with the next message, as chips to take out and put back. */
+  .ctx {
+    padding: 10px 14px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .ctxlab {
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--kg-acc);
+    margin-bottom: 6px;
+  }
+
+  .ctxnone {
+    margin: 0;
+    font-size: 12px;
+    color: var(--lab);
+  }
+
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .kchip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    height: 22px;
+    padding: 0 6px 0 8px;
+    background: transparent;
+    border: 1px solid var(--kg-acc);
+    color: var(--txt);
+    font-size: 11.5px;
+  }
+
+  .kchip .clabel {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .kchip .cx {
+    color: var(--lab);
+  }
+
+  .kchip:hover .cx {
+    color: var(--hi);
+  }
+
+  .kchip.out {
+    border-style: dashed;
+    border-color: var(--lines);
+    color: var(--lab);
+    text-decoration: line-through;
   }
 
   canvas {

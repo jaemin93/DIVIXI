@@ -2,7 +2,7 @@
   import { onDestroy, onMount, tick, untrack } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { invoke, inTauri, bring } from "./ipc.svelte";
-  import { store, type ArtifactInfo, type KbPick, type WsEntry } from "./store.svelte";
+  import { store, GRAPH_KIND, type ArtifactInfo, type KbPick, type WsEntry } from "./store.svelte";
   import AgentPicker from "./AgentPicker.svelte";
   import Icon from "./Icon.svelte";
   import Popover from "./Popover.svelte";
@@ -34,6 +34,8 @@
     if (kbStash !== null) store.messageDrafts[draftKey] = kbStash;
   });
   let contextOpen = $state(false);
+  /** Talking to the knowledge graph's conversation rather than a design's. */
+  const graphChat = $derived(store.chatArtifact && store.currentArtifact?.kind === GRAPH_KIND);
   let box = $state<HTMLTextAreaElement>();
   /** Highlighted row in the slash list. */
   let slashIndex = $state(0);
@@ -43,7 +45,7 @@
     const text = draft;
     // "@kb …" typed but not picked from is a search, not a message.
     if (kbQuery !== null) return;
-    const something = text.trim() || store.attachments.length || store.kbPicked.length || (store.chatArtifact && store.designSelected.length);
+    const something = text.trim() || store.attachments.length || store.kbPicked.length || (store.chatArtifact && store.chatSelected.length);
     // A design picked a moment ago is still being written out: wait for it.
     // A turn in flight is no reason to wait: the message joins the line.
     if (!something || store.attaching > 0) return;
@@ -762,8 +764,8 @@
         bind:value={draft}
         rows="1"
         placeholder={narrow
-          ? store.busy ? t("composer.queueingShort") : store.chatArtifact ? t("design.placeholderShort") : t("composer.placeholderShort")
-          : store.busy ? t("composer.queueing") : store.chatArtifact ? t("design.placeholder") : t("composer.placeholder")}
+          ? store.busy ? t("composer.queueingShort") : store.chatArtifact ? t(graphChat ? "kb.agentPlaceholderShort" : "design.placeholderShort") : t("composer.placeholderShort")
+          : store.busy ? t("composer.queueing") : store.chatArtifact ? t(graphChat ? "kb.agentPlaceholder" : "design.placeholder") : t("composer.placeholder")}
         aria-label={t("composer.placeholder")}
         onkeydown={onKey}
         oninput={() => {
