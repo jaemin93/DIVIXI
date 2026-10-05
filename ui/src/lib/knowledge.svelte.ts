@@ -170,9 +170,13 @@ class Knowledge {
         query: query.trim() || null,
       });
       if (seq !== this.searchSeq) return;
+      // What the query reaches lands with the query itself: the graph's focus
+      // then moves once, not to a stale set and again a moment later.
+      const reached = await this.queryEntitiesOf(query.trim());
+      if (seq !== this.searchSeq) return;
       this.items = items;
       this.shownQuery = query.trim();
-      void this.loadQueryEntities(seq);
+      this.queryEntities = reached;
     } catch (err) {
       if (seq === this.searchSeq) store.lastError = String(err);
     } finally {
@@ -180,18 +184,15 @@ class Knowledge {
     }
   }
 
-  /** What the shown query reaches in the graph, for the graph view to light. */
-  private async loadQueryEntities(seq: number) {
-    const query = this.shownQuery;
-    let found: KQueryEntities = { seeds: [], related: [] };
-    if (query) {
-      try {
-        found = await invoke<KQueryEntities>("knowledge_query_entities", { query });
-      } catch {
-        // Cosmetic: the graph shows the query unlit.
-      }
+  /** What a query reaches in the graph, for the graph view to light and focus on. */
+  private async queryEntitiesOf(query: string): Promise<KQueryEntities> {
+    if (!query) return { seeds: [], related: [] };
+    try {
+      return await invoke<KQueryEntities>("knowledge_query_entities", { query });
+    } catch {
+      // Cosmetic: the graph shows the query unlit, and whole.
+      return { seeds: [], related: [] };
     }
-    if (seq === this.searchSeq) this.queryEntities = found;
   }
 
   async loadGraph() {
