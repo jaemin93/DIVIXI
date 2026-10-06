@@ -30,7 +30,7 @@
   import { t } from "./i18n.svelte";
   import { placeNew, queryReach, settle, settleBudget, tick, visibleIds, STILL } from "./graphLayout";
   import { cardMaxHeight, cardRect, cardShape, listMinLeft, railVisible, toggled } from "./detailCard";
-  import { dist, mid, phoneWidth, pinchView, type Pt } from "./phone";
+  import { dist, mid, phoneWidth, pinchView, toWorld as worldAt, type Pt } from "./phone";
   import { contextChips } from "./graphContext";
   import { kindCounts, nodesOfKind } from "./kindList";
   import { store } from "./store.svelte";
@@ -838,9 +838,7 @@
 
   function startPinch() {
     const [a, b] = [...touching.values()];
-    const c = plateCentre();
-    const m = mid(a, b);
-    pinch = { k: view.k, d: dist(a, b), anchor: { x: (m.x - c.x - view.x) / view.k, y: (m.y - c.y - view.y) / view.k } };
+    pinch = { k: view.k, d: dist(a, b), anchor: worldAt(mid(a, b), view, plateCentre()) };
     // The one-finger drag that began it is not a drag, nor a tap.
     if (drag?.body) drag.body.pinned = false;
     drag = null;
