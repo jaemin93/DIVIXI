@@ -1205,7 +1205,7 @@ class Store {
   /** The knowledge page's libraries column shown. Persisted ("kblist"), as the designs column is. */
   kbListOpen = $state(true);
   /** Its width. Persisted. */
-  kbListWidth = $state(220);
+  kbListWidth = $state(240);
   /** The library the knowledge page showed ("all" or an id), as remembered ("kblibrary"). */
   kbLibrarySaved = $state("");
 
@@ -1220,7 +1220,8 @@ class Store {
   }
 
   setKbListWidth(px: number, persist = false) {
-    this.kbListWidth = Math.min(420, Math.max(180, Math.round(px)));
+    // The designs column's range (and ItemColumn's handle), so the two columns size alike.
+    this.kbListWidth = Math.min(480, Math.max(200, Math.round(px)));
     if (persist) this.persistWidth("kblist_width", this.kbListWidth);
   }
 

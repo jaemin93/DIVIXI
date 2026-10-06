@@ -2,6 +2,7 @@
   import { store } from "./store.svelte";
   import { kb } from "./knowledge.svelte";
   import { libraryOfTagKey } from "./libraries";
+  import { tagUses } from "./tagUses";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
 
@@ -87,13 +88,15 @@
       <div class="list">
         {#each pool as tag (tag.name)}
           {@const on = track.tags.includes(tag.name)}
+          <!-- Everything carrying it, of every kind; by kind on hover. -->
+          {@const uses = tagUses(tag.name, { tracks: store.tracks, artifacts: store.artifacts, libraries: kb.libraries })}
           <div class="row" class:on>
             <button class="pickrow" role="checkbox" aria-checked={on} onclick={() => toggle(tag.name)}>
               <span class="tdot" style="background: {tag.color}"></span>
               <span class="mono name">{tag.name}</span>
               <span class="grow"></span>
               {#if on}<span class="mono check">✓</span>{/if}
-              <span class="mono count">{store.tracks.filter((x) => x.tags.includes(tag.name)).length}</span>
+              <span class="mono count" title={t("track.tagUses", uses)}>{uses.total}</span>
             </button>
             {#if confirmDelete === tag.name}
               <button class="del confirm mono" onclick={() => remove(tag.name)}>{t("track.confirmDelete")}</button>

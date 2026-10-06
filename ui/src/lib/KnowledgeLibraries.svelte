@@ -61,9 +61,6 @@
 <ItemColumn
   title={t("kb.lib.title")}
   width={store.kbListWidth}
-  min={180}
-  max={420}
-  reset={220}
   widthLabel={t("kb.lib.listWidth")}
   onwidth={(px, persist) => store.setKbListWidth(px, persist)}
   onclose={() => store.setKbList(false)}
