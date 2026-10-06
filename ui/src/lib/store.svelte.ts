@@ -1925,7 +1925,10 @@ class Store {
     return tag;
   }
 
-  /** Drop a tag from the pool and from every track carrying it. */
+  /** Others carrying tags (the knowledge libraries): told when one leaves the vocabulary. */
+  tagHolders: ((name: string) => Promise<void>)[] = [];
+
+  /** Drop a tag from the pool and from every track, design and library carrying it. */
   async deleteTag(name: string) {
     this.tagPool = this.tagPool.filter((t) => t.name !== name);
     await this.persistTags();
@@ -1935,6 +1938,7 @@ class Store {
     for (const d of this.artifacts) {
       if (d.tags.includes(name)) await this.updateArtifact(d.id, { tags: d.tags.filter((x) => x !== name) });
     }
+    for (const holder of this.tagHolders) await holder(name);
   }
   // ----- errors the human should see, wherever they happened -----
   //

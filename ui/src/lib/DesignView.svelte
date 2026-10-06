@@ -1,9 +1,6 @@
 <script lang="ts">
   import { store } from "./store.svelte";
-  import { slide } from "svelte/transition";
-  import { cubicOut } from "svelte/easing";
-  import SplitHandle from "./SplitHandle.svelte";
-  import Icon from "./Icon.svelte";
+  import ItemColumn from "./ItemColumn.svelte";
   import ArtifactMenu from "./ArtifactMenu.svelte";
   import { whenFull } from "./time";
   import Board from "./Board.svelte";
@@ -20,12 +17,7 @@
    * design is attached to a track's conductor from the track's composer.
    */
   let renaming = $state(false);
-
-  /** The list slides like the tracks column; not for those who asked for less motion. */
-  const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const side = { axis: "x" as const, duration: reduced ? 0 : 200, easing: cubicOut };
   let titleDraft = $state("");
-  let newTitle = $state("");
   /** The right-click menu: the same as a track's, less its session. */
   let menu = $state<{ id: string; x: number; y: number } | null>(null);
   const menuArtifact = $derived.by(() => {
@@ -40,11 +32,21 @@
   const constraints = $derived(count("constraint"));
   const questions = $derived(count("question"));
 
-  async function create(e: Event) {
-    e.preventDefault();
-    await store.createDesign(newTitle.trim() || t("design.untitled"));
-    newTitle = "";
+  async function create(name: string) {
+    await store.createDesign(name.trim() || t("design.untitled"));
   }
+
+  /** Every design, most recently touched first, as the column's rows. */
+  const rows = $derived(
+    store.designs.map((d) => ({
+      id: d.id,
+      name: d.title,
+      tags: d.tags,
+      color: d.color,
+      meta: whenLabel(d.updated_at, store.now, store.lang),
+      metaTitle: whenFull(d.updated_at, store.lang),
+    })),
+  );
 
   function rename() {
     if (!d) return;
@@ -62,54 +64,22 @@
 <div class="designs">
   <!-- Every design, most recently touched first; folds like the tracks column. -->
   {#if store.designListOpen}
-  <div class="sidebox" transition:slide={side}>
-  <aside class="list" style="width: {store.designListWidth}px">
-    <SplitHandle edge="right" width={store.designListWidth} min={200} max={480} reset={240} label={t("design.listWidth")} onchange={(px, persist) => store.setDesignListWidth(px, persist)} />
-    <!-- As the tracks column: the title, then folding the column away. -->
-    <div class="head">
-      <span class="mlab">{t("design.title")}</span>
-      <span class="grow"></span>
-      <button class="x" onclick={() => store.setDesignList(false)} aria-label={t("tracks.close")} title={t("tracks.close")}>
-        <Icon name="collapse" />
-      </button>
-    </div>
-    <form class="new" onsubmit={create}>
-      <input type="text" bind:value={newTitle} placeholder={t("design.newPh")} aria-label={t("design.new")} maxlength="80" />
-      <button class="btn" type="submit" title={t("design.new")} aria-label={t("design.new")}>+</button>
-    </form>
-    <div class="rows">
-      {#each store.designs as item (item.id)}
-        <!-- Like a track's row: tags and time above, the name below, its colour on the left. -->
-        <div
-          class="row"
-          class:on={item.id === store.artifact}
-          class:menued={menu?.id === item.id}
-          style="border-left-color: {item.color || 'transparent'}"
-          oncontextmenu={(e) => {
-            e.preventDefault();
-            menu = { id: item.id, x: e.clientX, y: e.clientY };
-          }}
-          role="presentation"
-        >
-          <button class="pick" onclick={() => store.openArtifact(item.id)}>
-            <span class="top">
-              <span class="taglist" title={item.tags.join(", ")}>
-                {#each item.tags as tag (tag)}
-                  <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
-                {/each}
-              </span>
-              <span class="mono when" title={whenFull(item.updated_at, store.lang)}>{whenLabel(item.updated_at, store.now, store.lang)}</span>
-            </span>
-            <span class="name">{item.title}</span>
-          </button>
-        </div>
-      {/each}
-      {#if !store.designs.length}
-        <p class="none">{t("design.none")}</p>
-      {/if}
-    </div>
-  </aside>
-  </div>
+    <ItemColumn
+      title={t("design.title")}
+      width={store.designListWidth}
+      widthLabel={t("design.listWidth")}
+      onwidth={(px, persist) => store.setDesignListWidth(px, persist)}
+      onclose={() => store.setDesignList(false)}
+      newLabel={t("design.new")}
+      newPlaceholder={t("design.newPh")}
+      oncreate={create}
+      items={rows}
+      current={store.artifact}
+      menued={menu?.id ?? null}
+      onpick={(id) => store.openArtifact(id)}
+      onmenu={(id, x, y) => (menu = { id, x, y })}
+      empty={t("design.none")}
+    />
   {/if}
 
   {#if menu && menuArtifact}
@@ -206,155 +176,6 @@
     display: flex;
   }
 
-  .list {
-    position: relative;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    border-right: 1px solid var(--line);
-    background: var(--rail);
-  }
-
-  .head {
-    height: 44px;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 10px 0 16px;
-  }
-
-  .x {
-    width: 28px;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: transparent;
-    border: 0;
-    color: var(--lab);
-  }
-
-  .x:hover {
-    color: var(--hi);
-    background: var(--sel);
-  }
-
-  .new {
-    display: flex;
-    gap: 6px;
-    padding: 0 12px 10px;
-  }
-
-  .new input {
-    flex: 1;
-    min-width: 0;
-    height: 30px;
-    padding: 0 9px;
-    background: var(--inp);
-    border: 1px solid var(--line);
-    color: var(--txt);
-    font-size: 12px;
-  }
-
-  .new input:focus {
-    border-color: var(--acc);
-  }
-
-  .new .btn {
-    width: 30px;
-    height: 30px;
-    padding: 0;
-    font-size: 15px;
-  }
-
-  .rows {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  /* Two lines, as a track's row: tags and time above, the name below. The
-     left bar is the design's colour, only when one is chosen; the open one is
-     told by its shade. */
-  .row {
-    min-height: 52px;
-    display: flex;
-    border-left: 2px solid transparent;
-  }
-
-  .row:hover,
-  .row.on,
-  .row.menued {
-    background: var(--sel);
-  }
-
-  .pick {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 3px;
-    padding: 8px 16px 8px 14px;
-    background: transparent;
-    border: 0;
-    text-align: left;
-    color: var(--dim);
-  }
-
-  .top {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    line-height: 1.3;
-  }
-
-  .taglist {
-    flex: 1;
-    min-width: 0;
-    font-size: 9px;
-    line-height: 1.3;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .chip {
-    font-size: 9px;
-    letter-spacing: 0.08em;
-  }
-
-  .chip + .chip {
-    margin-left: 8px;
-  }
-
-  .row.on .pick {
-    color: var(--hi);
-  }
-
-  .name {
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 13px;
-  }
-
-  .when {
-    flex-shrink: 0;
-    font-size: 9px;
-    letter-spacing: 0.04em;
-    color: var(--lab);
-  }
-
-  .none {
-    margin: 12px 16px;
-    font-size: 12px;
-    color: var(--lab);
-  }
-
   .main {
     flex: 1;
     min-width: 0;
@@ -433,12 +254,6 @@
     flex: 1;
     min-height: 0;
     display: flex;
-  }
-
-  .sidebox {
-    flex-shrink: 0;
-    display: flex;
-    min-height: 0;
   }
 
   .boardwrap {

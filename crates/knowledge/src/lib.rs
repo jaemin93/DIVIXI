@@ -129,11 +129,12 @@ mod tests {
     fn sources_are_listed_by_library_only_when_there_are_several() {
         let stats = Stats { sources: 2, items: 2, entities: 0, relations: 0 };
         let sources = [source("ar1", "/d/a.md", 1), source("ar2", "/d/b.md", 2)];
-        let one = [Library { id: 1, name: "General".into(), created_at: 0, sources: 2 }];
+        let one = [Library { id: 1, name: "General".into(), created_at: 0, sources: 2, color: String::new(), tags: vec![] }];
         let text = format_sources(&sources, &stats, &one);
         assert!(!text.contains("Library:"), "{text}");
         assert!(text.contains("- a.md — id: ar1") && text.contains("- b.md — id: ar2"), "{text}");
-        let two = [Library { id: 1, name: "General".into(), created_at: 0, sources: 1 }, Library { id: 2, name: "Work".into(), created_at: 1, sources: 1 }];
+        let lib = |id: i64, name: &str| Library { id, name: name.into(), created_at: id, sources: 1, color: String::new(), tags: vec![] };
+        let two = [lib(1, "General"), lib(2, "Work")];
         let text = format_sources(&sources, &stats, &two);
         let (general, work) = (text.find("## Library: General").unwrap(), text.find("## Library: Work").unwrap());
         let (a, b) = (text.find("a.md").unwrap(), text.find("b.md").unwrap());

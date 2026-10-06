@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  ALL_ROW,
   GENERAL,
   GENERAL_NAME,
   MAX_NAME,
   addTarget,
+  libraryOfTagKey,
+  libraryRow,
+  libraryTagKey,
   cleanName,
   deleteBlock,
   displayName,
@@ -16,8 +20,8 @@ import {
 } from "./libraries.ts";
 
 const libs = [
-  { id: GENERAL, name: GENERAL_NAME, created_at: 0, sources: 3 },
-  { id: 2, name: "Work notes", created_at: 1, sources: 0 },
+  { id: GENERAL, name: GENERAL_NAME, created_at: 0, sources: 3, color: "", tags: [] },
+  { id: 2, name: "Work notes", created_at: 1, sources: 0, color: "#1a73e8", tags: ["docs", "q4"] },
 ];
 
 test("General is shown in the person's language until it is renamed", () => {
@@ -61,6 +65,18 @@ test("a document added from the view of all goes to General", () => {
 test("the graph conversation is told the library on screen, and nothing for all", () => {
   assert.deepEqual(libraryPick(2), ["l:2"]);
   assert.deepEqual(libraryPick(null), []);
+});
+
+test("a library reads as a row of the list column, as a design does", () => {
+  assert.deepEqual(libraryRow(libs[1], "Work notes"), { id: "2", name: "Work notes", tags: ["docs", "q4"], color: "#1a73e8", meta: "0" });
+  assert.equal(libraryRow(libs[0], "일반").name, "일반", "the name as shown");
+  assert.notEqual(ALL_ROW, libraryRow(libs[0], "").id, "the row of all is no library's");
+});
+
+test("a library's tags open the one tag dialog by a key of their own", () => {
+  assert.equal(libraryTagKey(2), "lib:2");
+  assert.equal(libraryOfTagKey("lib:2"), 2);
+  for (const other of ["tr001", "ar002", "lib:", "lib:x", "xlib:2"]) assert.equal(libraryOfTagKey(other), null, other);
 });
 
 test("a view keeps its library while it exists, and falls back to all", () => {
