@@ -670,11 +670,16 @@ async fn delete_artifact(app: AppHandle, id: String) -> Result<(), String> {
         return Err("its agent is still responding; wait for it to finish".to_string());
     }
     state.artifacts.close(&id).await;
+    // A document's source shares its artifact's id; only a document's
+    // deletion takes the source (and what was drawn from it) along. Data
+    // put together from two installs can hold a source whose id a design
+    // later gets.
+    let document = state.store.artifact(&id).ok().flatten().is_some_and(|(a, _)| a.kind == knowledge::KIND);
     state.store.delete_artifact(&id).map_err(|e| e.to_string())?;
     // Forgotten only once the record is gone, so a read in between cannot
     // bring the board back into the cache.
     state.boards.forget(&id);
-    if state.library.db.source(&id).ok().flatten().is_some() {
+    if document && state.library.db.source(&id).ok().flatten().is_some() {
         knowledge::remove(&app, &id);
     }
     let dir = state.artifacts_dir.join(&id);

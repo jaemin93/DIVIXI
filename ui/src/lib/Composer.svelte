@@ -74,9 +74,25 @@
       if (narrow) grow();
     };
     vv?.addEventListener("resize", onResize);
+    // Measured at one width, the height is wrong at another. On a phone the
+    // track list sits beside the page while a pick from it switches the
+    // conversation, so the box was measured a few letters wide -- a line a
+    // word, the 40% cap -- and kept that height after the list folded.
+    // Its width alone: grow() sets the height, which must not come back here.
+    let width = 0;
+    const ro = typeof ResizeObserver === "function" && box
+      ? new ResizeObserver(([e]) => {
+          const w = Math.round(e.contentRect.width);
+          if (w === width) return;
+          width = w;
+          grow();
+        })
+      : null;
+    if (box) ro?.observe(box);
     return () => {
       narrowQuery?.removeEventListener("change", onNarrow);
       vv?.removeEventListener("resize", onResize);
+      ro?.disconnect();
     };
   });
 

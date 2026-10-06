@@ -35,7 +35,7 @@ import {
 import { addError, dropError, errorLife, type AppError } from "./errors";
 import { withTrack } from "./tracks";
 import { keepsSetting } from "./layoutSettings";
-import { clampZoom, foldsOnPick, instanceZoomKey, parseZoom, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen } from "./uiMemory";
+import { clampZoom, foldsOnPick, instanceZoomKey, parseZoom, WEB_DESIGNLIST_KEY, WEB_KBLIST_KEY, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen } from "./uiMemory";
 import { pairing, type Paired } from "./pairing.svelte";
 import { openKey, parseMemory, pruneOpen, remember, treeReply, underOpen, type WsEntry as WsEntryType } from "./fileTree";
 
@@ -921,7 +921,7 @@ class Store {
   /** Width of the conversation beside a design's board. Persisted. */
   artifactChatWidth = $state(460);
   /** The designs column shown. Persisted. */
-  designListOpen = $state(true);
+  designListOpen = $state(!overWeb || webPanelOpen(readLocal(WEB_DESIGNLIST_KEY), phoneScreen()));
 
   setArtifactChatWidth(px: number, persist = false) {
     this.artifactChatWidth = Math.min(760, Math.max(340, Math.round(px)));
@@ -930,6 +930,8 @@ class Store {
 
   async setDesignList(open: boolean) {
     this.designListOpen = open;
+    // A browser keeps its own, as the track list (a phone's is not the PC's).
+    if (overWeb) return writeLocal(WEB_DESIGNLIST_KEY, open ? "open" : "closed");
     if (!this.keeps("designlist")) return;
     try {
       await invoke("set_setting", { key: "designlist", value: open ? "open" : "closed" });
@@ -1205,7 +1207,7 @@ class Store {
   settingsNavWidth = $state(232);
 
   /** The knowledge page's libraries column shown. Persisted ("kblist"), as the designs column is. */
-  kbListOpen = $state(true);
+  kbListOpen = $state(!overWeb || webPanelOpen(readLocal(WEB_KBLIST_KEY), phoneScreen()));
   /** Its width. Persisted. */
   kbListWidth = $state(264);
   /** The library the knowledge page showed ("all" or an id), as remembered ("kblibrary"). */
@@ -1213,6 +1215,7 @@ class Store {
 
   async setKbList(open: boolean) {
     this.kbListOpen = open;
+    if (overWeb) return writeLocal(WEB_KBLIST_KEY, open ? "open" : "closed");
     if (!this.keeps("kblist")) return;
     try {
       await invoke("set_setting", { key: "kblist", value: open ? "open" : "closed" });
@@ -3149,9 +3152,10 @@ class Store {
         if (Number.isFinite(sn) && sn > 0) this.setSettingsNavWidth(sn);
         const rl = Number(routineListWidth);
         if (Number.isFinite(rl) && rl > 0) this.setRoutineListWidth(rl);
-        this.designListOpen = designList !== "closed";
+        // A browser's columns were read from the browser as it started (above).
+        if (!overWeb) this.designListOpen = designList !== "closed";
         this.designChatOpen = designChat !== "closed";
-        this.kbListOpen = kbList !== "closed";
+        if (!overWeb) this.kbListOpen = kbList !== "closed";
         const kw = Number(kbListWidth);
         if (Number.isFinite(kw) && kw > 0) this.setKbListWidth(kw);
         this.kbLibrarySaved = kbLibrary ?? "";

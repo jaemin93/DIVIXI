@@ -50,6 +50,9 @@ export function instanceZoomKey(instanceId: string): string {
  */
 export const WEB_TRACKLIST_KEY = "divixi.tracklist";
 export const WEB_RAIL_KEY = "divixi.rail";
+/** The designs and libraries columns, as the track list. */
+export const WEB_DESIGNLIST_KEY = "divixi.designlist";
+export const WEB_KBLIST_KEY = "divixi.kblist";
 
 /**
  * Whether a browser's side panel (the track list, the rail spelled out)

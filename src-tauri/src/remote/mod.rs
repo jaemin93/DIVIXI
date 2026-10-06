@@ -363,6 +363,23 @@ fn address_of(name: &str, https: u16) -> String {
     }
 }
 
+/// The step as this Divixi stands behind it: `Ready` only while its server
+/// answers on the published port.
+///
+/// Tailscale keeps a mapping across restarts, so a Divixi started on data
+/// where phone access was never turned on (a dev build on a fresh copy, say)
+/// still finds its port published -- with nothing listening, the address
+/// answers 502. Called ready, it showed "on" and a code the phone could not
+/// open. It is `Publish` instead: turning on starts the server, and
+/// [`tailscale::publish`] adopts the mapping already there without writing.
+fn answering(step: Step, running: bool) -> Step {
+    if step == Step::Ready && !running {
+        Step::Publish
+    } else {
+        step
+    }
+}
+
 fn replaceable(step: Step, serve: &tailscale::ServeState) -> bool {
     matches!(step, Step::Occupied | Step::Publish) && serve.taken
 }
@@ -447,7 +464,10 @@ fn forget_look(app: &AppHandle) {
 async fn phone_status_now(app: &AppHandle, fresh: bool) -> PhoneStatus {
     let want = port(app);
     let (probe, serve) = look(app, want, fresh).await;
-    let step = step_of(&probe, &serve);
+    let st = app.state::<AppState>();
+    let running = st.remote.running.lock().await.as_ref().map(|r| r.port);
+    let found = step_of(&probe, &serve);
+    let step = answering(found, running == Some(want));
     let address = address_of(&probe.name, serve.https_port());
     // The one origin a browser may name, kept beside the state that decides
     // it rather than written at each place that could change it. Set only
@@ -460,8 +480,6 @@ async fn phone_status_now(app: &AppHandle, fresh: bool) -> PhoneStatus {
     if !probe.login.is_empty() {
         let _ = set(app, "phone.self_login", &probe.login);
     }
-    let st = app.state::<AppState>();
-    let running = st.remote.running.lock().await.as_ref().map(|r| r.port);
     let awake = st.remote.awake.lock().as_ref().map(|g| g.held);
     PhoneStatus {
         on: phone_on(app),
@@ -475,7 +493,9 @@ async fn phone_status_now(app: &AppHandle, fresh: bool) -> PhoneStatus {
         port: running.unwrap_or(want),
         running: running.is_some(),
         listen_all: listen_all(app),
-        replaceable: replaceable(step, &serve),
+        // From what serve holds, not from what is answering: a mapping that
+        // is this Divixi's is never offered up for replacing.
+        replaceable: replaceable(found, &serve),
         probe,
         serve,
     }
@@ -669,6 +689,20 @@ mod tests {
         );
         assert_eq!(step_of(&Probe { https: Some(false), ..ready_probe() }, &free()), Step::EnableHttps);
         assert_eq!(step_of(&ready_probe(), &free()), Step::Publish);
+    }
+
+    #[test]
+    fn a_published_port_nothing_answers_on_is_turned_on_not_ready() {
+        let ours = ServeState { published: Some(true), port_free: Some(false), taken: true, detail: String::new(), ..Default::default() };
+        let found = step_of(&ready_probe(), &ours);
+        assert_eq!(found, Step::Ready);
+        assert_eq!(answering(found, true), Step::Ready);
+        assert_eq!(answering(found, false), Step::Publish, "no code for an address that answers 502");
+        assert!(!replaceable(found, &ours), "this Divixi's own mapping is never offered up");
+        // Every other step is what it was, server or not.
+        for step in [Step::Install, Step::SignIn, Step::EnableHttps, Step::Occupied, Step::Publish] {
+            assert_eq!(answering(step, false), step);
+        }
     }
 
     #[test]

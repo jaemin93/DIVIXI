@@ -22,6 +22,9 @@
   import { store } from "./store.svelte";
   import { t } from "./i18n.svelte";
   import { narrow } from "./listFilter";
+  import { phoneWidth } from "./phone";
+  import { overWeb } from "./ipc.svelte";
+  import { foldsOnPick } from "./uiMemory";
 
   /**
    * A page's list column, made like the tracks column: the title, a "+"
@@ -173,7 +176,14 @@
           }}
           role="presentation"
         >
-          <button class="pick" onclick={() => onpick(item.id)}>
+          <button
+            class="pick"
+            onclick={() => {
+              onpick(item.id);
+              // A phone: done with once a row is picked, as the track list is.
+              if (foldsOnPick(overWeb, phoneWidth(innerWidth))) onclose();
+            }}
+          >
             <span class="top">
               <span class="taglist" title={item.tags.join(", ")}>
                 {#each item.tags as tag (tag)}

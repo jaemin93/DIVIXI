@@ -119,6 +119,33 @@
     padding-right: 16px;
   }
 
+  /* A phone (Track's breakpoint): no room beside the board or the knowledge
+     page, so the agent covers the screen, as a track's working folder does
+     (Workspace): the strip above the soft keyboard. Its own × (or the page's
+     panel toggle, under it) takes it back to the page. No width to drag. */
+  @media (max-width: 640px) {
+    .talk {
+      position: fixed;
+      left: 0;
+      right: 0;
+      top: var(--vvtop, 0px);
+      height: var(--vvh, 100dvh);
+      width: auto !important;
+      z-index: 30;
+      border-left: 0;
+      background-color: var(--bg);
+    }
+
+    .talk > :global([role="separator"]) {
+      display: none;
+    }
+
+    .talk .x {
+      width: 44px;
+      height: 44px;
+    }
+  }
+
   .talk :global(.scroll) {
     padding-left: 18px;
     padding-right: 18px;

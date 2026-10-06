@@ -893,4 +893,84 @@
     color: var(--dim);
     flex-shrink: 0;
   }
+
+  /* A phone (Track's breakpoint): the page's margins come in, rows that ran
+     sideways wrap, and nothing is left so narrow its words stand a letter a
+     line. */
+  @media (max-width: 640px) {
+    .kbar {
+      padding: 6px 6px 0 12px;
+      column-gap: 8px;
+    }
+
+    .tabs {
+      flex: 1;
+      min-width: 0;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .tabs button {
+      padding: 0 10px;
+      min-height: 40px;
+    }
+
+    /* The small line keeps its marks; its words are on the Sources tab. */
+    .indexing .itext,
+    .indexing .sep {
+      display: none;
+    }
+
+    .inner {
+      padding: 12px 12px 24px;
+    }
+
+    .banner,
+    .actions,
+    .ghead {
+      flex-wrap: wrap;
+    }
+
+    .filters select {
+      flex: 1 1 140px;
+      max-width: none;
+    }
+
+    .gname {
+      max-width: none;
+    }
+
+    .gpath {
+      display: none;
+    }
+
+    .card {
+      margin: 0 8px 8px 12px;
+    }
+
+    .source {
+      flex-wrap: wrap;
+      gap: 8px 10px;
+    }
+
+    .sbody {
+      flex: 1 1 100%;
+    }
+
+    .spath {
+      white-space: normal;
+      word-break: break-all;
+    }
+
+    .move {
+      max-width: none;
+      flex: 1 1 120px;
+    }
+
+    footer {
+      padding: 8px 12px;
+      gap: 6px 14px;
+      flex-wrap: wrap;
+    }
+  }
 </style>
