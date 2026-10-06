@@ -23,6 +23,8 @@
   import { t } from "./i18n.svelte";
   import { narrow } from "./listFilter";
   import { phoneWidth } from "./phone";
+  import { overWeb } from "./ipc.svelte";
+  import { foldsOnPick } from "./uiMemory";
 
   /**
    * A page's list column, made like the tracks column: the title, a "+"
@@ -178,8 +180,8 @@
             class="pick"
             onclick={() => {
               onpick(item.id);
-              // A phone: the column covers the page, and is done with once a row is picked.
-              if (phoneWidth(innerWidth)) onclose();
+              // A phone: done with once a row is picked, as the track list is.
+              if (foldsOnPick(overWeb, phoneWidth(innerWidth))) onclose();
             }}
           >
             <span class="top">
@@ -381,35 +383,6 @@
     font-size: 9px;
     letter-spacing: 0.04em;
     color: var(--lab);
-  }
-
-  /* A phone (Track's breakpoint): no room beside the page, which a column
-     would squeeze to nothing (its words a letter a line). The column lies
-     over the page at the screen's width instead, and folds away once a row
-     is picked; no width to drag. */
-  @media (max-width: 640px) {
-    .sidebox {
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      z-index: 20;
-    }
-
-    .list {
-      width: 100% !important;
-      border-right: 0;
-    }
-
-    .list > :global([role="separator"]) {
-      display: none;
-    }
-
-    .x,
-    .newbtn {
-      min-height: 36px;
-    }
   }
 
   .none {

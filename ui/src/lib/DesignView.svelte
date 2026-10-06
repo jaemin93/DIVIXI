@@ -175,7 +175,6 @@
 
 <style>
   .designs {
-    position: relative;
     flex: 1;
     min-width: 0;
     display: flex;

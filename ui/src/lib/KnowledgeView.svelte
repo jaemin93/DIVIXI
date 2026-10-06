@@ -349,7 +349,6 @@
 <style>
   /* The libraries column, then the page; as the designs column and a design. */
   .kpage {
-    position: relative;
     flex: 1;
     min-width: 0;
     min-height: 0;
