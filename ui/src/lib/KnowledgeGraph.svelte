@@ -30,6 +30,7 @@
   import { t } from "./i18n.svelte";
   import { placeNew, queryReach, settle, settleBudget, tick, visibleIds, STILL } from "./graphLayout";
   import { cardMaxHeight, cardRect, cardShape, listMinLeft, railVisible, toggled } from "./detailCard";
+  import { dist, mid, phoneWidth, pinchView, type Pt } from "./phone";
   import { contextChips } from "./graphContext";
   import { kindCounts, nodesOfKind } from "./kindList";
   import { store } from "./store.svelte";
@@ -61,6 +62,7 @@
   let card = $state<CardPrefs>(rememberedCard);
   /** The open card's height, for labels to keep clear of it. */
   let cardH = $state(0);
+  let cardEl = $state<HTMLElement>();
   /** The plate's height, and the query and centre boxes' at its bottom left, for the card to stop short of. */
   let stageH = $state(0);
   let boxesH = $state(0);
@@ -559,8 +561,9 @@
     // Nor may one run under the overview rail on the right edge.
     const railH = sections.length * 24;
     if (railOn) taken.push([w - 150, h / 2 - railH / 2 - 8, w, h / 2 + railH / 2 + 8]);
-    // Nor under the entity card, open or folded, top left.
-    const covered = cardRect(shape, w, cardH);
+    // Nor under the entity card, open or folded: where it is drawn (top left;
+    // on a phone, a sheet along the bottom), else where it will be.
+    const covered = cardBox() ?? cardRect(shape, w, cardH);
     if (covered) taken.push(covered);
     const free = (x0: number, y0: number, x1: number, y1: number) =>
       !taken.some(([a0, b0, a1, b1]) => x0 < a1 && x1 > a0 && y0 < b1 && y1 > b0);
@@ -728,9 +731,12 @@
     // from the 10th to the 90th percentile on each axis.
     const [x0, x1] = spread(set.map((b) => b.x));
     const [y0, y1] = spread(set.map((b) => b.y));
-    // Room for labels to the right, and for the rail, caption and scale bar round the edge.
-    const w = canvas.clientWidth - 240;
-    const h = canvas.clientHeight - 120;
+    // Room for labels to the right, and for the rail, caption and scale bar
+    // round the edge; a phone's plate has neither rail nor caption, and no
+    // width to spare.
+    const phone = phoneWidth(canvas.clientWidth);
+    const w = canvas.clientWidth - (phone ? 60 : 240);
+    const h = canvas.clientHeight - (phone ? 80 : 120);
     const k = Math.min(2.5, Math.max(FRAME_MIN_K, Math.min(w / Math.max(1, x1 - x0 + 120), h / Math.max(1, y1 - y0 + 40))));
     const cx = (x0 + x1) / 2 + 40;
     const cy = (y0 + y1) / 2;
@@ -789,6 +795,15 @@
     void document.fonts?.ready.then(() => kick());
   });
 
+  /** The entity card's box in the plate, as drawn; null without one. */
+  function cardBox(): [number, number, number, number] | null {
+    if (!cardEl || !canvas) return null;
+    const c = canvas.getBoundingClientRect();
+    const r = cardEl.getBoundingClientRect();
+    if (!r.width) return null;
+    return [r.left - c.left, r.top - c.top, r.right - c.left, r.bottom - c.top];
+  }
+
   function toWorld(e: PointerEvent | WheelEvent): { x: number; y: number } {
     const rect = canvas!.getBoundingClientRect();
     return {
@@ -808,8 +823,43 @@
 
   let drag: { body?: Body; sx: number; sy: number; vx: number; vy: number; moved: boolean } | null = null;
 
+  // ----- two fingers: pinch to zoom (one finger drags and taps as the mouse does) -----
+
+  /** Fingers (pointers) on the plate now, by id, where they are. */
+  const touching = new Map<number, Pt>();
+  /** A pinch under way: the zoom and the fingers' distance when it began, and the world point between them. */
+  let pinch: { k: number; d: number; anchor: Pt } | null = null;
+
+  /** The plate's middle on screen, as the camera counts from it. */
+  function plateCentre(): Pt {
+    const r = canvas!.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }
+
+  function startPinch() {
+    const [a, b] = [...touching.values()];
+    const c = plateCentre();
+    const m = mid(a, b);
+    pinch = { k: view.k, d: dist(a, b), anchor: { x: (m.x - c.x - view.x) / view.k, y: (m.y - c.y - view.y) / view.k } };
+    // The one-finger drag that began it is not a drag, nor a tap.
+    if (drag?.body) drag.body.pinned = false;
+    drag = null;
+    glide = null;
+  }
+
+  function lift(e: PointerEvent) {
+    touching.delete(e.pointerId);
+    if (touching.size < 2) pinch = null;
+  }
+
   function down(e: PointerEvent) {
     canvas!.setPointerCapture(e.pointerId);
+    touching.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touching.size >= 2) {
+      startPinch();
+      return;
+    }
+    if (pinch) return;
     const body = hit(toWorld(e));
     drag = { body, sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y, moved: false };
     if (body) body.pinned = true;
@@ -817,6 +867,16 @@
   }
 
   function move(e: PointerEvent) {
+    if (touching.has(e.pointerId)) touching.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && touching.size >= 2) {
+      const [a, b] = [...touching.values()];
+      const v = pinchView(pinch.k, pinch.d, dist(a, b), pinch.anchor, mid(a, b), plateCentre(), 0.25, 4);
+      view.k = v.k;
+      view.x = v.x;
+      view.y = v.y;
+      kick();
+      return;
+    }
     pointer = toWorld(e);
     if (!drag) {
       const over = hit(pointer) ?? null;
@@ -848,7 +908,8 @@
     kick();
   }
 
-  async function up() {
+  async function up(e: PointerEvent) {
+    lift(e);
     if (!drag) return;
     const { body, moved } = drag;
     drag = null;
@@ -1054,7 +1115,10 @@
     {#if !kb.graph.nodes.length}
       <p class="empty">{t("kb.graphEmpty")}</p>
     {/if}
-    <canvas bind:this={canvas} onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={() => (drag = null)} onpointerleave={leave} onwheel={wheel}></canvas>
+    <canvas bind:this={canvas} onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={(e) => {
+      lift(e);
+      drag = null;
+    }} onpointerleave={leave} onwheel={wheel}></canvas>
     {#if listKind}
       <div class="kindlist" style="left: {listLeft}px; width: {listW}px" role="dialog" aria-label={t("kb.kindOpen", { kind: listKind })}>
         <div class="klhead">
@@ -1149,7 +1213,7 @@
       </nav>
     {/if}
     {#if picked}
-      <aside class="detail" class:folded={card.folded} style="max-height: {cardMaxHeight(stageH, kb.shownQuery || centreNode ? boxesH : 0, BOXES_BOTTOM)}px" bind:clientHeight={cardH}>
+      <aside class="detail" bind:this={cardEl} class:folded={card.folded} style="max-height: {cardMaxHeight(stageH, kb.shownQuery || centreNode ? boxesH : 0, BOXES_BOTTOM)}px" bind:clientHeight={cardH}>
         <div class="dhead">
           {#if card.folded}
             <span class="dname small">{@render glyph(glyphOf(picked.kind), true)}<span>{picked.name}</span></span>
@@ -1413,6 +1477,10 @@
   }
 
   /* The plate's caption, top left: FIG. 01 · ENTITY GRAPH · LIVE. */
+  /* A phone (Track's breakpoint): the plate is the screen's width. The card
+     is a sheet along the bottom, the query and centre boxes go to the top, a
+     kind's list spans the plate; the caption and the overview rail step out
+     (the legend chooses a kind as the rail does). */
   .fig {
     position: absolute;
     top: 14px;
@@ -1715,5 +1783,52 @@
     font-size: 10.5px;
     color: var(--lab);
     margin-top: 2px;
+  }
+
+  @media (max-width: 640px) {
+    .bar {
+      padding: 6px 8px;
+      gap: 6px;
+    }
+
+    .count {
+      margin-right: 0;
+    }
+
+    .gsearch {
+      order: 1;
+      flex: 1 1 100%;
+      max-width: none;
+      height: 32px;
+    }
+
+    .fig,
+    .rail {
+      display: none;
+    }
+
+    .detail {
+      top: auto;
+      left: 8px;
+      right: 8px;
+      bottom: 8px;
+      width: auto;
+      max-width: none;
+      max-height: 55% !important;
+    }
+
+    .kindlist {
+      left: 8px !important;
+      right: 8px;
+      width: auto !important;
+    }
+
+    .boxes {
+      top: 8px;
+      bottom: auto;
+      left: 8px;
+      right: 8px;
+      width: auto;
+    }
   }
 </style>

@@ -14,6 +14,7 @@
  * preflight nothing answers.
  */
 
+import { staleBuild } from "./phone";
 import { pairingName } from "./deviceName";
 
 const ACCESS = "divixi.access";
@@ -183,6 +184,28 @@ const handlers = new Map<string, Set<Handler>>();
 let socket: WebSocket | null = null;
 let seen = 0;
 let backoff = 1000;
+/** The build this page came from: the server's when the socket first opened. */
+let pageBuild: string | null = null;
+
+/**
+ * A page that outlived the PC's update (a phone's tab stays open for days)
+ * reloads when its socket comes back to another build, instead of driving the
+ * new app with the old screens: the knowledge graph's removed physics
+ * button, say. The server says its build at /api/health.
+ */
+async function checkBuild(): Promise<void> {
+  try {
+    const res = await fetch(`${base()}/api/health`, { cache: "no-store" });
+    const build = ((await res.json()) as { build?: string }).build ?? null;
+    if (staleBuild(pageBuild, build)) {
+      location.reload();
+      return;
+    }
+    pageBuild ??= build;
+  } catch {
+    // Unknown: the next reconnect asks again.
+  }
+}
 
 /**
  * The event socket, kept up.
@@ -206,7 +229,10 @@ function open(): void {
   const ws = new WebSocket(url, [WS_PROTOCOL, token]);
   socket = ws;
 
-  ws.onopen = () => (backoff = 1000);
+  ws.onopen = () => {
+    backoff = 1000;
+    void checkBuild();
+  };
   ws.onmessage = (e) => {
     let frame: Frame;
     try {

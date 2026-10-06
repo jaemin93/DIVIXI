@@ -219,4 +219,31 @@
     height: 36px;
     padding: 0 18px;
   }
+
+  /* A phone's width (Track's breakpoint): the whole screen, the side's
+     words dropped so the list keeps the width. */
+  @media (max-width: 640px) {
+    .backdrop {
+      inset: 0;
+      padding: 0;
+    }
+
+    .panel {
+      width: 100vw;
+      height: var(--vvh, 100dvh);
+      border: 0;
+    }
+
+    .side {
+      display: none;
+    }
+
+    .main {
+      padding: 12px 14px 14px;
+    }
+
+    .foot {
+      flex-wrap: wrap;
+    }
+  }
 </style>
