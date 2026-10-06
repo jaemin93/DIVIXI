@@ -5,6 +5,13 @@ fn main() {
     println!("cargo:rerun-if-changed=icons/32x32.png");
     println!("cargo:rerun-if-changed=icons/128x128.png");
     println!("cargo:rerun-if-changed=windows-app-manifest.xml");
+    // The built UI is embedded at compile time, and it is what the phone
+    // server hands out -- a dev build too, whose own window shows the dev
+    // server instead. Unwatched, a `dist` built since the last Rust change
+    // stayed out, and a phone got the UI from before it.
+    if std::path::Path::new("../dist").exists() {
+        println!("cargo:rerun-if-changed=../dist");
+    }
 
     // On Windows the app needs Common Controls v6 (Tauri's own manifest). Given
     // to the linker rather than the app's resource file, it reaches the test
