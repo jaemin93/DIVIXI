@@ -2,9 +2,10 @@
   import { store, agentLabel, TRACK_COLORS, type TrackSort } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import SplitHandle from "./SplitHandle.svelte";
+  import ListSearch from "./ListSearch.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel, whenFull, WINDOWS } from "./time";
-  import { anyFilterOn, CLEARED, passesFilter, toggleTag } from "./trackFilter";
+  import { CLEARED, passesFilter, toggleTag } from "./trackFilter";
 
   /**
    * Second column: every track, newest activity first, each unfolding into
@@ -60,10 +61,6 @@
 
   // ----- filter, sort, fold -----
   const filter = $derived(store.trackFilter);
-  const filterActive = $derived(anyFilterOn(filter));
-  const filterLabel = $derived(filterActive ? `${t("tracks.filter")} · ${t("tracks.filterOn")}` : t("tracks.filter"));
-  let filterOpen = $state(false);
-  let filterEl = $state<HTMLDivElement>();
   let showDormant = $state(false);
 
   const sorters: Record<TrackSort, (a: (typeof tracks)[number], b: (typeof tracks)[number]) => number> = {
@@ -259,13 +256,11 @@
 
   function onDocClick(e: MouseEvent) {
     if (menu && !inside(e, menuEl)) closeMenu();
-    if (filterOpen && !inside(e, filterEl)) filterOpen = false;
   }
 
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") {
       if (menu) closeMenu();
-      filterOpen = false;
     }
   }
 
@@ -323,93 +318,19 @@
     </button>
   </div>
 
-  <div class="searchrow" bind:this={filterEl}>
-    <input class="search" type="text" bind:value={query} placeholder={t("tracks.search")} aria-label={t("tracks.search")} />
-    <button class="fbtn" class:on={filterActive || filterOpen} class:set={filterActive} onclick={() => (filterOpen = !filterOpen)} title={filterLabel} aria-label={filterLabel} aria-haspopup="menu" aria-expanded={filterOpen}>
-      <Icon name="filter" size={14} />
-    </button>
-
-    {#if filterOpen}
-      <!-- The filter menu, after Kiro Crew's: what to show, in what order, what to fold, which tags. -->
-      <div class="fmenu" role="menu" aria-label={t("tracks.filter")}>
-        <div class="fhead fheadrow">
-          <span class="mlab-sm">{t("tracks.filterTitle")}</span>
-          <span class="grow"></span>
-          {#if filterActive}<button class="mono fclear" onclick={clearFilter}>{t("tracks.clearShort")}</button>{/if}
-        </div>
-        <!-- A filter that is on says so three ways: the accent bar, bold text and a ✓. -->
-        <button class="fitem narrow" class:on={filter.running} role="menuitemcheckbox" aria-checked={filter.running} onclick={() => store.setTrackFilter({ running: !filter.running })}>
-          <span class="dot" style="background: var(--ok)"></span>{t("tracks.running")}
-          <span class="grow"></span>{#if filter.running}<span class="mono check" aria-hidden="true">✓</span>{/if}
-        </button>
-        <button class="fitem narrow" class:on={filter.active} role="menuitemcheckbox" aria-checked={filter.active} onclick={() => store.setTrackFilter({ active: !filter.active })}>
-          <span class="dot" style="background: var(--idle)"></span>{t("tracks.active")}
-          <span class="grow"></span>{#if filter.active}<span class="mono check" aria-hidden="true">✓</span>{/if}
-        </button>
-        <div class="fitem sub narrow" class:on={filter.recent !== ""} role="menuitem" aria-haspopup="menu">
-          <span>{t("tracks.recent")}{filter.recent ? ` · ${filter.recent}` : ""}</span>
-          <span class="grow"></span>
-          <span class="mono arrow">›</span>
-          <div class="submenu" role="menu">
-            <div class="subhead">{t("tracks.recentHead")}</div>
-            {#each ["", "1h", "24h", "7d"] as w (w)}
-              <button class="fitem" class:on={filter.recent === w} role="menuitemradio" aria-checked={filter.recent === w} onclick={() => store.setTrackFilter({ recent: w as typeof filter.recent })}>
-                {w || t("tracks.recentAll")}<span class="grow"></span>{#if filter.recent === w}<span class="mono check">✓</span>{/if}
-              </button>
-            {/each}
-          </div>
-        </div>
-
-        <div class="rule"></div>
-        <div class="mlab-sm fhead">{t("tracks.sortTitle")}</div>
-        {#each [["recent", t("tracks.sort.recent")], ["oldest", t("tracks.sort.oldest")], ["created-desc", t("tracks.sort.createdDesc")], ["created-asc", t("tracks.sort.createdAsc")], ["az", "A → Z"], ["za", "Z → A"]] as [id, label] (id)}
-          <button class="fitem" class:on={filter.sort === id} role="menuitemradio" aria-checked={filter.sort === id} onclick={() => store.setTrackFilter({ sort: id as TrackSort })}>
-            {label}<span class="grow"></span>{#if filter.sort === id}<span class="mono check">✓</span>{/if}
-          </button>
-        {/each}
-
-        <div class="rule"></div>
-        <div class="fitem sub" class:on={filter.fold > 0} role="menuitem" aria-haspopup="menu">
-          <span>{t("tracks.fold")}{filter.fold > 0 ? ` · ${filter.fold}d` : ""}</span>
-          <span class="grow"></span>
-          <span class="mono arrow">›</span>
-          <div class="submenu" role="menu">
-            <div class="subhead">{t("tracks.foldHead")}</div>
-            {#each [0, 1, 2, 7, 14] as d (d)}
-              <button class="fitem" class:on={filter.fold === d} role="menuitemradio" aria-checked={filter.fold === d} onclick={() => store.setTrackFilter({ fold: d })}>
-                {d === 0 ? t("tracks.foldOff") : `${d}d`}<span class="grow"></span>{#if filter.fold === d}<span class="mono check">✓</span>{/if}
-              </button>
-            {/each}
-          </div>
-        </div>
-
-        <div class="rule"></div>
-        <div class="fhead fheadrow">
-          <span class="mlab-sm">{t("tracks.tagsTitle")}</span>
-          {#if store.tagPool.length > 1}<span class="fhint">{t("tracks.tagsAll")}</span>{/if}
-        </div>
-        <div class="taglist">
-        {#each store.tagPool as tag (tag.name)}
-          {@const picked = filter.tags.includes(tag.name)}
-          <button class="fitem narrow" class:on={picked} role="menuitemcheckbox" aria-checked={picked} onclick={() => toggleTagFilter(tag.name)}>
-            <span class="box" class:on={picked} style="border-color: {tag.color}; background: {picked ? tag.color : 'transparent'}"></span>
-            <span class="mono">{tag.name}</span>
-            <span class="grow"></span>
-            {#if picked}<span class="mono check" aria-hidden="true">✓</span>{/if}
-            <span class="mono count">{tagCount(tag.name)}</span>
-          </button>
-        {/each}
-        {#if store.tagPool.length === 0}
-          <div class="fitem static dim">{t("tracks.noTagsYet")}</div>
-        {/if}
-        </div>
-        {#if filterActive}
-          <div class="rule"></div>
-          <button class="fitem" onclick={clearFilter}>{t("tracks.clear")}</button>
-        {/if}
-      </div>
-    {/if}
-  </div>
+  <!-- The search row and filter menu the designs and libraries columns use too;
+       the tracks column adds its own sections above the tags. -->
+  <ListSearch
+    bind:query
+    placeholder={t("tracks.search")}
+    picked={filter.tags}
+    ontoggle={toggleTagFilter}
+    onclear={clearFilter}
+    {tagCount}
+    extraOn={filter.running || filter.active || filter.recent !== ""}
+    title={t("tracks.filter")}
+    sections={trackSections}
+  />
 
   <div class="list">
     {#each shown as tr (tr.id)}
@@ -432,6 +353,57 @@
     {/if}
   </div>
 </aside>
+
+<!-- The tracks column's own filters, above the tags in the shared menu (ListSearch). -->
+{#snippet trackSections()}
+  <!-- A filter that is on says so three ways: the accent bar, bold text and a ✓. -->
+  <button class="fitem narrow" class:on={filter.running} role="menuitemcheckbox" aria-checked={filter.running} onclick={() => store.setTrackFilter({ running: !filter.running })}>
+    <span class="dot" style="background: var(--ok)"></span>{t("tracks.running")}
+    <span class="grow"></span>{#if filter.running}<span class="mono check" aria-hidden="true">✓</span>{/if}
+  </button>
+  <button class="fitem narrow" class:on={filter.active} role="menuitemcheckbox" aria-checked={filter.active} onclick={() => store.setTrackFilter({ active: !filter.active })}>
+    <span class="dot" style="background: var(--idle)"></span>{t("tracks.active")}
+    <span class="grow"></span>{#if filter.active}<span class="mono check" aria-hidden="true">✓</span>{/if}
+  </button>
+  <div class="fitem sub narrow" class:on={filter.recent !== ""} role="menuitem" aria-haspopup="menu">
+    <span>{t("tracks.recent")}{filter.recent ? ` · ${filter.recent}` : ""}</span>
+    <span class="grow"></span>
+    <span class="mono arrow">›</span>
+    <div class="submenu" role="menu">
+      <div class="subhead">{t("tracks.recentHead")}</div>
+      {#each ["", "1h", "24h", "7d"] as w (w)}
+        <button class="fitem" class:on={filter.recent === w} role="menuitemradio" aria-checked={filter.recent === w} onclick={() => store.setTrackFilter({ recent: w as typeof filter.recent })}>
+          {w || t("tracks.recentAll")}<span class="grow"></span>{#if filter.recent === w}<span class="mono check">✓</span>{/if}
+        </button>
+      {/each}
+    </div>
+  </div>
+
+  <div class="rule"></div>
+  <div class="mlab-sm fhead">{t("tracks.sortTitle")}</div>
+  {#each [["recent", t("tracks.sort.recent")], ["oldest", t("tracks.sort.oldest")], ["created-desc", t("tracks.sort.createdDesc")], ["created-asc", t("tracks.sort.createdAsc")], ["az", "A → Z"], ["za", "Z → A"]] as [id, label] (id)}
+    <button class="fitem" class:on={filter.sort === id} role="menuitemradio" aria-checked={filter.sort === id} onclick={() => store.setTrackFilter({ sort: id as TrackSort })}>
+      {label}<span class="grow"></span>{#if filter.sort === id}<span class="mono check">✓</span>{/if}
+    </button>
+  {/each}
+
+  <div class="rule"></div>
+  <div class="fitem sub" class:on={filter.fold > 0} role="menuitem" aria-haspopup="menu">
+    <span>{t("tracks.fold")}{filter.fold > 0 ? ` · ${filter.fold}d` : ""}</span>
+    <span class="grow"></span>
+    <span class="mono arrow">›</span>
+    <div class="submenu" role="menu">
+      <div class="subhead">{t("tracks.foldHead")}</div>
+      {#each [0, 1, 2, 7, 14] as d (d)}
+        <button class="fitem" class:on={filter.fold === d} role="menuitemradio" aria-checked={filter.fold === d} onclick={() => store.setTrackFilter({ fold: d })}>
+          {d === 0 ? t("tracks.foldOff") : `${d}d`}<span class="grow"></span>{#if filter.fold === d}<span class="mono check">✓</span>{/if}
+        </button>
+      {/each}
+    </div>
+  </div>
+
+  <div class="rule"></div>
+{/snippet}
 
 <!-- One track and, when unfolded, its workers. -->
 {#snippet row(tr: (typeof tracks)[number])}
@@ -644,186 +616,6 @@
     background: var(--sel);
   }
 
-  .searchrow {
-    position: relative;
-    display: flex;
-    gap: 6px;
-    margin: 10px 12px 6px;
-  }
-
-  .fbtn {
-    width: 32px;
-    height: 32px;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--inp);
-    border: 1px solid var(--line);
-    color: var(--lab);
-  }
-
-  .fbtn:hover,
-  .fbtn.on {
-    color: var(--hi);
-    border-color: var(--acc);
-  }
-
-  /* A filter is on: the button is tinted. */
-  .fbtn.set {
-    background: var(--accbg);
-  }
-
-  /* The filter menu hangs under the search row. */
-  .fmenu {
-    position: absolute;
-    top: calc(100% + 6px);
-    left: 0;
-    right: 0;
-    z-index: 30;
-    background: var(--card);
-    border: 1px solid var(--lines);
-    padding: 4px 0 6px;
-  }
-
-  .taglist {
-    max-height: 30vh;
-    overflow-y: auto;
-  }
-
-  /* A row with a submenu: hovering opens it to the right, as Kiro does. */
-  .fitem.sub {
-    position: relative;
-  }
-
-  .arrow {
-    color: var(--lab);
-    font-size: 12px;
-  }
-
-  .submenu {
-    display: none;
-    position: absolute;
-    top: -5px;
-    left: calc(100% - 6px);
-    min-width: 200px;
-    z-index: 31;
-    background: var(--card);
-    border: 1px solid var(--lines);
-    padding: 4px 0 6px;
-    color: var(--dim);
-  }
-
-  .fitem.sub:hover,
-  .fitem.sub:focus-within {
-    color: var(--hi);
-    background: var(--sel);
-  }
-
-  .fitem.sub:hover > .submenu,
-  .fitem.sub:focus-within > .submenu {
-    display: block;
-  }
-
-  .subhead {
-    padding: 8px 14px 6px;
-    font-size: 11px;
-    color: var(--lab);
-    white-space: nowrap;
-  }
-
-  .fhead {
-    padding: 10px 14px 4px;
-  }
-
-  .fheadrow {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-  }
-
-  .fhint {
-    font-size: 10px;
-    color: var(--lab);
-  }
-
-  .fclear {
-    padding: 0;
-    background: transparent;
-    border: 0;
-    font-size: 10px;
-    color: var(--lab);
-    text-decoration: underline;
-    text-underline-offset: 2px;
-  }
-
-  .fclear:hover {
-    color: var(--hi);
-  }
-
-  .fitem {
-    width: 100%;
-    min-height: 30px;
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 4px 14px;
-    background: transparent;
-    border: 0;
-    text-align: left;
-    font-size: 12px;
-    color: var(--dim);
-  }
-
-  .fitem:not(.static):hover {
-    color: var(--hi);
-    background: var(--sel);
-  }
-
-  .fitem.on {
-    color: var(--hi);
-  }
-
-  /* A filter that narrows the list, when on: the instance menu's accent bar
-     on the left, a tinted row and bold text, besides the ✓ at the right. */
-  .fitem.narrow {
-    border-left: 2px solid transparent;
-    padding-left: 12px;
-  }
-
-  .fitem.narrow.on {
-    border-left-color: var(--acc);
-    background: var(--accbg);
-    font-weight: 600;
-  }
-
-  .fitem.narrow.on:hover {
-    background: var(--sel);
-  }
-
-  .fitem.dim {
-    color: var(--lab);
-    font-size: 11px;
-  }
-
-  .fitem .check {
-    color: var(--acct);
-    font-size: 11px;
-  }
-
-  .fitem .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-  }
-
-  .fitem .box {
-    width: 10px;
-    height: 10px;
-    border: 1px solid;
-    flex-shrink: 0;
-  }
-
   .dormant {
     width: 100%;
     height: 34px;
@@ -843,22 +635,6 @@
   .dormant:hover {
     color: var(--hi);
     background: var(--sel);
-  }
-
-  .search {
-    flex: 1;
-    min-width: 0;
-    height: 32px;
-    background: var(--inp);
-    border: 1px solid var(--line);
-    color: var(--txt);
-    font-family: var(--sans);
-    font-size: 12px;
-    padding: 0 10px;
-  }
-
-  .search:focus {
-    border-color: var(--acc);
   }
 
   .list {

@@ -18,16 +18,22 @@
   import { cubicOut } from "svelte/easing";
   import SplitHandle from "./SplitHandle.svelte";
   import Icon from "./Icon.svelte";
+  import ListSearch from "./ListSearch.svelte";
   import { store } from "./store.svelte";
   import { t } from "./i18n.svelte";
+  import { narrow } from "./listFilter";
 
   /**
-   * A page's list column, made like the tracks column: the title and the
-   * fold button, a box to make one, and a row per item, tags and a small
-   * fact above, the name below, its colour as the bar on the left; the open
-   * one told by its shade. Right-clicking a row asks the page for its menu
-   * (rename, tags, colour, delete), which the page draws. The designs page
-   * and the knowledge page's libraries both use it, so the two read as one.
+   * A page's list column, made like the tracks column: the title, a "+"
+   * button and the fold button over a rule; the search row and its tag
+   * filter (ListSearch, the tracks column's own); a row per item, tags and a
+   * small fact above, the name below, its colour as the bar on the left, the
+   * open one told by its shade. The "+" opens a name box under the head (a
+   * design or a library needs a name only; a track opens its own form).
+   * Right-clicking a row asks the page for its menu (rename, tags, colour,
+   * delete), which the page draws. `pinned` rows (all libraries) stay on top
+   * whatever the search. The designs page and the knowledge page's libraries
+   * both use it, so the three columns read as one.
    */
 
   let {
@@ -35,16 +41,21 @@
     width,
     min = 200,
     max = 480,
-    reset = 240,
+    reset = 264,
     widthLabel,
     onwidth,
     onclose,
     newLabel,
+    newButton,
     newPlaceholder,
+    searchPlaceholder,
     maxlength = 80,
     oncreate,
     note = "",
+    pinned = [],
     items,
+    picked,
+    onpick_tags,
     current,
     menued = null,
     onpick,
@@ -60,13 +71,21 @@
     onwidth: (px: number, persist: boolean) => void;
     onclose: () => void;
     newLabel: string;
+    /** The head's button, as the tracks column's "+ TRACK". */
+    newButton: string;
     newPlaceholder: string;
+    searchPlaceholder: string;
     maxlength?: number;
     /** Make one from the box. Resolves to why not (the box keeps its text), or nothing. */
     oncreate: (name: string) => Promise<string | void> | string | void;
     /** A line under the box: what went wrong with a name, say. */
     note?: string;
+    /** Rows above the rest that the search and filter leave alone (all libraries). */
+    pinned?: ColumnItem[];
     items: ColumnItem[];
+    /** The tags the column is narrowed to, kept as the tracks column keeps its filter. */
+    picked: string[];
+    onpick_tags: (tags: string[]) => void;
     current: string | null;
     menued?: string | null;
     onpick: (id: string) => void;
@@ -79,34 +98,69 @@
   const side = { axis: "x" as const, duration: reduced ? 0 : 200, easing: cubicOut };
 
   let draft = $state("");
+  /** The name box under the head, opened by the head's "+". */
+  let creating = $state(false);
+  let query = $state("");
+  const shown = $derived(narrow(items, query, picked));
+  const filtering = $derived(!!query.trim() || picked.length > 0);
 
   async function create(e: Event) {
     e.preventDefault();
     const why = await oncreate(draft);
-    if (!why) draft = "";
+    if (!why) {
+      draft = "";
+      creating = false;
+    }
+  }
+
+  function toggleTag(tag: string) {
+    onpick_tags(picked.includes(tag) ? picked.filter((x) => x !== tag) : [...picked, tag]);
+  }
+
+  /** How many of this column's rows carry a tag (pinned rows are no one's). */
+  function tagCount(tag: string): number {
+    return items.filter((i) => i.tags.includes(tag)).length;
   }
 </script>
 
 <div class="sidebox" transition:slide={side}>
   <aside class="list" style="width: {width}px" aria-label={title}>
     <SplitHandle edge="right" {width} {min} {max} {reset} label={widthLabel} onchange={onwidth} />
-    <!-- As the tracks column: the title, then folding the column away. -->
+    <!-- As the tracks column: the title, "+", then folding the column away, over a rule. -->
     <div class="head">
       <span class="mlab">{title}</span>
       <span class="grow"></span>
+      <button class="btn newbtn" class:on={creating} title={newLabel} aria-expanded={creating} onclick={() => (creating = !creating)}>{newButton}</button>
       <button class="x" onclick={onclose} aria-label={t("tracks.close")} title={t("tracks.close")}>
         <Icon name="collapse" />
       </button>
     </div>
-    <form class="new" onsubmit={create}>
-      <input type="text" bind:value={draft} placeholder={newPlaceholder} aria-label={newLabel} {maxlength} />
-      <button class="btn" type="submit" title={newLabel} aria-label={newLabel}>+</button>
-    </form>
+    {#if creating}
+      <form class="new" onsubmit={create}>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input
+          type="text"
+          bind:value={draft}
+          placeholder={newPlaceholder}
+          aria-label={newLabel}
+          {maxlength}
+          autofocus
+          onkeydown={(e) => {
+            if (e.key === "Escape") {
+              creating = false;
+              draft = "";
+            }
+          }}
+        />
+        <button class="btn" type="submit" title={newLabel} aria-label={newLabel}>+</button>
+      </form>
+    {/if}
     {#if note}
       <p class="note" role="status">{note}</p>
     {/if}
+    <ListSearch bind:query placeholder={searchPlaceholder} {picked} ontoggle={toggleTag} onclear={() => onpick_tags([])} {tagCount} />
     <div class="rows">
-      {#each items as item (item.id)}
+      {#each [...pinned, ...shown] as item (item.id)}
         <!-- Like a track's row: tags and the small fact above, the name below, its colour on the left. -->
         <div
           class="row"
@@ -134,6 +188,9 @@
       {/each}
       {#if !items.length}
         <p class="none">{empty}</p>
+      {:else if filtering && !shown.length}
+        <!-- Nothing the search or filter lets through: said as the tracks column says it. -->
+        <div class="mono empty">{t("tracks.none")}</div>
       {/if}
     </div>
   </aside>
@@ -163,6 +220,24 @@
     align-items: center;
     gap: 8px;
     padding: 0 10px 0 16px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* The head's "+", as the tracks column's "+ TRACK". */
+  .newbtn {
+    height: 26px;
+    padding: 0 9px;
+  }
+
+  .newbtn.on {
+    color: var(--hi);
+    border-color: var(--acc);
+  }
+
+  .empty {
+    padding: 18px 16px;
+    font-size: 11px;
+    color: var(--lab);
   }
 
   .grow {
@@ -188,7 +263,7 @@
   .new {
     display: flex;
     gap: 6px;
-    padding: 0 12px 10px;
+    padding: 10px 12px 0;
   }
 
   .new input {
@@ -214,7 +289,7 @@
   }
 
   .note {
-    margin: -2px 12px 10px;
+    margin: 8px 12px 0;
     font-size: 11.5px;
     line-height: 1.45;
     color: var(--warn);

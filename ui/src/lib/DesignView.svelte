@@ -71,9 +71,13 @@
       onwidth={(px, persist) => store.setDesignListWidth(px, persist)}
       onclose={() => store.setDesignList(false)}
       newLabel={t("design.new")}
+      newButton={t("design.newButton")}
       newPlaceholder={t("design.newPh")}
+      searchPlaceholder={t("design.search")}
       oncreate={create}
       items={rows}
+      picked={store.designTags}
+      onpick_tags={(tags) => store.setDesignTags(tags)}
       current={store.artifact}
       menued={menu?.id ?? null}
       onpick={(id) => store.openArtifact(id)}

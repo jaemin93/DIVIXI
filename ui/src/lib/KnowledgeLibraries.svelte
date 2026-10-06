@@ -23,11 +23,10 @@
     return m ? kb.libraries.find((l) => l.id === m.id) : undefined;
   });
 
-  const rows = $derived([
-    // The small fact above the name: a design shows when it changed, a library how many documents it holds.
-    { id: ALL_ROW, name: t("kb.lib.all"), tags: [], color: "", meta: t("kb.lib.docCount", { n: kb.sources.length }), menu: false },
-    ...kb.libraries.map((l) => ({ ...libraryRow(l, kb.libraryName(l)), meta: t("kb.lib.docCount", { n: l.sources }) })),
-  ]);
+  // The small fact above the name: a design shows when it changed, a library how many documents it holds.
+  /** All libraries: on top whatever the search or filter, as it is no library. */
+  const all = $derived([{ id: ALL_ROW, name: t("kb.lib.all"), tags: [], color: "", meta: t("kb.lib.docCount", { n: kb.sources.length }), menu: false }]);
+  const rows = $derived(kb.libraries.map((l) => ({ ...libraryRow(l, kb.libraryName(l)), meta: t("kb.lib.docCount", { n: l.sources }) })));
 
   function nameNote(p: NameProblem): string {
     if (p === "long") return t("kb.lib.nameLong", { n: MAX_NAME });
@@ -65,11 +64,16 @@
   onwidth={(px, persist) => store.setKbListWidth(px, persist)}
   onclose={() => store.setKbList(false)}
   newLabel={t("kb.lib.new")}
+  newButton={t("kb.lib.newButton")}
   newPlaceholder={t("kb.lib.newPh")}
+  searchPlaceholder={t("kb.lib.search")}
   maxlength={MAX_NAME}
   oncreate={create}
   {note}
+  pinned={all}
   items={rows}
+  picked={store.kbTags}
+  onpick_tags={(tags) => store.setKbTags(tags)}
   current={kb.library === null ? ALL_ROW : String(kb.library)}
   menued={menu ? String(menu.id) : null}
   onpick={(id) => kb.showLibrary(id === ALL_ROW ? null : Number(id))}
