@@ -4,8 +4,8 @@
 //!   cargo run -p orchestra-app --example design_agent -- claude_code
 //!
 //! The board starts with one note of the human's. The agent gets the design
-//! preamble and the same two MCP tools the app gives it (`board_read`,
-//! `board_write`, same descriptions and schema), and is asked to rough the
+//! preamble and the same three MCP tools the app gives it (`board_read`,
+//! `board_write`, `board_text`, same descriptions and schemas), and is asked to rough the
 //! idea out. Checks: it wrote through the tool; the board gained a goal,
 //! constraints and a question; they hang off the human's note by arrows;
 //! every agent item is a suggestion waiting on the human.
