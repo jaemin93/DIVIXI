@@ -727,6 +727,21 @@ pub fn knowledge_library_rename(app: AppHandle, id: i64, name: String) -> Result
     Ok(renamed)
 }
 
+/// A library's colour and/or tags, checked as a track's and a design's are.
+#[tauri::command(async)]
+pub fn knowledge_library_update(app: AppHandle, id: i64, color: Option<String>, tags: Option<Vec<String>>) -> Result<KLibrary, String> {
+    let mut look = orchestra_store::TrackPatch { color, tags, ..Default::default() };
+    crate::check_patch(&mut look)?;
+    let updated = app
+        .state::<AppState>()
+        .library
+        .db
+        .set_library_look(id, look.color.as_deref(), look.tags.as_deref())
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit(LIBRARIES_EVENT, ());
+    Ok(updated)
+}
+
 /// Delete an empty library; General, and a library with documents, are refused.
 #[tauri::command(async)]
 pub fn knowledge_library_delete(app: AppHandle, id: i64) -> Result<(), String> {

@@ -138,6 +138,7 @@ const OWNER_ALLOWED: &[&str] = &[
     // libraries: made, renamed, deleted (an empty one), a document moved
     "knowledge_library_create",
     "knowledge_library_rename",
+    "knowledge_library_update",
     "knowledge_library_delete",
     "knowledge_move",
     "knowledge_embed_test",
@@ -281,6 +282,7 @@ mod tests {
             "knowledge_libraries",
             "knowledge_library_create",
             "knowledge_library_rename",
+            "knowledge_library_update",
             "knowledge_library_delete",
             "knowledge_move",
             "list_routines",

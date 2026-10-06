@@ -14,7 +14,7 @@ use crate::chunk::Chunk;
 use crate::extract::Extraction;
 use crate::fts;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Upgrades from each version to the next; `MIGRATIONS[v - 1]` takes v to v + 1.
 const MIGRATIONS: &[&str] = &[
@@ -36,6 +36,9 @@ const MIGRATIONS: &[&str] = &[
      );
      ALTER TABLE sources ADD COLUMN library_id INTEGER NOT NULL DEFAULT 1;
      CREATE INDEX IF NOT EXISTS sources_by_library ON sources(library_id);",
+    // 5 -> 6: a library's colour and tags, as a track's and a design's.
+    "ALTER TABLE libraries ADD COLUMN color TEXT NOT NULL DEFAULT '';
+     ALTER TABLE libraries ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
 ];
 
 // `sources.library_id` names a row of `libraries` without a REFERENCES
@@ -47,7 +50,9 @@ CREATE TABLE libraries (
     id          INTEGER PRIMARY KEY,
     name        TEXT NOT NULL,
     name_key    TEXT NOT NULL UNIQUE,
-    created_at  INTEGER NOT NULL
+    created_at  INTEGER NOT NULL,
+    color       TEXT NOT NULL DEFAULT '',
+    tags        TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE sources (
     id             TEXT PRIMARY KEY,
@@ -149,6 +154,10 @@ pub struct Library {
     pub created_at: i64,
     /// Documents in it.
     pub sources: i64,
+    /// `#rrggbb`, or "" for none: the bar on its row, as a track's and a design's.
+    pub color: String,
+    /// Names from the app's one tag vocabulary, as a track's and a design's.
+    pub tags: Vec<String>,
 }
 
 /// A document in the library.
@@ -314,10 +323,18 @@ fn row_to_source(r: &rusqlite::Row<'_>) -> rusqlite::Result<Source> {
     })
 }
 
-const LIBRARY_SELECT: &str = "SELECT l.id, l.name, l.created_at, (SELECT COUNT(*) FROM sources s WHERE s.library_id = l.id) FROM libraries l";
+const LIBRARY_SELECT: &str =
+    "SELECT l.id, l.name, l.created_at, (SELECT COUNT(*) FROM sources s WHERE s.library_id = l.id), l.color, l.tags FROM libraries l";
 
 fn row_to_library(r: &rusqlite::Row<'_>) -> rusqlite::Result<Library> {
-    Ok(Library { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)?, sources: r.get(3)? })
+    Ok(Library {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        created_at: r.get(2)?,
+        sources: r.get(3)?,
+        color: r.get(4)?,
+        tags: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+    })
 }
 
 /// A library's name as kept: spaces at the ends dropped and runs of them
@@ -495,6 +512,22 @@ impl KnowledgeDb {
                 anyhow::bail!("there is already a library named {name}");
             }
             conn.execute("UPDATE libraries SET name = ?2, name_key = ?3 WHERE id = ?1", params![id, name, name_key(&name)])?;
+        }
+        self.library(id)?.ok_or_else(|| anyhow::anyhow!("library {id} vanished"))
+    }
+
+    /// Set a library's colour and/or tags (General's too). The values are
+    /// taken as given: the app checks them as it checks a track's.
+    pub fn set_library_look(&self, id: i64, color: Option<&str>, tags: Option<&[String]>) -> anyhow::Result<Library> {
+        {
+            let conn = self.conn.lock();
+            require_library(&conn, id)?;
+            if let Some(c) = color {
+                conn.execute("UPDATE libraries SET color = ?2 WHERE id = ?1", params![id, c])?;
+            }
+            if let Some(t) = tags {
+                conn.execute("UPDATE libraries SET tags = ?2 WHERE id = ?1", params![id, serde_json::to_string(t)?])?;
+            }
         }
         self.library(id)?.ok_or_else(|| anyhow::anyhow!("library {id} vanished"))
     }
@@ -1417,16 +1450,21 @@ mod tests {
         text.replace(from, "")
     }
 
+    /// The schema as it was before a library had a colour and tags (version 5).
+    fn schema_v5() -> String {
+        cut(SCHEMA, ",\n    color       TEXT NOT NULL DEFAULT '',\n    tags        TEXT NOT NULL DEFAULT '[]'")
+    }
+
     /// The schema as it was before libraries (version 4).
     fn schema_v4() -> String {
-        let s = cut(SCHEMA, "CREATE TABLE libraries (\n    id          INTEGER PRIMARY KEY,\n    name        TEXT NOT NULL,\n    name_key    TEXT NOT NULL UNIQUE,\n    created_at  INTEGER NOT NULL\n);\n");
+        let s = cut(&schema_v5(), "CREATE TABLE libraries (\n    id          INTEGER PRIMARY KEY,\n    name        TEXT NOT NULL,\n    name_key    TEXT NOT NULL UNIQUE,\n    created_at  INTEGER NOT NULL\n);\n");
         let s = cut(&s, ",\n    library_id     INTEGER NOT NULL DEFAULT 1");
         cut(&s, "CREATE INDEX sources_by_library ON sources(library_id);\n")
     }
 
     fn temp_db(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("kn-{name}-{}.db", std::process::id()));
-        for p in [path.clone(), path.with_extension("db.v4.bak"), path.with_extension("db.v1.bak")] {
+        for p in [path.clone(), path.with_extension("db.v4.bak"), path.with_extension("db.v5.bak"), path.with_extension("db.v1.bak")] {
             let _ = std::fs::remove_file(p);
         }
         path
@@ -1492,6 +1530,60 @@ mod tests {
         for p in copies.into_iter().chain([path.clone()]) {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    #[test]
+    fn migrates_version_five_libraries_to_colours_and_tags() {
+        let path = temp_db("migrate-v5");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&schema_v5()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema_version', '5');
+                 INSERT INTO libraries(id, name, name_key, created_at) VALUES (1, 'General', 'general', 1), (2, 'Work', 'work', 2);
+                 INSERT INTO sources(id, source_type, uri, status, created_at, library_id) VALUES ('ar001', 'local_file', '/docs/a.md', 'synced', 1, 2);",
+            )
+            .unwrap();
+            let cols: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('libraries') WHERE name IN ('color', 'tags')", [], |r| r.get(0)).unwrap();
+            assert_eq!(cols, 0, "the old schema really lacks them");
+        }
+        let db = KnowledgeDb::open(&path).unwrap();
+        let libs = db.libraries().unwrap();
+        assert_eq!(libs.iter().map(|l| (l.name.as_str(), l.sources, l.color.as_str(), l.tags.len())).collect::<Vec<_>>(), vec![("General", 0, "", 0), ("Work", 1, "", 0)], "kept, with no colour and no tags");
+        assert_eq!(db.source("ar001").unwrap().unwrap().library_id, 2, "documents stay where they were");
+        let work = db.set_library_look(2, Some("#c0392b"), Some(&["docs".to_string(), "q4".to_string()])).unwrap();
+        assert_eq!((work.color.as_str(), work.tags.clone()), ("#c0392b", vec!["docs".to_string(), "q4".to_string()]));
+        drop(db);
+        let backup = path.with_extension("db.v5.bak");
+        {
+            let old = Connection::open(&backup).unwrap();
+            let v: String = old.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
+            assert_eq!(v, "5", "the copy kept before the upgrade");
+        }
+        // Again: nothing changes, the look stays.
+        let db = KnowledgeDb::open(&path).unwrap();
+        let work = db.library(2).unwrap().unwrap();
+        assert_eq!((work.color.as_str(), work.tags.len()), ("#c0392b", 2));
+        drop(db);
+        for p in [path.clone(), backup] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn a_library_gets_a_colour_and_tags_and_keeps_them_by_parts() {
+        let db = seeded();
+        let work = db.create_library("Work").unwrap();
+        assert_eq!((work.color.as_str(), work.tags.len()), ("", 0), "none at first");
+        let w = db.set_library_look(work.id, Some("#1a73e8"), None).unwrap();
+        assert_eq!((w.color.as_str(), w.tags.len()), ("#1a73e8", 0));
+        let w = db.set_library_look(work.id, None, Some(&["a".to_string()])).unwrap();
+        assert_eq!((w.color.as_str(), w.tags.clone()), ("#1a73e8", vec!["a".to_string()]), "the colour stays when only tags change");
+        let g = db.set_library_look(GENERAL, Some(""), Some(&[])).unwrap();
+        assert_eq!((g.color.as_str(), g.tags.len()), ("", 0), "General too");
+        assert!(db.set_library_look(999, Some("#ffffff"), None).is_err());
+        let renamed = db.rename_library(work.id, "Work 2").unwrap();
+        assert_eq!(renamed.color, "#1a73e8", "a rename keeps the look");
     }
 
     #[test]

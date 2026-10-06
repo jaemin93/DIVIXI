@@ -3,6 +3,7 @@ import { boardPng, briefOf } from "./ink";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Key, type Lang, type LangPref } from "./i18n.svelte";
 import { picksOf, toggleChip, type Chip } from "./graphContext";
+import { parseTags } from "./listFilter";
 import { libraryPick } from "./libraries";
 import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
 import {
@@ -1196,7 +1197,8 @@ class Store {
   }
 
   /** Width of the designs column. Persisted. */
-  designListWidth = $state(240);
+  /** The tracks column's 264 at first, as the libraries column. */
+  designListWidth = $state(264);
   /** Width of the routines column. Persisted. */
   routineListWidth = $state(260);
   /** Width of the settings column. Persisted. */
@@ -1205,7 +1207,7 @@ class Store {
   /** The knowledge page's libraries column shown. Persisted ("kblist"), as the designs column is. */
   kbListOpen = $state(true);
   /** Its width. Persisted. */
-  kbListWidth = $state(220);
+  kbListWidth = $state(264);
   /** The library the knowledge page showed ("all" or an id), as remembered ("kblibrary"). */
   kbLibrarySaved = $state("");
 
@@ -1220,8 +1222,32 @@ class Store {
   }
 
   setKbListWidth(px: number, persist = false) {
-    this.kbListWidth = Math.min(420, Math.max(180, Math.round(px)));
+    // The designs column's range (and ItemColumn's handle), so the two columns size alike.
+    this.kbListWidth = Math.min(480, Math.max(200, Math.round(px)));
     if (persist) this.persistWidth("kblist_width", this.kbListWidth);
+  }
+
+  /** The designs column's and the libraries column's tag filters, kept as the tracks column's is (this PC only). */
+  designTags = $state<string[]>([]);
+  kbTags = $state<string[]>([]);
+
+  async setDesignTags(tags: string[]) {
+    this.designTags = tags;
+    await this.keepList("designlist_tags", tags);
+  }
+
+  async setKbTags(tags: string[]) {
+    this.kbTags = tags;
+    await this.keepList("kblist_tags", tags);
+  }
+
+  private async keepList(key: string, tags: string[]) {
+    if (!this.keeps(key)) return;
+    try {
+      await invoke("set_setting", { key, value: JSON.stringify(tags) });
+    } catch (err) {
+      this.lastError = String(err);
+    }
   }
 
   /** Remember the library the knowledge page shows: "all", or its id. */
@@ -1925,7 +1951,10 @@ class Store {
     return tag;
   }
 
-  /** Drop a tag from the pool and from every track carrying it. */
+  /** Others carrying tags (the knowledge libraries): told when one leaves the vocabulary. */
+  tagHolders: ((name: string) => Promise<void>)[] = [];
+
+  /** Drop a tag from the pool and from every track, design and library carrying it. */
   async deleteTag(name: string) {
     this.tagPool = this.tagPool.filter((t) => t.name !== name);
     await this.persistTags();
@@ -1935,6 +1964,7 @@ class Store {
     for (const d of this.artifacts) {
       if (d.tags.includes(name)) await this.updateArtifact(d.id, { tags: d.tags.filter((x) => x !== name) });
     }
+    for (const holder of this.tagHolders) await holder(name);
   }
   // ----- errors the human should see, wherever they happened -----
   //
@@ -3096,7 +3126,7 @@ class Store {
         this.lastError = String(err);
       }
       try {
-        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineListWidth, designChat, kbList, kbListWidth, kbLibrary] = await Promise.all([
+        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineListWidth, designChat, kbList, kbListWidth, kbLibrary, designTags, kbTags] = await Promise.all([
           setting("terminal"),
           setting("terminal_height"),
           setting("artifact_chat_width"),
@@ -3108,6 +3138,8 @@ class Store {
           setting("kblist"),
           setting("kblist_width"),
           setting("kblibrary"),
+          setting("designlist_tags"),
+          setting("kblist_tags"),
         ]);
         const dc = Number(artifactChat);
         if (Number.isFinite(dc) && dc > 0) this.setArtifactChatWidth(dc);
@@ -3123,6 +3155,8 @@ class Store {
         const kw = Number(kbListWidth);
         if (Number.isFinite(kw) && kw > 0) this.setKbListWidth(kw);
         this.kbLibrarySaved = kbLibrary ?? "";
+        this.designTags = parseTags(designTags);
+        this.kbTags = parseTags(kbTags);
         const h = Number(termHeight);
         if (Number.isFinite(h) && h > 0) this.setTermHeight(h);
         if (term === "open") void this.setTerminal(true);

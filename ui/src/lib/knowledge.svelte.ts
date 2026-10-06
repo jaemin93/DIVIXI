@@ -259,6 +259,16 @@ class Knowledge {
     }
   }
 
+  /** A library's colour and/or tags, as a design's are set. */
+  async updateLibrary(id: number, look: { color?: string; tags?: string[] }) {
+    try {
+      await invoke<KLibrary>("knowledge_library_update", { id, color: look.color ?? null, tags: look.tags ?? null });
+      await this.loadLibraries();
+    } catch (err) {
+      store.lastError = String(err);
+    }
+  }
+
   /** Delete an empty library (not General). Returns why not, or "". */
   async deleteLibrary(id: number): Promise<string> {
     try {
@@ -459,6 +469,11 @@ class Knowledge {
 }
 
 export const kb = new Knowledge();
+
+// A tag taken out of the vocabulary leaves the libraries too, as it leaves tracks and designs.
+store.tagHolders.push(async (name) => {
+  for (const l of kb.libraries) if (l.tags.includes(name)) await kb.updateLibrary(l.id, { tags: l.tags.filter((x) => x !== name) });
+});
 
 /** Subscribe once. */
 export async function connectKnowledge() {

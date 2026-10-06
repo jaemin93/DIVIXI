@@ -13,7 +13,26 @@ export const GENERAL_NAME = "General";
 export const MAX_NAME = 80;
 
 /** Mirrors `orchestra_knowledge::Library`. */
-export type KLibrary = { id: number; name: string; created_at: number; sources: number };
+export type KLibrary = { id: number; name: string; created_at: number; sources: number; color: string; tags: string[] };
+
+/** The list column's row for all libraries (ItemColumn): not a library, so no menu. */
+export const ALL_ROW = "all";
+
+/** A library as a row of the list column: its tags, its colour, its number of documents. */
+export function libraryRow(lib: KLibrary, shownName: string): { id: string; name: string; tags: string[]; color: string; meta: string } {
+  return { id: String(lib.id), name: shownName, tags: lib.tags, color: lib.color, meta: String(lib.sources) };
+}
+
+/** The tag-dialog key for a library (`lib:<id>`), beside a track's `tr…` and an artifact's `ar…`. */
+export function libraryTagKey(id: number): string {
+  return `lib:${id}`;
+}
+
+/** The library a tag-dialog key names, or null for another kind of key. */
+export function libraryOfTagKey(key: string): number | null {
+  const m = /^lib:(\d+)$/.exec(key);
+  return m ? Number(m[1]) : null;
+}
 
 /** A library's name as shown: General's in the person's language until renamed. */
 export function displayName(lib: Pick<KLibrary, "id" | "name">, generalLabel: string): string {

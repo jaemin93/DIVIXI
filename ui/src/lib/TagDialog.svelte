@@ -1,5 +1,8 @@
 <script lang="ts">
   import { store } from "./store.svelte";
+  import { kb } from "./knowledge.svelte";
+  import { libraryOfTagKey } from "./libraries";
+  import { tagUses } from "./tagUses";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
 
@@ -11,16 +14,23 @@
   let draft = $state("");
   let input = $state<HTMLInputElement>();
 
-  /** A track (`tr…`) or an artifact (`ar…`): both carry a name and tags. */
+  /** A track (`tr…`), an artifact (`ar…`) or a knowledge library (`lib:<id>`): each carries a name and tags. */
   const track = $derived.by(() => {
     const t = store.tracks.find((x) => x.id === store.tagDialog);
     if (t) return { id: t.id, name: t.name, tags: t.tags };
+    const lib = libraryOfTagKey(store.tagDialog);
+    if (lib !== null) {
+      const l = kb.libraries.find((x) => x.id === lib);
+      return l ? { id: store.tagDialog, name: kb.libraryName(l), tags: l.tags } : undefined;
+    }
     const d = store.artifacts.find((x) => x.id === store.tagDialog);
     return d ? { id: d.id, name: d.title, tags: d.tags } : undefined;
   });
 
   async function setTags(id: string, tags: string[]) {
-    if (store.tracks.some((x) => x.id === id)) await store.updateTrack(id, { tags });
+    const lib = libraryOfTagKey(id);
+    if (lib !== null) await kb.updateLibrary(lib, { tags });
+    else if (store.tracks.some((x) => x.id === id)) await store.updateTrack(id, { tags });
     else await store.updateArtifact(id, { tags });
   }
   const pool = $derived(store.tagPool);
@@ -78,13 +88,15 @@
       <div class="list">
         {#each pool as tag (tag.name)}
           {@const on = track.tags.includes(tag.name)}
+          <!-- Everything carrying it, of every kind; by kind on hover. -->
+          {@const uses = tagUses(tag.name, { tracks: store.tracks, artifacts: store.artifacts, libraries: kb.libraries })}
           <div class="row" class:on>
             <button class="pickrow" role="checkbox" aria-checked={on} onclick={() => toggle(tag.name)}>
               <span class="tdot" style="background: {tag.color}"></span>
               <span class="mono name">{tag.name}</span>
               <span class="grow"></span>
               {#if on}<span class="mono check">✓</span>{/if}
-              <span class="mono count">{store.tracks.filter((x) => x.tags.includes(tag.name)).length}</span>
+              <span class="mono count" title={t("track.tagUses", uses)}>{uses.total}</span>
             </button>
             {#if confirmDelete === tag.name}
               <button class="del confirm mono" onclick={() => remove(tag.name)}>{t("track.confirmDelete")}</button>

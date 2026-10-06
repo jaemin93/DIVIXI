@@ -222,7 +222,7 @@ fn list_tracks(state: State<'_, AppState>) -> Result<Vec<TrackInfo>, String> {
 
 /// Check the fields a patch sets. `cwd` must be a directory, agents must
 /// be known; an empty worker agent means "the conductor's".
-fn check_patch(patch: &mut TrackPatch) -> Result<(), String> {
+pub(crate) fn check_patch(patch: &mut TrackPatch) -> Result<(), String> {
     if let Some(n) = patch.name.as_deref() {
         if n.trim().is_empty() {
             return Err("a track needs a name".to_string());
@@ -1790,6 +1790,7 @@ pub fn run() {
             knowledge::knowledge_libraries,
             knowledge::knowledge_library_create,
             knowledge::knowledge_library_rename,
+            knowledge::knowledge_library_update,
             knowledge::knowledge_library_delete,
             knowledge::knowledge_move,
         ])
