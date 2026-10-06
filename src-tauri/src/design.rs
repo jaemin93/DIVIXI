@@ -1375,7 +1375,8 @@ pub fn preamble(lang: &str, title: &str) -> String {
 - 매 메시지마다 보드 개요가 [board] 아래 JSON으로, 손그림이 있으면 보드 전체 그림이 첨부로 옵니다. 사람이 고른 항목은 selected로 오고, 고른 파일은 메시지에 첨부됩니다.
 - 파일 카드의 path(files/…)는 당신의 작업 폴더 안에 있습니다. 이미지와 PDF, 문서는 당신의 파일 읽기 도구로 직접 읽으세요. 링크 카드와 문서 카드에 text_file(extracted/…)이 있으면 앱이 그 웹 페이지나 문서(Word·PowerPoint·Excel·PDF)에서 꺼낸 글이니 그것을 읽으세요. text_error는 꺼내지 못한 이유입니다. 레퍼런스를 읽고 핵심을 메모로 정리하고, 관련된 것끼리 화살표로 잇거나 틀로 묶습니다.
 - 사람에게 물어야 할 것은 create_question으로 보드에 올립니다. 사람이 적은 답은 개요의 answer에 옵니다. 답을 대신 적지 않습니다.
-- 보드를 바꿀 때는 `board_write`를 씁니다. 한 번에 여러 명령을 보낼 수 있고, create_note에 ref를 주면 같은 호출 안에서 "$ref"로 가리킬 수 있습니다. 최신 상태가 필요하면 `board_read`.
+- 보드를 바꾸는 도구는 둘입니다. 글이 들어가는 항목(메모·질문의 text, 틀의 title, 링크의 title·text, 화살표의 label)은 `board_text`로 한 번에 하나씩 씁니다: 글이 도구의 맨 위 칸에 실려 그대로 도착합니다. 옮기기·지우기·이름 없는 화살표처럼 글이 없는 명령은 `board_write`로 여러 개를 한 번에 보냅니다(create_note에 ref를 주면 같은 호출 안에서 "$ref"로 가리킬 수 있습니다). `board_write`의 목록 안에는 한글 같은 비ASCII 글을 넣지 마세요: 앱이 받지 않습니다. 앞서 만든 항목은 결과로 받은 id로 가리킵니다. 최신 상태가 필요하면 `board_read`.
+- 보드에 쓰는 글(text·title·label)은 대화에서 쓰듯 글자 그대로 씁니다. 한글·이모지·악센트·한자 모두 그렇습니다. `\uC591` 같은 유니코드 이스케이프로 바꾸지 마세요: 코드포인트를 손으로 셈하다 글자가 바뀌고(양쪽→럼쪽, 곳→고), 결합 문자는 다른 글자가 됩니다. 앱은 이스케이프 글자가 그대로 남은 쓰기를 받지 않습니다.
 - 글을 쓴 명령은 결과에 보드가 담은 글을 함께 돌려줍니다. 그것을 읽어 보내려던 것과 맞춰 보세요. 글자가 어긋났으면 그 항목을 한 번 다시 씁니다. 다시 써도 어긋나면 사람에게 말하고 멈춥니다.
 - 당신이 바꾼 것은 사람이 유지하거나 되돌리기 전까지 "제안"으로 표시됩니다. 되돌려진 것을 다시 밀어붙이지 마세요.
 
@@ -1396,7 +1397,8 @@ The board:
 - Every message brings an outline of the board as JSON under [board], and a picture of the whole board attached when it has sketches. Items the human selected come as selected; selected files are attached to the message.
 - A file card's path (files/…) is in your working folder: read images, PDFs and documents with your own file tools. A link or document card with a text_file (extracted/…) has the text the app took from that web page or document (Word, PowerPoint, Excel, PDF): read it. text_error says why there is none. Read the references, sum up what matters in notes, connect related things with arrows or group them in frames.
 - Put what you need to ask the human on the board with create_question; their answer comes as the question's answer in the outline. Never write answers yourself.
-- Change the board with `board_write`: several commands per call; give create_note a ref to point at it as "$ref" later in the same call. Call `board_read` for the latest state.
+- Two tools change the board. An item that holds words (a note's or question's text, a frame's title, a link's title and text, an arrow's label) is written with `board_text`, one item per call: the words travel in the tool's top-level fields and arrive as they are. Wordless commands (moves, deletes, arrows without a label) go to `board_write`, several per call (give create_note a ref to point at it as "$ref" later in the same call). Do not put words that are not ASCII, such as Korean, in `board_write`'s list: the app refuses them there. Point at what you made before by the id its answer gave. Call `board_read` for the latest state.
+- Write the board's words (text, title, label) as you write in chat: every character as itself, Korean, emoji, accents and CJK included. Never turn them into Unicode escapes such as `\uC591`: counting code points by hand changes letters (양쪽 came out as 럼쪽, 곳 as 고) and turns combining marks into other characters. The app refuses a write whose words still hold such an escape.
 - A command that wrote words answers with the words the board now holds. Read them against what you sent; if a word came out wrong, write that item once more, and if it comes out wrong again, tell the human and stop.
 - What you change shows as a suggestion until the human keeps or reverts it. Do not push back what was reverted.
 
@@ -1415,7 +1417,69 @@ How to work:
 pub const BOARD_READ: &str = "board_read";
 pub const BOARD_READ_DESC: &str = "Read the design's board: every note (id, tag, text, position, size, who made it), sketch, reference file (name, media type, path in your working folder), link (url, title), each link or document card's text_file (its text, taken by the app, in your working folder) or text_error, frame (title, what it holds), question (text, the human's answer) and arrow, and which items are suggestions still waiting on the human.";
 pub const BOARD_WRITE: &str = "board_write";
-pub const BOARD_WRITE_DESC: &str = "Change the design's board with a list of commands, applied in order. Each result says ok with the item id, or the error. A command that wrote words answers with them too, as the board now holds them: read them against what you sent. create_note {x, y, text, tag?, w?, h?, ref?} (tag: goal | constraint | question | idea); create_question {x, y, text, w?, h?, ref?} (a card the human answers); create_link {x, y, url, title?, text?, ref?} (a web page as a reference); create_frame {x, y, w, h, title?, ref?} (a titled area; what lies inside moves with it); update {id, text?, tag?, url?, title?}; move {id, x, y, w?, h?}; delete {ids}; connect {from, to, label?}. Ids may be \"$ref\" for an item made earlier in the same call. Files come only from the human. Your changes show as suggestions the human keeps or reverts.";
+pub const BOARD_WRITE_DESC: &str = "Change the design's board with a list of commands, applied in order. Each result says ok with the item id, or the error. A command that wrote words answers with them too, as the board now holds them: read them against what you sent. create_note {x, y, text, tag?, w?, h?, ref?} (tag: goal | constraint | question | idea); create_question {x, y, text, w?, h?, ref?} (a card the human answers); create_link {x, y, url, title?, text?, ref?} (a web page as a reference); create_frame {x, y, w, h, title?, ref?} (a titled area; what lies inside moves with it); update {id, text?, tag?, url?, title?}; move {id, x, y, w?, h?}; delete {ids}; connect {from, to, label?}. Ids may be \"$ref\" for an item made earlier in the same call. Files come only from the human. Your changes show as suggestions the human keeps or reverts. Words that are not ASCII (Korean, emoji, accents, CJK) do not go here: inside this list they get escaped and come out as other letters, so such a command is refused. Write those items with board_text, one per call, every character as itself; never \\uXXXX escapes.";
+
+/// The tool that writes one item with words, its words at the top level.
+pub const BOARD_TEXT: &str = "board_text";
+pub const BOARD_TEXT_DESC: &str = "Write one item that holds words on the design's board. Its words are this tool's own top-level fields (text, title, label), so every character arrives as itself: Korean, emoji, accents, CJK. Never \\uXXXX escapes. op: create_note {x, y, text, tag?, w?, h?} (tag: goal | constraint | question | idea); create_question {x, y, text, w?, h?}; create_frame {x, y, w, h, title?}; create_link {x, y, url, title?, text?}; update {id, text?, tag?, url?, title?}; connect {from, to, label?}. Answers with the item's id and the words the board now holds: read them against what you sent. One item per call; moves, deletes and wordless arrows go in board_write. Your changes show as suggestions the human keeps or reverts.";
+
+/// What every field of words says in the schema: the characters themselves.
+const WORDS: &str = "Plain text, every character as itself (Korean, emoji, accents, CJK). Never \\uXXXX escapes.";
+
+/// Arguments of `board_text`: one command, every field at the top level.
+///
+/// Not a list on purpose. A tool's top-level string fields are written out by
+/// the model as they are, the way it writes in chat; strings inside a list of
+/// objects are written as JSON, and there the design agent turns Korean into
+/// `\\uXXXX` escapes it works out by hand, which is how 양쪽 came out as 럼쪽.
+pub fn board_text_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "op": { "type": "string", "enum": ["create_note", "create_question", "create_frame", "create_link", "update", "connect"] },
+            "text": { "type": "string", "description": WORDS },
+            "title": { "type": "string", "description": WORDS },
+            "label": { "type": "string", "description": WORDS },
+            "tag": { "type": "string", "enum": ["", "goal", "constraint", "question", "idea"] },
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "w": { "type": "number" },
+            "h": { "type": "number" },
+            "id": { "type": "string" },
+            "url": { "type": "string" },
+            "from": { "type": "string" },
+            "to": { "type": "string" }
+        },
+        "required": ["op"]
+    })
+}
+
+/// A `board_text` call as the one-command list `board_write` takes.
+pub fn text_command(args: &Value) -> Value {
+    let mut one = args.clone();
+    if let Some(o) = one.as_object_mut() {
+        // A ref names an item for later commands in the same call; there are none.
+        o.remove("ref");
+    }
+    json!({ "commands": [one] })
+}
+
+/// Refuse a `board_write` command whose words are not all ASCII: they belong
+/// in `board_text`, where they arrive as they are (see [`board_text_schema`]).
+pub fn ascii_words(args: &Value) -> Result<(), String> {
+    let Some(commands) = args.get("commands").and_then(Value::as_array) else { return Ok(()) };
+    for (i, c) in commands.iter().enumerate() {
+        for field in ["text", "title", "label"] {
+            if c.get(field).and_then(Value::as_str).is_some_and(|w| !w.is_ascii()) {
+                return Err(format!(
+                    "command {} ({field}) has words that are not ASCII. Nothing was written. Inside board_write's list such words get escaped and come out as other letters: write that item with board_text, one item per call, the words as they are; keep board_write for moves, deletes and wordless arrows.",
+                    i + 1
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Arguments of `board_write`: a list of commands.
 pub fn board_write_schema() -> Value {
@@ -1434,14 +1498,14 @@ pub fn board_write_schema() -> Value {
                         "y": { "type": "number" },
                         "w": { "type": "number" },
                         "h": { "type": "number" },
-                        "text": { "type": "string" },
+                        "text": { "type": "string", "description": WORDS },
                         "tag": { "type": "string", "enum": ["", "goal", "constraint", "question", "idea"] },
                         "ref": { "type": "string" },
                         "from": { "type": "string" },
                         "to": { "type": "string" },
-                        "label": { "type": "string" },
+                        "label": { "type": "string", "description": WORDS },
                         "url": { "type": "string" },
-                        "title": { "type": "string" }
+                        "title": { "type": "string", "description": WORDS }
                     },
                     "required": ["op"]
                 }
@@ -1449,6 +1513,65 @@ pub fn board_write_schema() -> Value {
         },
         "required": ["commands"]
     })
+}
+
+/// The first `\uXXXX` left as text in some words, outside code: an escape
+/// of a character that is not ASCII, written out instead of the character.
+///
+/// The design agent turns Korean into JSON escapes by habit and works out
+/// the code points itself, and a slip there gives another syllable. Most of
+/// those escapes are undone before the call arrives (the agent's client
+/// parses its JSON), so what is wrong cannot be told from what is right; but
+/// one escaped twice arrives as these six characters, and that is refused,
+/// so the words are written again as themselves. Inside `code` and ```
+/// fences an escape is the subject, not a slip, and is left alone, as are
+/// escapes of ASCII (`\u0041`), which no one writes instead of a letter.
+pub fn literal_escape(words: &str) -> Option<String> {
+    let mut fence = false;
+    for line in words.lines() {
+        if line.trim_start().starts_with("```") {
+            fence = !fence;
+            continue;
+        }
+        if fence {
+            continue;
+        }
+        // Outside inline code: the parts between backticks at even positions.
+        for (i, part) in line.split('`').enumerate() {
+            if i % 2 == 1 {
+                continue;
+            }
+            let b = part.as_bytes();
+            let mut k = 0;
+            while k + 6 <= b.len() {
+                if b[k] == b'\\' && (b[k + 1] == b'u' || b[k + 1] == b'U') && b[k + 2..k + 6].iter().all(u8::is_ascii_hexdigit) {
+                    let hex = &part[k + 2..k + 6];
+                    if u32::from_str_radix(hex, 16).is_ok_and(|c| c >= 0x80) {
+                        return Some(part[k..k + 6].to_string());
+                    }
+                }
+                k += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Refuse a `board_write` whose words hold a written-out escape (see
+/// [`literal_escape`]), saying which command and what to do instead.
+pub fn check_words(args: &Value) -> Result<(), String> {
+    let Some(commands) = args.get("commands").and_then(Value::as_array) else { return Ok(()) };
+    for (i, c) in commands.iter().enumerate() {
+        for field in ["text", "title", "label"] {
+            if let Some(found) = c.get(field).and_then(Value::as_str).and_then(literal_escape) {
+                return Err(format!(
+                    "command {} ({field}) holds the escape {found} as text. Nothing was written. Write the words again with every character as itself (Korean, emoji, accents), not \\uXXXX escapes.",
+                    i + 1
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The commands in a `board_write` call.
@@ -1460,6 +1583,7 @@ pub fn parse_commands(args: &Value) -> Result<Vec<Op>, String> {
 /// The design agent's tools, scoped to one design.
 pub fn tools(app: AppHandle, id: String) -> Vec<Tool> {
     let read = (app.clone(), id.clone());
+    let text = (app.clone(), id.clone());
     let write = (app, id);
     vec![
         Tool::new(
@@ -1484,10 +1608,29 @@ pub fn tools(app: AppHandle, id: String) -> Vec<Tool> {
                 // `orchestra_app=debug` to see, not the whole protocol at
                 // trace, which is half a gigabyte an afternoon.
                 tracing::debug!(design = %id, commands = %args, "board_write");
+                if let Err(why) = ascii_words(&args).and_then(|()| check_words(&args)) {
+                    tracing::warn!(design = %id, %why, "board_write refused");
+                    return Err(why);
+                }
                 let ops = parse_commands(&args)?;
                 let run = crate::artifact::running(&app, &id).await;
                 let results = apply(&app, &id, ops, Actor::Agent { run })?;
                 Ok(json!({ "results": results }))
+            }
+        }),
+        Tool::new(BOARD_TEXT, BOARD_TEXT_DESC, board_text_schema(), move |args| {
+            let (app, id) = text.clone();
+            async move {
+                tracing::debug!(design = %id, command = %args, "board_text");
+                let call = text_command(&args);
+                if let Err(why) = check_words(&call) {
+                    tracing::warn!(design = %id, %why, "board_text refused: an escape written out as text");
+                    return Err(why);
+                }
+                let ops = parse_commands(&call)?;
+                let run = crate::artifact::running(&app, &id).await;
+                let results = apply(&app, &id, ops, Actor::Agent { run })?;
+                Ok(results.into_iter().next().unwrap_or(Value::Null))
             }
         }),
     ]
@@ -1496,6 +1639,111 @@ pub fn tools(app: AppHandle, id: String) -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Korean (with the syllables that came out wrong), emoji, a combining
+    /// mark, CJK: as the agent's call carries them, through the board, its
+    /// outline, the stored JSON and back, unchanged by a single code point.
+    #[test]
+    fn words_go_round_the_board_unchanged() {
+        let words = [
+            "양쪽 곳 비교: 왼쪽과 오른쪽을 나란히",
+            "결정문이 문을 열어 두면 되돌릴 수 있다",
+            "졸업생·졸음·뷁·똠얌꿍·흙탕물?",
+            "이모지 🎨🧭 👩🏽‍💻 그리고 결합 문자 e\u{301}, 한자 漢字",
+        ];
+        // The call as JSON text, as it arrives over MCP.
+        let call = json!({ "commands": words.iter().enumerate().map(|(i, w)| json!({ "op": "create_note", "x": i as f64 * 300.0, "y": 0, "text": w })).collect::<Vec<_>>() }).to_string();
+        let args: Value = serde_json::from_str(&call).unwrap();
+        check_words(&args).unwrap();
+        let mut d = Doc::default();
+        let results = d.apply(parse_commands(&args).unwrap(), &Actor::Agent { run: None });
+        for (r, w) in results.iter().zip(words) {
+            assert_eq!(r["text"], w, "the answer carries the words as kept");
+        }
+        // Stored and read back.
+        let saved = serde_json::to_string(&d).unwrap();
+        let back: Doc = serde_json::from_str(&saved).unwrap();
+        let texts: Vec<&str> = back.nodes.iter().map(|n| n.text.as_str()).collect();
+        assert_eq!(texts, words);
+        assert!(texts[3].contains("e\u{301}") && !texts[3].contains('\u{e9}'), "the combining mark stays a combining mark");
+        // The outline the agent reads next turn, and the stored JSON itself, hold the characters, not escapes.
+        let outline = back.outline().to_string();
+        for w in words {
+            assert!(outline.contains(w), "{w} in the outline");
+        }
+        assert!(!saved.contains("\\u"), "no escapes stored: {saved}");
+    }
+
+    #[test]
+    fn an_escape_written_out_as_text_is_found_outside_code_only() {
+        assert_eq!(literal_escape("\\uC591\\uCABD 비교").as_deref(), Some("\\uC591"), "Korean escaped twice");
+        assert_eq!(literal_escape("emoji \\ud83c\\udfa8").as_deref(), Some("\\ud83c"));
+        assert_eq!(literal_escape("accent caf\\u00e9").as_deref(), Some("\\u00e9"));
+        assert_eq!(literal_escape("양쪽 곳 비교 🎨 e\u{301}"), None, "the characters themselves");
+        assert_eq!(literal_escape("JSON keeps `\\u00e9` as is"), None, "inline code is the subject");
+        assert_eq!(literal_escape("```\nlet s = \"\\uC591\";\n```\nok"), None, "a fence too");
+        assert_eq!(literal_escape("A is \\u0041"), None, "an ASCII escape is no one's slip");
+        assert_eq!(literal_escape("C:\\users\\ufo"), None, "not four hex digits");
+        assert_eq!(literal_escape("``` open fence\n\\uC591"), None, "an unclosed fence runs to the end");
+    }
+
+    #[test]
+    fn a_write_with_an_escape_left_in_its_words_is_refused_whole() {
+        let ok = json!({ "commands": [{ "op": "create_note", "x": 0, "y": 0, "text": "양쪽" }] });
+        assert!(check_words(&ok).is_ok());
+        let bad = json!({ "commands": [
+            { "op": "create_note", "x": 0, "y": 0, "text": "양쪽" },
+            { "op": "create_frame", "x": 0, "y": 0, "w": 100, "h": 100, "title": "\\uBE44\\uAD50" }
+        ] });
+        let why = check_words(&bad).unwrap_err();
+        assert!(why.starts_with("command 2 (title)") && why.contains("\\uBE44") && why.contains("Nothing was written"), "{why}");
+        let label = json!({ "commands": [{ "op": "connect", "from": "a", "to": "b", "label": "\\uACF3" }] });
+        assert!(check_words(&label).is_err(), "an arrow's label too");
+        assert!(check_words(&json!({})).is_ok(), "no commands: parse_commands says so");
+    }
+
+    #[test]
+    fn words_go_through_board_text_and_board_write_keeps_to_ascii() {
+        // board_text: the words are the call's own top-level strings.
+        let schema = board_text_schema();
+        for f in ["text", "title", "label"] {
+            assert_eq!(schema["properties"][f]["type"], "string", "{f} is a top-level string");
+        }
+        assert!(schema["properties"].get("commands").is_none(), "no list to nest words in");
+        let call = text_command(&json!({ "op": "create_note", "x": 0, "y": 0, "text": "양쪽 곳 비교 🎨 e\u{301}", "tag": "goal", "ref": "a" }));
+        assert!(call["commands"][0].get("ref").is_none(), "a ref names nothing across calls");
+        let mut d = Doc::default();
+        let r = d.apply(parse_commands(&call).unwrap(), &Actor::Agent { run: None });
+        assert_eq!((r[0]["ok"].as_bool(), r[0]["text"].as_str()), (Some(true), Some("양쪽 곳 비교 🎨 e\u{301}")));
+        assert_eq!(d.nodes[0].tag, "goal");
+        let frame = text_command(&json!({ "op": "create_frame", "x": 0, "y": 200, "w": 400, "h": 300, "title": "비교" }));
+        assert!(d.apply(parse_commands(&frame).unwrap(), &Actor::Agent { run: None })[0]["ok"].as_bool().unwrap());
+
+        // board_write: wordless commands and ASCII words pass; Korean is sent to board_text.
+        assert!(ascii_words(&json!({ "commands": [{ "op": "move", "id": "n1", "x": 5, "y": 5 }, { "op": "create_note", "x": 0, "y": 0, "text": "plain ASCII" }] })).is_ok());
+        let why = ascii_words(&json!({ "commands": [{ "op": "move", "id": "n1", "x": 5, "y": 5 }, { "op": "create_note", "x": 0, "y": 0, "text": "곳" }] })).unwrap_err();
+        assert!(why.starts_with("command 2 (text)") && why.contains("board_text") && why.contains("Nothing was written"), "{why}");
+        assert!(ascii_words(&json!({ "commands": [{ "op": "connect", "from": "a", "to": "b", "label": "é" }] })).is_err(), "an accent too");
+        assert!(ascii_words(&json!({ "commands": [{ "op": "update", "id": "n1", "title": "🎨" }] })).is_err(), "an emoji too");
+        assert!(BOARD_WRITE_DESC.contains("board_text") && BOARD_TEXT_DESC.contains("top-level"));
+        for lang in ["ko", "en"] {
+            assert!(preamble(lang, "t").contains("board_text"), "{lang}");
+        }
+    }
+
+    #[test]
+    fn the_agent_is_told_to_write_the_characters_themselves() {
+        for lang in ["ko", "en"] {
+            let p = preamble(lang, "t");
+            assert!(p.contains("\\uC591"), "{lang}: the escape named");
+        }
+        assert!(BOARD_WRITE_DESC.contains("never \\uXXXX"), "{BOARD_WRITE_DESC}");
+        let schema = board_write_schema();
+        for f in ["text", "title", "label"] {
+            let d = schema["properties"]["commands"]["items"]["properties"][f]["description"].as_str().unwrap_or("");
+            assert!(d.contains("character as itself"), "{f}: {d}");
+        }
+    }
 
     #[test]
     fn undo_takes_back_the_humans_edits_and_only_those() {

@@ -39,7 +39,7 @@ async fn run() -> anyhow::Result<()> {
         &Actor::Human,
     );
 
-    let (r, w) = (board.clone(), board.clone());
+    let (r, w, t) = (board.clone(), board.clone(), board.clone());
     let tools = vec![
         Tool::new(design::BOARD_READ, design::BOARD_READ_DESC, json!({ "type": "object", "properties": {} }), move |_| {
             let b = r.clone();
@@ -52,6 +52,16 @@ async fn run() -> anyhow::Result<()> {
                 let results = b.lock().apply(ops, &Actor::Agent { run: None });
                 println!("  board_write → {}", serde_json::to_string(&results).unwrap_or_default());
                 Ok(json!({ "results": results }))
+            }
+        }),
+        // One item with words, its words at the top level (see design::board_text_schema).
+        Tool::new(design::BOARD_TEXT, design::BOARD_TEXT_DESC, design::board_text_schema(), move |args| {
+            let b = t.clone();
+            async move {
+                let ops = design::parse_commands(&design::text_command(&args))?;
+                let results = b.lock().apply(ops, &Actor::Agent { run: None });
+                println!("  board_text → {}", serde_json::to_string(&results).unwrap_or_default());
+                Ok(results.into_iter().next().unwrap_or(serde_json::Value::Null))
             }
         }),
     ];
