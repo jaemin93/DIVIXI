@@ -4,8 +4,8 @@
 //!   cargo run -p orchestra-app --example design_agent -- claude_code
 //!
 //! The board starts with one note of the human's. The agent gets the design
-//! preamble and the same two MCP tools the app gives it (`board_read`,
-//! `board_write`, same descriptions and schema), and is asked to rough the
+//! preamble and the same three MCP tools the app gives it (`board_read`,
+//! `board_write`, `board_text`, same descriptions and schemas), and is asked to rough the
 //! idea out. Checks: it wrote through the tool; the board gained a goal,
 //! constraints and a question; they hang off the human's note by arrows;
 //! every agent item is a suggestion waiting on the human.
@@ -39,7 +39,7 @@ async fn run() -> anyhow::Result<()> {
         &Actor::Human,
     );
 
-    let (r, w) = (board.clone(), board.clone());
+    let (r, w, t) = (board.clone(), board.clone(), board.clone());
     let tools = vec![
         Tool::new(design::BOARD_READ, design::BOARD_READ_DESC, json!({ "type": "object", "properties": {} }), move |_| {
             let b = r.clone();
@@ -52,6 +52,16 @@ async fn run() -> anyhow::Result<()> {
                 let results = b.lock().apply(ops, &Actor::Agent { run: None });
                 println!("  board_write → {}", serde_json::to_string(&results).unwrap_or_default());
                 Ok(json!({ "results": results }))
+            }
+        }),
+        // One item with words, its words at the top level (see design::board_text_schema).
+        Tool::new(design::BOARD_TEXT, design::BOARD_TEXT_DESC, design::board_text_schema(), move |args| {
+            let b = t.clone();
+            async move {
+                let ops = design::parse_commands(&design::text_command(&args))?;
+                let results = b.lock().apply(ops, &Actor::Agent { run: None });
+                println!("  board_text → {}", serde_json::to_string(&results).unwrap_or_default());
+                Ok(results.into_iter().next().unwrap_or(serde_json::Value::Null))
             }
         }),
     ];
