@@ -5,6 +5,7 @@
   import { store, type DesignNode, type DesignOp, type DesignTag, type Stroke } from "./store.svelte";
   import { strokePath, strokesBox, worldStrokes, localStrokes, overlaps, edgeEnds, TAG_COLORS, type Box } from "./ink";
   import { t } from "./i18n.svelte";
+  import { findCards, isFindKey, stepMatch, ID_LABEL_MIN_ZOOM } from "./boardFind";
 
   /**
    * The design's sketch board, after Huabu: notes, freehand ink and arrows,
@@ -25,6 +26,69 @@
   let el = $state<HTMLDivElement>();
   let view = $state({ x: 0, y: 0, k: 1 });
   const doc = $derived(store.designDoc);
+
+  // ----- finding a card: Ctrl+F (Cmd+F on macOS), by its words or its id -----
+
+  const mac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  let findOpen = $state(false);
+  let findQuery = $state("");
+  let findInput = $state<HTMLInputElement>();
+  /** The match the board shows, an index into `matches`; -1 for none. */
+  let findAt = $state(-1);
+  /** The cards the query finds, in the order Enter steps through them (see boardFind). */
+  const matches = $derived(findOpen ? findCards(doc.nodes, findQuery) : []);
+  const found = $derived(new Set(matches));
+  const current = $derived(findAt >= 0 ? matches[findAt] : undefined);
+
+  function openFind() {
+    findOpen = true;
+    // What was searched last is kept and picked, as a browser's find bar does.
+    queueMicrotask(() => {
+      findInput?.focus();
+      findInput?.select();
+    });
+  }
+
+  function closeFind() {
+    findOpen = false;
+    findAt = -1;
+    el?.focus();
+  }
+
+  /** Show a found card: in the middle, at a zoom it can be read at. */
+  function showFound(id: string | undefined) {
+    const n = id ? doc.nodes.find((x) => x.id === id) : undefined;
+    if (!n) return;
+    if (view.k < 0.6) view = { ...view, k: 1 };
+    reveal(n);
+  }
+
+  function findStep(back: boolean) {
+    findAt = stepMatch(findAt, matches.length, back);
+    showFound(matches[findAt]);
+  }
+
+  /** A new query: the first card it finds (the one whose id it is, when there is one). */
+  function onFindInput() {
+    findAt = matches.length ? 0 : -1;
+    showFound(matches[0]);
+  }
+
+  // ----- a card's id, as the agent names it -----
+
+  let copiedId = $state("");
+
+  async function copyId(id: string) {
+    try {
+      await navigator.clipboard.writeText(id);
+      copiedId = id;
+      setTimeout(() => {
+        if (copiedId === id) copiedId = "";
+      }, 1200);
+    } catch {
+      // Cosmetic: the id is on screen to read anyway.
+    }
+  }
 
   /** Agent suggestions by the item they are about. */
   const pending = $derived(new Map(doc.changes.map((c) => [c.target, c.id])));
@@ -746,9 +810,16 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    const target = e.target as HTMLElement | null;
+    // Find a card: on the designs page only, and not from the agent's
+    // column, where a find is the text's, not the board's.
+    if (isFindKey(e, mac) && store.view === "design" && !store.tagDialog && !target?.closest?.("aside.talk, [role=dialog], [role=menu]")) {
+      e.preventDefault();
+      openFind();
+      return;
+    }
     // Not while typing, nor behind a dialog or menu (the tag dialog, a
     // right-click menu), nor on another view.
-    const target = e.target as HTMLElement | null;
     if (e.defaultPrevented || editing || store.tagDialog || store.view !== "design") return;
     if (target?.closest?.("input, textarea, select, [contenteditable], [role=menu], [role=dialog]")) return;
     // Undo and redo of the human's own edits (typing has its own).
@@ -852,7 +923,7 @@
   <!-- Said once, when focus lands on the board, so the keys are not a
        secret to anyone who cannot find them by pointing. -->
   <p id="board-keys" class="offscreen">{t("design.boardKeys")}</p>
-  <div class="world" style="transform: translate({view.x}px, {view.y}px) scale({view.k})">
+  <div class="world" class:ids={view.k >= ID_LABEL_MIN_ZOOM} style="transform: translate({view.x}px, {view.y}px) scale({view.k}); --k: {view.k}">
     <!-- Arrows under the items. -->
     <svg class="edges" style="left: {edgeFrame.x}px; top: {edgeFrame.y}px" width={edgeFrame.w} height={edgeFrame.h}>
       <defs>
@@ -894,11 +965,26 @@
         class:on={selected.includes(n.id)}
         class:pending={change !== undefined}
         class:from={arrowFrom === n.id}
+        class:found={found.has(n.id)}
+        class:current={current === n.id}
         data-node={n.id}
         style="left: {b.x}px; top: {b.y}px; width: {b.w}px; height: {b.h}px; {n.tag ? `--tag: ${TAG_COLORS[n.tag]}` : ''}"
         ondblclick={() => startEdit(n)}
         role="presentation"
       >
+        <!-- Its id, as the agent names it ("n441"), above its top left; a click copies it. -->
+        <button
+          type="button"
+          class="nid mono"
+          tabindex="-1"
+          title={copiedId === n.id ? t("design.idCopied") : t("design.idCopy")}
+          onpointerdown={(ev) => ev.stopPropagation()}
+          ondblclick={(ev) => ev.stopPropagation()}
+          onclick={(ev) => {
+            ev.stopPropagation();
+            void copyId(n.id);
+          }}>{copiedId === n.id ? `${n.id} ✓` : n.id}</button
+        >
         {#if n.kind === "frame"}
           <div class="ftitle">
             {#if editing === n.id}
@@ -1124,6 +1210,37 @@
           {t(`design.tag.${tag}` as "design.tag.goal")}
         </button>
       {/each}
+    </div>
+  {/if}
+
+  {#if findOpen}
+    <!-- Find a card by its words or its id: Enter and Shift+Enter step, Esc closes. -->
+    <div class="find" role="search" onpointerdown={(e) => e.stopPropagation()}>
+      <input
+        bind:this={findInput}
+        bind:value={findQuery}
+        type="text"
+        spellcheck="false"
+        placeholder={t("design.findPh")}
+        aria-label={t("design.find")}
+        oninput={onFindInput}
+        onkeydown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            findStep(e.shiftKey);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            closeFind();
+          } else if (isFindKey(e, mac)) {
+            e.preventDefault();
+            findInput?.select();
+          }
+        }}
+      />
+      <span class="mono fcount" aria-live="polite">{findQuery.trim() ? (matches.length ? t("design.findCount", { i: findAt + 1, n: matches.length }) : t("design.findNone")) : ""}</span>
+      <button type="button" disabled={!matches.length} onclick={() => findStep(true)} aria-label={t("design.findPrev")} title={t("design.findPrev")}>↑</button>
+      <button type="button" disabled={!matches.length} onclick={() => findStep(false)} aria-label={t("design.findNext")} title={t("design.findNext")}>↓</button>
+      <button type="button" onclick={closeFind} aria-label={t("design.findClose")} title={t("design.findClose")}>×</button>
     </div>
   {/if}
 
@@ -1737,6 +1854,107 @@
   .tagbtn.on {
     border-color: var(--tag);
     color: var(--tag);
+  }
+
+  /* A card's id above its top left (the top right holds an agent suggestion's
+     keep/revert bar): small and faint, the same size on screen at any zoom
+     (the world is scaled by --k), gone when zoomed far out. */
+  .nid {
+    position: absolute;
+    left: 0;
+    bottom: 100%;
+    display: none;
+    margin-bottom: calc(3px / var(--k));
+    padding: 0 calc(2px / var(--k));
+    background: transparent;
+    border: 0;
+    font-size: calc(9px / var(--k));
+    line-height: 1.2;
+    letter-spacing: 0.06em;
+    color: var(--lab);
+    opacity: 0.75;
+    cursor: copy;
+    white-space: nowrap;
+    z-index: 1;
+  }
+
+  .world.ids .nid {
+    display: block;
+  }
+
+  /* A frame's top left is its title's (28 units up): the id goes above that. */
+  .node.frame .nid {
+    bottom: calc(100% + 28px);
+  }
+
+  .nid:hover,
+  .node.current .nid {
+    color: var(--hi);
+    opacity: 1;
+  }
+
+  /* Found by the find bar: every match outlined, the one shown in the accent. */
+  .node.found {
+    outline: 1px dashed var(--acc);
+    outline-offset: 3px;
+  }
+
+  .node.current {
+    outline: 2px solid var(--acc);
+    outline-offset: 3px;
+  }
+
+  .find {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px;
+    background: var(--card);
+    border: 1px solid var(--lines);
+    cursor: default;
+  }
+
+  .find input {
+    width: 220px;
+    height: 28px;
+    padding: 0 8px;
+    background: var(--inp);
+    border: 1px solid var(--line);
+    color: var(--txt);
+    font-size: 12px;
+  }
+
+  .find input:focus {
+    border-color: var(--acc);
+  }
+
+  .fcount {
+    min-width: 54px;
+    text-align: center;
+    font-size: 10px;
+    color: var(--lab);
+  }
+
+  .find button {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+  }
+
+  .find button:hover:not(:disabled) {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .find button:disabled {
+    opacity: 0.4;
   }
 
   .zoom {

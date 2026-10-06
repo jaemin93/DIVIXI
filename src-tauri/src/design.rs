@@ -1379,6 +1379,7 @@ pub fn preamble(lang: &str, title: &str) -> String {
 - 보드에 쓰는 글(text·title·label)은 대화에서 쓰듯 글자 그대로 씁니다. 한글·이모지·악센트·한자 모두 그렇습니다. `\uC591` 같은 유니코드 이스케이프로 바꾸지 마세요: 코드포인트를 손으로 셈하다 글자가 바뀌고(양쪽→럼쪽, 곳→고), 결합 문자는 다른 글자가 됩니다. 앱은 이스케이프 글자가 그대로 남은 쓰기를 받지 않습니다.
 - 글을 쓴 명령은 결과에 보드가 담은 글을 함께 돌려줍니다. 그것을 읽어 보내려던 것과 맞춰 보세요. 글자가 어긋났으면 그 항목을 한 번 다시 씁니다. 다시 써도 어긋나면 사람에게 말하고 멈춥니다.
 - 당신이 바꾼 것은 사람이 유지하거나 되돌리기 전까지 "제안"으로 표시됩니다. 되돌려진 것을 다시 밀어붙이지 마세요.
+- 사람에게 카드를 말할 때는 id만 쓰지 말고 짧은 내용을 함께 씁니다: 예) n441("양쪽 비교"). 사람은 보드에서 카드마다 위에 붙은 id를 보거나 Ctrl+F로 id나 내용을 찾아 그 카드로 갑니다.
 
 일하는 법:
 - 메모는 짧게: 한 메모에 한 생각, 두세 줄. 긴 설명은 메모를 나누거나 대화로.
@@ -1401,6 +1402,7 @@ The board:
 - Write the board's words (text, title, label) as you write in chat: every character as itself, Korean, emoji, accents and CJK included. Never turn them into Unicode escapes such as `\uC591`: counting code points by hand changes letters (양쪽 came out as 럼쪽, 곳 as 고) and turns combining marks into other characters. The app refuses a write whose words still hold such an escape.
 - A command that wrote words answers with the words the board now holds. Read them against what you sent; if a word came out wrong, write that item once more, and if it comes out wrong again, tell the human and stop.
 - What you change shows as a suggestion until the human keeps or reverts it. Do not push back what was reverted.
+- When you mention a card to the human, give its id with a few of its words, e.g. n441 ("compare both sides"), not the id alone. The human sees each card's id above it on the board and finds a card by its id or words with Ctrl+F.
 
 How to work:
 - Keep notes short: one thought per note, two or three lines. Split long explanations or say them in chat.
@@ -1729,6 +1731,17 @@ mod tests {
         for lang in ["ko", "en"] {
             assert!(preamble(lang, "t").contains("board_text"), "{lang}");
         }
+    }
+
+    #[test]
+    fn the_agent_names_a_card_by_id_and_a_few_words() {
+        assert!(preamble("ko", "t").contains("n441(\"양쪽 비교\")"));
+        assert!(preamble("en", "t").contains("n441 (\"compare both sides\")"));
+        // The ids it names are the outline's, the ones the board shows.
+        let mut d = Doc::default();
+        let r = d.apply(ops(json!([{ "op": "create_note", "x": 0, "y": 0, "text": "양쪽 비교" }])), &Actor::Agent { run: None });
+        let id = r[0]["id"].as_str().unwrap().to_string();
+        assert_eq!(d.outline()["nodes"][0]["id"], id.as_str());
     }
 
     #[test]
