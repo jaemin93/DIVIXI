@@ -122,6 +122,10 @@ const OWNER_ALLOWED: &[&str] = &[
     "design_review",
     "design_undo",
     "design_add_blob",
+    // A design as a file: written out for the browser to download, and one
+    // uploaded made into a new design (the PC's own dialogs stay its own).
+    "design_export_data",
+    "design_import_data",
     // Files the Divixi app brought over first (instance_upload).
     "design_add_files",
     // A shell on this machine, drawn on the app's PC (as VS Code Remote).

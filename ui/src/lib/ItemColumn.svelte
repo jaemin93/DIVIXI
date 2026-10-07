@@ -32,7 +32,8 @@
    * filter (ListSearch, the tracks column's own); a row per item, tags and a
    * small fact above, the name below, its colour as the bar on the left, the
    * open one told by its shade. The "+" opens a name box under the head (a
-   * design or a library needs a name only; a track opens its own form).
+   * design or a library needs a name only; a track opens its own form), and
+   * under it, when the page can, a way to make one from a file instead.
    * Right-clicking a row asks the page for its menu (rename, tags, colour,
    * delete), which the page draws. `pinned` rows (all libraries) stay on top
    * whatever the search. The designs page and the knowledge page's libraries
@@ -54,6 +55,10 @@
     searchPlaceholder,
     maxlength = 80,
     oncreate,
+    onimport,
+    importLabel = "",
+    importTitle = "",
+    importAccept = "",
     note = "",
     pinned = [],
     items,
@@ -81,6 +86,16 @@
     maxlength?: number;
     /** Make one from the box. Resolves to why not (the box keeps its text), or nothing. */
     oncreate: (name: string) => Promise<string | void> | string | void;
+    /**
+     * Make one from a file instead (a design another DIVIXI exported): offered
+     * in the "+" box beside naming a new one. This PC picks with its own
+     * dialog (no file given); a browser picks here and hands the file over.
+     */
+    onimport?: (file?: File) => void;
+    importLabel?: string;
+    importTitle?: string;
+    /** The file input's `accept` (".divixi-design"). */
+    importAccept?: string;
     /** A line under the box: what went wrong with a name, say. */
     note?: string;
     /** Rows above the rest that the search and filter leave alone (all libraries). */
@@ -104,6 +119,13 @@
   /** The name box under the head, opened by the head's "+". */
   let creating = $state(false);
   let query = $state("");
+  let fileInput = $state<HTMLInputElement>();
+
+  function importFile() {
+    if (overWeb) fileInput?.click();
+    else onimport?.();
+    creating = false;
+  }
   const shown = $derived(narrow(items, query, picked));
   const filtering = $derived(!!query.trim() || picked.length > 0);
 
@@ -157,6 +179,23 @@
         />
         <button class="btn" type="submit" title={newLabel} aria-label={newLabel}>+</button>
       </form>
+      {#if onimport}
+        <!-- Or make it from a file: the same "+", two ways in. -->
+        <button class="importbtn" type="button" title={importTitle} onclick={importFile}>{importLabel}</button>
+      {/if}
+    {/if}
+    {#if onimport && overWeb}
+      <input
+        class="pickfile"
+        type="file"
+        accept={importAccept}
+        bind:this={fileInput}
+        onchange={(e) => {
+          const f = e.currentTarget.files?.[0];
+          e.currentTarget.value = "";
+          if (f) onimport(f);
+        }}
+      />
     {/if}
     {#if note}
       <p class="note" role="status">{note}</p>
@@ -242,6 +281,28 @@
   .newbtn.on {
     color: var(--hi);
     border-color: var(--acc);
+  }
+
+  /* The "+" box's second way in: a quiet line under the name box. */
+  .importbtn {
+    display: block;
+    margin: -4px 12px 8px;
+    padding: 4px 0;
+    background: none;
+    border: 0;
+    font-size: 12px;
+    color: var(--dim);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .importbtn:hover {
+    color: var(--hi);
+    text-decoration: underline;
+  }
+
+  .pickfile {
+    display: none;
   }
 
   .empty {
