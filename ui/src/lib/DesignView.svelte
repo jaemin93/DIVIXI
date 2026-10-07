@@ -76,10 +76,10 @@
       newPlaceholder={t("design.newPh")}
       searchPlaceholder={t("design.search")}
       oncreate={create}
-      onimport={(file) => store.importDesign(file)}
-      importLabel={t("design.import")}
-      importTitle={t("design.importTitle")}
-      importAccept={DESIGN_EXT}
+      options={[
+        { id: "new", label: t("design.new"), kind: "name" },
+        { id: "import", label: t("design.import"), kind: "file", accept: DESIGN_EXT, onfile: (file) => store.importDesign(file) },
+      ]}
       note={store.designNote}
       items={rows}
       picked={store.designTags}

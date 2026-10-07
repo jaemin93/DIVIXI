@@ -2346,7 +2346,7 @@ class Store {
     }
   }
 
-  /** What the designs column says under its head after an export or an import. */
+  /** What the designs column says under its head when an export or an import fails. */
   designNote = $state("");
 
   /** A design written out as a file another DIVIXI imports: this PC's save dialog, or a browser's download. */
@@ -2356,10 +2356,8 @@ class Store {
       if (overWeb) {
         const file = await invoke<{ name: string; text: string }>("design_export_data", { id });
         download(file.name, file.text);
-        this.designNote = t("design.exported", { where: file.name });
       } else {
-        const path = await invoke<string | null>("design_export", { id });
-        if (path) this.designNote = t("design.exported", { where: path });
+        await invoke<string | null>("design_export", { id });
       }
     } catch (err) {
       this.designNote = t("design.exportFailed", { why: String(err) });
@@ -2367,9 +2365,10 @@ class Store {
   }
 
   /**
-   * A design file made into a new design: picked with this PC's dialog, or a
-   * `file` a browser was handed. Always a new design; a name that is taken
-   * gets "(가져옴)". Its tags join the vocabulary.
+   * A design file made into a new design, which the list then shows open:
+   * picked with this PC's dialog, or a `file` a browser was handed. Always a
+   * new design; a name that is taken gets "(가져옴)". Its tags join the
+   * vocabulary.
    */
   async importDesign(file?: File) {
     this.designNote = "";
@@ -2394,7 +2393,6 @@ class Store {
       if (!d) return;
       for (const tag of d.tags) await this.createTag(tag);
       this.artifacts = [d, ...this.artifacts];
-      this.designNote = t("design.imported", { name: d.title });
       await this.openArtifact(d.id);
     } catch (err) {
       this.designNote = t("design.importFailed", { why: String(err) });
