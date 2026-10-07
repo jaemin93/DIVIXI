@@ -4,6 +4,7 @@
   import { store } from "./store.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
+  import { RECENT, recentDevices } from "./deviceList";
 
   /**
    * Settings › Remote instances, this PC's side: its GitHub account (who
@@ -23,6 +24,9 @@
   let port = $state(7488);
   let error = $state("");
   let busy = $state(false);
+  /** Every signed-in device listed, not only the few seen most lately. */
+  let allDevices = $state(false);
+  const devices = $derived(recentDevices(status?.devices ?? [], allDevices));
 
   onMount(async () => {
     try {
@@ -154,7 +158,7 @@
 
       {#if status.devices.length}
         <div class="lab devhead">{t("serve.devices", { n: status.devices.length })}</div>
-        {#each status.devices as d (d.id)}
+        {#each devices.shown as d (d.id)}
           <div class="line dev">
             <div class="what">
               <div class="who">{d.name}</div>
@@ -168,6 +172,12 @@
             <button class="btn sm" disabled={busy} onclick={() => drop(d.id)}>{t("serve.drop")}</button>
           </div>
         {/each}
+        <!-- The few seen most lately; the rest a press away, and back. -->
+        {#if devices.hidden || allDevices}
+          <button class="more" aria-expanded={allDevices} onclick={() => (allDevices = !allDevices)}>
+            {allDevices ? t("serve.devicesFewer", { n: RECENT }) : t("serve.devicesAll", { n: status.devices.length })}
+          </button>
+        {/if}
         <div class="line">
           {#if confirming}
             <span class="hint">{t("serve.dropAllSure")}</span>
@@ -360,6 +370,27 @@
   .dev {
     padding: 6px 0;
     border-top: 1px solid var(--lineq);
+  }
+
+  .dev .who {
+    overflow-wrap: anywhere;
+  }
+
+  .more {
+    display: block;
+    width: 100%;
+    padding: 8px 0;
+    background: none;
+    border: 0;
+    border-top: 1px solid var(--lineq);
+    font-size: 12px;
+    color: var(--dim);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .more:hover {
+    color: var(--hi);
   }
 
   .btn.sm {

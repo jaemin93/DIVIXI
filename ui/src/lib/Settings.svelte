@@ -189,7 +189,7 @@
     {#each groups as g (g.label)}
       {#if g.label}<div class="mlab glabel">{g.label}</div>{/if}
       {#each g.entries as e (e.id)}
-        <button class="entry" class:on={store.settingsSection === e.id} onclick={() => (store.settingsSection = e.id)}>
+        <button class="entry" class:on={store.settingsSection === e.id} title={e.label} aria-label={e.label} onclick={() => (store.settingsSection = e.id)}>
           <Icon name={e.icon} />
           <span class="label">{e.label}</span>
         </button>
@@ -1041,5 +1041,30 @@
   .label {
     font-size: 10px;
     letter-spacing: 0.18em;
+  }
+
+  /* A phone's width (Track's breakpoint): the sections fold to their icons,
+     as the rail does, so the page beside them has the screen. */
+  @media (max-width: 640px) {
+    .col {
+      width: 48px !important;
+    }
+
+    .col > :global([role="separator"]),
+    .head,
+    .glabel,
+    .entry .label {
+      display: none;
+    }
+
+    .entry {
+      height: 44px;
+      justify-content: center;
+      padding: 0;
+    }
+
+    .inner {
+      padding: 20px 16px 40px;
+    }
   }
 </style>
