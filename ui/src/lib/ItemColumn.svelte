@@ -11,6 +11,15 @@
     /** Has a right-click menu (the row of all libraries has none). */
     menu?: boolean;
   };
+
+  /**
+   * One way the "+" makes an item, when it has more than one: `name` opens
+   * the name box; `file` picks a file (this PC's own dialog when `onfile` is
+   * called with none; a browser's picker otherwise, with `accept`).
+   */
+  export type NewOption =
+    | { id: string; label: string; kind: "name" }
+    | { id: string; label: string; kind: "file"; accept: string; onfile: (file?: File) => void };
 </script>
 
 <script lang="ts">
@@ -32,7 +41,8 @@
    * filter (ListSearch, the tracks column's own); a row per item, tags and a
    * small fact above, the name below, its colour as the bar on the left, the
    * open one told by its shade. The "+" opens a name box under the head (a
-   * design or a library needs a name only; a track opens its own form).
+   * design or a library needs a name only; a track opens its own form), or,
+   * when there is more than one way to make one, a menu of them.
    * Right-clicking a row asks the page for its menu (rename, tags, colour,
    * delete), which the page draws. `pinned` rows (all libraries) stay on top
    * whatever the search. The designs page and the knowledge page's libraries
@@ -54,6 +64,7 @@
     searchPlaceholder,
     maxlength = 80,
     oncreate,
+    options = [],
     note = "",
     pinned = [],
     items,
@@ -81,6 +92,8 @@
     maxlength?: number;
     /** Make one from the box. Resolves to why not (the box keeps its text), or nothing. */
     oncreate: (name: string) => Promise<string | void> | string | void;
+    /** More than one way to make one: the "+" opens a menu of them. Without, it opens the name box. */
+    options?: NewOption[];
     /** A line under the box: what went wrong with a name, say. */
     note?: string;
     /** Rows above the rest that the search and filter leave alone (all libraries). */
@@ -104,6 +117,38 @@
   /** The name box under the head, opened by the head's "+". */
   let creating = $state(false);
   let query = $state("");
+  /** The "+" menu, when there are options. */
+  let choosing = $state(false);
+  let menuEl = $state<HTMLDivElement>();
+  let fileInput = $state<HTMLInputElement>();
+  /** The file option a browser's picker is open for. */
+  let picking = $state<Extract<NewOption, { kind: "file" }> | null>(null);
+
+  function plus() {
+    // An open name box: the "+" puts it away, as it always did.
+    if (creating) creating = false;
+    else if (options.length) choosing = !choosing;
+    else creating = !creating;
+  }
+
+  function choose(o: NewOption) {
+    choosing = false;
+    if (o.kind === "name") {
+      creating = true;
+    } else if (overWeb && fileInput) {
+      // In the click itself: a browser opens its picker only for a person's press.
+      picking = o;
+      fileInput.accept = o.accept;
+      fileInput.click();
+    } else {
+      creating = false;
+      o.onfile();
+    }
+  }
+
+  function onDocClick(e: MouseEvent) {
+    if (choosing && menuEl && !e.composedPath().includes(menuEl)) choosing = false;
+  }
   const shown = $derived(narrow(items, query, picked));
   const filtering = $derived(!!query.trim() || picked.length > 0);
 
@@ -126,6 +171,8 @@
   }
 </script>
 
+<svelte:document onclick={onDocClick} onkeydown={(e) => e.key === "Escape" && (choosing = false)} />
+
 <div class="sidebox" transition:slide={side}>
   <aside class="list" style="width: {width}px" aria-label={title}>
     <SplitHandle edge="right" {width} {min} {max} {reset} label={widthLabel} onchange={onwidth} />
@@ -133,7 +180,23 @@
     <div class="head">
       <span class="mlab">{title}</span>
       <span class="grow"></span>
-      <button class="btn newbtn" class:on={creating} title={newLabel} aria-expanded={creating} onclick={() => (creating = !creating)}>{newButton}</button>
+      <div class="plus" bind:this={menuEl}>
+        <button
+          class="btn newbtn"
+          class:on={creating || choosing}
+          title={newLabel}
+          aria-haspopup={options.length ? "menu" : undefined}
+          aria-expanded={options.length ? choosing : creating}
+          onclick={plus}>{newButton}</button
+        >
+        {#if choosing}
+          <div class="newmenu" role="menu" aria-label={newLabel}>
+            {#each options as o (o.id)}
+              <button class="opt" role="menuitem" onclick={() => choose(o)}>{o.label}</button>
+            {/each}
+          </div>
+        {/if}
+      </div>
       <button class="x" onclick={onclose} aria-label={t("tracks.close")} title={t("tracks.close")}>
         <Icon name="collapse" />
       </button>
@@ -157,6 +220,19 @@
         />
         <button class="btn" type="submit" title={newLabel} aria-label={newLabel}>+</button>
       </form>
+    {/if}
+    {#if overWeb && options.some((o) => o.kind === "file")}
+      <input
+        class="pickfile"
+        type="file"
+        bind:this={fileInput}
+        onchange={(e) => {
+          const f = e.currentTarget.files?.[0];
+          e.currentTarget.value = "";
+          if (f) picking?.onfile(f);
+          picking = null;
+        }}
+      />
     {/if}
     {#if note}
       <p class="note" role="status">{note}</p>
@@ -242,6 +318,44 @@
   .newbtn.on {
     color: var(--hi);
     border-color: var(--acc);
+  }
+
+  /* The "+" and, with options, its menu under it. */
+  .plus {
+    position: relative;
+  }
+
+  .newmenu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 30;
+    min-width: 150px;
+    padding: 4px 0;
+    background: var(--card);
+    border: 1px solid var(--lines);
+  }
+
+  .opt {
+    display: block;
+    width: 100%;
+    height: 34px;
+    padding: 0 14px;
+    background: none;
+    border: 0;
+    text-align: left;
+    font-size: 13px;
+    color: var(--dim);
+  }
+
+  .opt:hover,
+  .opt:focus-visible {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .pickfile {
+    display: none;
   }
 
   .empty {

@@ -2,6 +2,7 @@
   import { store } from "./store.svelte";
   import ItemColumn from "./ItemColumn.svelte";
   import ArtifactMenu from "./ArtifactMenu.svelte";
+  import { DESIGN_EXT } from "./designFile";
   import { whenFull } from "./time";
   import Board from "./Board.svelte";
   import PanelToggle from "./PanelToggle.svelte";
@@ -75,6 +76,11 @@
       newPlaceholder={t("design.newPh")}
       searchPlaceholder={t("design.search")}
       oncreate={create}
+      options={[
+        { id: "new", label: t("design.new"), kind: "name" },
+        { id: "import", label: t("design.import"), kind: "file", accept: DESIGN_EXT, onfile: (file) => store.importDesign(file) },
+      ]}
+      note={store.designNote}
       items={rows}
       picked={store.designTags}
       onpick_tags={(tags) => store.setDesignTags(tags)}
@@ -99,6 +105,9 @@
       onclose={() => (menu = null)}
       onrename={(title) => store.updateArtifact(md.id, { title })}
       ontags={() => (store.tagDialog = md.id)}
+      onexport={() => store.exportDesign(md.id)}
+      exportLabel={t("design.export")}
+      exportTitle={t("design.exportTitle")}
       oncolor={(color) => store.updateArtifact(md.id, { color })}
       ondelete={() => store.deleteArtifact(md.id)}
     />

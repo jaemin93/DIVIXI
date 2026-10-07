@@ -5,6 +5,7 @@ import { i18n, systemLang, t, type Key, type Lang, type LangPref } from "./i18n.
 import { picksOf, toggleChip, type Chip } from "./graphContext";
 import { parseTags } from "./listFilter";
 import { libraryPick } from "./libraries";
+import { download, tooLarge } from "./designFile";
 import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
 import {
   AUTO_KEY,
@@ -2342,6 +2343,59 @@ class Store {
       await this.openArtifact(d.id);
     } catch (err) {
       this.lastError = String(err);
+    }
+  }
+
+  /** What the designs column says under its head when an export or an import fails. */
+  designNote = $state("");
+
+  /** A design written out as a file another DIVIXI imports: this PC's save dialog, or a browser's download. */
+  async exportDesign(id: string) {
+    this.designNote = "";
+    try {
+      if (overWeb) {
+        const file = await invoke<{ name: string; text: string }>("design_export_data", { id });
+        download(file.name, file.text);
+      } else {
+        await invoke<string | null>("design_export", { id });
+      }
+    } catch (err) {
+      this.designNote = t("design.exportFailed", { why: String(err) });
+    }
+  }
+
+  /**
+   * A design file made into a new design, which the list then shows open:
+   * picked with this PC's dialog, or a `file` a browser was handed. Always a
+   * new design; a name that is taken gets "(가져옴)". Its tags join the
+   * vocabulary.
+   */
+  async importDesign(file?: File) {
+    this.designNote = "";
+    const agent = this.readyAgents.some((a) => a.kind === this.agent) ? this.agent : this.readyAgents[0]?.kind;
+    if (!agent) {
+      this.lastError = "no agent is ready";
+      return;
+    }
+    const suffix = t("design.importedSuffix");
+    try {
+      let d: ArtifactInfo | null;
+      if (file) {
+        const max = tooLarge(file.size, overWeb);
+        if (max !== null) {
+          this.designNote = t("design.importTooLarge", { mb: max });
+          return;
+        }
+        d = await invoke<ArtifactInfo>("design_import_data", { text: await file.text(), agent, suffix });
+      } else {
+        d = await invoke<ArtifactInfo | null>("design_import", { agent, suffix });
+      }
+      if (!d) return;
+      for (const tag of d.tags) await this.createTag(tag);
+      this.artifacts = [d, ...this.artifacts];
+      await this.openArtifact(d.id);
+    } catch (err) {
+      this.designNote = t("design.importFailed", { why: String(err) });
     }
   }
 

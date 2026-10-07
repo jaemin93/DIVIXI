@@ -20,6 +20,9 @@
     onrename,
     ontags,
     oncolor,
+    onexport,
+    exportLabel = "",
+    exportTitle = "",
     ondelete,
   }: {
     x: number;
@@ -36,6 +39,10 @@
     ontags?: () => void;
     /** Without it (a library has no colour), the menu has no colours. */
     oncolor?: (color: string) => void | Promise<void>;
+    /** Without it (a library is not written out), the menu has no Export item. */
+    onexport?: () => void;
+    exportLabel?: string;
+    exportTitle?: string;
     /** Resolves to why it was refused, or "" when it is gone. */
     ondelete: () => Promise<string>;
   } = $props();
@@ -113,6 +120,9 @@
     <button class="item" role="menuitem" onclick={startRename}>{t("track.rename")}</button>
     {#if ontags}
       <button class="item" role="menuitem" onclick={() => { ontags(); onclose(); }}>{t("track.tags")}</button>
+    {/if}
+    {#if onexport}
+      <button class="item" role="menuitem" title={exportTitle} onclick={() => { onexport(); onclose(); }}>{exportLabel}</button>
     {/if}
     <div class="rule"></div>
     {#if oncolor}

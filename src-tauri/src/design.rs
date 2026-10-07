@@ -293,18 +293,18 @@ impl Actor {
     }
 }
 
-const TAGS: [&str; 5] = ["", "goal", "constraint", "question", "idea"];
+pub(crate) const TAGS: [&str; 5] = ["", "goal", "constraint", "question", "idea"];
 
 /// Bounds on what one board holds, so a runaway agent or window cannot grow
 /// it without end (every edit saves and sends the whole board).
 const MAX_OPS: usize = 200;
-const MAX_NODES: usize = 2_000;
-const MAX_TEXT: usize = 4_000;
-const MAX_LABEL: usize = 200;
+pub(crate) const MAX_NODES: usize = 2_000;
+pub(crate) const MAX_TEXT: usize = 4_000;
+pub(crate) const MAX_LABEL: usize = 200;
 const MAX_STROKES: usize = 500;
 const MAX_POINTS: usize = 5_000;
 
-fn check_text(text: &str, max: usize, what: &str) -> Result<(), String> {
+pub(crate) fn check_text(text: &str, max: usize, what: &str) -> Result<(), String> {
     if text.chars().count() > max {
         Err(format!("{what} is longer than {max} characters"))
     } else {
@@ -337,7 +337,7 @@ fn shifted(strokes: &[Stroke], dx: f64, dy: f64) -> Vec<Stroke> {
         .collect()
 }
 
-fn check_strokes(strokes: &[Stroke]) -> Result<(), String> {
+pub(crate) fn check_strokes(strokes: &[Stroke]) -> Result<(), String> {
     if strokes.len() > MAX_STROKES {
         return Err(format!("a sketch holds at most {MAX_STROKES} strokes"));
     }
@@ -361,7 +361,7 @@ const LINK_H: f64 = 110.0;
 const MAX_URL: usize = 2_000;
 
 /// An address a link card may hold: http or https, no spaces.
-fn check_url(url: &str) -> Result<String, String> {
+pub(crate) fn check_url(url: &str) -> Result<String, String> {
     let u = url.trim();
     let ok = (u.starts_with("https://") || u.starts_with("http://")) && u.len() <= MAX_URL && !u.chars().any(char::is_whitespace);
     if ok {
@@ -372,7 +372,7 @@ fn check_url(url: &str) -> Result<String, String> {
 }
 
 /// A file's place as a node keeps it: `files/<one plain name>`.
-fn check_src(src: &str) -> Result<String, String> {
+pub(crate) fn check_src(src: &str) -> Result<String, String> {
     let name = src.strip_prefix("files/").ok_or("a file lives under files/")?;
     let plain = !name.is_empty() && !name.contains(['/', '\\']) && name != "." && name != ".." && !name.starts_with('.');
     if plain {
@@ -1179,7 +1179,7 @@ pub fn review(app: &AppHandle, id: &str, changes: &[u64], keep: bool) -> Result<
 // ----- reference files -----
 
 /// Largest file brought onto a board.
-const MAX_FILE: u64 = 50 * 1024 * 1024;
+pub(crate) const MAX_FILE: u64 = 50 * 1024 * 1024;
 /// Files brought in one go.
 const MAX_FILES: usize = 20;
 
@@ -1217,7 +1217,7 @@ pub fn mime_of(name: &str) -> &'static str {
 }
 
 /// A file name safe to keep: letters, digits, dot, dash, underscore.
-fn plain_name(name: &str) -> String {
+pub(crate) fn plain_name(name: &str) -> String {
     let clean: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
     let clean = clean.trim_start_matches('.').to_string();
     if clean.trim_matches(['.', '_']).is_empty() { "file".to_string() } else { clean.chars().take(80).collect() }

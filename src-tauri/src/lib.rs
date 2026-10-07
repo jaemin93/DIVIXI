@@ -39,6 +39,7 @@ mod embed;
 mod extract;
 pub mod artifact;
 pub mod design;
+mod design_file;
 mod knowledge;
 mod logging;
 mod mask;
@@ -769,6 +770,124 @@ fn design_add_blob(app: AppHandle, id: String, name: String, data: String, x: f6
     }
     let data = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|e| format!("bad data: {e}"))?;
     design::add_files(&app, &id, vec![design::Incoming::Bytes { name, data }], x, y)
+}
+
+/// A design written out as one file ([`design_file`]): a name to save it
+/// under, and the file's text.
+fn design_export_text(state: &AppState, id: &str) -> Result<(String, String), String> {
+    let info = match state.store.artifact(id).map_err(|e| e.to_string())? {
+        Some((a, _)) if a.kind == design::KIND => a,
+        _ => return Err(format!("no design {id}")),
+    };
+    let doc = design::doc(state, id)?;
+    let meta = design_file::Meta { title: info.title.clone(), color: info.color.clone(), tags: info.tags.clone() };
+    let text = design_file::pack(&meta, &doc, design_file::read_from(state.artifacts_dir.join(id)))?;
+    Ok((design_file::file_name_for(&info.title), text))
+}
+
+/// A design file that arrived, made into a new design: a fresh id, a name no
+/// design here has (`suffix` added, "(가져옴)"), its files in its own folder.
+/// Nothing that exists is touched; a design half made is taken back.
+fn design_import_text(state: &AppState, text: &str, agent: Option<String>, suffix: &str) -> Result<ArtifactInfo, String> {
+    let incoming = design_file::unpack(text)?;
+    let agent = agent.unwrap_or_default();
+    if !agent.is_empty() {
+        state.spec_for(&agent)?;
+    }
+    let taken: Vec<String> = state.store.artifacts(Some(design::KIND)).map_err(|e| e.to_string())?.into_iter().map(|a| a.title).collect();
+    let title = design_file::unique_title(&incoming.meta.title, &taken, suffix);
+    // A colour or tag this PC would refuse is left behind, not the design.
+    let mut look = TrackPatch { color: Some(incoming.meta.color.clone()), tags: Some(incoming.meta.tags.clone()), ..Default::default() };
+    if check_patch(&mut look).is_err() {
+        look = TrackPatch::default();
+    }
+    let body = serde_json::to_string(&incoming.doc).map_err(|e| e.to_string())?;
+    let made = state.store.create_artifact(design::KIND, &title, &agent, &body).map_err(|e| e.to_string())?;
+    let undo = |why: String| {
+        let _ = state.store.delete_artifact(&made.id);
+        let _ = std::fs::remove_dir_all(state.artifacts_dir.join(&made.id));
+        why
+    };
+    if !incoming.files.is_empty() {
+        let dir = artifact::workdir(state, &made.id).map_err(&undo)?.join("files");
+        std::fs::create_dir_all(&dir).map_err(|e| undo(e.to_string()))?;
+        for (name, bytes) in &incoming.files {
+            // Plain names, checked in `unpack`: nothing here reaches outside the folder.
+            std::fs::write(dir.join(name), bytes).map_err(|e| undo(format!("could not keep {name}: {e}")))?;
+        }
+    }
+    if look.color.is_none() && look.tags.is_none() {
+        return Ok(made);
+    }
+    state
+        .store
+        .update_artifact(&made.id, &ArtifactPatch { color: look.color, tags: look.tags, ..Default::default() })
+        .map_err(|e| undo(e.to_string()))
+}
+
+/// Save a design as a file where the human picks (its list's right-click
+/// Export). `None` when they cancel.
+#[tauri::command]
+async fn design_export(app: AppHandle, id: String) -> Result<Option<String>, String> {
+    let (name, text) = {
+        let state = app.state::<AppState>();
+        design_export_text(&state, &id)?
+    };
+    let mut dialog = app.dialog().file().set_file_name(&name).add_filter("DIVIXI design", &[design_file::EXTENSION]);
+    if let Some(dir) = std::env::var_os("USERPROFILE").map(PathBuf::from).map(|h| h.join("Downloads")).filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    dialog.save_file(move |picked| {
+        let _ = tx.send(picked);
+    });
+    let Some(target) = rx.await.map_err(|e| e.to_string())?.and_then(|p| p.into_path().ok()) else {
+        return Ok(None);
+    };
+    tokio::fs::write(&target, text).await.map_err(|e| format!("could not save {}: {e}", target.display()))?;
+    Ok(Some(target.display().to_string()))
+}
+
+/// A design file's name and text, for a browser to download (a phone has no
+/// save dialog of this PC's).
+#[derive(serde::Serialize)]
+struct DesignFile {
+    name: String,
+    text: String,
+}
+
+#[tauri::command(async)]
+fn design_export_data(state: State<'_, AppState>, id: String) -> Result<DesignFile, String> {
+    let (name, text) = design_export_text(&state, &id)?;
+    Ok(DesignFile { name, text })
+}
+
+/// Pick a design file and make a new design of it (the list's "+" →
+/// Import). `None` when they cancel.
+#[tauri::command]
+async fn design_import(app: AppHandle, agent: Option<String>, suffix: String) -> Result<Option<ArtifactInfo>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().add_filter("DIVIXI design", &[design_file::EXTENSION]).pick_file(move |picked| {
+        let _ = tx.send(picked);
+    });
+    let Some(path) = rx.await.map_err(|e| e.to_string())?.and_then(|p| p.into_path().ok()) else {
+        return Ok(None);
+    };
+    // The size first: a file is not read at all past the cap.
+    let size = tokio::fs::metadata(&path).await.map_err(|e| format!("could not read {}: {e}", path.display()))?.len();
+    if size > design_file::MAX_PACKAGE {
+        return Err(format!("the file is larger than {} MB", design_file::MAX_PACKAGE / (1024 * 1024)));
+    }
+    let bytes = tokio::fs::read(&path).await.map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let text = String::from_utf8(bytes).map_err(|_| "this is not a DIVIXI design file".to_string())?;
+    let state = app.state::<AppState>();
+    design_import_text(&state, &text, agent, &suffix).map(Some)
+}
+
+/// A design file's text from a browser (a phone's upload), made into a new design.
+#[tauri::command(async)]
+fn design_import_data(state: State<'_, AppState>, text: String, agent: Option<String>, suffix: String) -> Result<ArtifactInfo, String> {
+    design_import_text(&state, &text, agent, &suffix)
 }
 
 /// Open a link card's page in the system browser. Only http(s) addresses,
@@ -1735,6 +1854,10 @@ pub fn run() {
             design_review,
             design_add_files,
             design_add_blob,
+            design_export,
+            design_export_data,
+            design_import,
+            design_import_data,
             open_url,
             design_open_file,
             design_undo,
