@@ -8,8 +8,6 @@
     /** The small fact on the right of the upper line: a time, a count. */
     meta: string;
     metaTitle?: string;
-    /** Has a right-click menu (the row of all libraries has none). */
-    menu?: boolean;
   };
 
   /**
@@ -44,9 +42,8 @@
    * design or a library needs a name only; a track opens its own form), or,
    * when there is more than one way to make one, a menu of them.
    * Right-clicking a row asks the page for its menu (rename, tags, colour,
-   * delete), which the page draws. `pinned` rows (all libraries) stay on top
-   * whatever the search. The designs page and the knowledge page's libraries
-   * both use it, so the three columns read as one.
+   * delete), which the page draws. The designs page and the knowledge
+   * page's libraries both use it, so the three columns read as one.
    */
 
   let {
@@ -66,7 +63,6 @@
     oncreate,
     options = [],
     note = "",
-    pinned = [],
     items,
     picked,
     onpick_tags,
@@ -96,8 +92,6 @@
     options?: NewOption[];
     /** A line under the box: what went wrong with a name, say. */
     note?: string;
-    /** Rows above the rest that the search and filter leave alone (all libraries). */
-    pinned?: ColumnItem[];
     items: ColumnItem[];
     /** The tags the column is narrowed to, kept as the tracks column keeps its filter. */
     picked: string[];
@@ -165,7 +159,7 @@
     onpick_tags(picked.includes(tag) ? picked.filter((x) => x !== tag) : [...picked, tag]);
   }
 
-  /** How many of this column's rows carry a tag (pinned rows are no one's). */
+  /** How many of this column's rows carry a tag. */
   function tagCount(tag: string): number {
     return items.filter((i) => i.tags.includes(tag)).length;
   }
@@ -239,7 +233,7 @@
     {/if}
     <ListSearch bind:query placeholder={searchPlaceholder} {picked} ontoggle={toggleTag} onclear={() => onpick_tags([])} {tagCount} />
     <div class="rows">
-      {#each [...pinned, ...shown] as item (item.id)}
+      {#each shown as item (item.id)}
         <!-- Like a track's row: tags and the small fact above, the name below, its colour on the left. -->
         <div
           class="row"
@@ -248,7 +242,7 @@
           style="border-left-color: {item.color || 'transparent'}"
           oncontextmenu={(e) => {
             e.preventDefault();
-            if (item.menu !== false) onmenu(item.id, e.clientX, e.clientY);
+            onmenu(item.id, e.clientX, e.clientY);
           }}
           role="presentation"
         >

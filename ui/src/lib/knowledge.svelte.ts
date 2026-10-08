@@ -82,7 +82,7 @@ class Knowledge {
   sources = $state<KSource[]>([]);
   /** The libraries, General first. */
   libraries = $state<KLibrary[]>([]);
-  /** The library the page shows; null: all of them. */
+  /** The library the page shows; null only before the libraries are loaded. */
   library = $state<number | null>(null);
   /** Sources that share most of their passages with another, by source id. */
   overlaps = $state<Record<string, { other: string; shared: number; percent: number }>>({});
@@ -114,12 +114,12 @@ class Knowledge {
     return this.artifactOf(s.id)?.title ?? s.uri.split(/[\\/]/).at(-1) ?? s.uri;
   }
 
-  /** The documents of the library shown (all of them for "all"). */
+  /** The documents of the library shown. */
   get shown(): KSource[] {
     return sourcesIn(this.sources, this.library);
   }
 
-  /** The library shown, or undefined for all of them. */
+  /** The library shown, or undefined before the libraries are loaded. */
   get current(): KLibrary | undefined {
     return this.libraries.find((l) => l.id === this.library);
   }
@@ -168,7 +168,7 @@ class Knowledge {
       ]);
       this.sources = sources;
       this.libraries = libraries;
-      // The first time, the library shown last; after, the one shown if it is still there.
+      // The first time, the library shown last; after, the one shown if it is still there (else General).
       this.setShownLibrary(keepLibrary(this.loaded ? this.library : parseLibrary(store.kbLibrarySaved), libraries));
       await this.loadStats();
       this.formats = formats;
@@ -199,11 +199,11 @@ class Knowledge {
     if (this.sourceFilter && !this.shown.some((s) => s.id === this.sourceFilter)) this.sourceFilter = "";
   }
 
-  /** Show one library (or all, `null`): the tabs, counts and graph follow; remembered. */
-  async showLibrary(library: number | null) {
+  /** Show one library: the tabs, counts and graph follow; remembered. */
+  async showLibrary(library: number) {
     if (library === this.library) return;
     this.setShownLibrary(library);
-    void store.rememberKbLibrary(library === null ? "all" : String(library));
+    void store.rememberKbLibrary(String(library));
     await this.loadStats();
     await this.refreshTab();
   }
@@ -228,9 +228,9 @@ class Knowledge {
     }
     const keep = keepLibrary(this.library, this.libraries);
     if (keep !== this.library) {
-      // Deleted (here or from another window): back to all of them.
+      // Deleted (here or from another window): back to General.
       this.setShownLibrary(keep);
-      void store.rememberKbLibrary("all");
+      void store.rememberKbLibrary(keep === null ? "" : String(keep));
       await this.loadStats();
       if (store.view === "knowledge") await this.refreshTab();
     }
@@ -276,7 +276,7 @@ class Knowledge {
     } catch (err) {
       return String(err);
     }
-    if (this.library === id) await this.showLibrary(null);
+    // The library shown gone: loadLibraries falls back to General.
     await this.loadLibraries();
     return "";
   }
@@ -352,7 +352,7 @@ class Knowledge {
   }
 
   /**
-   * Add a file to the library shown (General from the view of all); `track`
+   * Add a file to the library shown (General when none is yet); `track`
    * makes `path` relative to that track's folder. Returns why not, or "".
    */
   async add(path: string, track?: string): Promise<string> {

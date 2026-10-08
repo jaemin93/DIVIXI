@@ -1,7 +1,7 @@
 /**
  * Libraries of the knowledge page: named sets of documents. A document is in
  * one library; search (the conductor's, `@kb`) sees them all, the page shows
- * one or all. The rules the core keeps, mirrored here so the page can say
+ * one at a time. The rules the core keeps, mirrored here so the page can say
  * what is wrong before asking, and tested apart from the components.
  */
 
@@ -14,9 +14,6 @@ export const MAX_NAME = 80;
 
 /** Mirrors `orchestra_knowledge::Library`. */
 export type KLibrary = { id: number; name: string; created_at: number; sources: number; color: string; tags: string[] };
-
-/** The list column's row for all libraries (ItemColumn): not a library, so no menu. */
-export const ALL_ROW = "all";
 
 /** A library as a row of the list column: its tags, its colour, its number of documents. */
 export function libraryRow(lib: KLibrary, shownName: string): { id: string; name: string; tags: string[]; color: string; meta: string } {
@@ -39,7 +36,7 @@ export function displayName(lib: Pick<KLibrary, "id" | "name">, generalLabel: st
   return lib.id === GENERAL && lib.name === GENERAL_NAME ? generalLabel : lib.name;
 }
 
-/** The documents a view shows: of one library, or all of them (`null`). */
+/** The documents a view shows: of one library, or all of them (`null`, before any library is loaded). */
 export function sourcesIn<T extends { library_id: number }>(sources: T[], library: number | null): T[] {
   return library === null ? sources : sources.filter((s) => s.library_id === library);
 }
@@ -73,27 +70,30 @@ export function deleteBlock(lib: Pick<KLibrary, "id" | "sources">): DeleteBlock 
   return "";
 }
 
-/** Where a document added from a view goes: its library, or General from the view of all. */
+/** Where a document added from a view goes: its library, or General when none is shown yet. */
 export function addTarget(library: number | null): number {
   return library ?? GENERAL;
 }
 
-/** The library a view shows, as the graph conversation is told it (`l:<id>`); nothing for all. */
+/** The library a view shows, as the graph conversation is told it (`l:<id>`); nothing when none is. */
 export function libraryPick(library: number | null): string[] {
   return library === null ? [] : [`l:${library}`];
 }
 
 /**
  * The library a view should show once the libraries are (re)loaded: the one
- * it showed if it is still there, else all of them.
+ * it showed if it is still there, else General, else the first. Null only
+ * when there are no libraries. (The page once had a view of all libraries,
+ * remembered as "all"; it now opens on General.)
  */
 export function keepLibrary(library: number | null, libraries: Pick<KLibrary, "id">[]): number | null {
-  return library !== null && libraries.some((l) => l.id === library) ? library : null;
+  if (library !== null && libraries.some((l) => l.id === library)) return library;
+  return libraries.find((l) => l.id === GENERAL)?.id ?? libraries[0]?.id ?? null;
 }
 
-/** A remembered choice ("all", or a library's id) read back; anything else is all. */
+/** A remembered choice (a library's id) read back; anything else, the old "all" too, is none. */
 export function parseLibrary(saved: string | null | undefined): number | null {
-  if (!saved || saved === "all") return null;
+  if (!saved) return null;
   const n = Number(saved);
   return Number.isInteger(n) && n > 0 ? n : null;
 }

@@ -18,7 +18,7 @@
    * (listed per document, or found by a search), the entity graph, the
    * documents themselves with their sync state, and how documents are
    * described. The libraries column on the left picks what the three tabs
-   * show: one library, or all of them.
+   * show: one library at a time.
    */
   const tabs = $derived<{ id: KTab; label: string }[]>([
     { id: "list", label: t("kb.tab.list") },
@@ -118,9 +118,9 @@
   <!-- One thin bar: the page's name (what it is for, on hover), its tabs, what
        the index is doing when there is something to say, and the page's buttons. -->
   <header class="kbar">
-    {#if !store.kbListOpen}
+    {#if !store.kbListOpen && kb.current}
       <!-- The libraries column folded away: which library the tabs show, still. -->
-      <span class="klib mono" title={t("kb.lib.title")}>{kb.current ? kb.libraryName(kb.current) : t("kb.lib.all")}</span>
+      <span class="klib mono" title={t("kb.lib.title")}>{kb.libraryName(kb.current)}</span>
     {/if}
     <div class="tabs" role="tablist">
       {#each tabs as tab (tab.id)}
@@ -261,7 +261,7 @@
     {:else if kb.tab === "sources"}
       <div class="actions">
         <span class="grow"></span>
-        <!-- Where an added document goes: the library shown, General from the view of all. -->
+        <!-- Where an added document goes: the library shown, General when none is yet. -->
         <span class="mono into">{t("kb.lib.addInto", { name: kb.libraryNameOf(addTarget(kb.library)) })}</span>
         <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
       </div>
