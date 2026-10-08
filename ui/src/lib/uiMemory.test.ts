@@ -2,7 +2,7 @@
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { clampZoom, foldsOnPick, instanceZoomKey, parseZoom, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen, ZOOM_MAX, ZOOM_MIN } from "./uiMemory.ts";
+import { clampZoom, FIELD_MIN_PX, fieldFontPx, foldsOnPick, instanceZoomKey, parseZoom, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen, ZOOM_MAX, ZOOM_MIN } from "./uiMemory.ts";
 
 test("a zoom asked for lands on a step within bounds", () => {
   assert.equal(clampZoom(110), 110);
@@ -67,4 +67,23 @@ test("only a narrow browser folds the list when a track is picked", () => {
   // The desktop window, however narrow, keeps its list as before.
   assert.equal(foldsOnPick(false, true), false);
   assert.equal(foldsOnPick(false, false), false);
+});
+
+test("a phone's field is 16px on screen at 100% and zoomed in", () => {
+  assert.equal(FIELD_MIN_PX, 16);
+  assert.equal(fieldFontPx(100), 16);
+  assert.equal(fieldFontPx(110), 16);
+  assert.equal(fieldFontPx(ZOOM_MAX), 16);
+  // Not a number: the page is at 100%, and so is the field.
+  assert.equal(fieldFontPx(Number.NaN), 16);
+});
+
+test("a phone zoomed out grows its fields back to 16px on screen", () => {
+  assert.equal(fieldFontPx(50), 32);
+  assert.equal(fieldFontPx(80), 20);
+  assert.equal(fieldFontPx(90), 17.78);
+  assert.equal(fieldFontPx(10), 32); // clamped to ZOOM_MIN first
+  for (let z = ZOOM_MIN; z <= ZOOM_MAX; z += 10) {
+    assert.ok((fieldFontPx(z) * z) / 100 >= FIELD_MIN_PX, String(z));
+  }
 });

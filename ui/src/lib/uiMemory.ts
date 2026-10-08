@@ -23,6 +23,25 @@ export function clampZoom(percent: number): number {
 }
 
 /**
+ * The smallest text a phone's browser lets a field have before it zooms the
+ * page in on focus (iOS: under 16px it does, and does not zoom back out).
+ */
+export const FIELD_MIN_PX = 16;
+
+/**
+ * A field's font size on a phone, in CSS pixels before the page's zoom: 16px
+ * on screen whatever the zoom. A page zoomed out (CSS zoom on the root, the
+ * phone's way) shrinks its fields' text with it; this grows them back so the
+ * text on screen stays at FIELD_MIN_PX. Zoomed in, they keep 16px and grow
+ * with the page. Rounded up, so rounding never takes it under.
+ */
+export function fieldFontPx(zoomPercent: number): number {
+  const z = clampZoom(zoomPercent);
+  if (z >= 100) return FIELD_MIN_PX;
+  return Math.ceil((FIELD_MIN_PX * 100 * 100) / z) / 100;
+}
+
+/**
  * A stored zoom read back: the percent to apply, or null to stay at 100%.
  * A value that is not a plain number within bounds (hand-edited, from an
  * older build, cut short) is ignored rather than trusted: a corrupt 5000
