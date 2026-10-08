@@ -310,7 +310,7 @@ fn qr_code(text: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::{Cell, RefCell};
 
     use super::*;
@@ -331,11 +331,11 @@ mod tests {
         }
     }
 
-    fn free() -> ServeState {
+    pub(crate) fn free() -> ServeState {
         ServeState { published: Some(false), port_free: Some(true), https: tailscale::SERVE_PORT, ..Default::default() }
     }
 
-    fn published() -> ServeState {
+    pub(crate) fn published() -> ServeState {
         ServeState { published: Some(true), port_free: Some(false), https: tailscale::SERVE_PORT, ..Default::default() }
     }
 
@@ -345,10 +345,10 @@ mod tests {
 
     /// A daemon and a server, as these commands see them. A successful
     /// publish or unpublish changes what the next look reads, as it would.
-    struct Fake {
+    pub(crate) struct Fake {
         probe: Probe,
         serve: RefCell<ServeState>,
-        running: bool,
+        pub(crate) running: bool,
         publish: Outcome,
         unpublish: Outcome,
         published: Cell<usize>,
@@ -356,7 +356,7 @@ mod tests {
     }
 
     impl Fake {
-        fn new(serve: ServeState) -> Self {
+        pub(crate) fn new(serve: ServeState) -> Self {
             Self {
                 probe: ready_probe(),
                 serve: RefCell::new(serve),
