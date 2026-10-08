@@ -508,8 +508,12 @@ async fn app_asset(State(ctx): State<Ctx>, uri: Uri) -> Response<Body> {
     // app routes to later), so the shell answers for it. A missing file under
     // `/assets/` is a genuine 404 and must not come back as HTML, or a broken
     // script tag reports itself as a parse error somewhere else entirely.
-    let found = resolver.get(wanted.to_string()).or_else(|| {
-        (!wanted.starts_with("assets/")).then(|| resolver.get("index.html".into())).flatten()
+    // Tauri's resolver over embedded assets already falls back to
+    // index.html for a path it has no file for, so that answer is refused
+    // here for anything under `/assets/` that did not ask for HTML.
+    let is_asset = wanted.starts_with("assets/");
+    let found = resolver.get(wanted.to_string()).filter(|a| !is_asset || a.mime_type != "text/html" || wanted.ends_with(".html")).or_else(|| {
+        (!is_asset).then(|| resolver.get("index.html".into())).flatten()
     });
     let Some(asset) = found else {
         return (StatusCode::NOT_FOUND, "no such thing").into_response();

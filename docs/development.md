@@ -46,6 +46,15 @@ Node the other three checks pass and that one fails with
 clone every cargo command needs `npm run build` to have run once. `npm run app`
 does it for you; a bare `cargo test` does not.
 
+`divixi-server` carries the built UI inside the binary, since that is what a
+phone loads from it, so build it after `npm run build` and again after a UI
+change. Its `server` feature turns on Tauri's `custom-protocol` for that.
+Without it Tauri builds in development mode, embeds nothing, and reads `dist/`
+from the build machine's checkout at run time: the binary works where it was
+built and answers every page with "no such thing" anywhere else.
+`scripts/check-server-ui.sh target/debug/divixi-server` runs a built binary
+away from the checkout and checks that the UI comes back, as CI does on Linux.
+
 The checks, which are the same five CI runs (`.github/workflows/ci.yml`):
 
 ```bash
