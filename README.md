@@ -69,7 +69,8 @@ npx tauri build                                 # installer in target/release/bu
 
 `divixi-server` is DIVIXI without a window, for a server. The desktop app reaches it over
 an SSH tunnel, or at an address with your GitHub account. It starts the server over SSH
-when it is not running.
+when it is not running. To open a server from a phone over Tailscale, turn that on at the
+server with `divixi-server phone on`.
 
 See **[docs/divixi-server.md](docs/divixi-server.md)** to build, install, connect, keep it
 running, and update it.

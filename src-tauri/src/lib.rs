@@ -2067,13 +2067,9 @@ pub fn run() {
 /// server's `token` command): signed with the same key, for its port.
 pub fn pair_link() -> anyhow::Result<String> {
     let data_dir = data_dir_offline()?;
-    let (store, _) = open_store(&data_dir)?;
+    let store = open_store_offline(&data_dir)?;
     let auth = remote::auth::Auth::open(&data_dir)?;
-    let port = store
-        .get_meta(&format!("{SETTING_PREFIX}remote.port"))?
-        .and_then(|p| p.trim().parse::<u16>().ok())
-        .filter(|p| *p >= 1024)
-        .unwrap_or(remote::LISTEN_PORT);
+    let port = remote::port_in(&store);
     // Over SSH: whoever can run this owns the machine, so the link carries
     // full scope. A phone's link is minted in the app and carries less.
     let (token, _) = auth.pair_token(&store, remote::auth::Scope::Full, remote::auth::REFRESH_SECS);
@@ -2092,7 +2088,7 @@ pub fn set_owner(login: Option<&str>) -> anyhow::Result<String> {
         }
     }
     let data_dir = data_dir_offline()?;
-    let (store, _) = open_store(&data_dir)?;
+    let store = open_store_offline(&data_dir)?;
     let auth = remote::auth::Auth::open(&data_dir)?;
     remote::github::set_owner(&store, &auth, login)?;
     Ok(match login {
@@ -2109,9 +2105,43 @@ pub fn set_listen(how: Option<&str>) -> anyhow::Result<String> {
         Some("local") => "local",
         _ => anyhow::bail!("say all or local"),
     };
-    let (store, _) = open_store(&data_dir_offline()?)?;
+    let store = open_store_offline(&data_dir_offline()?)?;
     store.set_meta(&format!("{SETTING_PREFIX}remote.listen"), how)?;
     Ok(format!("listen {how}: restart divixi-server for it to apply"))
+}
+
+/// `divixi-server phone status|on|off|link`: phone access, decided at the
+/// server (see src/remote/phone_cli.rs). The words after `phone`.
+pub fn phone(args: &[String]) -> anyhow::Result<String> {
+    use std::io::IsTerminal as _;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut cmd = remote::phone_cli::parse(&args)?;
+    // A QR code is for a terminal: piped into a file or a script it is noise.
+    if let remote::phone_cli::Cmd::Link { qr } = &mut cmd {
+        *qr &= std::io::stdout().is_terminal();
+    }
+    let data_dir = data_dir_offline()?;
+    let store = open_store_offline(&data_dir)?;
+    let auth = remote::auth::Auth::open(&data_dir)?;
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(remote::phone_cli::run(cmd, &store, &auth, &remote::phone_cli::Real))
+}
+
+/// The store, for a `divixi-server` subcommand: opened beside the server,
+/// which may be running and have it open too. SQLite takes the two (WAL, and
+/// a wait on a busy database), and settings written here are read by the
+/// server on its next request. What a first start does -- moving the old
+/// database over, closing runs left live -- is the server's alone.
+fn open_store_offline(data_dir: &std::path::Path) -> anyhow::Result<Store> {
+    let path = match std::env::var_os(DB_ENV) {
+        Some(explicit) if explicit == ":memory:" => anyhow::bail!("{DB_ENV}=:memory: keeps nothing for a command to change"),
+        Some(explicit) => PathBuf::from(explicit),
+        None => data_dir.join("divixi.db"),
+    };
+    if !path.is_file() {
+        anyhow::bail!("{} does not exist: start divixi-server once first", path.display());
+    }
+    Store::open_alongside(&path)
 }
 
 /// The platform's app-data folder for Divixi, before [`instance_data_dir`]

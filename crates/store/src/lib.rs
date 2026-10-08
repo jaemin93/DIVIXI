@@ -891,15 +891,25 @@ impl Store {
     /// a process that no longer exists.
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
-        Self::init(conn)
+        Self::init(conn, true)
+    }
+
+    /// Open the database beside a process that may already have it open
+    /// (`divixi-server token`, `owner`, `phone` … while the server runs).
+    ///
+    /// The same as [`Store::open`] except that live runs are left alone: they
+    /// may be live in that other process, and closing them out as
+    /// [`INTERRUPTED`] from here would fail runs that are still going.
+    pub fn open_alongside(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        Self::init(Connection::open(path)?, false)
     }
 
     /// An in-memory store, for tests and `DIVISI_DB=:memory:`.
     pub fn in_memory() -> anyhow::Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, true)
     }
 
-    fn init(mut conn: Connection) -> anyhow::Result<Self> {
+    fn init(mut conn: Connection, close_interrupted: bool) -> anyhow::Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -930,8 +940,10 @@ impl Store {
         }
 
         let store = Self { conn: Mutex::new(conn) };
-        store.close_interrupted_runs()?;
-        store.close_interrupted_routine_runs()?;
+        if close_interrupted {
+            store.close_interrupted_runs()?;
+            store.close_interrupted_routine_runs()?;
+        }
         Ok(store)
     }
 
@@ -2667,6 +2679,27 @@ mod tests {
         assert_eq!(last.event.kind(), "failed");
 
         drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_alongside_leaves_live_runs_live() {
+        let dir = std::env::temp_dir().join(format!("orchestra-store-alongside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let _ = std::fs::remove_file(&path);
+
+        // The server holds it open with a run going; a CLI command opens it too.
+        let server = Store::open(&path).unwrap();
+        let run = server.begin_run(TR, "solo", "claude_code", "still going", ".").unwrap();
+        server.append(&run, 7, &AgentEvent::Started { session_id: "s".into(), cwd: ".".into() }).unwrap();
+
+        let cli = Store::open_alongside(&path).unwrap();
+        cli.set_meta("setting:x", "y").unwrap();
+        assert_eq!(server.get_meta("setting:x").unwrap().as_deref(), Some("y"));
+        assert_eq!(server.run(&run).unwrap().unwrap().status, RunStatus::Running);
+
+        drop((cli, server));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

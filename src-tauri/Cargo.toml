@@ -75,6 +75,10 @@ portable-pty = "0.9.0"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 base64 = "0.23.1"
 imagesize = "0.15"
+# `divixi-server phone link` draws its link as a QR code in the terminal.
+# Without default features it has no dependencies of its own (the defaults
+# pull in `image`).
+qrcode = { version = "0.14", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # The terminal's PATH, read from the registry as Windows keeps it (src/windows_path.rs).

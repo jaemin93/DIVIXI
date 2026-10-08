@@ -20,6 +20,7 @@ pub mod events;
 pub mod github;
 pub mod peer;
 pub mod install;
+pub(crate) mod phone_cli;
 pub mod server;
 pub mod tailscale;
 
@@ -27,6 +28,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use orchestra_store::Store;
 use serde::Serialize;
 use tauri::Manager;
 
@@ -89,15 +91,30 @@ impl Remote {
 }
 
 pub(super) fn setting(app: &AppHandle, key: &str) -> Option<String> {
-    app.state::<AppState>().store.get_meta(&format!("{}{key}", crate::SETTING_PREFIX)).ok().flatten()
+    setting_in(&app.state::<AppState>().store, key)
 }
 
 pub(super) fn set(app: &AppHandle, key: &str, value: &str) -> Result<(), String> {
-    app.state::<AppState>().store.set_meta(&format!("{}{key}", crate::SETTING_PREFIX), value).map_err(|e| e.to_string())
+    set_in(&app.state::<AppState>().store, key, value)
+}
+
+/// [`setting`], from a store opened without the app (the `divixi-server`
+/// subcommands).
+fn setting_in(store: &Store, key: &str) -> Option<String> {
+    store.get_meta(&format!("{}{key}", crate::SETTING_PREFIX)).ok().flatten()
+}
+
+fn set_in(store: &Store, key: &str, value: &str) -> Result<(), String> {
+    store.set_meta(&format!("{}{key}", crate::SETTING_PREFIX), value).map_err(|e| e.to_string())
 }
 
 fn port(app: &AppHandle) -> u16 {
-    setting(app, "remote.port").and_then(|p| p.trim().parse().ok()).filter(|p| *p >= 1024).unwrap_or(LISTEN_PORT)
+    port_in(&app.state::<AppState>().store)
+}
+
+/// The port this Divixi answers on (the `remote.port` setting), from its store.
+pub(crate) fn port_in(store: &Store) -> u16 {
+    setting_in(store, "remote.port").and_then(|p| p.trim().parse().ok()).filter(|p| *p >= 1024).unwrap_or(LISTEN_PORT)
 }
 
 /// Whether to answer on every network (an address other PCs reach
@@ -160,7 +177,11 @@ fn enabled(app: &AppHandle) -> bool {
 /// Phone access: this Divixi, published on this machine's tailnet and opened
 /// in a phone's browser. Not remote instances, which is the other way round.
 fn phone_on(app: &AppHandle) -> bool {
-    setting(app, "phone.enabled").as_deref() == Some("true")
+    phone_on_in(&app.state::<AppState>().store)
+}
+
+fn phone_on_in(store: &Store) -> bool {
+    setting_in(store, "phone.enabled").as_deref() == Some("true")
 }
 
 /// At startup: the events hub listens, and the server comes up if this
@@ -380,6 +401,27 @@ fn answering(step: Step, running: bool) -> Step {
     }
 }
 
+/// The step and the address, from a reading of Tailscale and whether this
+/// Divixi's server answers on its port -- and what the server needs to know
+/// of that reading, kept in its settings.
+///
+/// The one origin a browser may name is kept beside the state that decides it
+/// rather than written at each place that could change it. Set only while this
+/// Divixi is actually published: a phone's every command is a POST, which
+/// carries `Origin`, so an origin left behind after turning phone access off
+/// would be a door left open with the address hidden.
+fn keep_reading(store: &Store, probe: &tailscale::Probe, serve: &tailscale::ServeState, running: bool) -> (Step, String) {
+    let step = answering(step_of(probe, serve), running);
+    let address = address_of(&probe.name, serve.https_port());
+    let _ = set_in(store, "phone.origin", if step == Step::Ready { &address } else { "" });
+    // `peer::trust` runs on the request path and cannot probe, so the login
+    // the daemon reports for this machine is kept where it can read it.
+    if !probe.login.is_empty() {
+        let _ = set_in(store, "phone.self_login", &probe.login);
+    }
+    (step, address)
+}
+
 fn replaceable(step: Step, serve: &tailscale::ServeState) -> bool {
     matches!(step, Step::Occupied | Step::Publish) && serve.taken
 }
@@ -442,6 +484,13 @@ async fn look(app: &AppHandle, port: u16, fresh: bool) -> (tailscale::Probe, tai
             }
         }
     }
+    let (probe, serve) = read_tailnet(port).await;
+    *app.state::<AppState>().remote.looked.lock() = Some((std::time::Instant::now(), probe.clone(), serve.clone()));
+    (probe, serve)
+}
+
+/// What Tailscale says now, with nothing cached.
+async fn read_tailnet(port: u16) -> (tailscale::Probe, tailscale::ServeState) {
     let probe = tailscale::probe().await;
     // Asking the daemon about serve is only meaningful once it can answer at
     // all; before that the read would be a second way of saying the same
@@ -451,7 +500,6 @@ async fn look(app: &AppHandle, port: u16, fresh: bool) -> (tailscale::Probe, tai
     } else {
         tailscale::ServeState::default()
     };
-    *app.state::<AppState>().remote.looked.lock() = Some((std::time::Instant::now(), probe.clone(), serve.clone()));
     (probe, serve)
 }
 
@@ -467,19 +515,7 @@ async fn phone_status_now(app: &AppHandle, fresh: bool) -> PhoneStatus {
     let st = app.state::<AppState>();
     let running = st.remote.running.lock().await.as_ref().map(|r| r.port);
     let found = step_of(&probe, &serve);
-    let step = answering(found, running == Some(want));
-    let address = address_of(&probe.name, serve.https_port());
-    // The one origin a browser may name, kept beside the state that decides
-    // it rather than written at each place that could change it. Set only
-    // while this Divixi is actually published: a phone's every command is a
-    // POST, which carries `Origin`, so an origin left behind after turning
-    // phone access off would be a door left open with the address hidden.
-    let _ = set(app, "phone.origin", if step == Step::Ready { &address } else { "" });
-    // `peer::trust` runs on the request path and cannot probe, so the login
-    // the daemon reports for this machine is kept where it can read it.
-    if !probe.login.is_empty() {
-        let _ = set(app, "phone.self_login", &probe.login);
-    }
+    let (step, address) = keep_reading(&st.store, &probe, &serve, running == Some(want));
     let awake = st.remote.awake.lock().as_ref().map(|g| g.held);
     PhoneStatus {
         on: phone_on(app),
@@ -580,7 +616,11 @@ async fn switch(app: AppHandle, on: bool, replace: bool) -> Result<PhoneStatus, 
 /// Read here and signed into every link minted, so the number on the screen
 /// and the number in the token are one number.
 fn phone_days(app: &AppHandle) -> i64 {
-    setting(app, "phone.days")
+    phone_days_in(&app.state::<AppState>().store)
+}
+
+fn phone_days_in(store: &Store) -> i64 {
+    setting_in(store, "phone.days")
         .and_then(|d| d.trim().parse().ok())
         .filter(|d| auth::PHONE_DAYS.contains(d))
         .unwrap_or(auth::PHONE_DAYS_DEFAULT)
@@ -616,13 +656,19 @@ pub async fn phone_pair_link(app: AppHandle) -> Result<PairLink, String> {
     if status.step != Step::Ready {
         return Err("Phone access is not published yet, so a code would not open anything.".into());
     }
-    let days = phone_days(&app);
     let st = app.state::<AppState>();
-    let (token, expires) = st.remote.auth.pair_token(&st.store, auth::Scope::Conversation, days * 24 * 60 * 60);
-    let id = st.remote.auth.link_id(&token).unwrap_or_default();
+    Ok(mint_phone_link(&st.store, &st.remote.auth, &status.address))
+}
+
+/// A phone's pairing link for `address`, at the span the settings say.
+/// The caller has made sure that address is published and answering.
+fn mint_phone_link(store: &Store, auth: &auth::Auth, address: &str) -> PairLink {
+    let days = phone_days_in(store);
+    let (token, expires) = auth.pair_token(store, auth::Scope::Conversation, days * 24 * 60 * 60);
+    let id = auth.link_id(&token).unwrap_or_default();
     // The app, with the token in the query. It takes it, keeps it and
     // takes it back out of the address bar; there is no page in between.
-    Ok(PairLink { url: format!("{}/?token={token}", status.address), expires, days, id })
+    PairLink { url: format!("{address}/?token={token}"), expires, days, id }
 }
 
 /// Choose how long a phone stays signed in. Links already minted keep the

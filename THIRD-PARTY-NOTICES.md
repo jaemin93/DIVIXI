@@ -34,7 +34,7 @@ development-time tool and is not redistributed. See §4, which matters most.
 
 ## 2. Rust dependencies
 
-632 entries in `Cargo.lock`; 625 are external crates and 7 are DIVIXI's own
+633 entries in `Cargo.lock`; 626 are external crates and 7 are DIVIXI's own
 workspace members. Licences were read from each crate's own `Cargo.toml`
 (`os-audit/scan-cargo-licenses.mjs` reproduces this).
 
@@ -118,7 +118,9 @@ These are bundled into the UI and therefore redistributed:
 dependencies of its own. It draws the pairing code for phone access; the QR
 specification is DENSO WAVE's, and "QR Code" is their registered trademark,
 which costs nothing to use but is noted because the package's own header
-does.
+does. On the Rust side, `qrcode` (0.14, `MIT OR Apache-2.0`, built without
+its default features and so with no dependencies) draws the same code in a
+terminal for `divixi-server phone link`.
 
 `dompurify` is dual-licensed with an **OR**, so DIVIXI takes the Apache-2.0
 option and no MPL obligation arises for it. `highlight.js` (BSD-3-Clause) and

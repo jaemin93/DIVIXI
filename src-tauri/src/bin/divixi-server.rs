@@ -6,6 +6,9 @@
 //!   divixi-server token           print a pairing link (five minutes, once)
 //!   divixi-server owner <login>   the GitHub account that may come in at an address (--none: nobody)
 //!   divixi-server listen all|local  answer on every network, or this machine only
+//!   divixi-server phone status|on|off|link
+//!                                 phone access over Tailscale, decided here (see
+//!                                 src/remote/phone_cli.rs)
 //!
 //! The desktop app reaches it through an SSH tunnel (signing in with a
 //! pairing token over SSH), or at its address as the owner's GitHub account.
@@ -15,7 +18,7 @@
 //! the level it is logging at and where the log file is — both go to stdout
 //! as well as to that file, so a service manager keeps them too.
 
-const USAGE: &str = "usage: divixi-server [-v|-vv] [serve | token | owner <github-login>|--none | listen all|local]";
+const USAGE: &str = "usage: divixi-server [-v|-vv] [serve | token | owner <github-login>|--none | listen all|local | phone status|on|off|link]";
 
 fn done(r: anyhow::Result<String>, what: &str) {
     match r {
@@ -70,6 +73,7 @@ fn main() {
         },
         Some("owner") => done(orchestra_app::set_owner(args.get(1).map(String::as_str)), "divixi-server owner"),
         Some("listen") => done(orchestra_app::set_listen(args.get(1).map(String::as_str)), "divixi-server listen"),
+        Some("phone") => done(orchestra_app::phone(&args[1..]), "divixi-server phone"),
         Some("-h" | "--help" | "help") => println!("{USAGE}"),
         Some(other) => {
             eprintln!("divixi-server: unknown command {other:?}\n{USAGE}");

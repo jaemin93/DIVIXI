@@ -155,13 +155,14 @@ install -Dm755 target/release/divixi-server ~/.local/bin/divixi-server
 - The first build takes a few minutes; later ones are around thirty seconds.
 - `~/.local/bin` is the default install path. Put it elsewhere if you write that path into the
   instance settings in the app.
-- There are five commands.
+- There are six commands.
 
 ```bash
 divixi-server                  # = serve. Run the server (127.0.0.1:7488 by default)
 divixi-server token            # print a pairing token once (5 minutes, single use; the app calls this over SSH)
 divixi-server owner <login>    # the GitHub account allowed in over an address (--none: nobody)
 divixi-server listen all|local # accept from every network / only from this server (SSH tunnel) — restart to apply
+divixi-server phone status|on|off|link  # open this server from a phone over Tailscale (section 4C)
 divixi-server help
 ```
 
@@ -211,6 +212,36 @@ pkill -x divixi-server; setsid -f ~/.local/bin/divixi-server serve >/dev/null 2>
   `http://<Tailscale IP>:7488`.
 - The desktop DIVIXI becomes a server the same way, through "Open this PC as a remote instance" in
   Settings.
+
+### C. A phone (Tailscale)
+
+The desktop app turns phone access on from a card in Settings, but a server has no window, and
+another device cannot turn it on (who may reach a machine is decided at that machine). So it is
+done here, on the server, with `divixi-server phone`. `tailscale serve` puts the server on your
+tailnet over HTTPS and proxies to `127.0.0.1`, so the server keeps listening on this machine only.
+It needs Tailscale installed and signed in, and MagicDNS and HTTPS certificates on for the tailnet.
+
+```bash
+divixi-server phone status   # where it stands, and the next thing to do
+divixi-server phone on       # publish with tailscale serve (--dry-run: only say what it would run)
+divixi-server phone link     # a one-time link and QR code for the phone (5 minutes)
+divixi-server phone off      # withdraw it from the tailnet
+```
+
+- Changing `tailscale serve` usually needs root. Then `phone on` changes nothing, prints the exact
+  command (for example `sudo /usr/bin/tailscale serve --bg --https=443 http://127.0.0.1:7488`) and
+  exits with an error. Run it, then `divixi-server phone on` again. Or let your user change serve
+  from now on with `sudo tailscale set --operator=$USER`.
+- The server can be running or not. Settings are written to the same database and apply without
+  a restart. A link is made only while the server answers, since a link to an address that answers
+  nothing fails on the phone.
+- The link signs the phone in for the span set in the desktop app's phone card (7 days unless
+  changed), with the phone's scope rather than the full one `divixi-server token` gives.
+- If the phone says `pairing failed`, its browser may have opened the link early in a hidden tab
+  (iOS Chrome's "Preload webpages"). Turn that off, or open the link with the camera, and make a
+  new link.
+- The phone opens the server's own page, so the server must have the UI built in (`npm run build`
+  before `cargo build`, as in section 3).
 
 ---
 
@@ -294,6 +325,8 @@ from that commit.
 | The server will not stay up after **Start it** or an install | Run the binary by hand to see why: `~/.divixi/server/current/divixi-server help` (or your own path). `error while loading shared libraries: libwebkit2gtk-4.1.so.0` means the WebKitGTK runtime is missing: `sudo apt install -y libwebkit2gtk-4.1-0` (section 1) |
 | An agent shows as "not installed" | PATH on the server. Add the CLI and node directories to "Remote PATH" in the instance settings, or to `Environment=PATH` in the systemd unit |
 | A direct address says "no owner yet" | Run `divixi-server owner <github login>` on the server |
+| `divixi-server phone on` prints a `sudo … tailscale serve …` line | Changing serve needs root here: run that line, then `phone on` again (section 4C) |
+| The phone says `pairing failed` right after opening the link | The browser preloaded the link and spent it. Turn off preloading (iOS Chrome: "Preload webpages"), then `divixi-server phone link` again |
 | A direct address says "… does not own this DIVIXI" | Whether the app's GitHub account is the same as the server's owner |
 | A remote shell is left behind | When the app dies, the server closes that machine's shells two minutes later |
 | "this build differs from the app" | Whether the server and the app came from the same commit (section 2). If you updated one side only, see section 7 |
