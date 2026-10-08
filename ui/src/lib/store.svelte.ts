@@ -7,15 +7,7 @@ import { parseTags } from "./listFilter";
 import { libraryPick } from "./libraries";
 import { download, tooLarge } from "./designFile";
 import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
-import {
-  AUTO_KEY,
-  autoFrom,
-  autoTo,
-  dueForCheck,
-  LAST_CHECK_KEY,
-  lastCheckFrom,
-  lastCheckTo,
-} from "./updateSchedule";
+import { AUTO_KEY, autoFrom, autoTo } from "./updateSchedule";
 import {
   dropQueued,
   liveQueued,
@@ -3343,14 +3335,22 @@ class Store {
    * Ask GitHub which release is newest.
    *
    * Two things call this and no others: the button in the settings, and
-   * `checkAtStartup` once a launch while the switch is on. Both record when
-   * they asked, which is what the day's allowance is counted from -- see
-   * updateSchedule.ts.
+   * `checkAtStartup` once each time the app starts while the switch is on.
+   * The button is never refused.
    *
    * Nothing is downloaded here. The download is a second press
    * (`downloadUpdate`), as the module header in src-tauri/src/update.rs says.
    */
   async checkUpdate() {
+    await this.runCheck(() => invoke<UpdateCheck>("update_check"));
+  }
+
+  /**
+   * Put one check's answer where the card and the banner read it. `ask`
+   * answers null for a check at startup that was skipped, which leaves the
+   * card as it was before anything asked.
+   */
+  private async runCheck(ask: () => Promise<UpdateCheck | null>) {
     if (this.updateChecking) return;
     this.updateChecking = true;
     this.updateCheck = null;
@@ -3358,32 +3358,18 @@ class Store {
     // one is not what the card is about any more.
     this.updateGot = null;
     this.updateProgress = null;
+    let found: UpdateCheck | null;
     try {
-      this.updateCheck = await invoke<UpdateCheck>("update_check");
+      found = await ask();
     } catch (err) {
       // The command names a case for every failure it knows, so getting here
       // means the call itself never landed. Still shown, not swallowed.
-      this.updateCheck = { kind: "failed", detail: String(err) };
+      found = { kind: "failed", detail: String(err) };
     }
+    this.updateCheck = found;
     this.updateChecking = false;
-    // The attempt is what the day's allowance counts, so the stamp moves even
-    // when the answer was a failure: a GitHub that is down must not be asked
-    // again at every launch. The button is never capped, so nobody is left
-    // waiting on it either (updateSchedule.ts).
-    await this.rememberChecked();
     // A release found after the banner was closed is worth saying again.
-    if (this.updateCheck.kind === "update") this.updateBannerClosed = false;
-  }
-
-  /** Write down that a check has just been made. */
-  private async rememberChecked() {
-    try {
-      await invoke("set_setting", { key: LAST_CHECK_KEY, value: lastCheckTo(Date.now()) });
-    } catch (err) {
-      // Not worth a word in front of anyone: the cost of losing the stamp is
-      // one extra check at the next launch.
-      console.warn("could not record the update check", err);
-    }
+    if (found?.kind === "update") this.updateBannerClosed = false;
   }
 
   /**
@@ -3395,55 +3381,31 @@ class Store {
   updateAuto = $state(true);
 
   /**
-   * The one check divixi makes without being asked, once a launch.
+   * The one check divixi makes without being asked, once each time it starts.
    *
    * Called from main.ts and nowhere else, and deliberately not awaited: the
    * request must not stand between anyone and their tracks. Everything in here
    * happens after the window is up, and a machine with no network spends the
    * whole of it failing quietly.
    *
-   * Three things can stop it: the switch being off, a check inside the last
-   * twenty-four hours, and not being this PC's own Divixi. What it does not do
-   * is show anything unless there is something to show — an up-to-date answer
-   * and a failed one are both silent here, and the failure is on the settings
-   * card for whoever goes looking. Only a release that is actually out puts the
-   * banner up (`updateWorthSaying`).
-   *
-   * The rule itself is in updateSchedule.ts, which is where its tests are.
+   * Whether it asks GitHub is decided by `update_check_at_startup`
+   * (src-tauri/src/update.rs): once per process, while the switch is on, in a
+   * release build -- so a reloaded webview, or Local shown again after a
+   * remote instance, does not ask twice. Each skip and each failure is a line
+   * in the log. What it does not do is show anything unless there is something
+   * to show — an up-to-date answer and a failed one are both silent here, and
+   * the failure is on the settings card for whoever goes looking. Only a
+   * release that is actually out puts the banner up (`updateWorthSaying`).
    */
   async checkAtStartup() {
     // An update replaces this PC's app. A remote instance is updated where it
     // runs, and its settings are the remote's, not this machine's.
     if (!local) return;
-    let auto = true;
-    let last: number | null = null;
-    try {
-      const [rawAuto, rawLast] = await Promise.all([
-        invoke<string | null>("get_setting", { key: AUTO_KEY }),
-        invoke<string | null>("get_setting", { key: LAST_CHECK_KEY }),
-      ]);
-      auto = autoFrom(rawAuto);
-      last = lastCheckFrom(rawLast);
-    } catch (err) {
-      // The store could not be read. Not a thing to put in front of anyone,
-      // and not a reason to go to GitHub either: this launch stays quiet.
-      console.warn("could not read the update settings", err);
-      return;
-    }
-    this.updateAuto = auto;
-    const due = dueForCheck({ manual: false, auto, last, now: Date.now() });
-    if (!due.check) return;
-    await this.checkUpdate();
+    void this.loadUpdateAuto();
+    await this.runCheck(() => invoke<UpdateCheck | null>("update_check_at_startup"));
   }
 
-  /**
-   * The switch, from the settings, for the card to draw.
-   *
-   * `checkAtStartup` reads the same key, but it leaves early in the two cases
-   * that matter here -- the switch off, and a check already made today -- and
-   * a card opened after that would otherwise show the default rather than the
-   * setting.
-   */
+  /** The switch, from the settings, for the card to draw. */
   async loadUpdateAuto() {
     try {
       this.updateAuto = autoFrom(await invoke<string | null>("get_setting", { key: AUTO_KEY }));

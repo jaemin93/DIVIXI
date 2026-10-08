@@ -56,9 +56,8 @@
     // into the binary; asks GitHub nothing (src-tauri/src/update.rs).
     if (local) void store.loadRelease();
     // And whether the check at startup is on, for the switch on that card.
-    // `checkAtStartup` reads the same setting; this is for the times it left
-    // early (the switch off, or a check made within the day) and so never got
-    // as far as putting it in the store.
+    // `checkAtStartup` reads it too; this keeps the card right after the
+    // switch has been changed elsewhere.
     if (local) void store.loadUpdateAuto();
   });
   function saveIdle() {

@@ -1886,6 +1886,7 @@ pub fn run() {
             diagnostics_report,
             update::update_release,
             update::update_check,
+            update::update_check_at_startup,
             update::update_download,
             update::update_download_cancel,
             update::update_open,

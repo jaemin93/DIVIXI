@@ -4,12 +4,14 @@
 //! `jaemin93/divixi`, compares that release's tag against the tag this binary
 //! was built from, and says which of the two is newer. That is all it does.
 //!
-//! Two things call it: the button on the settings page, and -- once a launch,
-//! at most once a day, while the switch beside that button is on -- the app
-//! itself. The schedule is not here: it is ui/src/lib/updateSchedule.ts, a
-//! pure function with the tests for it beside it, because the switch and the
-//! stamp it reads live in the settings the interface already owns. What is
-//! here has no memory of when it last ran and no timer of its own.
+//! Two things call it: the button on the settings page, and -- once each
+//! time the app starts, while the switch beside that button is on -- the app
+//! itself ([`update_check_at_startup`]). Whether the one at startup goes ahead
+//! is [`at_startup`], a pure function with its tests below. "Once each time
+//! the app starts" means once per process: the window hidden and shown again,
+//! Local shown again after a remote instance, or the webview reloaded do not
+//! ask a second time, and a remote instance's webview never asks at all.
+//! There is no timer.
 //!
 //! ## Where it stops, and why it stops there
 //!
@@ -24,8 +26,8 @@
 //! only thing that would make it not one. So Tauri's updater plugin is not
 //! used by the app runtime.
 //!
-//! What the app does do -- step 1 on a press or once a day, the rest only ever
-//! on a press:
+//! What the app does do -- step 1 on a press or once at startup, the rest only
+//! ever on a press:
 //!
 //!   1. asks GitHub for the newest published release ([`update_check`]);
 //!   2. downloads the installer for this platform into the app data folder
@@ -77,23 +79,22 @@
 //! the one request the app ever makes on its own behalf, so it is kept to the
 //! smallest shape that can work:
 //!
-//!   * it happens on a press, or once a launch and at most once a day while
-//!     the switch in Settings -> About is on. Never more often than that, and
+//!   * it happens on a press, or once each time the app starts while the
+//!     switch in Settings -> About is on. Never more often than that, and
 //!     never at all with the switch off. There is no timer and nothing in the
 //!     background: the automatic one is a single call as the window comes up,
-//!     and it is capped by a stamp in the settings, not by a clock running
-//!     inside the app;
+//!     and a flag held for the life of the process keeps it to one;
 //!   * it carries no authentication. The endpoint is public, so the user's
 //!     GitHub token (which exists for remote instances, `remote::github`) is
 //!     deliberately NOT sent: it would name the user to GitHub for no gain;
 //!   * it carries no version, no platform, no identifier of any kind. The
 //!     `User-Agent` is the bare word `divixi`, which the GitHub API requires
 //!     of every caller. What GitHub learns from it is an address asking a
-//!     public question once a day, which is what any reader of the releases
-//!     page is;
+//!     public question when the app starts, which is what any reader of the
+//!     releases page is;
 //!   * unauthenticated, GitHub allows 60 requests an hour per address, which
-//!     one a day plus a button nobody presses sixty times an hour will not
-//!     reach. Being rate-limited is reported rather than retried.
+//!     one a start plus a button nobody presses sixty times an hour will not
+//!     reach. Being rate-limited is logged rather than retried.
 //!
 //! ## Drafts
 //!
@@ -416,8 +417,8 @@ pub fn update_release() -> Option<&'static str> {
 
 /// Ask GitHub for the newest published release and compare it with this build.
 ///
-/// Runs on a press of "check for updates", and once a launch when the
-/// interface decides one is due (ui/src/lib/updateSchedule.ts). This command
+/// Runs on a press of "check for updates", and through
+/// [`update_check_at_startup`] once each time the app starts. This command
 /// keeps no schedule of its own: it asks whenever it is called. See the module
 /// header for why nothing is downloaded or installed by either caller.
 #[tauri::command]
@@ -435,6 +436,87 @@ pub async fn update_check() -> Check {
         Check::BadBuild { current } => tracing::error!("[update] this binary was built with DIVIXI_RELEASE={current:?}, which is not a release tag"),
     }
     found
+}
+
+/// The settings key holding the switch for the check at startup, as the
+/// interface names it (ui/src/lib/updateSchedule.ts). Absent means on.
+const AUTO_KEY: &str = "updates.auto";
+
+/// The switch as it is stored. Anything that is not the word `off` is on, as
+/// `autoFrom` in the interface reads it.
+fn auto_from(raw: Option<&str>) -> bool {
+    raw != Some("off")
+}
+
+/// Whether this process has made its check at startup. Set by the first call
+/// of [`update_check_at_startup`] and never cleared: a webview reloaded, the
+/// window shown again, or Local shown again after a remote instance are all
+/// the same run of the app, and ask nothing more.
+static STARTUP_CHECKED: AtomicBool = AtomicBool::new(false);
+
+/// Why the check at startup did not ask GitHub. Each is a line in the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Skip {
+    /// This process has already made its check at startup.
+    AlreadyThisRun,
+    /// The switch in Settings -> About is off.
+    Off,
+    /// A development build: there is no release to compare it with.
+    DevBuild,
+}
+
+impl Skip {
+    fn why(self) -> &'static str {
+        match self {
+            Skip::AlreadyThisRun => "already checked since the app started",
+            Skip::Off => "turned off in Settings -> About",
+            Skip::DevBuild => "a development build has no release to compare (build with DIVIXI_RELEASE_TAG to try it)",
+        }
+    }
+}
+
+/// The whole of the rule for the check at startup: once a process, while the
+/// switch is on, and only in a build that is a release. There is no day's
+/// allowance: a new process always asks. Pure, so every case is a test rather
+/// than an app to restart. A press of the button does not come through here
+/// and is never refused.
+pub(crate) fn at_startup(first_this_run: bool, auto: bool, current: Option<&str>) -> Result<(), Skip> {
+    if !first_this_run {
+        return Err(Skip::AlreadyThisRun);
+    }
+    if !auto {
+        return Err(Skip::Off);
+    }
+    if current.is_none() {
+        return Err(Skip::DevBuild);
+    }
+    Ok(())
+}
+
+/// The one check divixi makes without being asked, once each time it starts.
+///
+/// Called by the Local webview as it comes up (`checkAtStartup` in
+/// ui/src/lib/store.svelte.ts); a remote instance's webview does not call it.
+/// `None` when it was skipped, with the reason in the log. Otherwise the
+/// answer, whatever it was: a failure (offline, rate limited) is logged by
+/// [`update_check`], and the interface shows nothing for it.
+#[tauri::command]
+pub async fn update_check_at_startup(state: State<'_, AppState>) -> Result<Option<Check>, String> {
+    let first = !STARTUP_CHECKED.swap(true, Ordering::SeqCst);
+    let auto = match state.store.get_meta(&format!("{}{AUTO_KEY}", crate::SETTING_PREFIX)) {
+        Ok(raw) => auto_from(raw.as_deref()),
+        Err(err) => {
+            // Not a reason to go to GitHub: this start stays quiet.
+            tracing::warn!("[update] check at startup skipped: the switch could not be read: {err}");
+            return Ok(None);
+        }
+    };
+    if let Err(skip) = at_startup(first, auto, release()) {
+        tracing::info!("[update] check at startup skipped: {}", skip.why());
+        return Ok(None);
+    }
+    tracing::info!("[update] checking for a newer release at startup");
+    Ok(Some(update_check().await))
 }
 
 /// The command's body with the build's tag passed in, so the request handling
@@ -1201,6 +1283,45 @@ mod tests {
         assert_eq!(json(Check::NoRelease), "no_release");
         assert_eq!(json(Check::RateLimited { detail: String::new() }), "rate_limited");
         assert_eq!(json(Check::UpToDate { current: "v2026-09-28".into() }), "up_to_date");
+    }
+
+    // ----- the check at startup -----
+
+    #[test]
+    fn a_new_run_of_a_release_build_checks() {
+        // No stamp and no day's allowance: however recently an earlier run
+        // asked, the rule has nothing that could stop this one.
+        assert_eq!(at_startup(true, true, Some("v2026-09-28")), Ok(()));
+    }
+
+    #[test]
+    fn the_same_run_does_not_ask_twice() {
+        // The window shown again, Local shown again after a remote instance,
+        // the webview reloaded: all the same process.
+        assert_eq!(at_startup(false, true, Some("v2026-09-28")), Err(Skip::AlreadyThisRun));
+        assert_eq!(at_startup(false, false, None), Err(Skip::AlreadyThisRun));
+    }
+
+    #[test]
+    fn the_switch_off_is_respected() {
+        assert_eq!(at_startup(true, false, Some("v2026-09-28")), Err(Skip::Off));
+    }
+
+    #[test]
+    fn a_development_build_skips_without_asking() {
+        assert_eq!(at_startup(true, true, None), Err(Skip::DevBuild));
+        // The switch is the reason given first: it is the one a person set.
+        assert_eq!(at_startup(true, false, None), Err(Skip::Off));
+    }
+
+    #[test]
+    fn the_switch_is_on_unless_it_was_turned_off() {
+        assert!(auto_from(None), "never set");
+        assert!(auto_from(Some("on")));
+        assert!(!auto_from(Some("off")));
+        // Something else wrote into it: not a reason to stop checking.
+        assert!(auto_from(Some("yes")));
+        assert!(auto_from(Some("")));
     }
 
     // ----- fetching the installer -----
