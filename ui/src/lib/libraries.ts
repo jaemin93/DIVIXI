@@ -15,9 +15,9 @@ export const MAX_NAME = 80;
 /** Mirrors `orchestra_knowledge::Library`. */
 export type KLibrary = { id: number; name: string; created_at: number; sources: number; color: string; tags: string[] };
 
-/** A library as a row of the list column: its tags, its colour, its number of documents. */
-export function libraryRow(lib: KLibrary, shownName: string): { id: string; name: string; tags: string[]; color: string; meta: string } {
-  return { id: String(lib.id), name: shownName, tags: lib.tags, color: lib.color, meta: String(lib.sources) };
+/** A library as a row of the list column: its tags and its colour (no count: the page body says it). */
+export function libraryRow(lib: KLibrary, shownName: string): { id: string; name: string; tags: string[]; color: string } {
+  return { id: String(lib.id), name: shownName, tags: lib.tags, color: lib.color };
 }
 
 /** The tag-dialog key for a library (`lib:<id>`), beside a track's `tr…` and an artifact's `ar…`. */

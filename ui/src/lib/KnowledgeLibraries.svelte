@@ -8,9 +8,8 @@
 
   /**
    * The knowledge page's libraries, in the same column as the designs
-   * (ItemColumn): each library, its tags and number of documents above its
-   * name, its colour as the bar; one is always the one shown (General at
-   * first). A library is renamed, tagged, coloured and deleted from its
+   * (ItemColumn): each library, its tags above its name, its colour as the
+   * bar; one is always the one shown (General at first). A library is renamed, tagged, coloured and deleted from its
    * right-click menu, as a design is (ArtifactMenu); General is never
    * deleted, nor a library with documents, which the menu says.
    */
@@ -23,8 +22,7 @@
     return m ? kb.libraries.find((l) => l.id === m.id) : undefined;
   });
 
-  // The small fact above the name: a design shows when it changed, a library how many documents it holds.
-  const rows = $derived(kb.libraries.map((l) => ({ ...libraryRow(l, kb.libraryName(l)), meta: t("kb.lib.docCount", { n: l.sources }) })));
+  const rows = $derived(kb.libraries.map((l) => libraryRow(l, kb.libraryName(l))));
 
   function nameNote(p: NameProblem): string {
     if (p === "long") return t("kb.lib.nameLong", { n: MAX_NAME });

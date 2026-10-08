@@ -5,8 +5,8 @@
     name: string;
     tags: string[];
     color: string;
-    /** The small fact on the right of the upper line: a time, a count. */
-    meta: string;
+    /** The small fact on the right of the upper line (a design's time); none, nothing there. */
+    meta?: string;
     metaTitle?: string;
   };
 
@@ -234,7 +234,7 @@
     <ListSearch bind:query placeholder={searchPlaceholder} {picked} ontoggle={toggleTag} onclear={() => onpick_tags([])} {tagCount} />
     <div class="rows">
       {#each shown as item (item.id)}
-        <!-- Like a track's row: tags and the small fact above, the name below, its colour on the left. -->
+        <!-- A track's row without its dot and fold toggle: tags and the small fact above, the name below, its colour on the left. -->
         <div
           class="row"
           class:on={item.id === current}
@@ -260,14 +260,14 @@
                   <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
                 {/each}
               </span>
-              <span class="mono when" title={item.metaTitle ?? ""}>{item.meta}</span>
+              {#if item.meta}<span class="mono when" title={item.metaTitle ?? ""}>{item.meta}</span>{/if}
             </span>
-            <span class="name">{item.name}</span>
+            <span class="main"><span class="name">{item.name}</span></span>
           </button>
         </div>
       {/each}
       {#if !items.length}
-        <p class="none">{empty}</p>
+        <div class="mono empty">{empty}</div>
       {:else if filtering && !shown.length}
         <!-- Nothing the search or filter lets through: said as the tracks column says it. -->
         <div class="mono empty">{t("tracks.none")}</div>
@@ -413,24 +413,31 @@
     color: var(--warn);
   }
 
+  /* The tracks column's list (TrackList .list), its rows' measures and
+     colours, so the three columns read as one. */
   .rows {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    padding: 4px 0 12px;
   }
 
   /* Two lines, as a track's row: tags and the small fact above, the name
-     below. The left bar is the item's colour, only when one is chosen; the
-     open one is told by its shade. */
+     below on a 36px line. The left bar is the item's colour, only when one
+     is chosen; the open one is told by its shade and brighter text, as a
+     track is. */
   .row {
     min-height: 52px;
     display: flex;
+    align-items: flex-end;
     border-left: 2px solid transparent;
+    color: var(--dim);
   }
 
   .row:hover,
   .row.on,
   .row.menued {
+    color: var(--hi);
     background: var(--sel);
   }
 
@@ -439,19 +446,23 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    gap: 3px;
-    padding: 8px 16px 8px 14px;
+    align-items: stretch;
+    padding: 0 16px 0 14px;
     background: transparent;
     border: 0;
     text-align: left;
-    color: var(--dim);
+    font-size: 13px;
+    color: inherit;
   }
 
   .top {
     display: flex;
     align-items: center;
     gap: 8px;
+    padding: 8px 0 0 0;
+    margin-bottom: -4px;
+    overflow: hidden;
+    white-space: nowrap;
     line-height: 1.3;
   }
 
@@ -474,28 +485,25 @@
     margin-left: 8px;
   }
 
-  .row.on .pick {
-    color: var(--hi);
+  .main {
+    height: 36px;
+    display: flex;
+    align-items: center;
+    min-width: 0;
   }
 
   .name {
-    max-width: 100%;
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 13px;
   }
 
   .when {
     flex-shrink: 0;
     font-size: 9px;
     letter-spacing: 0.04em;
-    color: var(--lab);
-  }
-
-  .none {
-    margin: 12px 16px;
-    font-size: 12px;
     color: var(--lab);
   }
 </style>

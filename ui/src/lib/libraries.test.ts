@@ -67,7 +67,7 @@ test("the graph conversation is told the library on screen, and nothing when non
 });
 
 test("a library reads as a row of the list column, as a design does", () => {
-  assert.deepEqual(libraryRow(libs[1], "Work notes"), { id: "2", name: "Work notes", tags: ["docs", "q4"], color: "#1a73e8", meta: "0" });
+  assert.deepEqual(libraryRow(libs[1], "Work notes"), { id: "2", name: "Work notes", tags: ["docs", "q4"], color: "#1a73e8" });
   assert.equal(libraryRow(libs[0], "일반").name, "일반", "the name as shown");
 });
 
