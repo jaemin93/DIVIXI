@@ -37,8 +37,8 @@ void arrive()
     });
     const restoring = store.restore();
     // The one request divixi makes without being asked: which release is
-    // newest, once a launch, at most once a day, and only while the switch in
-    // Settings -> About is on (ui/src/lib/updateSchedule.ts). Not awaited and
+    // newest, once each time the app starts, and only while the switch in
+    // Settings -> About is on (src-tauri/src/update.rs). Not awaited and
     // nothing waits on it. Only in the app's own window: a phone's browser has
     // no installer to update.
     if (inTauri) void store.checkAtStartup();

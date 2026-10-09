@@ -25,7 +25,7 @@
    *
    * Nothing in this component asks GitHub anything: it draws what the store
    * already knows, and the store knows it from a press or from the one check
-   * at startup (ui/src/lib/updateSchedule.ts).
+   * at startup (src-tauri/src/update.rs, `update_check_at_startup`).
    */
   import { t } from "./i18n.svelte";
   import { local } from "./ipc.svelte";

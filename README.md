@@ -82,7 +82,7 @@ running, and update it.
   update check below.
 - **Checking for updates.** DIVIXI asks the public GitHub API for the newest published
   release of this repository in two cases: when you press *Check for updates* in
-  **Settings → About**, and once when the app opens, at most once a day. The request
+  **Settings → About**, and once each time the app starts. The request
   carries no sign-in, no version, no platform, and nothing that identifies you or this
   machine — what GitHub sees is an address reading a public page. The check at startup
   has a switch beside that button and can be turned off; the button keeps working either
