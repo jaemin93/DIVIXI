@@ -881,11 +881,24 @@ pub async fn replace(port: u16) -> Outcome {
     }
 }
 
+/// The arguments [`write`] runs the CLI with, so that `divixi-server phone on`
+/// can print the very command when it has to be run as root.
+pub fn publish_args(port: u16, https: u16) -> Vec<String> {
+    vec!["serve".into(), "--bg".into(), format!("--https={https}"), format!("http://127.0.0.1:{port}")]
+}
+
+/// The arguments [`off`] runs the CLI with.
+pub fn unpublish_args(https: u16) -> Vec<String> {
+    vec!["serve".into(), "--https".into(), https.to_string(), format!("--set-path={SERVE_MOUNT}"), "off".into()]
+}
+
 /// `serve --bg` for Divixi on `port`, at HTTPS port `https`. Whatever was at
 /// the mount is replaced, which is why every caller decides first whether that
 /// is allowed.
 async fn write(port: u16, https: u16) -> Outcome {
-    match run(&["serve", "--bg", &format!("--https={https}"), &format!("http://127.0.0.1:{port}")], WRITE_TIMEOUT).await {
+    let args = publish_args(port, https);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match run(&args, WRITE_TIMEOUT).await {
         Ran::NoCli => Outcome::bad(Code::NoCli, "Tailscale was not found, so nothing was published."),
         Ran::NoStart(e) => Outcome::bad(Code::Failed, format!("Tailscale is installed but could not be started: {e}")),
         Ran::Timeout { out, err } => {
@@ -960,7 +973,9 @@ pub async fn unpublish(port: u16) -> Outcome {
 
 /// Remove the handler at [`SERVE_MOUNT`] on HTTPS port `https`, and only that.
 async fn off(https: u16) -> Outcome {
-    match run(&["serve", "--https", &https.to_string(), &format!("--set-path={SERVE_MOUNT}"), "off"], WRITE_TIMEOUT).await {
+    let args = unpublish_args(https);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match run(&args, WRITE_TIMEOUT).await {
         Ran::NoCli => Outcome::bad(Code::NoCli, "Tailscale was not found; nothing to do."),
         Ran::NoStart(e) => Outcome::bad(Code::Failed, format!("The tailscale CLI could not be started: {e}")),
         Ran::Timeout { out, err } => {

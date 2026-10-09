@@ -68,7 +68,8 @@ npx tauri build                                 # 설치 파일이 target/releas
 
 `divixi-server`는 창이 없는 DIVIXI로, 서버용입니다. 데스크톱 앱은 SSH 터널을 통해, 또는
 당신의 GitHub 계정으로 특정 주소에서 여기에 닿습니다. 서버가 떠 있지 않으면 앱이 SSH로
-서버를 시작시킵니다.
+서버를 시작시킵니다. 휴대폰에서 Tailscale로 서버를 열려면 서버에서
+`divixi-server phone on`으로 켭니다.
 
 빌드·설치·연결·상시 구동·업데이트는 **[docs/divixi-server.ko.md](docs/divixi-server.ko.md)**
 를 보세요.

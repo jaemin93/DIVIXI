@@ -2066,14 +2066,13 @@ pub fn run() {
 /// A pairing link for another PC's Divixi app (it takes the token from it), made without the running app (the
 /// server's `token` command): signed with the same key, for its port.
 pub fn pair_link() -> anyhow::Result<String> {
-    let data_dir = data_dir_offline()?;
-    let (store, _) = open_store(&data_dir)?;
-    let auth = remote::auth::Auth::open(&data_dir)?;
-    let port = store
-        .get_meta(&format!("{SETTING_PREFIX}remote.port"))?
-        .and_then(|p| p.trim().parse::<u16>().ok())
-        .filter(|p| *p >= 1024)
-        .unwrap_or(remote::LISTEN_PORT);
+    pair_link_in(&data_dir_offline()?)
+}
+
+fn pair_link_in(data_dir: &std::path::Path) -> anyhow::Result<String> {
+    let store = open_store_offline(data_dir)?;
+    let auth = remote::auth::Auth::open(data_dir)?;
+    let port = remote::port_in(&store);
     // Over SSH: whoever can run this owns the machine, so the link carries
     // full scope. A phone's link is minted in the app and carries less.
     let (token, _) = auth.pair_token(&store, remote::auth::Scope::Full, remote::auth::REFRESH_SECS);
@@ -2091,9 +2090,12 @@ pub fn set_owner(login: Option<&str>) -> anyhow::Result<String> {
             anyhow::bail!("{l:?} is not a GitHub login");
         }
     }
-    let data_dir = data_dir_offline()?;
-    let (store, _) = open_store(&data_dir)?;
-    let auth = remote::auth::Auth::open(&data_dir)?;
+    set_owner_in(&data_dir_offline()?, login)
+}
+
+fn set_owner_in(data_dir: &std::path::Path, login: Option<&str>) -> anyhow::Result<String> {
+    let store = open_store_offline(data_dir)?;
+    let auth = remote::auth::Auth::open(data_dir)?;
     remote::github::set_owner(&store, &auth, login)?;
     Ok(match login {
         Some(l) => format!("{l} owns this DIVIXI"),
@@ -2109,9 +2111,66 @@ pub fn set_listen(how: Option<&str>) -> anyhow::Result<String> {
         Some("local") => "local",
         _ => anyhow::bail!("say all or local"),
     };
-    let (store, _) = open_store(&data_dir_offline()?)?;
+    set_listen_in(&data_dir_offline()?, how)
+}
+
+fn set_listen_in(data_dir: &std::path::Path, how: &str) -> anyhow::Result<String> {
+    let store = open_store_offline(data_dir)?;
     store.set_meta(&format!("{SETTING_PREFIX}remote.listen"), how)?;
     Ok(format!("listen {how}: restart divixi-server for it to apply"))
+}
+
+/// `divixi-server phone status|on|off|link`: phone access, decided at the
+/// server (see src/remote/phone_cli.rs). The words after `phone`.
+pub fn phone(args: &[String]) -> anyhow::Result<String> {
+    use std::io::IsTerminal as _;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut cmd = remote::phone_cli::parse(&args)?;
+    // A QR code is for a terminal: piped into a file or a script it is noise.
+    if let remote::phone_cli::Cmd::Link { qr } = &mut cmd {
+        *qr &= std::io::stdout().is_terminal();
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(phone_in(&data_dir_offline()?, cmd, &remote::phone_cli::Real))
+}
+
+async fn phone_in(data_dir: &std::path::Path, cmd: remote::phone_cli::Cmd, net: &impl remote::phone_cli::Tailnet) -> anyhow::Result<String> {
+    // A folder no divixi-server has run on has no server behind it, nor the
+    // key a running one would check a link against: say so rather than make
+    // a database just to refuse. status, on and off start one, as `listen`
+    // and `owner` do; what they keep is there when the server first starts.
+    if matches!(cmd, remote::phone_cli::Cmd::Link { .. }) && !db_path(data_dir)?.is_file() {
+        anyhow::bail!("no divixi-server has run on {} yet, so a link would not open anything: start divixi-server first", data_dir.display());
+    }
+    let store = open_store_offline(data_dir)?;
+    let auth = remote::auth::Auth::open(data_dir)?;
+    remote::phone_cli::run(cmd, &store, &auth, net).await
+}
+
+/// Where a `divixi-server` subcommand finds the store: `DIVIXI_DB`, or
+/// `divixi.db` in the data folder.
+fn db_path(data_dir: &std::path::Path) -> anyhow::Result<PathBuf> {
+    Ok(match std::env::var_os(DB_ENV) {
+        Some(explicit) if explicit == ":memory:" => anyhow::bail!("{DB_ENV}=:memory: keeps nothing for a command to change"),
+        Some(explicit) => PathBuf::from(explicit),
+        None => data_dir.join("divixi.db"),
+    })
+}
+
+/// The store, for a `divixi-server` subcommand.
+///
+/// One that exists is opened beside the server, which may be running and
+/// have it open too: SQLite takes the two (WAL, and a wait on a busy
+/// database), settings written here are read by the server on its next
+/// request, and the runs it has live are left alone. One that does not exist
+/// yet has no server on it, so it is made as a first start makes it.
+fn open_store_offline(data_dir: &std::path::Path) -> anyhow::Result<Store> {
+    let path = db_path(data_dir)?;
+    if path.is_file() {
+        Store::open_alongside(&path)
+    } else {
+        Ok(open_store(data_dir)?.0)
+    }
 }
 
 /// The platform's app-data folder for Divixi, before [`instance_data_dir`]
@@ -2254,5 +2313,105 @@ mod patch_tests {
         for p in [Some(dirs.path), dirs.parent, Some(dirs.home)].into_iter().flatten() {
             assert!(!p.starts_with(r"\\?\"), "{p}");
         }
+    }
+}
+
+/// The `divixi-server` subcommands, on a data folder nothing has run on yet
+/// and on one a server has open.
+#[cfg(test)]
+mod offline_tests {
+    use super::*;
+    use remote::phone_cli::tests::{free, published, Fake};
+    use remote::phone_cli::Cmd;
+
+    /// An empty data folder of its own, gone when the test ends.
+    struct Fresh(PathBuf);
+
+    impl Fresh {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("divixi-offline-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn db(&self) -> PathBuf {
+            self.0.join("divixi.db")
+        }
+        fn setting(&self, key: &str) -> Option<String> {
+            Store::open_alongside(self.db()).unwrap().get_meta(&format!("{SETTING_PREFIX}{key}")).unwrap()
+        }
+    }
+
+    impl Drop for Fresh {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn phone(dir: &Fresh, cmd: Cmd, net: &Fake) -> anyhow::Result<String> {
+        tauri::async_runtime::block_on(phone_in(&dir.0, cmd, net))
+    }
+
+    #[test]
+    fn token_owner_and_listen_start_the_store_in_an_empty_folder() {
+        let dir = Fresh::new("listen");
+        assert_eq!(set_listen_in(&dir.0, "local").unwrap(), "listen local: restart divixi-server for it to apply");
+        assert!(dir.db().is_file());
+        assert_eq!(dir.setting("remote.listen").as_deref(), Some("local"));
+
+        let dir = Fresh::new("owner");
+        assert_eq!(set_owner_in(&dir.0, Some("someone")).unwrap(), "someone owns this DIVIXI");
+        assert_eq!(remote::github::owner(&Store::open_alongside(dir.db()).unwrap()).as_deref(), Some("someone"));
+
+        let dir = Fresh::new("token");
+        let link = pair_link_in(&dir.0).unwrap();
+        assert!(link.starts_with(&format!("http://127.0.0.1:{}/auth/pair?token=", remote::LISTEN_PORT)), "{link}");
+        assert!(dir.0.join("remote.key").is_file());
+    }
+
+    #[test]
+    fn phone_status_on_and_off_start_the_store_in_an_empty_folder() {
+        let dir = Fresh::new("phone-status");
+        let said = phone(&dir, Cmd::Status, &Fake::new(free())).unwrap();
+        assert!(said.starts_with("phone access: off"), "{said}");
+        assert!(dir.db().is_file());
+
+        let dir = Fresh::new("phone-on");
+        let mut net = Fake::new(free());
+        net.running = false;
+        let said = phone(&dir, Cmd::On { dry_run: false }, &net).unwrap();
+        assert!(said.contains("start divixi-server"), "{said}");
+        assert_eq!(dir.setting("phone.enabled").as_deref(), Some("true"));
+
+        let dir = Fresh::new("phone-off");
+        assert_eq!(phone(&dir, Cmd::Off { dry_run: false }, &Fake::new(free())).unwrap(), "Phone access was already off.");
+        assert_eq!(dir.setting("phone.enabled").as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn phone_link_in_an_empty_folder_says_why_and_makes_nothing() {
+        let dir = Fresh::new("phone-link");
+        let err = phone(&dir, Cmd::Link { qr: false }, &Fake::new(published())).unwrap_err().to_string();
+        assert!(err.contains("start divixi-server first"), "{err}");
+        assert!(!dir.db().exists());
+    }
+
+    #[test]
+    fn a_store_the_server_has_open_keeps_its_live_runs() {
+        let dir = Fresh::new("alongside");
+        let server = Store::open(dir.db()).unwrap();
+        let track = server
+            .create_track(&TrackPatch { name: Some("t".into()), cwd: Some(".".into()), agent: Some("claude_code".into()), ..Default::default() })
+            .unwrap();
+        let run = server.begin_run(&track.id, "solo", "claude_code", "still going", ".").unwrap();
+        server.append(&run, 7, &AgentEvent::Started { session_id: "s".into(), cwd: ".".into() }).unwrap();
+
+        set_listen_in(&dir.0, "all").unwrap();
+        set_owner_in(&dir.0, Some("someone")).unwrap();
+        pair_link_in(&dir.0).unwrap();
+        phone(&dir, Cmd::Status, &Fake::new(free())).unwrap();
+
+        assert_eq!(server.run(&run).unwrap().unwrap().status, orchestra_core::RunStatus::Running);
+        assert_eq!(server.get_meta(&format!("{SETTING_PREFIX}remote.listen")).unwrap().as_deref(), Some("all"));
     }
 }

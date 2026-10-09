@@ -140,13 +140,14 @@ install -Dm755 target/release/divixi-server ~/.local/bin/divixi-server
 
 - 처음 빌드는 몇 분 걸리고, 그다음부터는 30초 안팎입니다.
 - `~/.local/bin`은 기본 설치 경로입니다. 앱의 인스턴스 설정에 경로를 따로 적으면 다른 곳에 두어도 됩니다.
-- 명령은 다섯 가지입니다.
+- 명령은 여섯 가지입니다.
 
 ```bash
 divixi-server                  # = serve. 서버 실행 (기본 127.0.0.1:7488)
 divixi-server token            # 페어링 토큰 한 번 출력 (5분, 1회용; 앱이 SSH로 부름)
 divixi-server owner <login>    # 주소로 들어올 수 있는 GitHub 계정 (--none: 없음)
 divixi-server listen all|local # 모든 네트워크 / 이 서버에서만(SSH 터널) 받기 — 다시 켜야 적용
+divixi-server phone status|on|off|link  # Tailscale로 휴대폰에서 이 서버 열기 (4C절)
 divixi-server help
 ```
 
@@ -189,6 +190,33 @@ pkill -x divixi-server; setsid -f ~/.local/bin/divixi-server serve >/dev/null 2>
   화면의 안내를 따르면 됩니다.
 - 그다음 **원격 인스턴스 추가**에서 연결 방식은 **직접 주소**, 주소는 `http://<Tailscale IP>:7488`로 넣습니다.
 - 데스크톱 DIVIXI도 설정의 "이 PC를 원격 인스턴스로 열기"로 같은 방식의 서버가 됩니다.
+
+### C. 휴대폰 (Tailscale)
+
+데스크톱 앱은 설정의 휴대폰 접속 카드에서 켜지만, 서버에는 창이 없고 다른 기기에서는 켤 수 없습니다
+(이 기기에 누가 닿을지는 그 기기에서 정합니다). 그래서 서버에서 `divixi-server phone`으로 켭니다.
+`tailscale serve`가 서버를 tailnet에 HTTPS로 올리고 `127.0.0.1`로 넘겨 주므로, 서버는 계속 이 기기에서만
+받습니다. Tailscale이 설치·로그인되어 있고, tailnet에 MagicDNS와 HTTPS 인증서가 켜져 있어야 합니다.
+
+```bash
+divixi-server phone status   # 지금 상태와 다음에 할 일
+divixi-server phone on       # tailscale serve로 올리기 (--dry-run: 실행할 명령만 보여 줌)
+divixi-server phone link     # 휴대폰용 일회용 링크와 QR 코드 (5분)
+divixi-server phone off      # tailnet에서 내리기
+```
+
+- `tailscale serve`를 바꾸려면 대개 root가 필요합니다. 그러면 `phone on`은 아무것도 바꾸지 않고, 실행할
+  명령(예: `sudo /usr/bin/tailscale serve --bg --https=443 http://127.0.0.1:7488`)을 그대로 출력하고 오류로
+  끝납니다. 그 명령을 실행한 뒤 `divixi-server phone on`을 다시 하세요. 또는
+  `sudo tailscale set --operator=$USER`로 지금 사용자가 앞으로 serve를 바꿀 수 있게 해도 됩니다.
+- 서버가 떠 있든 아니든 됩니다. 설정은 같은 데이터베이스에 쓰이고 다시 켜지 않아도 적용됩니다. 링크는
+  서버가 응답할 때만 만듭니다. 아무것도 응답하지 않는 주소의 링크는 휴대폰에서 실패하기 때문입니다.
+- 링크로 들어온 휴대폰은 데스크톱 앱의 휴대폰 카드에서 정한 기간(바꾸지 않았으면 7일) 동안 로그인되어
+  있고, `divixi-server token`의 전체 범위가 아니라 휴대폰 범위를 받습니다.
+- 휴대폰이 `pairing failed`라고 하면, 브라우저가 숨은 탭에서 링크를 먼저 열었을 수 있습니다(iOS Chrome의
+  '웹페이지 미리 로드'). 그 설정을 끄거나 카메라로 링크를 열고, 링크를 새로 만드세요.
+- 휴대폰은 서버가 주는 페이지를 열므로, 서버에 UI가 들어 있어야 합니다(3절처럼 `cargo build` 전에
+  `npm run build`).
 
 ---
 
@@ -268,6 +296,8 @@ Rust 코드 기준이라, 화면만 바뀐 앱 업데이트에서는 뜨지 않�
 | **서버 시작**이나 설치 뒤에도 서버가 떠 있지 않음 | 바이너리를 직접 돌려 이유 보기: `~/.divixi/server/current/divixi-server help` (또는 직접 설치한 경로). `error while loading shared libraries: libwebkit2gtk-4.1.so.0`이면 WebKitGTK 런타임이 없는 것: `sudo apt install -y libwebkit2gtk-4.1-0` (1절) |
 | 에이전트가 "설치 안 됨" | 서버 쪽 PATH. 인스턴스 설정의 "원격 PATH"나 systemd의 `Environment=PATH`에 CLI·node 경로 추가 |
 | 직접 주소가 "no owner yet" | 서버에서 `divixi-server owner <GitHub 아이디>` |
+| `divixi-server phone on`이 `sudo … tailscale serve …` 줄을 출력함 | 이 기기에서는 serve를 바꾸는 데 root가 필요함: 그 줄을 실행하고 `phone on`을 다시 (4C절) |
+| 링크를 열자마자 휴대폰이 `pairing failed` | 브라우저가 링크를 미리 열어 써 버린 것. 미리 로드를 끄고(iOS Chrome: '웹페이지 미리 로드') `divixi-server phone link`를 다시 |
 | 직접 주소가 "… does not own this DIVIXI" | 앱의 GitHub 로그인 계정과 서버 주인이 같은지 |
 | 원격 셸이 남음 | 앱이 비정상 종료되면 2분 뒤 서버가 그 기기의 셸을 닫음 |
 | "빌드가 이 앱과 다릅니다" | 서버와 앱이 같은 커밋에서 나왔는지(2절). 한쪽만 업데이트한 것이면 7절 |
