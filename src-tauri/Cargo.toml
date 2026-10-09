@@ -23,7 +23,11 @@ path = "src/bin/divixi-server.rs"
 required-features = ["server"]
 
 [features]
-server = ["tauri/test"]
+# custom-protocol: embed dist/ in the binary, as `tauri build` does for the
+# app. A phone loads the UI from divixi-server, and without it Tauri builds
+# in development mode and reads dist/ from the build machine's checkout at
+# run time, which no server has (#77). scripts/check-server-ui.sh checks it.
+server = ["tauri/test", "tauri/custom-protocol"]
 
 [lib]
 name = "orchestra_app"

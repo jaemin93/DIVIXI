@@ -629,7 +629,8 @@ jobs:
           cache-key: release-server
 
       # tauri-build needs the frontend bundle even for the windowless binary:
-      # it embeds the same dist/.
+      # it embeds the same dist/ (the `server` feature turns on Tauri's
+      # custom-protocol, which is what makes it embed rather than point at it).
       - name: Build UI (required by tauri-build)
         run: npm run build
 
@@ -640,6 +641,12 @@ jobs:
         env:
           DIVIXI_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: cargo build --release -p orchestra-app --features server --bin divixi-server
+
+      # The binary that gets uploaded, run the way a server runs it: no
+      # checkout, no dist/ beside it. The release of 2026-10-08 answered
+      # "no such thing" to every page (#77), and nothing before here noticed.
+      - name: divixi-server serves its embedded UI
+        run: scripts/check-server-ui.sh target/release/divixi-server
 
       - name: Stage the binary
         run: |
