@@ -72,7 +72,7 @@
   {#if !design}
   <div class="ctx">
     <div class="mono ctxlab">{t("kb.agentContext")}</div>
-    <!-- The library on screen goes with every message (all of them: nothing to say). -->
+    <!-- The library on screen goes with every message (none yet: nothing to say). -->
     {#if kb.current}
       <p class="ctxlib">{t("kb.lib.onScreen", { name: kb.libraryName(kb.current) })}</p>
     {/if}

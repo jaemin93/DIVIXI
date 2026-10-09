@@ -11,14 +11,13 @@
   import KnowledgeLibraries from "./KnowledgeLibraries.svelte";
   import { docTrouble, indexProgress } from "./indexProgress";
   import { tick } from "svelte";
-  import { addTarget } from "./libraries";
 
   /**
    * The knowledge library, after Kiro Crew's: the items agents can search
    * (listed per document, or found by a search), the entity graph, the
    * documents themselves with their sync state, and how documents are
    * described. The libraries column on the left picks what the three tabs
-   * show: one library, or all of them.
+   * show: one library at a time.
    */
   const tabs = $derived<{ id: KTab; label: string }[]>([
     { id: "list", label: t("kb.tab.list") },
@@ -118,9 +117,9 @@
   <!-- One thin bar: the page's name (what it is for, on hover), its tabs, what
        the index is doing when there is something to say, and the page's buttons. -->
   <header class="kbar">
-    {#if !store.kbListOpen}
+    {#if !store.kbListOpen && kb.current}
       <!-- The libraries column folded away: which library the tabs show, still. -->
-      <span class="klib mono" title={t("kb.lib.title")}>{kb.current ? kb.libraryName(kb.current) : t("kb.lib.all")}</span>
+      <span class="klib mono" title={t("kb.lib.title")}>{kb.libraryName(kb.current)}</span>
     {/if}
     <div class="tabs" role="tablist">
       {#each tabs as tab (tab.id)}
@@ -212,7 +211,13 @@
         <p class="note">{t("kb.results", { n: shown.length, q: kb.shownQuery })}</p>
       {/if}
 
-      {#if !kb.shown.length}
+      {#if kb.loaded && !kb.libraries.length}
+        <!-- Nothing to put a document in: making a library comes first. -->
+        <div class="emptybox">
+          <p class="none">{t("kb.lib.makeFirst")}</p>
+          <button class="btn btn-acc" onclick={() => kb.askCreate()}>{t("kb.lib.new")}</button>
+        </div>
+      {:else if !kb.shown.length}
         <div class="emptybox">
           <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
         </div>
@@ -261,12 +266,18 @@
     {:else if kb.tab === "sources"}
       <div class="actions">
         <span class="grow"></span>
-        <!-- Where an added document goes: the library shown, General from the view of all. -->
-        <span class="mono into">{t("kb.lib.addInto", { name: kb.libraryNameOf(addTarget(kb.library)) })}</span>
-        <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
+        {#if kb.loaded && !kb.libraries.length}
+          <!-- No library: nowhere to add to, so the button makes one instead. -->
+          <span class="mono into">{t("kb.lib.makeFirst")}</span>
+          <button class="btn btn-acc" onclick={() => kb.askCreate()}>{t("kb.lib.new")}</button>
+        {:else}
+          <!-- Where an added document goes: the library shown. -->
+          {#if kb.current}<span class="mono into">{t("kb.lib.addInto", { name: kb.libraryName(kb.current) })}</span>{/if}
+          <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
+        {/if}
       </div>
       {#if !kb.shown.length}
-        <p class="none">{t("kb.lib.empty")}</p>
+        <p class="none">{kb.libraries.length ? t("kb.lib.empty") : t("kb.lib.none")}</p>
       {/if}
       {#each kb.shown as s (s.id)}
         {@const art = kb.artifactOf(s.id)}

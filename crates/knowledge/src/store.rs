@@ -27,7 +27,7 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE items ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';
      CREATE INDEX IF NOT EXISTS items_by_hash ON items(content_hash);",
     // 4 -> 5: libraries. Every document there is goes to the General one
-    // (made on open, see `ensure_general`), the column's default.
+    // (made on open, see `settle_libraries`), the column's default.
     "CREATE TABLE IF NOT EXISTS libraries (
          id          INTEGER PRIMARY KEY,
          name        TEXT NOT NULL,
@@ -137,16 +137,23 @@ pub mod status {
     pub const ERROR: &str = "error";
 }
 
-/// The library every document is in until it is moved, and that every
-/// document already there went to when libraries came. It is never deleted.
+/// The library made once, on a new library file (and the one every document
+/// already there went to when libraries came). It is a library like any other
+/// after that: renamed, and deleted when empty, and not made again on open.
+/// A document is never given it unasked: with no library, adding one is
+/// refused ([`NO_LIBRARY`]). The one exception is a document already stored
+/// whose library row is missing, which `settle_libraries` puts back in it.
 pub const GENERAL: i64 = 1;
+/// The start of the error for adding a document when there is no library.
+/// The UI recognises it by this text and says it in the person's language.
+pub const NO_LIBRARY: &str = "no knowledge library yet";
 /// Its name as stored; the UI shows it in the person's language until renamed.
 pub const GENERAL_NAME: &str = "General";
 /// Longest library name, in characters.
 pub const MAX_LIBRARY_NAME: usize = 80;
 
 /// A library: a named set of documents. Search, the conductor's tools and
-/// `@kb` see every library; the knowledge page shows one, or all.
+/// `@kb` see every library; the knowledge page shows one at a time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Library {
     pub id: i64,
@@ -424,7 +431,7 @@ impl KnowledgeDb {
             }
             Some(v) => anyhow::bail!("knowledge schema version {v} is not supported by this build ({SCHEMA_VERSION})"),
         }
-        ensure_general(&conn)?;
+        settle_libraries(&conn)?;
         backfill_hashes(&mut conn)?;
         // A sync cut short by a quit resumes from the start next time.
         conn.execute(
@@ -434,16 +441,32 @@ impl KnowledgeDb {
         Ok(Self { conn: Mutex::new(conn) })
     }
 
-    /// Register a document in the General library. Errors when the id or the path is taken.
+    /// Register a document in the default library ([`Self::default_library`]).
+    /// Errors when the id or the path is taken.
     pub fn add_source(&self, id: &str, source_type: &str, uri: &str) -> anyhow::Result<Source> {
-        self.add_source_in(id, source_type, uri, GENERAL)
+        let library = self.default_library()?;
+        self.add_source_in(id, source_type, uri, library)
+    }
+
+    /// Where a document goes when no library is named: the first library
+    /// (General first while it exists, then the oldest). With none at all it
+    /// is refused ([`NO_LIBRARY`]): the person makes a library first, and
+    /// none is made for them.
+    pub fn default_library(&self) -> anyhow::Result<i64> {
+        let conn = self.conn.lock();
+        let first: Option<i64> = conn
+            .query_row(&format!("SELECT id FROM libraries ORDER BY id != {GENERAL}, created_at, id LIMIT 1"), [], |r| r.get(0))
+            .optional()?;
+        first.ok_or_else(|| anyhow::anyhow!("{NO_LIBRARY}: make a library first"))
     }
 
     /// Register a document in a library. Errors when the id or the path is
-    /// taken (a file is in one library only), or there is no such library.
+    /// taken (a file is in one library only), or there is no such library
+    /// ([`NO_LIBRARY`] when there is none at all).
     pub fn add_source_in(&self, id: &str, source_type: &str, uri: &str, library: i64) -> anyhow::Result<Source> {
         {
             let conn = self.conn.lock();
+            require_any_library(&conn)?;
             require_library(&conn, library)?;
             conn.execute(
                 "INSERT INTO sources(id, source_type, uri, status, created_at, library_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -532,13 +555,10 @@ impl KnowledgeDb {
         self.library(id)?.ok_or_else(|| anyhow::anyhow!("library {id} vanished"))
     }
 
-    /// Delete an empty library. General is never deleted (so there is always
-    /// one), and a library with documents is refused: they are moved or
-    /// removed first, by the person, so nothing goes anywhere unasked.
+    /// Delete an empty library, General too (the last one as well: then
+    /// there are none). A library with documents is refused: they are moved
+    /// or removed first, by the person, so nothing goes anywhere unasked.
     pub fn delete_library(&self, id: i64) -> anyhow::Result<()> {
-        if id == GENERAL {
-            anyhow::bail!("the General library cannot be deleted");
-        }
         let conn = self.conn.lock();
         require_library(&conn, id)?;
         let docs: i64 = conn.query_row("SELECT COUNT(*) FROM sources WHERE library_id = ?1", params![id], |r| r.get(0))?;
@@ -1205,15 +1225,41 @@ fn passage_hash(content: &str) -> String {
     Sha256::digest(words.as_bytes()).iter().take(12).map(|b| format!("{b:02x}")).collect()
 }
 
-/// The General library exists, and every document is in a library that
-/// does (one whose library went missing goes back to General). Safe to run
-/// on every open.
-fn ensure_general(conn: &Connection) -> anyhow::Result<()> {
+/// Marks in `meta` that General was made for this file, once. Every file
+/// from before General could be deleted has it already (it was made on every
+/// open), so a file without the mark gets General once and the mark; one
+/// with the mark is left with whatever libraries the person kept, none too.
+const GENERAL_MADE: &str = "general_made";
+
+/// On every open: General made the first time only (a new file, or one from
+/// before libraries or before General could be deleted), and every document
+/// in a library that exists. The second part is a repair, not a default: the
+/// app never leaves a document without its library (a library with documents
+/// is not deleted), so a missing row means an older file or one edited by
+/// hand, and the documents in it would otherwise be searched but shown
+/// nowhere and impossible to move or remove. They go to General, made again
+/// for them only then. Safe to run on every open.
+fn settle_libraries(conn: &Connection) -> anyhow::Result<()> {
+    let made = conn.query_row("SELECT 1 FROM meta WHERE key = ?1", params![GENERAL_MADE], |_| Ok(())).optional()?.is_some();
+    if !made {
+        make_general(conn)?;
+        conn.execute("INSERT INTO meta(key, value) VALUES (?1, '1')", params![GENERAL_MADE])?;
+    }
+    let lost: i64 = conn.query_row("SELECT COUNT(*) FROM sources WHERE library_id NOT IN (SELECT id FROM libraries)", [], |r| r.get(0))?;
+    if lost > 0 {
+        make_general(conn)?;
+        conn.execute("UPDATE sources SET library_id = ?1 WHERE library_id NOT IN (SELECT id FROM libraries)", params![GENERAL])?;
+    }
+    Ok(())
+}
+
+/// General, unless it is there. Its id may meanwhile be another library's
+/// (SQLite reuses the highest rowid once it is gone); that one is kept.
+fn make_general(conn: &Connection) -> anyhow::Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO libraries(id, name, name_key, created_at) VALUES (?1, ?2, ?3, ?4)",
         params![GENERAL, GENERAL_NAME, name_key(GENERAL_NAME), now_ms()],
     )?;
-    conn.execute("UPDATE sources SET library_id = ?1 WHERE library_id NOT IN (SELECT id FROM libraries)", params![GENERAL])?;
     Ok(())
 }
 
@@ -1235,6 +1281,15 @@ fn backup_before_upgrade(conn: &Connection, path: &Path, from: i64) {
         Ok(_) => tracing::info!(backup = %backup.display(), "kept a copy of the knowledge library before upgrading it"),
         Err(err) => tracing::warn!(%err, "could not copy the knowledge library before upgrading it"),
     }
+}
+
+/// [`NO_LIBRARY`] when there are no libraries at all.
+fn require_any_library(conn: &Connection) -> anyhow::Result<()> {
+    let any = conn.query_row("SELECT 1 FROM libraries LIMIT 1", [], |_| Ok(())).optional()?;
+    if any.is_none() {
+        anyhow::bail!("{NO_LIBRARY}: make a library first");
+    }
+    Ok(())
 }
 
 fn require_library(conn: &Connection, id: i64) -> anyhow::Result<()> {
@@ -1600,6 +1655,15 @@ mod tests {
         let db = KnowledgeDb::open(&path).unwrap();
         assert_eq!(db.source("ar001").unwrap().unwrap().library_id, GENERAL);
         drop(db);
+        {
+            // General deleted meanwhile: made again to hold the document.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("DELETE FROM libraries; UPDATE sources SET library_id = 42;").unwrap();
+        }
+        let db = KnowledgeDb::open(&path).unwrap();
+        assert_eq!(db.source("ar001").unwrap().unwrap().library_id, GENERAL);
+        assert_eq!(db.libraries().unwrap().len(), 1);
+        drop(db);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1629,7 +1693,6 @@ mod tests {
         assert!(db.add_source_in("ar012", "local_file", "/docs/w.md", GENERAL).is_err(), "a file is in one library only");
         assert_eq!(db.library(work.id).unwrap().unwrap().sources, 1);
 
-        assert!(db.delete_library(GENERAL).is_err(), "General is never deleted");
         let refused = db.delete_library(work.id).unwrap_err().to_string();
         assert!(refused.contains("1 documents"), "a library with documents is kept: {refused}");
         assert_eq!(db.move_source("ar010", GENERAL).unwrap().library_id, GENERAL);
@@ -1639,6 +1702,73 @@ mod tests {
         assert!(db.library(work.id).unwrap().is_none());
         assert!(db.delete_library(work.id).is_err(), "gone already");
         assert_eq!(db.source("ar010").unwrap().unwrap().library_id, GENERAL, "the moved document stayed");
+
+        // General is refused only for its documents, in the same words as any library.
+        let refused = db.delete_library(GENERAL).unwrap_err().to_string();
+        assert!(refused.contains("3 documents") && refused.contains("move or remove them first"), "{refused}");
+    }
+
+    #[test]
+    fn general_is_deleted_like_any_library_and_not_made_again_on_open() {
+        let path = temp_db("general-gone");
+        {
+            let db = KnowledgeDb::open(&path).unwrap();
+            assert_eq!(db.libraries().unwrap().iter().map(|l| l.id).collect::<Vec<_>>(), vec![GENERAL], "a new file has General");
+            let work = db.create_library("Work").unwrap();
+            db.delete_library(GENERAL).unwrap();
+            assert_eq!(db.libraries().unwrap().iter().map(|l| l.id).collect::<Vec<_>>(), vec![work.id]);
+            // With no library named, a document goes to the first one there is.
+            assert_eq!(db.add_source("ar001", "local_file", "/docs/a.md").unwrap().library_id, work.id);
+        }
+        {
+            let db = KnowledgeDb::open(&path).unwrap();
+            assert_eq!(db.libraries().unwrap().iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec!["Work"], "not made again on open");
+            db.delete_source("ar001").unwrap();
+            let work = db.libraries().unwrap()[0].id;
+            db.delete_library(work).unwrap();
+            assert!(db.libraries().unwrap().is_empty(), "the last one goes too");
+        }
+        {
+            let db = KnowledgeDb::open(&path).unwrap();
+            assert!(db.libraries().unwrap().is_empty(), "none, and none made on open");
+            // With no library a document is refused, named or not, and none is made for it.
+            for refused in [
+                db.add_source("ar002", "local_file", "/docs/b.md").unwrap_err(),
+                db.add_source_in("ar003", "local_file", "/docs/c.md", GENERAL).unwrap_err(),
+                db.default_library().unwrap_err(),
+            ] {
+                assert!(refused.to_string().starts_with(NO_LIBRARY), "{refused}");
+            }
+            assert!(db.libraries().unwrap().is_empty(), "no General made for it");
+            assert!(db.sources().unwrap().is_empty());
+            // A library made by the person takes it.
+            let mine = db.create_library("Mine").unwrap();
+            assert_eq!(db.add_source("ar002", "local_file", "/docs/b.md").unwrap().library_id, mine.id);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_file_from_before_general_could_be_deleted_keeps_it_once() {
+        let path = temp_db("general-mark");
+        {
+            let db = KnowledgeDb::open(&path).unwrap();
+            db.create_library("Work").unwrap();
+        }
+        {
+            // As the last build left it: General there, no mark.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute("DELETE FROM meta WHERE key = ?1", params![GENERAL_MADE]).unwrap();
+        }
+        {
+            let db = KnowledgeDb::open(&path).unwrap();
+            assert_eq!(db.libraries().unwrap().iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec![GENERAL_NAME, "Work"], "nothing lost, nothing doubled");
+            db.delete_library(GENERAL).unwrap();
+        }
+        let db = KnowledgeDb::open(&path).unwrap();
+        assert_eq!(db.libraries().unwrap().iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec!["Work"], "marked: General stays deleted");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -964,7 +964,7 @@ class Store {
   graphExcluded = $state<Set<string>>(new Set());
 
   /**
-   * The library the knowledge page shows (null: all of them), set by the page;
+   * The library the knowledge page shows (null: none yet), set by the page;
    * the graph conversation is told it with every message.
    */
   graphLibrary = $state<number | null>(null);
@@ -1261,7 +1261,7 @@ class Store {
     try {
       await invoke("set_setting", { key: "kblibrary", value });
     } catch {
-      // Cosmetic: the page opens on all of them next time.
+      // Cosmetic: the page opens on General next time.
     }
   }
 

@@ -1,17 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  ALL_ROW,
   GENERAL,
   GENERAL_NAME,
+  NO_LIBRARY,
   MAX_NAME,
-  addTarget,
   libraryOfTagKey,
   libraryRow,
   libraryTagKey,
   cleanName,
   deleteBlock,
   displayName,
+  isNoLibrary,
   keepLibrary,
   libraryPick,
   nameProblem,
@@ -50,27 +50,11 @@ test("names are checked as the core checks them", () => {
   assert.equal(nameProblem("Work Notes", libs, 2), "", "a library may keep its own name in another case");
 });
 
-test("General is never deleted, nor a library with documents", () => {
-  assert.equal(deleteBlock(libs[0]), "general");
-  assert.equal(deleteBlock({ id: GENERAL, sources: 0 }), "general", "empty or not");
-  assert.equal(deleteBlock({ id: 2, sources: 1 }), "notEmpty");
+test("a library with documents is not deleted, General as any other", () => {
+  assert.equal(deleteBlock(libs[0]), "notEmpty", "General with documents: the same reason as any library");
+  assert.equal(deleteBlock({ sources: 0 }), "", "General empty: deleted");
+  assert.equal(deleteBlock({ sources: 1 }), "notEmpty");
   assert.equal(deleteBlock(libs[1]), "");
-});
-
-test("a document added from the view of all goes to General", () => {
-  assert.equal(addTarget(null), GENERAL);
-  assert.equal(addTarget(2), 2);
-});
-
-test("the graph conversation is told the library on screen, and nothing for all", () => {
-  assert.deepEqual(libraryPick(2), ["l:2"]);
-  assert.deepEqual(libraryPick(null), []);
-});
-
-test("a library reads as a row of the list column, as a design does", () => {
-  assert.deepEqual(libraryRow(libs[1], "Work notes"), { id: "2", name: "Work notes", tags: ["docs", "q4"], color: "#1a73e8", meta: "0" });
-  assert.equal(libraryRow(libs[0], "일반").name, "일반", "the name as shown");
-  assert.notEqual(ALL_ROW, libraryRow(libs[0], "").id, "the row of all is no library's");
 });
 
 test("a library's tags open the one tag dialog by a key of their own", () => {
@@ -79,10 +63,33 @@ test("a library's tags open the one tag dialog by a key of their own", () => {
   for (const other of ["tr001", "ar002", "lib:", "lib:x", "xlib:2"]) assert.equal(libraryOfTagKey(other), null, other);
 });
 
-test("a view keeps its library while it exists, and falls back to all", () => {
+test("a view keeps its library while it exists, and falls back to the first", () => {
   assert.equal(keepLibrary(2, libs), 2);
-  assert.equal(keepLibrary(5, libs), null, "deleted elsewhere");
-  assert.equal(keepLibrary(null, libs), null);
+  assert.equal(keepLibrary(5, libs), GENERAL, "deleted elsewhere: the first, General while it is listed first");
+  assert.equal(keepLibrary(null, libs), GENERAL, "first opening, nothing remembered");
   assert.equal(parseLibrary("2"), 2);
   for (const s of ["all", "", null, undefined, "x", "-1", "1.5", "0"]) assert.equal(parseLibrary(s), null, String(s));
+});
+
+test("a remembered view of all libraries, from before there was none, opens on General", () => {
+  assert.equal(keepLibrary(parseLibrary("all"), libs), GENERAL);
+  assert.equal(keepLibrary(parseLibrary("2"), libs), 2);
+});
+
+test("General deleted: the first library is shown, and nothing once the last is gone", () => {
+  const noGeneral = [{ id: 3 }, { id: 4 }];
+  assert.equal(keepLibrary(null, noGeneral), 3);
+  assert.equal(keepLibrary(9, noGeneral), 3);
+  assert.equal(keepLibrary(4, noGeneral), 4);
+  assert.equal(keepLibrary(null, []), null);
+  assert.equal(keepLibrary(2, []), null);
+  assert.equal(keepLibrary(GENERAL, [{ id: 2 }]), 2, "General just deleted: the next library");
+  assert.equal(keepLibrary(GENERAL, []), null, "the last library just deleted: none");
+  assert.equal(keepLibrary(parseLibrary("1"), [{ id: 7 }]), 7, "a remembered General that is gone");
+});
+
+test("the core's refusal to add with no library is told apart from other errors", () => {
+  assert.ok(isNoLibrary(`${NO_LIBRARY}: make a library first`));
+  assert.ok(isNoLibrary(new Error(`${NO_LIBRARY}: make a library first`)), "as an error object too");
+  for (const other of ["no library 3", "already in the knowledge library", "not a file: C:/x", ""]) assert.ok(!isNoLibrary(other), other);
 });

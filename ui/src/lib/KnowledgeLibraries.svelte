@@ -4,15 +4,16 @@
   import { store } from "./store.svelte";
   import { kb } from "./knowledge.svelte";
   import { t } from "./i18n.svelte";
-  import { ALL_ROW, MAX_NAME, cleanName, deleteBlock, libraryRow, nameProblem, type DeleteBlock, type KLibrary, type NameProblem } from "./libraries";
+  import { MAX_NAME, cleanName, deleteBlock, libraryRow, nameProblem, type DeleteBlock, type KLibrary, type NameProblem } from "./libraries";
 
   /**
    * The knowledge page's libraries, in the same column as the designs
-   * (ItemColumn): All on top, then each library, its tags and number of
-   * documents above its name, its colour as the bar. A library is renamed,
+   * (ItemColumn): each library, its tags above its name, its colour as the
+   * bar; one is the one shown (the first, at first). A library is renamed,
    * tagged, coloured and deleted from its right-click menu, as a design is
-   * (ArtifactMenu); General is never deleted, nor a library with documents,
-   * which the menu says. All has no menu: it is every library, not one.
+   * (ArtifactMenu); a library with documents (General too) is not deleted,
+   * which the menu says. The last one may go: the column then says how to
+   * make one.
    */
 
   /** What to say about a name; cleared by the next try. */
@@ -23,10 +24,7 @@
     return m ? kb.libraries.find((l) => l.id === m.id) : undefined;
   });
 
-  // The small fact above the name: a design shows when it changed, a library how many documents it holds.
-  /** All libraries: on top whatever the search or filter, as it is no library. */
-  const all = $derived([{ id: ALL_ROW, name: t("kb.lib.all"), tags: [], color: "", meta: t("kb.lib.docCount", { n: kb.sources.length }), menu: false }]);
-  const rows = $derived(kb.libraries.map((l) => ({ ...libraryRow(l, kb.libraryName(l)), meta: t("kb.lib.docCount", { n: l.sources }) })));
+  const rows = $derived(kb.libraries.map((l) => libraryRow(l, kb.libraryName(l))));
 
   function nameNote(p: NameProblem): string {
     if (p === "long") return t("kb.lib.nameLong", { n: MAX_NAME });
@@ -35,7 +33,6 @@
   }
 
   function blockNote(b: DeleteBlock, l: KLibrary): string {
-    if (b === "general") return t("kb.lib.generalKept");
     if (b === "notEmpty") return t("kb.lib.notEmpty", { n: l.sources });
     return "";
   }
@@ -70,13 +67,14 @@
   maxlength={MAX_NAME}
   oncreate={create}
   {note}
-  pinned={all}
   items={rows}
   picked={store.kbTags}
   onpick_tags={(tags) => store.setKbTags(tags)}
-  current={kb.library === null ? ALL_ROW : String(kb.library)}
+  newAsked={kb.createAsked}
+  onnewasked={() => (kb.createAsked = false)}
+  current={kb.library === null ? null : String(kb.library)}
   menued={menu ? String(menu.id) : null}
-  onpick={(id) => kb.showLibrary(id === ALL_ROW ? null : Number(id))}
+  onpick={(id) => kb.showLibrary(Number(id))}
   onmenu={(id, x, y) => {
     note = "";
     menu = { id: Number(id), x, y };
