@@ -1,7 +1,7 @@
 import { invoke, listen, local, bring } from "./ipc.svelte";
 import { store, type ArtifactInfo } from "./store.svelte";
 import { t } from "./i18n.svelte";
-import { addTarget, displayName, keepLibrary, parseLibrary, sourcesIn, type KLibrary } from "./libraries";
+import { displayName, keepLibrary, parseLibrary, sourcesIn, type KLibrary } from "./libraries";
 
 export type { KLibrary } from "./libraries";
 
@@ -127,11 +127,6 @@ class Knowledge {
   /** A library's name as shown (General in the person's language until renamed). */
   libraryName(l: Pick<KLibrary, "id" | "name">): string {
     return displayName(l, t("kb.lib.general"));
-  }
-
-  libraryNameOf(id: number): string {
-    const l = this.libraries.find((x) => x.id === id);
-    return l ? this.libraryName(l) : String(id);
   }
 
   get indexing(): KSource[] {
@@ -352,12 +347,13 @@ class Knowledge {
   }
 
   /**
-   * Add a file to the library shown (General when none is yet); `track`
+   * Add a file to the library shown (with none, the core picks the first,
+   * or makes General again when there is none at all); `track`
    * makes `path` relative to that track's folder. Returns why not, or "".
    */
   async add(path: string, track?: string): Promise<string> {
     try {
-      const added = await invoke<{ source: KSource; artifact: ArtifactInfo }>("knowledge_add", { path, track: track ?? null, library: addTarget(this.library) });
+      const added = await invoke<{ source: KSource; artifact: ArtifactInfo }>("knowledge_add", { path, track: track ?? null, library: this.library });
       if (!store.artifacts.some((a) => a.id === added.artifact.id)) store.artifacts = [added.artifact, ...store.artifacts];
       this.upsert(added.source);
       return "";

@@ -5,7 +5,7 @@
  * what is wrong before asking, and tested apart from the components.
  */
 
-/** The library every document starts in, never deleted (the core's `GENERAL`). */
+/** The library a new library file starts with (the core's `GENERAL`); deleted like any other. */
 export const GENERAL = 1;
 /** Its name as stored; shown in the person's language until they rename it. */
 export const GENERAL_NAME = "General";
@@ -61,18 +61,11 @@ export function nameProblem(name: string, libraries: Pick<KLibrary, "id" | "name
   return "";
 }
 
-export type DeleteBlock = "" | "general" | "notEmpty";
+export type DeleteBlock = "" | "notEmpty";
 
-/** Why a library cannot be deleted: General never is, nor one with documents. "" when it can. */
-export function deleteBlock(lib: Pick<KLibrary, "id" | "sources">): DeleteBlock {
-  if (lib.id === GENERAL) return "general";
-  if (lib.sources > 0) return "notEmpty";
-  return "";
-}
-
-/** Where a document added from a view goes: its library, or General when none is shown yet. */
-export function addTarget(library: number | null): number {
-  return library ?? GENERAL;
+/** Why a library cannot be deleted: it holds documents (General too). "" when it can. */
+export function deleteBlock(lib: Pick<KLibrary, "sources">): DeleteBlock {
+  return lib.sources > 0 ? "notEmpty" : "";
 }
 
 /** The library a view shows, as the graph conversation is told it (`l:<id>`); nothing when none is. */
@@ -82,13 +75,14 @@ export function libraryPick(library: number | null): string[] {
 
 /**
  * The library a view should show once the libraries are (re)loaded: the one
- * it showed if it is still there, else General, else the first. Null only
- * when there are no libraries. (The page once had a view of all libraries,
- * remembered as "all"; it now opens on General.)
+ * it showed if it is still there, else the first (the core lists General
+ * first while it exists, then the oldest). Null when there are none. (The
+ * page once had a view of all libraries, remembered as "all"; it now opens
+ * on the first.)
  */
 export function keepLibrary(library: number | null, libraries: Pick<KLibrary, "id">[]): number | null {
   if (library !== null && libraries.some((l) => l.id === library)) return library;
-  return libraries.find((l) => l.id === GENERAL)?.id ?? libraries[0]?.id ?? null;
+  return libraries[0]?.id ?? null;
 }
 
 /** A remembered choice (a library's id) read back; anything else, the old "all" too, is none. */

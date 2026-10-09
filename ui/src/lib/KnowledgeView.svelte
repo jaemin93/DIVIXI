@@ -11,7 +11,6 @@
   import KnowledgeLibraries from "./KnowledgeLibraries.svelte";
   import { docTrouble, indexProgress } from "./indexProgress";
   import { tick } from "svelte";
-  import { addTarget } from "./libraries";
 
   /**
    * The knowledge library, after Kiro Crew's: the items agents can search
@@ -261,12 +260,12 @@
     {:else if kb.tab === "sources"}
       <div class="actions">
         <span class="grow"></span>
-        <!-- Where an added document goes: the library shown, General when none is yet. -->
-        <span class="mono into">{t("kb.lib.addInto", { name: kb.libraryNameOf(addTarget(kb.library)) })}</span>
+        <!-- Where an added document goes: the library shown; with none at all, a new General. -->
+        <span class="mono into">{kb.current ? t("kb.lib.addInto", { name: kb.libraryName(kb.current) }) : t("kb.lib.addIntoNew")}</span>
         <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
       </div>
       {#if !kb.shown.length}
-        <p class="none">{t("kb.lib.empty")}</p>
+        <p class="none">{kb.libraries.length ? t("kb.lib.empty") : t("kb.lib.none")}</p>
       {/if}
       {#each kb.shown as s (s.id)}
         {@const art = kb.artifactOf(s.id)}

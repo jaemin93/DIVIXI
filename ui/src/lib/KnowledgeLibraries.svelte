@@ -9,9 +9,11 @@
   /**
    * The knowledge page's libraries, in the same column as the designs
    * (ItemColumn): each library, its tags above its name, its colour as the
-   * bar; one is always the one shown (General at first). A library is renamed, tagged, coloured and deleted from its
-   * right-click menu, as a design is (ArtifactMenu); General is never
-   * deleted, nor a library with documents, which the menu says.
+   * bar; one is the one shown (the first, at first). A library is renamed,
+   * tagged, coloured and deleted from its right-click menu, as a design is
+   * (ArtifactMenu); a library with documents (General too) is not deleted,
+   * which the menu says. The last one may go: the column then says how to
+   * make one.
    */
 
   /** What to say about a name; cleared by the next try. */
@@ -31,7 +33,6 @@
   }
 
   function blockNote(b: DeleteBlock, l: KLibrary): string {
-    if (b === "general") return t("kb.lib.generalKept");
     if (b === "notEmpty") return t("kb.lib.notEmpty", { n: l.sources });
     return "";
   }

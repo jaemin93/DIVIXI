@@ -654,7 +654,8 @@ pub struct Added {
     artifact: ArtifactInfo,
 }
 
-/// Add a file to a library (General when none is named) and start describing it.
+/// Add a file to a library (the first one when none is named, General made
+/// again when there is none) and start describing it.
 #[tauri::command]
 pub async fn knowledge_add(app: AppHandle, path: String, track: Option<String>, library: Option<i64>) -> Result<Added, String> {
     let state = app.state::<AppState>();
@@ -669,7 +670,10 @@ pub async fn knowledge_add(app: AppHandle, path: String, track: Option<String>, 
     if state.library.db.source_by_uri(&uri).map_err(|e| e.to_string())?.is_some() {
         return Err("already in the knowledge library".to_string());
     }
-    let library = library.unwrap_or(GENERAL);
+    let library = match library {
+        Some(id) => id,
+        None => state.library.db.default_library().map_err(|e| e.to_string())?,
+    };
     if state.library.db.library(library).map_err(|e| e.to_string())?.is_none() {
         return Err(format!("no library {library}"));
     }
@@ -742,7 +746,7 @@ pub fn knowledge_library_update(app: AppHandle, id: i64, color: Option<String>, 
     Ok(updated)
 }
 
-/// Delete an empty library; General, and a library with documents, are refused.
+/// Delete an empty library (General too); a library with documents is refused.
 #[tauri::command(async)]
 pub fn knowledge_library_delete(app: AppHandle, id: i64) -> Result<(), String> {
     app.state::<AppState>().library.db.delete_library(id).map_err(|e| e.to_string())?;
