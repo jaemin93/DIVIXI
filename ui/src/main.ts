@@ -3,10 +3,14 @@ import "./lib/tokens.css";
 import App from "./App.svelte";
 import { connectEvents, store } from "./lib/store.svelte";
 import { connectKnowledge } from "./lib/knowledge.svelte";
-import { arrive, ready, inTauri, instance } from "./lib/ipc.svelte";
+import { arrive, ready, inTauri, instance, overWeb } from "./lib/ipc.svelte";
 import { step } from "./lib/startup.svelte";
 import { DEADLINE_MS } from "./lib/startup";
 import { t } from "./lib/i18n.svelte";
+
+// A phone's browser, or any browser: the styles that only it needs key off
+// this (tokens.css: fields at 16px, so iOS does not zoom in on them).
+if (overWeb) document.documentElement.dataset.web = "";
 
 // Until the tracks are in, the page says it is connecting rather than
 // showing an empty app (startup.ts). Not for ever: past the deadline a

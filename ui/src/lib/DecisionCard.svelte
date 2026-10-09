@@ -304,8 +304,30 @@
 
   .note {
     flex: 1;
+    min-width: 0;
     height: 32px;
     padding: 0 10px;
+  }
+
+  /* A phone: the card stays inside the screen. The note takes a row of its
+     own, above the two buttons, so neither it nor they are squeezed off the
+     right edge; a long word in an option wraps instead of widening the card. */
+  @media (max-width: 640px) {
+    .foot {
+      flex-wrap: wrap;
+    }
+
+    .note {
+      flex-basis: 100%;
+      height: 40px;
+    }
+
+    .label,
+    .detail,
+    .q,
+    .ctx {
+      overflow-wrap: anywhere;
+    }
   }
 
   .link {

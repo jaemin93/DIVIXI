@@ -36,7 +36,7 @@ import {
 import { addError, dropError, errorLife, type AppError } from "./errors";
 import { withTrack } from "./tracks";
 import { keepsSetting } from "./layoutSettings";
-import { clampZoom, foldsOnPick, instanceZoomKey, parseZoom, WEB_DESIGNLIST_KEY, WEB_KBLIST_KEY, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen } from "./uiMemory";
+import { clampZoom, fieldFontPx, foldsOnPick, instanceZoomKey, parseZoom, WEB_DESIGNLIST_KEY, WEB_KBLIST_KEY, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen } from "./uiMemory";
 import { pairing, type Paired } from "./pairing.svelte";
 import { openKey, parseMemory, pruneOpen, remember, treeReply, underOpen, type WsEntry as WsEntryType } from "./fileTree";
 
@@ -2999,11 +2999,15 @@ class Store {
   async setZoom(percent: number, persist = true) {
     const z = clampZoom(percent);
     this.zoom = z;
+    const root = document.documentElement;
     try {
       await getCurrentWebview().setZoom(z / 100);
-      (document.documentElement.style as unknown as { zoom: string }).zoom = "";
+      (root.style as unknown as { zoom: string }).zoom = "";
+      root.style.removeProperty("--field-fs");
     } catch {
-      (document.documentElement.style as unknown as { zoom: string }).zoom = `${z}%`;
+      (root.style as unknown as { zoom: string }).zoom = `${z}%`;
+      // A phone's fields stay 16px on screen, zoomed out or not (tokens.css).
+      root.style.setProperty("--field-fs", `${fieldFontPx(z)}px`);
     }
     if (!persist) return;
     try {

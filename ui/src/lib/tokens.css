@@ -203,6 +203,23 @@ select:focus-visible {
   outline-offset: -1px;
 }
 
+/* A phone's browser (data-web, set in main.ts), narrow or touch: every field
+ * is 16px on screen. Under that iOS zooms the page in when a field is
+ * touched and does not zoom back out, so the page is left wider than the
+ * screen. Here rather than per component so a new field cannot forget it;
+ * `!important` because each component sets its own size, and none is above
+ * 16px. `--field-fs` is 16px grown back by a zoomed-out page
+ * (uiMemory.fieldFontPx). Not the design board's cards, which are drawn at
+ * the board's own scale. The app's window never matches: no data-web. */
+@media (max-width: 640px), (pointer: coarse) {
+  :root[data-web]
+    :is(input:not([type="button"], [type="submit"], [type="reset"], [type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="image"]), textarea, select):not(
+      .world *
+    ) {
+    font-size: var(--field-fs, 16px) !important;
+  }
+}
+
 /* Said to a screen reader, shown to nobody: the keys a control answers to
    when there is no room (or no reason) to print them on it. Not
    `display: none`, which would take it out of the accessibility tree too. */
