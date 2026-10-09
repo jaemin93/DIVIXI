@@ -373,17 +373,17 @@ mod tests {
 
     #[test]
     fn only_a_single_address_inside_the_tailnet_is_attributable() {
-        assert_eq!(single_forwarded(&headers(&[("x-forwarded-for", "100.90.48.5")])), Some("100.90.48.5".parse().unwrap()));
+        assert_eq!(single_forwarded(&headers(&[("x-forwarded-for", "100.64.0.1")])), Some("100.64.0.1".parse().unwrap()));
         // A chain cannot be attributed, and picking an end is how this gets
         // spoofed: the far end supplies the value.
-        assert_eq!(single_forwarded(&headers(&[("x-forwarded-for", "100.90.48.5, 10.0.0.1")])), None);
+        assert_eq!(single_forwarded(&headers(&[("x-forwarded-for", "100.64.0.1, 10.0.0.1")])), None);
         assert_eq!(single_forwarded(&headers(&[("x-forwarded-for", "")])), None);
         assert_eq!(single_forwarded(&headers(&[("x-forwarded-for", "not-an-address")])), None);
         assert_eq!(single_forwarded(&HeaderMap::new()), None);
 
         assert!(in_tailnet("100.64.0.1".parse().unwrap()));
         assert!(in_tailnet("100.127.255.254".parse().unwrap()));
-        assert!(in_tailnet("fd7a:115c:a1e0::6737:3005".parse().unwrap()));
+        assert!(in_tailnet("fd7a:115c:a1e0::1".parse().unwrap()));
         // Just outside 100.64.0.0/10, both ways.
         assert!(!in_tailnet("100.63.255.255".parse().unwrap()));
         assert!(!in_tailnet("100.128.0.0".parse().unwrap()));
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn the_cache_answers_twice_and_does_not_grow_without_bound() {
         let cache = Cache::default();
-        let addr: IpAddr = "100.90.48.5".parse().unwrap();
+        let addr: IpAddr = "100.64.0.2".parse().unwrap();
         assert_eq!(cache.get(addr), None, "nothing known yet");
         let peer = Peer { login: "a@b.io".into(), node: "n1".into(), tagged: false };
         cache.put(addr, Some(peer.clone()));
