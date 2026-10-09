@@ -66,6 +66,8 @@
     items,
     picked,
     onpick_tags,
+    newAsked = false,
+    onnewasked,
     current,
     menued = null,
     onpick,
@@ -96,6 +98,9 @@
     /** The tags the column is narrowed to, kept as the tracks column keeps its filter. */
     picked: string[];
     onpick_tags: (tags: string[]) => void;
+    /** The page asks for the name box (nothing to put a document in yet); told back once it is open. */
+    newAsked?: boolean;
+    onnewasked?: () => void;
     current: string | null;
     menued?: string | null;
     onpick: (id: string) => void;
@@ -117,6 +122,14 @@
   let fileInput = $state<HTMLInputElement>();
   /** The file option a browser's picker is open for. */
   let picking = $state<Extract<NewOption, { kind: "file" }> | null>(null);
+
+  // Asked from the page: the name box, open (the column may have just been unfolded for it).
+  $effect(() => {
+    if (!newAsked) return;
+    choosing = false;
+    creating = true;
+    onnewasked?.();
+  });
 
   function plus() {
     // An open name box: the "+" puts it away, as it always did.

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   GENERAL,
   GENERAL_NAME,
+  NO_LIBRARY,
   MAX_NAME,
   libraryOfTagKey,
   libraryRow,
@@ -10,6 +11,7 @@ import {
   cleanName,
   deleteBlock,
   displayName,
+  isNoLibrary,
   keepLibrary,
   libraryPick,
   nameProblem,
@@ -84,4 +86,10 @@ test("General deleted: the first library is shown, and nothing once the last is 
   assert.equal(keepLibrary(GENERAL, [{ id: 2 }]), 2, "General just deleted: the next library");
   assert.equal(keepLibrary(GENERAL, []), null, "the last library just deleted: none");
   assert.equal(keepLibrary(parseLibrary("1"), [{ id: 7 }]), 7, "a remembered General that is gone");
+});
+
+test("the core's refusal to add with no library is told apart from other errors", () => {
+  assert.ok(isNoLibrary(`${NO_LIBRARY}: make a library first`));
+  assert.ok(isNoLibrary(new Error(`${NO_LIBRARY}: make a library first`)), "as an error object too");
+  for (const other of ["no library 3", "already in the knowledge library", "not a file: C:/x", ""]) assert.ok(!isNoLibrary(other), other);
 });

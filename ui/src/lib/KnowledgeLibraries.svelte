@@ -70,6 +70,8 @@
   items={rows}
   picked={store.kbTags}
   onpick_tags={(tags) => store.setKbTags(tags)}
+  newAsked={kb.createAsked}
+  onnewasked={() => (kb.createAsked = false)}
   current={kb.library === null ? null : String(kb.library)}
   menued={menu ? String(menu.id) : null}
   onpick={(id) => kb.showLibrary(Number(id))}

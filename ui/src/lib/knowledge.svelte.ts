@@ -1,7 +1,7 @@
 import { invoke, listen, local, bring } from "./ipc.svelte";
 import { store, type ArtifactInfo } from "./store.svelte";
 import { t } from "./i18n.svelte";
-import { displayName, keepLibrary, parseLibrary, sourcesIn, type KLibrary } from "./libraries";
+import { displayName, isNoLibrary, keepLibrary, parseLibrary, sourcesIn, type KLibrary } from "./libraries";
 
 export type { KLibrary } from "./libraries";
 
@@ -102,7 +102,9 @@ class Knowledge {
   formats = $state<string[]>([]);
   /** The file viewer's file, when it is in the library. */
   viewerSource = $state<KSource | null>(null);
-  loaded = false;
+  loaded = $state(false);
+  /** The libraries column was asked to open its name box (no library yet); it clears this. */
+  createAsked = $state(false);
 
   /** The artifact listing a source. */
   artifactOf(id: string): ArtifactInfo | undefined {
@@ -347,23 +349,35 @@ class Knowledge {
   }
 
   /**
-   * Add a file to the library shown (with none, the core picks the first,
-   * or makes General again when there is none at all); `track`
+   * Add a file to the library shown (with none, the core picks the first;
+   * with no library at all it is refused, and said so); `track`
    * makes `path` relative to that track's folder. Returns why not, or "".
    */
   async add(path: string, track?: string): Promise<string> {
+    if (this.loaded && !this.libraries.length) return t("kb.lib.makeFirst");
     try {
       const added = await invoke<{ source: KSource; artifact: ArtifactInfo }>("knowledge_add", { path, track: track ?? null, library: this.library });
       if (!store.artifacts.some((a) => a.id === added.artifact.id)) store.artifacts = [added.artifact, ...store.artifacts];
       this.upsert(added.source);
       return "";
     } catch (err) {
-      return String(err);
+      // From a view that had not loaded the libraries (the workspace panel), or another window's delete.
+      return isNoLibrary(err) ? t("kb.lib.makeFirst") : String(err);
     }
   }
 
-  /** Pick files from disk and add each. */
+  /** No library yet: open the libraries column with its name box, to make one. */
+  askCreate() {
+    void store.setKbList(true);
+    this.createAsked = true;
+  }
+
+  /** Pick files from disk and add each; with no library yet, ask for one instead. */
   async pickAndAdd() {
+    if (this.loaded && !this.libraries.length) {
+      this.askCreate();
+      return;
+    }
     let paths: string[] = [];
     try {
       paths = await bring(await invoke<string[]>("pick_files", { start: local ? (store.currentTrack?.cwd ?? null) : null }));

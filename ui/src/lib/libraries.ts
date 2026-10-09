@@ -85,6 +85,18 @@ export function keepLibrary(library: number | null, libraries: Pick<KLibrary, "i
   return libraries[0]?.id ?? null;
 }
 
+/**
+ * The core's refusal to add a document when there is no library at all
+ * (`orchestra_knowledge::store::NO_LIBRARY`): the page says it in the
+ * person's language instead.
+ */
+export const NO_LIBRARY = "no knowledge library yet";
+
+/** Whether an error is that refusal. */
+export function isNoLibrary(err: unknown): boolean {
+  return String(err).includes(NO_LIBRARY);
+}
+
 /** A remembered choice (a library's id) read back; anything else, the old "all" too, is none. */
 export function parseLibrary(saved: string | null | undefined): number | null {
   if (!saved) return null;

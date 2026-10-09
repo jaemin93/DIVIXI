@@ -211,7 +211,13 @@
         <p class="note">{t("kb.results", { n: shown.length, q: kb.shownQuery })}</p>
       {/if}
 
-      {#if !kb.shown.length}
+      {#if kb.loaded && !kb.libraries.length}
+        <!-- Nothing to put a document in: making a library comes first. -->
+        <div class="emptybox">
+          <p class="none">{t("kb.lib.makeFirst")}</p>
+          <button class="btn btn-acc" onclick={() => kb.askCreate()}>{t("kb.lib.new")}</button>
+        </div>
+      {:else if !kb.shown.length}
         <div class="emptybox">
           <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
         </div>
@@ -260,9 +266,15 @@
     {:else if kb.tab === "sources"}
       <div class="actions">
         <span class="grow"></span>
-        <!-- Where an added document goes: the library shown; with none at all, a new General. -->
-        <span class="mono into">{kb.current ? t("kb.lib.addInto", { name: kb.libraryName(kb.current) }) : t("kb.lib.addIntoNew")}</span>
-        <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
+        {#if kb.loaded && !kb.libraries.length}
+          <!-- No library: nowhere to add to, so the button makes one instead. -->
+          <span class="mono into">{t("kb.lib.makeFirst")}</span>
+          <button class="btn btn-acc" onclick={() => kb.askCreate()}>{t("kb.lib.new")}</button>
+        {:else}
+          <!-- Where an added document goes: the library shown. -->
+          {#if kb.current}<span class="mono into">{t("kb.lib.addInto", { name: kb.libraryName(kb.current) })}</span>{/if}
+          <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
+        {/if}
       </div>
       {#if !kb.shown.length}
         <p class="none">{kb.libraries.length ? t("kb.lib.empty") : t("kb.lib.none")}</p>

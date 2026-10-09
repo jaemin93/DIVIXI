@@ -140,9 +140,13 @@ pub mod status {
 /// The library made once, on a new library file (and the one every document
 /// already there went to when libraries came). It is a library like any other
 /// after that: renamed, and deleted when empty, and not made again on open.
-/// It is made again only to hold a document that would have none (see
-/// [`KnowledgeDb::default_library`] and `settle_libraries`).
+/// A document is never given it unasked: with no library, adding one is
+/// refused ([`NO_LIBRARY`]). The one exception is a document already stored
+/// whose library row is missing, which `settle_libraries` puts back in it.
 pub const GENERAL: i64 = 1;
+/// The start of the error for adding a document when there is no library.
+/// The UI recognises it by this text and says it in the person's language.
+pub const NO_LIBRARY: &str = "no knowledge library yet";
 /// Its name as stored; the UI shows it in the person's language until renamed.
 pub const GENERAL_NAME: &str = "General";
 /// Longest library name, in characters.
@@ -445,25 +449,24 @@ impl KnowledgeDb {
     }
 
     /// Where a document goes when no library is named: the first library
-    /// (General first while it exists, then the oldest). With none at all,
-    /// General is made again for it, so a document always has a library.
+    /// (General first while it exists, then the oldest). With none at all it
+    /// is refused ([`NO_LIBRARY`]): the person makes a library first, and
+    /// none is made for them.
     pub fn default_library(&self) -> anyhow::Result<i64> {
         let conn = self.conn.lock();
         let first: Option<i64> = conn
             .query_row(&format!("SELECT id FROM libraries ORDER BY id != {GENERAL}, created_at, id LIMIT 1"), [], |r| r.get(0))
             .optional()?;
-        if let Some(id) = first {
-            return Ok(id);
-        }
-        make_general(&conn)?;
-        Ok(GENERAL)
+        first.ok_or_else(|| anyhow::anyhow!("{NO_LIBRARY}: make a library first"))
     }
 
     /// Register a document in a library. Errors when the id or the path is
-    /// taken (a file is in one library only), or there is no such library.
+    /// taken (a file is in one library only), or there is no such library
+    /// ([`NO_LIBRARY`] when there is none at all).
     pub fn add_source_in(&self, id: &str, source_type: &str, uri: &str, library: i64) -> anyhow::Result<Source> {
         {
             let conn = self.conn.lock();
+            require_any_library(&conn)?;
             require_library(&conn, library)?;
             conn.execute(
                 "INSERT INTO sources(id, source_type, uri, status, created_at, library_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1230,8 +1233,12 @@ const GENERAL_MADE: &str = "general_made";
 
 /// On every open: General made the first time only (a new file, or one from
 /// before libraries or before General could be deleted), and every document
-/// in a library that exists (one whose library went missing goes to General,
-/// made again for it if need be). Safe to run on every open.
+/// in a library that exists. The second part is a repair, not a default: the
+/// app never leaves a document without its library (a library with documents
+/// is not deleted), so a missing row means an older file or one edited by
+/// hand, and the documents in it would otherwise be searched but shown
+/// nowhere and impossible to move or remove. They go to General, made again
+/// for them only then. Safe to run on every open.
 fn settle_libraries(conn: &Connection) -> anyhow::Result<()> {
     let made = conn.query_row("SELECT 1 FROM meta WHERE key = ?1", params![GENERAL_MADE], |_| Ok(())).optional()?.is_some();
     if !made {
@@ -1274,6 +1281,15 @@ fn backup_before_upgrade(conn: &Connection, path: &Path, from: i64) {
         Ok(_) => tracing::info!(backup = %backup.display(), "kept a copy of the knowledge library before upgrading it"),
         Err(err) => tracing::warn!(%err, "could not copy the knowledge library before upgrading it"),
     }
+}
+
+/// [`NO_LIBRARY`] when there are no libraries at all.
+fn require_any_library(conn: &Connection) -> anyhow::Result<()> {
+    let any = conn.query_row("SELECT 1 FROM libraries LIMIT 1", [], |_| Ok(())).optional()?;
+    if any.is_none() {
+        anyhow::bail!("{NO_LIBRARY}: make a library first");
+    }
+    Ok(())
 }
 
 fn require_library(conn: &Connection, id: i64) -> anyhow::Result<()> {
@@ -1715,10 +1731,19 @@ mod tests {
         {
             let db = KnowledgeDb::open(&path).unwrap();
             assert!(db.libraries().unwrap().is_empty(), "none, and none made on open");
-            // A document with nowhere to go gets General back.
-            let doc = db.add_source("ar002", "local_file", "/docs/b.md").unwrap();
-            assert_eq!(doc.library_id, GENERAL);
-            assert_eq!(db.libraries().unwrap().iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec![GENERAL_NAME]);
+            // With no library a document is refused, named or not, and none is made for it.
+            for refused in [
+                db.add_source("ar002", "local_file", "/docs/b.md").unwrap_err(),
+                db.add_source_in("ar003", "local_file", "/docs/c.md", GENERAL).unwrap_err(),
+                db.default_library().unwrap_err(),
+            ] {
+                assert!(refused.to_string().starts_with(NO_LIBRARY), "{refused}");
+            }
+            assert!(db.libraries().unwrap().is_empty(), "no General made for it");
+            assert!(db.sources().unwrap().is_empty());
+            // A library made by the person takes it.
+            let mine = db.create_library("Mine").unwrap();
+            assert_eq!(db.add_source("ar002", "local_file", "/docs/b.md").unwrap().library_id, mine.id);
         }
         let _ = std::fs::remove_file(&path);
     }
