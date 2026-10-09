@@ -52,7 +52,8 @@ change. Its `server` feature turns on Tauri's `custom-protocol` for that.
 Without it Tauri builds in development mode, embeds nothing, and reads `dist/`
 from the build machine's checkout at run time: the binary works where it was
 built and answers every page with "no such thing" anywhere else.
-`scripts/check-server-ui.sh target/debug/divixi-server` runs a built binary
+`scripts/check-server-ui.sh target/debug/divixi-server 7489` (a debug build
+answers on 7489; a release build on 7488, the default) runs a built binary
 away from the checkout and checks that the UI comes back, as CI does on Linux.
 
 The checks, which are the same five CI runs (`.github/workflows/ci.yml`):

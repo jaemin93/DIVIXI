@@ -141,11 +141,12 @@ jobs:
       # The phone gets its UI from divixi-server, out of the binary itself.
       # A build that leaves it out still serves it here, from this checkout's
       # dist/, and nowhere else (#77); the script runs it with dist/ moved
-      # away to see what a server sees.
+      # away to see what a server sees. A debug build answers on 7489, not
+      # 7488 (LISTEN_PORT in src-tauri/src/remote/mod.rs).
       - name: divixi-server serves its embedded UI
         if: runner.os == 'Linux'
         shell: bash
-        run: scripts/check-server-ui.sh target/debug/divixi-server
+        run: scripts/check-server-ui.sh target/debug/divixi-server 7489
 
       # Divixi starts a remote instance over SSH with `setsid`, which exists on
       # Linux and not on macOS (remote_line() in src-tauri/src/remote/client.rs).
