@@ -1,5 +1,5 @@
 import { invoke, listen } from "./ipc.svelte";
-import { store, artifactKey, type ArtifactInfo, type Routine } from "./store.svelte";
+import { store, artifactKey, type ArtifactInfo, type OptionConfig, type Routine } from "./store.svelte";
 import { t } from "./i18n.svelte";
 import { emptyPlan, instructionChanged, needsFirstDraft, pressedRun, runGate, unsaved, type LiveRun, type PlanDoc, type PlanEvent, type RunGate } from "./planGraph";
 
@@ -25,6 +25,9 @@ const drafted = new Set<string>();
 /** What `routine_plan_open` answers. */
 type Opened = { routine: Routine; plan: ArtifactInfo; doc: PlanDoc };
 
+/** An agent and its options, as picked. */
+export type AgentChoice = { agent: string; config: OptionConfig };
+
 class Plans {
   /** The routine whose plan this is, and whether its plan is on screen. */
   routine = $state("");
@@ -43,6 +46,22 @@ class Plans {
   live = $state<LiveRun | null>(null);
   /** Run was pressed and the plan on screen is not what the run would get: what to ask. */
   gate = $state<RunGate | null>(null);
+  /**
+   * The routine agent a new plan starts on, picked beside [Plan] before the
+   * plan exists. Once it does, the plan's own agent (the panel's picker) is it.
+   */
+  draftAgent = $state<AgentChoice>({ agent: "", config: {} });
+
+  /** Start the picker beside [Plan]: the routine agent last used, else `fallback`. */
+  async loadDraftAgent(fallback: string) {
+    let got: AgentChoice | null = null;
+    try {
+      got = await invoke<AgentChoice | null>("plan_agent_default");
+    } catch {
+      // No memory yet reads as none.
+    }
+    this.draftAgent = got ?? { agent: fallback, config: {} };
+  }
 
   /**
    * Run a routine, asking first when its plan on screen is not what the
@@ -174,12 +193,14 @@ class Plans {
    * the draft arriving as suggestion cards. A routine that has a plan just
    * shows it; changing it is asked for in the panel.
    */
-  async openFor(routine: string): Promise<boolean> {
+  async openFor(routine: string, agent?: AgentChoice): Promise<boolean> {
     const hadPlan = !!store.routines.find((r) => r.id === routine)?.plan;
     this.follow(routine);
     this.busy = true;
     try {
-      const got = await invoke<Opened>("routine_plan_open", { routine, agent: null });
+      // A new plan is made on the routine agent picked beside [Plan].
+      const pick = !hadPlan && agent?.agent ? agent : null;
+      const got = await invoke<Opened>("routine_plan_open", { routine, agent: pick?.agent ?? null, config: pick?.config ?? null });
       if (this.routine !== routine) return false;
       this.id = got.plan.id;
       this.doc = got.doc;

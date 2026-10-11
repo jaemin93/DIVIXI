@@ -621,7 +621,13 @@ async fn delete_routine(app: AppHandle, id: String) -> Result<(), String> {
 /// The plan's agent is its own, never the routine's: the one asked for, else
 /// the one last chosen for a plan, else (on a first plan) the routine's.
 #[tauri::command(async)]
-fn routine_plan_open(app: AppHandle, state: State<'_, AppState>, routine: String, agent: Option<String>) -> Result<serde_json::Value, String> {
+fn routine_plan_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    routine: String,
+    agent: Option<String>,
+    config: Option<std::collections::BTreeMap<String, String>>,
+) -> Result<serde_json::Value, String> {
     // One at a time, so two quick presses do not make two plans.
     static OPENING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
     let _held = OPENING.lock();
@@ -634,25 +640,20 @@ fn routine_plan_open(app: AppHandle, state: State<'_, AppState>, routine: String
             }
         }
     }
-    let remembered: Option<(String, std::collections::BTreeMap<String, String>)> = state
-        .store
-        .get_meta(PLAN_AGENT_DEFAULT)
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .and_then(|v| {
-            let agent = v.get("agent")?.as_str()?.to_string();
-            let config = serde_json::from_value(v.get("config").cloned().unwrap_or_default()).unwrap_or_default();
-            Some((agent, config))
-        });
-    let (agent, config) = match agent.filter(|a| !a.trim().is_empty()) {
-        Some(a) => (a, Default::default()),
-        None => match remembered.filter(|(a, _)| state.spec_for(a).is_ok()) {
+    // The routine agent picked beside [Plan] (and so remembered for the next
+    // plan), else the last one used for a plan, else the routine's own.
+    let chosen = agent.filter(|a| !a.trim().is_empty());
+    let (agent, config) = match chosen.clone() {
+        Some(a) => (a, config.unwrap_or_default()),
+        None => match plan_agent_remembered(&state) {
             Some(pair) => pair,
             None => (r.agent.clone(), Default::default()),
         },
     };
     state.spec_for(&agent)?;
+    if chosen.is_some() {
+        remember_plan_agent(&state, &agent, &config);
+    }
     let body = plan::new_body(&r)?;
     let mut info = state.store.create_artifact(plan::KIND, &r.name, &agent, &body).map_err(|e| e.to_string())?;
     if !config.is_empty() {
@@ -670,6 +671,30 @@ fn routine_plan_open(app: AppHandle, state: State<'_, AppState>, routine: String
 /// Where the agent and options last chosen for a plan are kept, as the
 /// start of the next plan.
 const PLAN_AGENT_DEFAULT: &str = "plan_agent_default";
+
+/// The routine agent the next plan starts on, if one was chosen before and
+/// is still installed.
+fn plan_agent_remembered(state: &AppState) -> Option<(String, std::collections::BTreeMap<String, String>)> {
+    let raw = state.store.get_meta(PLAN_AGENT_DEFAULT).ok().flatten()?;
+    let v = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let agent = v.get("agent")?.as_str()?.to_string();
+    let config = serde_json::from_value(v.get("config").cloned().unwrap_or_default()).unwrap_or_default();
+    state.spec_for(&agent).is_ok().then_some((agent, config))
+}
+
+fn remember_plan_agent(state: &AppState, agent: &str, config: &std::collections::BTreeMap<String, String>) {
+    let remembered = serde_json::json!({ "agent": agent, "config": config }).to_string();
+    if let Err(err) = state.store.set_meta(PLAN_AGENT_DEFAULT, &remembered) {
+        tracing::warn!(%err, "could not remember the plan agent");
+    }
+}
+
+/// The routine agent a new plan would start on (for the picker beside
+/// [Plan]); null when none was chosen yet.
+#[tauri::command(async)]
+fn plan_agent_default(state: State<'_, AppState>) -> Option<serde_json::Value> {
+    plan_agent_remembered(&state).map(|(agent, config)| serde_json::json!({ "agent": agent, "config": config }))
+}
 
 /// A routine's plan as it is now.
 #[tauri::command(async)]
@@ -783,10 +808,7 @@ fn update_artifact(
         .map_err(|e| e.to_string())?;
     // The agent and options chosen for a plan start the next plan too.
     if chose && info.kind == plan::KIND {
-        let remembered = serde_json::json!({ "agent": info.agent, "config": info.config }).to_string();
-        if let Err(err) = state.store.set_meta(PLAN_AGENT_DEFAULT, &remembered) {
-            tracing::warn!(%err, "could not remember the plan agent");
-        }
+        remember_plan_agent(&state, &info.agent, &info.config);
     }
     Ok(info)
 }
@@ -2008,6 +2030,7 @@ pub fn run() {
             routine_cancel,
             running_routines,
             routine_plan_open,
+            plan_agent_default,
             routine_live,
             plan_doc,
             plan_apply,

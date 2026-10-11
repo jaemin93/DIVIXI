@@ -9,6 +9,7 @@
   import PanelToggle from "./PanelToggle.svelte";
   import RunHistory from "./RunHistory.svelte";
   import AgentPicker from "./AgentPicker.svelte";
+  import RunAgentRow from "./RunAgentRow.svelte";
   import { plans } from "./plan.svelte";
   import { resultGlyphs, resultsOf } from "./planGraph";
   import { untrack } from "svelte";
@@ -126,6 +127,15 @@
   /** In plan mode the form folds to one line; this opens it. */
   let formOpen = $state(false);
 
+  /** [Plan] is offered here: a new routine, or a saved one with no plan. */
+  const offersPlan = $derived(making || (!!saved && !hasPlan));
+  // The routine agent beside [Plan] starts as the one last used for a plan.
+  $effect(() => {
+    const key = offersPlan ? (making ? NEW_ROUTINE : (saved?.id ?? "")) : "";
+    if (!key) return;
+    untrack(() => void plans.loadDraftAgent(saved?.agent || agent || store.readyAgents[0]?.kind || ""));
+  });
+
   /**
    * The Plan button: shows the routine's plan, or hides it. A form not saved
    * yet is saved first (it needs all four answers, as saving does), and a
@@ -141,7 +151,7 @@
     const id = store.routine;
     if (!id || id === NEW_ROUTINE) return;
     formOpen = false;
-    await plans.openFor(id);
+    await plans.openFor(id, plans.draftAgent);
   }
 
   /** A run's step results in one line, in the order of the plan it was given. */
@@ -190,31 +200,34 @@
             {/if}
           </div>
         {/if}
-        <!-- What the run goes on: picked here, kept with the routine, used from the next run. -->
-        <AgentPicker
-          target={{
-            label: t("routines.runAgent"),
-            agent: saved.agent,
-            config: saved.config,
-            note: t("routines.nextRun"),
-            setAgent: (a) => void store.saveRoutine(saved.id, a === saved.agent ? { agent: a } : { agent: a, config: {} }),
-            setOption: (id, value) => {
-              const { [id]: _old, ...rest } = saved.config;
-              void store.saveRoutine(saved.id, { config: value ? { ...rest, [id]: value } : rest });
-            },
-          }}
-        />
-        <!-- The right of the page: the plan's agent (the robot, once the plan is
-             open) and the routine's folder as files, as beside a track. -->
+        <!-- The right of the page: the routine agent (the robot, once the plan is
+             open) and the routine's folder as files, as beside a track. The run
+             agent is in the settings, not here. -->
         <div class="toggles">
           {#if planOn && store.planInfo}
-            <PanelToggle icon="bot" on={store.planChatOpen} title={t("panel.agent")} onclick={() => store.setPlanChat(!store.planChatOpen)} />
+            <PanelToggle icon="bot" on={store.planChatOpen} title={t("plan.agentLabel")} onclick={() => store.setPlanChat(!store.planChatOpen)} />
           {/if}
           <PanelToggle on={store.planFilesOpen} title={t("ws.toggle")} onclick={() => store.setPlanFiles(!store.planFilesOpen)} />
         </div>
       </div>
     {/if}
   </header>
+
+  {#snippet planAgent()}
+    <AgentPicker
+      target={{
+        label: t("plan.agentLabel"),
+        agent: plans.draftAgent.agent,
+        config: plans.draftAgent.config,
+        note: t("plan.agentNote"),
+        setAgent: (a) => (plans.draftAgent = { agent: a, config: a === plans.draftAgent.agent ? plans.draftAgent.config : {} }),
+        setOption: (id, value) => {
+          const { [id]: _old, ...rest } = plans.draftAgent.config;
+          plans.draftAgent = { ...plans.draftAgent, config: value ? { ...rest, [id]: value } : rest };
+        },
+      }}
+    />
+  {/snippet}
 
   {#snippet form()}
     <!-- Where and on what, above the words: the same order the form asks a
@@ -235,9 +248,13 @@
         </div>
       </div>
 
+      {#if !making && saved && !planOn}
+        <div class="f wide runrow"><RunAgentRow routine={saved} /></div>
+      {/if}
+
       {#if making}
       <label class="f">
-        <span class="flab">{t("routines.agent")}</span>
+        <span class="flab">{t("plan.runsOn")}</span>
         <select bind:value={agent}>
           {#if !store.readyAgents.length}<option value="">{t("routines.noAgents")}</option>{/if}
           {#each store.readyAgents as a (a.kind)}
@@ -276,6 +293,11 @@
 
     <div class="erow">
       {#if failed}<span class="bad">{failed}</span>{/if}
+      {#if offersPlan}
+        <!-- Who drafts the plan: the routine agent, picked before the plan exists;
+             the same choice as the panel's picker afterwards. -->
+        {@render planAgent()}
+      {/if}
       {#if making}
         <!-- A new routine is made by planning it: saved, and its first plan drafted. -->
         <button class="save" disabled={!complete || plans.busy} title={complete ? t("plan.buttonNew") : t("plan.buttonIncomplete")} onclick={planPress}>
@@ -296,7 +318,7 @@
       <div class="summary">
         <button class="fold" aria-expanded={formOpen} onclick={() => (formOpen = !formOpen)}>{formOpen ? "▾" : "▸"} {t("plan.form")}</button>
         <span>{t("routines.folder")} <b class="mono">{saved.cwd}</b></span>
-        <span>{t("plan.runsOn")} <b>{agentLabel(saved.agent)}</b></span>
+        <RunAgentRow routine={saved} />
         {#if dirty}<span class="bad">{t("plan.unsaved")}</span>{/if}
       </div>
       {#if formOpen}

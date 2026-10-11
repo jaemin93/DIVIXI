@@ -90,6 +90,8 @@ pub const ALLOWED: &[&str] = &[
     "routine_live",
     // a routine's plan, read only (its chat is the artifact's, above)
     "plan_doc",
+    // the routine agent a new plan would start on
+    "plan_agent_default",
     // the app
     "agent_statuses",
     "app_info",

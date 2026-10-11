@@ -2553,6 +2553,37 @@ mod tests {
         assert_eq!(read.instruction, "check", "the instruction it was sent is its own, as before");
     }
 
+    /// The run agent (the routine's) and the routine agent (its plan's, who
+    /// works the plan out) are two choices: either changes, the other stays.
+    #[test]
+    fn a_routines_run_agent_and_its_plan_agent_are_apart() {
+        let store = Store::in_memory().unwrap();
+        let r = store
+            .create_routine(&RoutinePatch {
+                name: Some("deps".into()),
+                instruction: Some("check".into()),
+                cwd: Some("/w".into()),
+                agent: Some("codex".into()),
+                config: Some(BTreeMap::from([("model".to_string(), "gpt-5".to_string())])),
+                ..RoutinePatch::default()
+            })
+            .unwrap();
+        let plan = store.create_artifact("plan", "deps", "claude_code", "{}").unwrap();
+        store.set_routine_plan(&r.id, &plan.id).unwrap();
+
+        let plan_config = BTreeMap::from([("model".to_string(), "opus".to_string())]);
+        store
+            .update_artifact(&plan.id, &ArtifactPatch { agent: Some("copilot".into()), config: Some(plan_config.clone()), ..ArtifactPatch::default() })
+            .unwrap();
+        let r2 = store.routine(&r.id).unwrap().unwrap();
+        assert_eq!((r2.agent.as_str(), r2.config.get("model").map(String::as_str)), ("codex", Some("gpt-5")), "the plan's agent leaves the run's alone");
+
+        store.update_routine(&r.id, &RoutinePatch { agent: Some("gemini".into()), config: Some(BTreeMap::new()), ..RoutinePatch::default() }).unwrap();
+        let (p, _) = store.artifact(&plan.id).unwrap().unwrap();
+        assert_eq!((p.agent.as_str(), p.config.clone()), ("copilot", plan_config), "and the run's leaves the plan's alone");
+        assert_eq!(store.routine(&r.id).unwrap().unwrap().agent, "gemini");
+    }
+
     /// The bug this table exists for: a routine ran on the agent a track
     /// used, and its work turned up in that track's history. Every way the
     /// app reaches for runs is asked here, because it only takes one that
