@@ -1297,9 +1297,15 @@ const OWN_TOOLS: &[&str] = &[PLAN_GET, PLAN_ADD_STEP, PLAN_UPDATE_STEP, PLAN_LIN
 /// Whether a permission question from a plan's agent is about one of its
 /// own plan tools (allowed) rather than anything else it could do: write a
 /// file, run a command (refused). Read from the question's title and input,
-/// which name the tool (`mcp__divixi__plan_add_step` and the like).
+/// which name the tool as each agent writes it: `mcp__divixi__plan_add_step`
+/// (Claude Code), `mcp.divixi.plan_add_step` (Codex), the bare name.
 pub fn is_own_tool(title: &str, input: &str) -> bool {
-    let named = |text: &str| OWN_TOOLS.iter().any(|t| text.contains(&format!("divixi__{t}")) || text.trim() == *t);
+    let named = |text: &str| {
+        OWN_TOOLS.iter().any(|t| {
+            let text = text.trim();
+            text == *t || text.contains(&format!("divixi__{t}")) || text == format!("mcp.divixi.{t}") || text.starts_with(&format!("mcp.divixi.{t}("))
+        })
+    };
     named(title) || named(input)
 }
 
@@ -1863,6 +1869,9 @@ mod tests {
         assert!(!is_own_tool("Bash", "rm -rf build"));
         assert!(!is_own_tool("mcp__divixi__plan_step", ""), "a run's tool is not the plan agent's");
         assert!(!is_own_tool("mcp__other__plan_add_step", ""), "another server's tool of the same name");
+        assert!(is_own_tool("mcp.divixi.plan_add_step", ""), "as Codex names it");
+        assert!(!is_own_tool("mcp.other.plan_add_step", ""));
+        assert!(!is_own_tool("echo mcp.divixi.plan_add_step > x.txt", ""), "a command that only mentions it");
     }
 
     #[test]

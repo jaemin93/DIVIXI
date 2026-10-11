@@ -111,6 +111,32 @@ struct PendingQuestions {
     prefix: String,
     next: u64,
     waiting: std::collections::HashMap<String, Responder<RequestPermissionResponse>>,
+    /// The title each tool call started with, by its id: some agents (Codex)
+    /// ask permission for a call with its id alone, and the question should
+    /// still say what the call is.
+    titles: std::collections::HashMap<String, String>,
+}
+
+/// How many tool call titles a session keeps for its questions.
+const TITLES_KEPT: usize = 256;
+
+/// Keep the titles of tool calls as they start (see `PendingQuestions::titles`).
+fn remember_titles(pending: &Pending, events: &[AgentEvent]) {
+    let Ok(mut p) = pending.lock() else { return };
+    for ev in events {
+        if let AgentEvent::ToolCall { id, title, .. } = ev {
+            if p.titles.len() >= TITLES_KEPT {
+                p.titles.clear();
+            }
+            p.titles.insert(id.clone(), title.clone());
+        }
+    }
+}
+
+/// What a permission question says it is about: its own title, else the
+/// title its tool call started with, else the call's id.
+fn question_title(own: Option<&str>, id: &str, known: Option<&str>) -> String {
+    own.filter(|t| !t.trim().is_empty()).or(known).unwrap_or(id).to_string()
 }
 
 impl PendingQuestions {
@@ -162,9 +188,11 @@ fn hold_question(pending: &Pending, req: RequestPermissionRequest, responder: Re
         }
         Err(_) => String::new(),
     };
+    let id = req.tool_call.tool_call_id.to_string();
+    let known = pending.lock().ok().and_then(|p| p.titles.get(&id).cloned());
     AgentEvent::Permission {
         request,
-        title: fields.title.clone().unwrap_or_else(|| req.tool_call.tool_call_id.to_string()),
+        title: question_title(fields.title.as_deref(), &id, known.as_deref()),
         tool_kind: fields.kind.as_ref().map(|k| format!("{k:?}").to_lowercase()).unwrap_or_default(),
         input,
         options,
@@ -612,10 +640,12 @@ async fn forward(
         let tx_ask = tx.clone();
         let commands = commands.clone();
         let pending = pending.clone();
+        let pending_seen = pending.clone();
         MatchDispatch::new(dispatch)
             .if_notification(async move |notif: SessionNotification| {
                 let events = translate(notif.update);
                 remember_commands(&commands, &events);
+                remember_titles(&pending_seen, &events);
                 for ev in events {
                     let _ = tx.send(ev);
                 }
@@ -632,4 +662,15 @@ async fn forward(
             .otherwise_ignore()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod title_tests {
+    #[test]
+    fn a_question_without_a_title_says_what_its_call_started_as() {
+        assert_eq!(super::question_title(Some("Write a.txt"), "c1", Some("x")), "Write a.txt");
+        assert_eq!(super::question_title(None, "exec-1", Some("mcp.divixi.plan_add_step")), "mcp.divixi.plan_add_step", "Codex asks by id");
+        assert_eq!(super::question_title(Some("  "), "exec-1", Some("t")), "t");
+        assert_eq!(super::question_title(None, "exec-1", None), "exec-1");
+    }
 }
