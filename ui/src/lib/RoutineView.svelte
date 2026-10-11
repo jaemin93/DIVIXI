@@ -278,7 +278,7 @@
             }}
           >
             {#each modelOption.choices as c (c.id)}
-              <option value={c.id}>{c.name}</option>
+              <option value={c.id}>{c.name}{c.id === modelOption.current ? " · now" : ""}</option>
             {/each}
           </select>
         </label>

@@ -305,7 +305,7 @@
         >
           {#if option.category !== "model"}<option value="">{defaultLabel(effectiveAgent, option)}</option>{/if}
           {#each option.choices as c (c.id)}
-            <option value={c.id}>{c.name}{c.group ? ` · ${c.group}` : ""}{c.id !== c.name ? ` (${c.id.replace(/^.*[#/]/, "")})` : ""}</option>
+            <option value={c.id}>{c.name}{c.group ? ` · ${c.group}` : ""}{c.id !== c.name ? ` (${c.id.replace(/^.*[#/]/, "")})` : ""}{option.category === "model" && c.id === option.current ? " · now" : ""}</option>
           {/each}
         </select>
         {#if option.category === "mode"}

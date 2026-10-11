@@ -217,7 +217,7 @@
             <button class="model" class:on={chosen} role="radio" aria-checked={chosen} disabled={!sExtract} onclick={() => setOption(modelOption.id, c.id)}>
               <span class="mname">{c.name}</span>
               {#if cheap[modelOption.id] === c.id}<span class="mono cheap">{t("kb.set.cheapest")}</span>{/if}
-              {#if c.id === modelOption.current}<span class="mono dflt">{t("kb.set.agentDefault")}</span>{/if}
+              {#if c.id === modelOption.current}<span class="mono dflt">now</span>{/if}
             </button>
           {/each}
         </div>

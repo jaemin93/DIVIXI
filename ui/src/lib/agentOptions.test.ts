@@ -75,6 +75,14 @@ test("nothing saved shows the agent's current model as picked", () => {
   }
 });
 
+test("the agent's current model is marked now, saved or not", () => {
+  const m = option("model", "model", "sonnet", [choice("opus"), choice("sonnet")]);
+  const empty = choiceList(m, "");
+  assert.deepEqual(empty.find((c) => c.id === "sonnet"), { ...choice("sonnet"), on: true, now: true }, "nothing saved: now and picked");
+  const saved = choiceList(m, "opus");
+  assert.deepEqual(saved.map((c) => [c.id, c.on, c.now]), [["opus", true, false], ["sonnet", false, true]]);
+});
+
 test("a saved model shows as picked; one the agent no longer lists shows its current", () => {
   const m = option("model", "model", "sonnet", [choice("opus"), choice("sonnet")]);
   assert.equal(shownChoice(m, "opus"), "opus");

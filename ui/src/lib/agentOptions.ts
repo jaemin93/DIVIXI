@@ -38,8 +38,12 @@ export function shownChoice<C extends Choice>(option: Listed<C>, chosen: string 
   return chosen && option.choices.some((c) => c.id === chosen) ? chosen : option.current;
 }
 
-/** A model list to draw: the agent's choices only, the one shown as picked marked. */
-export function choiceList<C extends Choice>(option: Listed<C>, chosen: string | undefined): (C & { on: boolean })[] {
+/**
+ * A model list to draw: the agent's choices only, the one shown as picked
+ * marked `on` (✓) and the agent's own current one `now`; nothing saved, the
+ * same one is both.
+ */
+export function choiceList<C extends Choice>(option: Listed<C>, chosen: string | undefined): (C & { on: boolean; now: boolean })[] {
   const shown = shownChoice(option, chosen);
-  return option.choices.map((c) => ({ ...c, on: c.id === shown }));
+  return option.choices.map((c) => ({ ...c, on: c.id === shown, now: c.id === option.current }));
 }

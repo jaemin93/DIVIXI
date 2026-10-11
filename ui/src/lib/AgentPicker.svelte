@@ -175,7 +175,7 @@
               <span class="mono id">{c.name}</span>
               <span class="desc">{c.id}{c.group ? ` · ${c.group}` : ""}{c.description ? ` · ${c.description}` : ""}</span>
             </span>
-            {#if c.on}<span class="mono check">✓</span>{/if}
+            {#if c.now}<span class="mono dim">now</span>{/if}{#if c.on}<span class="mono check">✓</span>{/if}
           </button>
         {/each}
       {/if}
