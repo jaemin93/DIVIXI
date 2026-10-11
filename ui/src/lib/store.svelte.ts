@@ -1443,7 +1443,7 @@ class Store {
   get wsTarget(): string {
     if (this.view === "routines") return this.routine && this.routine !== NEW_ROUTINE ? `routine:${this.routine}` : "";
     if (this.view === "design") return this.artifact ? `artifact:${this.artifact}` : "";
-    return this.wsTarget;
+    return this.track;
   }
 
   /** The target the panel's rows were read for. */
