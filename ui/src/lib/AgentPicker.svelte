@@ -118,6 +118,7 @@
       <span class="label mono">
         {summary.conductor}{#if summary.model}<span class="dim">{summary.model}</span>{/if}{#if summary.workers}<span class="sep">/</span><span class="dim">{t("picker.worker")}</span><span>{summary.workers}</span>{/if}
       </span>
+      {#if target}<span class="caret">▾</span>{/if}
     </button>
   {/snippet}
 
@@ -437,6 +438,11 @@
     font-size: 10px;
     letter-spacing: 0.1em;
     padding: 0;
+  }
+
+  .caret {
+    font-size: 9px;
+    color: var(--lab);
   }
 
   .tlabel {

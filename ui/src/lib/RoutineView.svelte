@@ -293,22 +293,23 @@
 
     <div class="erow">
       {#if failed}<span class="bad">{failed}</span>{/if}
-      {#if offersPlan}
-        <!-- Who drafts the plan: the planning agent, picked before the plan exists;
-             the same choice as the panel's picker afterwards. -->
-        {@render planAgent()}
+      {#if !making}
+        <button class="save" disabled={!complete || !dirty} onclick={save}>{t("routines.save")}</button>
       {/if}
-      {#if making}
-        <!-- A new routine is made by planning it: saved, and its first plan drafted. -->
-        <button class="save" disabled={!complete || plans.busy} title={complete ? t("plan.buttonNew") : t("plan.buttonIncomplete")} onclick={planPress}>
+      {#if offersPlan}
+        <!-- [Planning agent ▾] [Plan]: who drafts the plan, picked before it exists
+             (the panel's picker afterwards), then the press. A new routine is made
+             by planning it; a saved one with no plan yet (one the conductor wrote,
+             say) is planned from here. -->
+        {@render planAgent()}
+        <button
+          class="save"
+          disabled={!complete || plans.busy}
+          title={complete ? t("plan.buttonNew") : t("plan.buttonIncomplete")}
+          onclick={planPress}
+        >
           {t("plan.button")}
         </button>
-      {:else}
-        <button class="save" disabled={!complete || !dirty} onclick={save}>{t("routines.save")}</button>
-        {#if !hasPlan}
-          <!-- A saved routine with no plan yet (one the conductor wrote, say): plan it from here. -->
-          <button class="save" disabled={!complete || plans.busy} title={t("plan.buttonNew")} onclick={planPress}>{t("plan.button")}</button>
-        {/if}
       {/if}
     </div>
   {/snippet}
