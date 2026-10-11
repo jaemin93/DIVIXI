@@ -14,7 +14,7 @@
   import { resultGlyphs, resultsOf } from "./planGraph";
   import { untrack } from "svelte";
   import { t } from "./i18n.svelte";
-  import { shownChoice } from "./agentOptions";
+  import { missingChoice, shownChoice } from "./agentOptions";
   import { whenFull } from "./time";
 
   /**
@@ -130,11 +130,14 @@
 
   /** [Plan] is offered here: a new routine, or a saved one with no plan. */
   const offersPlan = $derived(making || (!!saved && !hasPlan));
-  // The planning agent beside [Plan] starts as the one last used for a plan.
+  // The planning agent beside [Plan] starts as the one last used for a plan
+  // (not again while [Plan] saves the form: that would undo the pick).
   $effect(() => {
     const key = offersPlan ? (making ? NEW_ROUTINE : (saved?.id ?? "")) : "";
     if (!key) return;
-    untrack(() => void plans.loadDraftAgent(saved?.agent || agent || store.readyAgents[0]?.kind || ""));
+    untrack(() => {
+      if (!pressing) void plans.loadDraftAgent(saved?.agent || agent || store.readyAgents[0]?.kind || "");
+    });
   });
 
   /**
@@ -143,16 +146,26 @@
    * routine with no plan gets one. Nothing is sent to the plan's agent: the
    * human asks it from the robot panel when they want to.
    */
+  /** [Plan] is at work: a second press waits, and makes no second routine. */
+  let pressing = $state(false);
+
   async function planPress() {
-    if (!complete || plans.busy) return;
-    if (making || dirty) {
-      await save();
-      if (failed) return;
+    if (!complete || plans.busy || pressing) return;
+    pressing = true;
+    // The planning agent as picked now, before saving reads anything back.
+    const choice = plans.draftAgent;
+    try {
+      if (making || dirty) {
+        await save();
+        if (failed) return;
+      }
+      const id = store.routine;
+      if (!id || id === NEW_ROUTINE) return;
+      formOpen = false;
+      await plans.openFor(id, choice);
+    } finally {
+      pressing = false;
     }
-    const id = store.routine;
-    if (!id || id === NEW_ROUTINE) return;
-    formOpen = false;
-    await plans.openFor(id, plans.draftAgent);
   }
 
   /** A run's step results in one line, in the order of the plan it was given. */
@@ -177,7 +190,7 @@
           </button>
         {:else}
           <div class="gatewrap">
-            <button class="go" disabled={dirty} title={dirty ? t("routines.saveFirst") : ""} onclick={() => plans.requestRun(saved.id)}>
+            <button class="go" disabled={dirty || store.routineRequesting(saved.id)} title={dirty ? t("routines.saveFirst") : ""} onclick={() => plans.requestRun(saved.id)}>
               <Icon name="play" size={12} /> {t("routines.runNow")}
             </button>
             {#if plans.gate && plans.routine === saved.id}
@@ -221,10 +234,10 @@
         agent: plans.draftAgent.agent,
         config: plans.draftAgent.config,
         note: t("plan.agentNote"),
-        setAgent: (a) => (plans.draftAgent = { agent: a, config: a === plans.draftAgent.agent ? plans.draftAgent.config : {} }),
+        setAgent: (a) => plans.pickDraftAgent({ agent: a, config: a === plans.draftAgent.agent ? plans.draftAgent.config : {} }),
         setOption: (id, value) => {
           const { [id]: _old, ...rest } = plans.draftAgent.config;
-          plans.draftAgent = { ...plans.draftAgent, config: value ? { ...rest, [id]: value } : rest };
+          plans.pickDraftAgent({ ...plans.draftAgent, config: value ? { ...rest, [id]: value } : rest });
         },
       }}
     />
@@ -277,6 +290,7 @@
               config = next;
             }}
           >
+            {#if missingChoice(modelOption, config[modelOption.id])}<option value={config[modelOption.id]}>{config[modelOption.id]} · {t("picker.missing")}</option>{/if}
             {#each modelOption.choices as c (c.id)}
               <option value={c.id}>{c.name}{c.id === modelOption.current ? " · now" : ""}</option>
             {/each}
@@ -304,7 +318,7 @@
         {@render planAgent()}
         <button
           class="save"
-          disabled={!complete || plans.busy}
+          disabled={!complete || plans.busy || pressing}
           title={complete ? t("plan.buttonNew") : t("plan.buttonIncomplete")}
           onclick={planPress}
         >

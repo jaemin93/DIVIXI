@@ -1,9 +1,9 @@
 import { invoke, listen, local } from "./ipc.svelte";
 import { keepsSetting } from "./layoutSettings";
-import { DRAWER_HEIGHT_KEY, DRAWER_KEY, DRAWER_RESET, clampDrawer, drawerFromSettings, pickStep } from "./planDrawer";
+import { DRAWER_HEIGHT_KEY, DRAWER_KEY, DRAWER_RESET, clampDrawer, drawerFromSettings, drawerSettings, pickStep } from "./planDrawer";
 import { store, artifactKey, type ArtifactInfo, type OptionConfig, type Routine } from "./store.svelte";
 import { t } from "./i18n.svelte";
-import { emptyPlan, instructionChanged, needsFirstDraft, pressedRun, runGate, unsaved, type LiveRun, type PlanDoc, type PlanEvent, type RunGate } from "./planGraph";
+import { emptyPlan, instructionChanged, mergeLive, needsFirstDraft, pressedRun, runGate, runVersion, unsaved, type LiveRun, type PlanDoc, type PlanEvent, type RunGate } from "./planGraph";
 
 /** Mirrors `routine::StepProgress`: a run's agent saying where it is (status "begun": a run given a plan started). */
 type StepProgress = { routine: string; run: string; step: string; status: string; note: string };
@@ -56,17 +56,30 @@ class Plans {
    * plan exists. Once it does, the plan's own agent (the panel's picker) is it.
    */
   draftAgent = $state<AgentChoice>({ agent: "", config: {} });
+  /** Bumped by every pick beside [Plan], so an answer read before it does not undo it. */
+  private draftPicks = 0;
 
   /** Start the picker beside [Plan]: the planning agent last used, else `fallback`. */
   async loadDraftAgent(fallback: string) {
+    const picks = this.draftPicks;
     let got: AgentChoice | null = null;
     try {
       got = await invoke<AgentChoice | null>("plan_agent_default");
     } catch {
       // No memory yet reads as none.
     }
+    if (picks !== this.draftPicks) return;
     this.draftAgent = got ?? { agent: fallback, config: {} };
   }
+
+  /** The human picked the planning agent beside [Plan]. */
+  pickDraftAgent(choice: AgentChoice) {
+    this.draftPicks++;
+    this.draftAgent = choice;
+  }
+
+  /** Routines whose Run is being looked at (the plan opening, the gate read). */
+  private asking = new Set<string>();
 
   /**
    * Run a routine, asking first when its plan on screen is not what the
@@ -74,17 +87,24 @@ class Plans {
    * with no plan runs straight away, as before.
    */
   async requestRun(routine: string) {
-    this.gate = null;
-    if (store.routine !== routine) await store.openRoutine(routine);
-    const r = store.routines.find((x) => x.id === routine);
-    if (r?.plan && !(this.open && this.routine === routine)) await this.openFor(routine);
-    if (!r?.plan || this.routine !== routine || !this.id) {
-      await store.runRoutine(routine);
-      return;
+    // A second press while the first is still being looked at, or on its way.
+    if (this.asking.has(routine) || store.routineRequesting(routine) || store.routineLive(routine)) return;
+    this.asking.add(routine);
+    try {
+      this.gate = null;
+      if (store.routine !== routine) await store.openRoutine(routine);
+      const r = store.routines.find((x) => x.id === routine);
+      if (r?.plan && !(this.open && this.routine === routine)) await this.openFor(routine);
+      if (!r?.plan || this.routine !== routine || !this.id) {
+        await store.runRoutine(routine);
+        return;
+      }
+      const g = runGate(this.doc);
+      if (g === "run") await store.runRoutine(routine);
+      else this.gate = g;
+    } finally {
+      this.asking.delete(routine);
     }
-    const g = runGate(this.doc);
-    if (g === "run") await store.runRoutine(routine);
-    else this.gate = g;
   }
 
   /** Save the working plan as a new version, then run with it. */
@@ -95,26 +115,38 @@ class Plans {
     await store.runRoutine(routine);
   }
 
-  /** Run with the last saved version, leaving the working plan as it is. */
+  /** Run with the run version, leaving the working plan as it is. */
   async runLastSaved() {
     this.gate = null;
     await store.runRoutine(this.routine);
   }
 
+  /** The newest read of the run in flight asked for: an older answer is let go. */
+  private liveAsked = 0;
+
   /** Read the run in flight (opening the plan, or a run beginning). */
   async loadLive() {
     const routine = this.routine;
     if (!routine) return;
+    const asked = ++this.liveAsked;
     try {
       const got = await invoke<LiveRun | null>("routine_live", { id: routine });
-      if (this.routine !== routine) return;
+      if (this.routine !== routine || asked !== this.liveAsked) return;
       // The core registers a run once its agent is open, a moment after Run
       // was pressed: until then, the run shown at the press stands.
       if (!got && this.live && !this.live.run && store.routineLive(routine)) return;
-      this.live = got;
+      // Step news that came while this was read is kept (the furthest word wins).
+      this.live = mergeLive(this.live, got);
     } catch {
       // Cosmetic: the run's result still comes at its end.
     }
+  }
+
+  /** A Run shown as started did not start: the plan stops showing it, and reads the core again. */
+  failed(routine: string) {
+    if (routine !== this.routine) return;
+    this.live = null;
+    void this.loadLive();
   }
 
   /** Run was pressed: show the run at once, as the last saved version has it. */
@@ -158,8 +190,13 @@ class Plans {
     return unsaved(this.doc);
   }
 
-  /** The version runs are given now, if any. */
+  /** The version runs are given now (the one last saved or saved over), if any. */
   get lastSaved(): number | undefined {
+    return runVersion(this.doc)?.n;
+  }
+
+  /** The newest saved version, if any: what "save as new" counts on from. */
+  get newest(): number | undefined {
     return this.doc.saved?.at(-1)?.n;
   }
 
@@ -292,16 +329,26 @@ class Plans {
    * at once) sees the saved version.
    */
   async save(note: string, over?: number): Promise<boolean> {
-    const out = await this.apply([over ? { op: "save", note, over } : { op: "save", note }]);
-    if (out[0]?.ok !== true) return false;
+    // A second press while the first is saving would find nothing to save.
+    if (this.saving) return false;
+    this.saving = true;
     try {
-      const doc = await invoke<PlanDoc>("plan_doc", { id: this.id });
-      if (doc.version >= this.doc.version) this.doc = doc;
-    } catch {
-      // The event brings it anyway.
+      const out = await this.apply([over ? { op: "save", note, over } : { op: "save", note }]);
+      if (out[0]?.ok !== true) return false;
+      try {
+        const doc = await invoke<PlanDoc>("plan_doc", { id: this.id });
+        if (doc.version >= this.doc.version) this.doc = doc;
+      } catch {
+        // The event brings it anyway.
+      }
+      return true;
+    } finally {
+      this.saving = false;
     }
-    return true;
   }
+
+  /** A save on its way. */
+  saving = $state(false);
 
   /** Bring a saved version back into the working plan. */
   async openVersion(n: number) {
@@ -319,12 +366,12 @@ class Plans {
   /** Raise or lower the step drawer; kept, as the terminal is. */
   setDrawer(open: boolean) {
     this.drawerOpen = open;
-    keep(DRAWER_KEY, open ? "open" : "closed");
+    keep(DRAWER_KEY, drawerSettings({ open, height: this.drawerHeight })[DRAWER_KEY]);
   }
 
   setDrawerHeight(px: number, persist = false) {
     this.drawerHeight = clampDrawer(px, window.innerHeight);
-    if (persist) keep(DRAWER_HEIGHT_KEY, String(this.drawerHeight));
+    if (persist) keep(DRAWER_HEIGHT_KEY, drawerSettings({ open: this.drawerOpen, height: this.drawerHeight })[DRAWER_HEIGHT_KEY]);
   }
 
   /** The drawer as it was left (this PC's window; a phone's lasts the page). */
@@ -362,6 +409,7 @@ function keep(key: string, value: string) {
 
 export const plans = new Plans();
 store.routineStarted.push((id) => plans.started(id));
+store.routineFailed.push((id) => plans.failed(id));
 
 /** Subscribe once. */
 export async function connectPlans() {

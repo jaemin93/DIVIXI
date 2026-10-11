@@ -1,7 +1,7 @@
 <script lang="ts">
   import { store, agentLabel, type Routine } from "./store.svelte";
   import { t } from "./i18n.svelte";
-  import { shownChoice } from "./agentOptions";
+  import { missingChoice, shownChoice } from "./agentOptions";
 
   /**
    * The routine's run agent, in its settings: one line with what runs it
@@ -49,6 +49,9 @@
       <label>
         <span class="flab">{modelOption.name}</span>
         <select value={shownChoice(modelOption, routine.config[modelOption.id])} onchange={(e) => setModel((e.currentTarget as HTMLSelectElement).value)}>
+          {#if missingChoice(modelOption, routine.config[modelOption.id])}
+            <option value={routine.config[modelOption.id]}>{routine.config[modelOption.id]} · {t("picker.missing")}</option>
+          {/if}
           {#each modelOption.choices as c (c.id)}
             <option value={c.id}>{c.name}{c.id === modelOption.current ? " · now" : ""}</option>
           {/each}

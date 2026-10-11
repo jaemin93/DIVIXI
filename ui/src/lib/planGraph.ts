@@ -44,10 +44,12 @@ export type PlanDoc = {
   next: number;
   source: { instruction: string; at: number } | null;
   proposal?: { text: string; run: string | null; at: number } | null;
-  /** Saved versions, oldest first; runs are given the last. */
+  /** Saved versions, oldest first. */
   saved?: PlanVersion[];
   /** The version the working plan was last opened from or saved as. */
   opened?: number | null;
+  /** The version runs are given: the one last saved or saved over (absent: the last). */
+  run?: number | null;
 };
 
 /** Mirrors `plan::Version`. */
@@ -151,20 +153,37 @@ export function layout(steps: PlanStep[]): Map<string, { x: number; y: number }>
     w.forEach((id, k) => auto.set(id, { x: col * (CARD_W + GAP_X), y: offset + k * (CARD_H + GAP_Y) }));
   });
   // Where each step ends up: its pin when the pin still reads in order.
-  const out = new Map(auto);
-  const placedX = (id: string) => out.get(id)!.x;
-  for (const w of ws) {
-    for (const id of w) {
-      const s = index.get(id)!;
-      if (s.x === undefined || s.y === undefined) continue;
-      const before = s.after.filter((a) => out.has(a));
-      const afterIt = steps.filter((o) => o.after.includes(id)).map((o) => o.id);
-      const rightOfBefore = before.every((a) => s.x! > placedX(a));
-      const leftOfAfter = afterIt.every((o) => s.x! < (index.get(o)!.x ?? auto.get(o)!.x));
-      if (rightOfBefore && leftOfAfter) out.set(id, { x: s.x, y: s.y });
+  // Wave by wave, each pin is read against where the steps it waits for
+  // ended up (their pins already settled), and against the steps waiting
+  // for it that are laid out; a pinned step waiting for it is judged in its
+  // own turn, against where this one ended up. So one pin out of order lets
+  // go of itself, not of the pins around it. A pin let go can still leave
+  // an earlier pin to the right of a step now laid out: then that pin goes
+  // too, and the layout is read again.
+  const released = new Set<string>();
+  const pinnedAt = (id: string) => {
+    const s = index.get(id)!;
+    return s.x !== undefined && s.y !== undefined && !released.has(id);
+  };
+  const waiting = (id: string) => steps.filter((o) => o.after.includes(id)).map((o) => o.id);
+  for (let pass = 0; ; pass++) {
+    const out = new Map(auto);
+    for (const w of ws) {
+      for (const id of w) {
+        if (!pinnedAt(id)) continue;
+        const s = index.get(id)!;
+        const rightOfBefore = s.after.filter((a) => out.has(a)).every((a) => s.x! > out.get(a)!.x);
+        const leftOfLaidOut = waiting(id)
+          .filter((o) => !pinnedAt(o))
+          .every((o) => s.x! < auto.get(o)!.x);
+        if (rightOfBefore && leftOfLaidOut) out.set(id, { x: s.x!, y: s.y! });
+        else released.add(id);
+      }
     }
+    const late = [...out.keys()].filter((id) => pinnedAt(id) && waiting(id).some((o) => out.get(o)!.x <= out.get(id)!.x));
+    if (!late.length || pass > steps.length) return out;
+    late.forEach((id) => released.add(id));
   }
-  return out;
 }
 
 /**
@@ -208,7 +227,9 @@ export type SuggestionKind = "added" | "changed" | "removed";
 export function suggestions(doc: PlanDoc): Map<string, { change: PlanChange; kind: SuggestionKind }> {
   const out = new Map<string, { change: PlanChange; kind: SuggestionKind }>();
   for (const c of doc.changes) {
-    const kind: SuggestionKind = !c.before ? "added" : !c.after ? "removed" : "changed";
+    let kind: SuggestionKind = "changed";
+    if (!c.before) kind = "added";
+    else if (!c.after) kind = "removed";
     out.set(c.target, { change: c, kind });
   }
   return out;
@@ -240,58 +261,89 @@ function content(steps: PlanStep[]): string {
 }
 
 /**
- * Whether the working plan has changes kept in no saved version (a plan
- * never saved, once it has steps). Back at an older version, it is saved:
- * as that version. Every field of a step counts; where it sits does not.
+ * The version runs are given, as `plan::Doc::run_version` reads it: the one
+ * last saved or saved over (the newest, when the plan does not say or that
+ * version was let go).
  */
-export function unsaved(doc: PlanDoc): boolean {
-  if (!doc.saved?.length) return doc.steps.length > 0;
-  const now = content(doc.steps);
-  return !doc.saved.some((v) => content(v.steps) === now);
+export function runVersion(doc: PlanDoc): PlanVersion | undefined {
+  const saved = doc.saved ?? [];
+  return saved.find((v) => v.n === doc.run) ?? saved.at(-1);
 }
 
-/** Whether a run now would get something other than the working plan (it gets the last saved version). */
-export function differsFromLast(doc: PlanDoc): boolean {
+/**
+ * Whether the working plan differs from the version runs are given, in what
+ * a run would get (where steps sit does not count). A plan never saved
+ * differs once it has steps. What "Unsaved" says, and what Run asks about.
+ */
+export function unsaved(doc: PlanDoc): boolean {
+  const given = runVersion(doc);
+  if (!given) return doc.steps.length > 0;
+  return content(given.steps) !== content(doc.steps);
+}
+
+/** Whether "save as new" has something to save: the working plan is not the newest version. */
+export function differsFromNewest(doc: PlanDoc): boolean {
   const last = doc.saved?.at(-1);
   if (!last) return doc.steps.length > 0;
   return content(last.steps) !== content(doc.steps);
 }
 
+/** Whether the working plan differs from saved version `n` (true when there is no such version). */
+export function differsFromVersion(doc: PlanDoc, n: number): boolean {
+  const v = doc.saved?.find((x) => x.n === n);
+  return !v || content(v.steps) !== content(doc.steps);
+}
+
 /** What "save over" writes into: the version the working plan came from, else the last. */
 export function saveTarget(doc: PlanDoc): number | undefined {
   const saved = doc.saved ?? [];
-  if (doc.opened != null && saved.some((v) => v.n === doc.opened)) return doc.opened;
+  const opened = doc.opened;
+  if (typeof opened === "number" && saved.some((v) => v.n === opened)) return opened;
   return saved.at(-1)?.n;
 }
 
 /**
- * What pressing Run does with the plan on screen:
- * - "run": straight away (no plan, or the working plan is the last saved one);
+ * What pressing Run does with the plan on screen -- the same rule as
+ * `plan::Doc::gate`, which the conductor's `run_routine` refuses by
+ * (tested on the same cases on both sides):
+ * - "settle": suggestions wait, so it cannot be saved: settle them first;
+ * - "run": straight away (no plan, or the working plan is the run version);
  * - "askSave": it has steps but was never saved -- save and run, or not;
- * - "askUnsaved": it differs from the last saved version -- save and run,
- *   run the last saved one, or not;
- * - "settle": suggestions wait, so it cannot be saved: settle them first.
+ * - "askUnsaved": it differs from the run version -- save and run, run that
+ *   version, or not.
  */
 export type RunGate = "run" | "askSave" | "askUnsaved" | "settle";
 
 export function runGate(doc: PlanDoc): RunGate {
-  const pending = doc.changes.length > 0;
-  if (!differsFromLast(doc) && !pending) return "run";
-  if (pending) return "settle";
+  if (doc.changes.length > 0) return "settle";
+  if (!unsaved(doc)) return "run";
   return doc.saved?.length ? "askUnsaved" : "askSave";
 }
 
 /** The fields of a step a drawer's text boxes hold, as typed. */
 export type StepDraft = { title: string; instruction: string; inputs: string; outputs: string; done_when: string };
 
+/** One item a line, as the boxes say ("one a line"): a comma is part of an item. */
 const lines = (v: string) =>
   v
-    .split(/\n|,/)
+    .split("\n")
     .map((x) => x.trim())
     .filter(Boolean);
 
-/** The edit a drawer's text boxes make to a step: only the fields that changed (an empty title keeps the old one). */
-export function editedFields(step: PlanStep, d: StepDraft): Record<string, unknown> {
+/**
+ * The edit a drawer's text boxes make to a step: only the fields that
+ * changed (an empty title keeps the old one), and of those only the ones
+ * in `touched` when it is given -- a box the human did not type in holds
+ * what the step said when it was filled, and must not write that back over
+ * a change made elsewhere meanwhile.
+ */
+export function editedFields(step: PlanStep, d: StepDraft, touched?: ReadonlySet<keyof StepDraft>): Record<string, unknown> {
+  const all = editedAll(step, d);
+  if (!touched) return all;
+  return Object.fromEntries(Object.entries(all).filter(([k]) => touched.has(k as keyof StepDraft)));
+}
+
+function editedAll(step: PlanStep, d: StepDraft): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const title = d.title.trim();
   if (title && title !== step.title) out.title = title;
@@ -359,16 +411,22 @@ export function resultsOf(steps: unknown): Map<string, StepResult> {
   return out;
 }
 
-/** The one-line glyphs of a run's step results, in plan order: ✓ ✗ –. */
+/** The glyph of one step's result: ✓ done, ✗ failed, – skipped, · nothing said of it. */
+export const RESULT_GLYPH = { done: "✓", failed: "✗", skipped: "–", none: "·" } as const;
+
+/** The one-line glyphs of a run's step results, in plan order. */
 export function resultGlyphs(order: string[], results: Map<string, StepResult>): string {
-  return order.map((id) => ({ done: "✓", failed: "✗", skipped: "–" })[results.get(id)?.status ?? "skipped"]).join("");
+  return order.map((id) => RESULT_GLYPH[results.get(id)?.status ?? "none"]).join("");
 }
+
+/** A step as a run was given it: every word of it from the core; titles and waits at least. */
+export type GivenStep = Partial<PlanStep> & { id: string; title: string; after: string[] };
 
 /** Mirrors `routine::live`: a run of the routine in flight. */
 export type LiveRun = {
   run: string;
-  /** The plan it was given: its saved version (null when it was given none). */
-  plan: { version: number; steps: { id: string; title: string; after: string[] }[] } | null;
+  /** The plan it was given: its run version (null when it was given none). */
+  plan: { version: number; steps: GivenStep[] } | null;
   /** What its agent said so far of each step, through `plan_step`. */
   progress: Record<string, { status: "started" | "done" | "failed" | "skipped"; note: string }>;
 };
@@ -398,13 +456,10 @@ export function runView(
   if (!live?.plan) return null;
   const given = saved.find((v) => v.n === live.plan!.version)?.steps ?? [];
   const byId = new Map([...working, ...given].map((s) => [s.id, s]));
-  const steps: PlanStep[] = live.plan.steps.map((g) => {
-    const w = byId.get(g.id);
-    // The run's own title and waits, whatever the working plan says now.
-    return w ? { ...w, title: g.title, after: g.after, x: undefined, y: undefined } : {
-      id: g.id, title: g.title, instruction: "", after: g.after, inputs: [], outputs: [], done_when: "", agent: "", on_fail: "stop", by: "",
-    };
-  });
+  const blank: PlanStep = { id: "", title: "", instruction: "", after: [], inputs: [], outputs: [], done_when: "", agent: "", on_fail: "stop", by: "" };
+  // The run's own words (all of them, from a run that kept them; else its
+  // title and waits over the saved version's), whatever the working plan says now.
+  const steps: PlanStep[] = live.plan.steps.map((g) => ({ ...blank, ...byId.get(g.id), ...g, x: undefined, y: undefined }));
   const told = Object.keys(live.progress ?? {}).length > 0;
   const said = (id: string) => live.progress?.[id]?.status;
   const ids = new Set(steps.map((s) => s.id));
@@ -423,15 +478,34 @@ export function runView(
 
 /**
  * The run in flight as the window can say it the moment Run is pressed,
- * before the core has opened the agent: the plan's last saved version
- * (what the run will be given), or none when nothing is saved. The core's
- * own state (routine_live) replaces it as soon as it has one.
+ * before the core has opened the agent: the plan's run version (what the
+ * run will be given), or none when nothing is saved. The core's own state
+ * (routine_live) replaces it as soon as it has one.
  */
 export function pressedRun(doc: PlanDoc): LiveRun {
-  const last = doc.saved?.at(-1);
+  const given = runVersion(doc);
   return {
     run: "",
-    plan: last && last.steps.length ? { version: last.n, steps: last.steps.map((s) => ({ id: s.id, title: s.title, after: s.after })) } : null,
+    plan: given && given.steps.length ? { version: given.n, steps: given.steps.map(({ x: _x, y: _y, ...s }) => s) } : null,
     progress: {},
   };
+}
+
+/** How far a step has got, for merging what two reports said of it. */
+const STAGE = { started: 1, done: 2, failed: 2, skipped: 2 } as const;
+
+/**
+ * The run in flight after the core's account of it (routine_live) arrives.
+ * Progress events can reach the window before an account read earlier, so
+ * for the same run each step keeps the furthest word either said; another
+ * run's account replaces this one outright.
+ */
+export function mergeLive(had: LiveRun | null, got: LiveRun | null): LiveRun | null {
+  if (!got || !had || (had.run && had.run !== got.run)) return got;
+  const progress = { ...got.progress };
+  for (const [id, p] of Object.entries(had.progress)) {
+    const theirs = progress[id];
+    if (!theirs || STAGE[p.status] > STAGE[theirs.status]) progress[id] = p;
+  }
+  return { ...got, progress };
 }

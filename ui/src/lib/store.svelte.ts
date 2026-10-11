@@ -33,6 +33,7 @@ import { pickable } from "./agentOptions";
 import { keepsSetting } from "./layoutSettings";
 import { clampZoom, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, listAfterRail, parseZoom, settingOpen, WEB_RAIL_KEY, webPanelOpen, type ListFold } from "./uiMemory";
 import { pairing, type Paired } from "./pairing.svelte";
+import { workspaceTarget } from "./workspaceTarget";
 import { openKey, parseMemory, pruneOpen, remember, treeReply, underOpen, type WsEntry as WsEntryType } from "./fileTree";
 
 export { wasStopped, errorLife, type Queued, type AppError };
@@ -394,6 +395,8 @@ export type Routine = {
   updated_at: number;
   runs: number;
   last_run: string | null;
+  /** When its last run started (Unix ms); null before any. Not `updated_at`, which an edit moves. */
+  last_run_at?: number | null;
   /** Its plan: the id of an artifact of kind `plan`, or empty for none. */
   plan?: string;
   /** `#rrggbb` for the bar beside it in its list, or empty. */
@@ -1441,9 +1444,7 @@ class Store {
    * workspace command and the preview take it as they take a track.
    */
   get wsTarget(): string {
-    if (this.view === "routines") return this.routine && this.routine !== NEW_ROUTINE ? `routine:${this.routine}` : "";
-    if (this.view === "design") return this.artifact ? `artifact:${this.artifact}` : "";
-    return this.track;
+    return workspaceTarget(this.view, this.routine, this.artifact, this.track, NEW_ROUTINE);
   }
 
   /** The target the panel's rows were read for. */
@@ -1453,10 +1454,21 @@ class Store {
   syncWorkspace() {
     const target = this.wsTarget;
     if (target === this.wsLoaded) return;
+    // The files open beside each page stay open for when it comes back: a
+    // look at a routine's folder does not close the track's tabs.
+    if (this.wsLoaded) this.wsTabs.set(this.wsLoaded, { open: this.openFiles, active: this.activeFile });
     this.clearWorkspace();
     this.wsLoaded = target;
+    const kept = this.wsTabs.get(target);
+    if (kept) {
+      this.openFiles = kept.open;
+      this.activeFile = kept.active;
+    }
     if (target) void this.refreshWorkspace();
   }
+
+  /** The files each folder had open, by target, for the time the app runs. */
+  private wsTabs = new Map<string, { open: string[]; active: string }>();
 
   /** The folders the file browser has open on the track showing now. */
   openDirs(): string[] {
@@ -2341,14 +2353,20 @@ class Store {
 
   /** How many of the open routine's runs are read: a page more each time the history asks. */
   routineRunsLimit = $state(RUNS_PAGE);
+  /** The latest history read asked for: an answer to an older one is let go. */
+  private runsAsked = 0;
 
   async loadRoutineRuns(id = this.routine) {
+    const asked = ++this.runsAsked;
     if (!id || id === NEW_ROUTINE) {
       this.routineRuns = [];
       return;
     }
     try {
-      this.routineRuns = await invoke<RoutineRun[]>("routine_runs", { id, limit: this.routineRunsLimit });
+      const runs = await invoke<RoutineRun[]>("routine_runs", { id, limit: this.routineRunsLimit });
+      // Another routine opened, or a newer read went out, while this one was on its way.
+      if (asked !== this.runsAsked || this.routine !== id) return;
+      this.routineRuns = runs;
     } catch (err) {
       this.lastError = String(err);
     }
@@ -2375,18 +2393,41 @@ class Store {
 
   /** Told the moment a routine is run, before the core answers (the plan shows its first wave). */
   routineStarted: ((id: string) => void)[] = [];
+  /** Told when a run that was shown as started did not start after all. */
+  routineFailed: ((id: string) => void)[] = [];
+  /** Routines with a Run on its way to the core: a second press waits for the first. */
+  routineAsking = $state<string[]>([]);
 
-  async runRoutine(id: string) {
+  /** Whether a Run of this routine is on its way (its buttons are off meanwhile). */
+  routineRequesting(id: string): boolean {
+    return this.routineAsking.includes(id);
+  }
+
+  /** Run a routine; true when the core started it. One request at a time per routine. */
+  async runRoutine(id: string): Promise<boolean> {
+    if (this.routineAsking.includes(id) || this.routineRunning.includes(id)) return false;
+    this.routineAsking = [...this.routineAsking, id];
     // Shown as running at once: the core is asked next, and its answer is
     // what keeps it that way.
-    if (!this.routineRunning.includes(id)) this.routineRunning = [...this.routineRunning, id];
+    this.routineRunning = [...this.routineRunning, id];
     for (const told of this.routineStarted) told(id);
     try {
       await invoke("run_routine", { id });
       await this.loadRoutineRuns(id);
+      return true;
     } catch (err) {
       this.lastError = String(err);
-      this.routineRunning = this.routineRunning.filter((r) => r !== id);
+      // Not started by this press: what the core says is running stands (a
+      // run from the phone or the conductor may be), else it is off the list.
+      try {
+        this.routineRunning = await invoke<string[]>("running_routines");
+      } catch {
+        this.routineRunning = this.routineRunning.filter((r) => r !== id);
+      }
+      for (const told of this.routineFailed) told(id);
+      return false;
+    } finally {
+      this.routineAsking = this.routineAsking.filter((r) => r !== id);
     }
   }
 
@@ -2425,17 +2466,19 @@ class Store {
     }
   }
 
-  async deleteRoutine(id: string) {
+  /** Delete a routine; its error, or "" when it went. */
+  async deleteRoutine(id: string): Promise<string> {
     try {
       await invoke("delete_routine", { id });
     } catch (err) {
       this.lastError = String(err);
-      return;
+      return this.lastError;
     }
     if (this.routine === id) this.routine = "";
     await this.loadRoutines();
     if (this.routines.length) await this.openRoutine(this.routines[0].id);
     else this.newRoutine();
+    return "";
   }
 
   /** Show the designs: the last one open, else the newest. */

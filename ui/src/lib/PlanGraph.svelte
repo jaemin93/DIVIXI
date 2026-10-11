@@ -45,11 +45,12 @@
     view = { k, x: (el.clientWidth - (x1 - x0) * k) / 2 - x0 * k, y: (el.clientHeight - (y1 - y0) * k) / 2 - y0 * k };
   }
 
-  // Framed when the plan first has steps, when another plan opens, and
-  // after a layout (plans.refit), so what moved is in view.
+  // Framed when the plan first has steps, when another plan opens, after a
+  // layout (plans.refit), and when a first draft is in (it arrives a card
+  // at a time, so the frame taken at the first card left the rest out).
   let framed = "";
   $effect(() => {
-    const key = `${plans.id}:${shown.length > 0}:${plans.refit}`;
+    const key = `${plans.id}:${shown.length > 0}:${plans.refit}:${plans.drafting}`;
     if (key === framed || !el) return;
     framed = key;
     queueMicrotask(fit);
@@ -160,12 +161,19 @@
       if (touches.size < 2) pinch = null;
       return;
     }
-    if (moving?.moved && dragging) void plans.apply([{ op: "move", id: dragging.id, x: dragging.x, y: dragging.y }]);
+    if (moving?.moved && dragging) {
+      // Held until the core's answer comes back, so the card does not jump
+      // back first; and only this drag is let go, never a next one begun meanwhile.
+      const done = dragging;
+      void plans.apply([{ op: "move", id: done.id, x: done.x, y: done.y }]).finally(() => {
+        if (dragging === done) dragging = null;
+      });
+    } else {
+      dragging = null;
+    }
     if (linking?.over && !refused) void plans.apply([{ op: "link", from: linking.from, to: linking.over }]);
     panning = null;
     moving = null;
-    // Held until the core's answer comes back, so the card does not jump back first.
-    setTimeout(() => (dragging = null), 150);
     linking = null;
   }
 

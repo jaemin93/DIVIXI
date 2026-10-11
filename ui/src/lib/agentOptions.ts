@@ -29,21 +29,34 @@ export function pickable<C extends Choice, O extends Option<C>>(options: O[]): O
 type Listed<C extends Choice> = { current: string; choices: C[] };
 
 /**
- * The choice a model list shows as picked. Nothing saved (or a choice the
- * agent no longer lists) shows the agent's own current model, which is what
- * such a session runs on: the list has no "agent default" entry of its own,
- * and what is saved stays as it is, so a run is not changed by looking.
+ * The choice a model list shows as picked: what a session would run on.
+ * Nothing saved is the agent's own current model (the list has no "agent
+ * default" entry of its own); a saved one is that one, listed or not --
+ * the run sends it as saved, so the list says so (see [`missingChoice`]).
+ * Looking changes nothing that is saved.
  */
 export function shownChoice<C extends Choice>(option: Listed<C>, chosen: string | undefined): string {
-  return chosen && option.choices.some((c) => c.id === chosen) ? chosen : option.current;
+  return chosen || option.current;
+}
+
+/** A saved choice the agent no longer lists, shown as it is, or null. */
+export function missingChoice<C extends Choice>(option: Listed<C>, chosen: string | undefined): string | null {
+  return chosen && !option.choices.some((c) => c.id === chosen) ? chosen : null;
 }
 
 /**
- * A model list to draw: the agent's choices only, the one shown as picked
- * marked `on` (✓) and the agent's own current one `now`; nothing saved, the
- * same one is both.
+ * A model list to draw: the agent's choices, the one shown as picked marked
+ * `on` (✓) and the agent's own current one `now` (nothing saved, the same
+ * one is both). A saved choice the agent no longer lists comes first,
+ * marked `missing`.
  */
-export function choiceList<C extends Choice>(option: Listed<C>, chosen: string | undefined): (C & { on: boolean; now: boolean })[] {
+export function choiceList<C extends Choice & { name?: string }>(
+  option: Listed<C>,
+  chosen: string | undefined,
+): (C & { on: boolean; now: boolean; missing: boolean })[] {
   const shown = shownChoice(option, chosen);
-  return option.choices.map((c) => ({ ...c, on: c.id === shown, now: c.id === option.current }));
+  const listed = option.choices.map((c) => ({ ...c, on: c.id === shown, now: c.id === option.current, missing: false }));
+  const gone = missingChoice(option, chosen);
+  if (!gone) return listed;
+  return [{ ...({ id: gone, name: gone } as unknown as C), on: true, now: false, missing: true }, ...listed];
 }

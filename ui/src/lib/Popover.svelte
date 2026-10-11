@@ -48,9 +48,22 @@
       return;
     }
     place();
-    // Again once the width it was given has settled its height.
-    const raf = requestAnimationFrame(place);
-    return () => cancelAnimationFrame(raf);
+    // Again once the width it was given has settled its height; and when
+    // what is in it changes (a list filled, filtered), or anything scrolls
+    // its trigger along.
+    let raf = requestAnimationFrame(place);
+    const soon = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(place);
+    };
+    const changed = new MutationObserver(soon);
+    changed.observe(panel, { childList: true, subtree: true, characterData: true });
+    window.addEventListener("scroll", soon, true);
+    return () => {
+      cancelAnimationFrame(raf);
+      changed.disconnect();
+      window.removeEventListener("scroll", soon, true);
+    };
   });
 
   function onDocClick(e: MouseEvent) {

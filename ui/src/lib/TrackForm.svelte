@@ -5,7 +5,7 @@
   import Mark from "./Mark.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
-  import { shownChoice } from "./agentOptions";
+  import { missingChoice, shownChoice } from "./agentOptions";
   import { startup } from "./startup.svelte";
   import { empty } from "./startup";
 
@@ -304,6 +304,7 @@
           onchange={(e) => setOption(option.id, (e.currentTarget as HTMLSelectElement).value)}
         >
           {#if option.category !== "model"}<option value="">{defaultLabel(effectiveAgent, option)}</option>{/if}
+          {#if option.category === "model" && missingChoice(option, config[option.id])}<option value={config[option.id]}>{config[option.id]} · {t("picker.missing")}</option>{/if}
           {#each option.choices as c (c.id)}
             <option value={c.id}>{c.name}{c.group ? ` · ${c.group}` : ""}{c.id !== c.name ? ` (${c.id.replace(/^.*[#/]/, "")})` : ""}{option.category === "model" && c.id === option.current ? " · now" : ""}</option>
           {/each}

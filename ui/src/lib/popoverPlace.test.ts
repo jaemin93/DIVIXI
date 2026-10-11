@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MARGIN, placePanel } from "./popoverPlace.ts";
+import { FLOOR, MARGIN, placePanel } from "./popoverPlace.ts";
 
 const view = { width: 1000, height: 800 };
 
@@ -39,4 +39,13 @@ test("no room above opens it below, and its height fits the side it opened", () 
   const tight = placePanel({ left: 100, right: 200, top: 300, bottom: 330 }, { width: 1000, height: 500 }, 320, 400, "left");
   assert.equal(tight.below, false, "more room above than below: stays above");
   assert.equal(tight.maxHeight, 300 - 8 - MARGIN);
+});
+
+test("no room above nor below: still a readable height, never zero", () => {
+  const short = { width: 800, height: 140 };
+  const p = placePanel({ left: 100, right: 200, top: 50, bottom: 90 }, short, 320, 300, "left");
+  assert.ok(p.maxHeight >= Math.min(FLOOR, short.height - 2 * MARGIN), `${p.maxHeight}`);
+  const tiny = placePanel({ left: 0, right: 10, top: 0, bottom: 10 }, { width: 10, height: 10 }, 320, 300, "left");
+  assert.equal(tiny.width, 0, "a window narrower than its margins gives no width, not a negative one");
+  assert.equal(tiny.maxHeight, 0);
 });

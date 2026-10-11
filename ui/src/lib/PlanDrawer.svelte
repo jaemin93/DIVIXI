@@ -33,21 +33,36 @@
     if (e.target === e.currentTarget && !plans.drawerOpen) gone = true;
   }
 
+  /** Ends a drag in progress: on release, on a cancelled pointer, and when the drawer goes. */
+  let endDrag: (() => void) | null = null;
+
   function startDrag(e: PointerEvent) {
     e.preventDefault();
+    endDrag?.();
+    const grip = e.currentTarget as HTMLElement;
+    // Captured, so a release outside the window still ends it.
+    grip.setPointerCapture(e.pointerId);
     dragging = true;
     const startY = e.clientY;
     const start = plans.drawerHeight;
     const move = (ev: PointerEvent) => plans.setDrawerHeight(start + (startY - ev.clientY));
     const stop = () => {
+      if (!endDrag) return;
+      endDrag = null;
       dragging = false;
       plans.setDrawerHeight(plans.drawerHeight, true);
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", stop);
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", stop);
+      grip.removeEventListener("pointercancel", stop);
+      grip.removeEventListener("lostpointercapture", stop);
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", stop);
+    endDrag = stop;
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", stop);
+    grip.addEventListener("pointercancel", stop);
+    grip.addEventListener("lostpointercapture", stop);
   }
+  $effect(() => () => endDrag?.());
 
   function onGripKey(e: KeyboardEvent) {
     const by = e.shiftKey ? 80 : 24;

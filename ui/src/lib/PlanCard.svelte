@@ -1,7 +1,7 @@
 <script lang="ts">
   import { plans } from "./plan.svelte";
   import { store } from "./store.svelte";
-  import { changedFields, type PlanChange, type PlanStep, type RunState, type StepResult, type SuggestionKind } from "./planGraph";
+  import { changedFields, RESULT_GLYPH, type PlanChange, type PlanStep, type RunState, type StepResult, type SuggestionKind } from "./planGraph";
   import Working from "./Working.svelte";
   import { t, type Key } from "./i18n.svelte";
 
@@ -40,15 +40,14 @@
   } = $props();
 
   const picked = $derived(store.planSelected.includes(step.id));
-  const what = $derived(
-    !suggestion
-      ? ""
-      : suggestion.kind === "changed"
-        ? t("plan.sug.changed", { what: changedFields(suggestion.change).map((f) => t(`plan.field.${f}` as Key)).join(", ") })
-        : t(`plan.sug.${suggestion.kind}` as Key),
-  );
+  /** What the agent's suggestion did to this step, in words. */
+  const what = $derived.by(() => {
+    if (!suggestion) return "";
+    if (suggestion.kind !== "changed") return t(`plan.sug.${suggestion.kind}` as Key);
+    return t("plan.sug.changed", { what: changedFields(suggestion.change).map((f) => t(`plan.field.${f}` as Key)).join(", ") });
+  });
   const ended = $derived(run === "done" || run === "failed" || run === "skipped" ? run : result?.status);
-  const glyph = $derived(ended ? { done: "✓", failed: "✗", skipped: "–" }[ended] : "");
+  const glyph = $derived(ended ? RESULT_GLYPH[ended] : "");
 
   function key(e: KeyboardEvent) {
     if (removed) return;
@@ -59,6 +58,10 @@
   }
 </script>
 
+<!-- The card is pressed and dragged as a whole; the part that is picked (by
+     keyboard too) is its face, and the suggestion's buttons sit beside it,
+     never inside another button. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="card"
   class:sug={!!suggestion}
@@ -67,17 +70,13 @@
   class:waiting={run === "waiting"}
   class:running={run === "running"}
   {style}
-  role="button"
-  tabindex={removed ? -1 : 0}
-  aria-pressed={picked}
-  aria-label={`${step.id} ${step.title}`}
   data-step={step.id}
   onpointerdown={(e) => {
     if ((e.target as HTMLElement).closest("button")) return;
     onpointerdown?.(e);
   }}
-  onkeydown={key}
 >
+  <div class="face" role="button" tabindex={removed ? -1 : 0} aria-pressed={picked} aria-label={`${step.id} ${step.title}`} onkeydown={key}>
   <div class="top mono">
     <span>{step.id}</span>
     <span>{step.by === "agent" ? t("plan.by.agent") : t("plan.by.human")}</span>
@@ -95,8 +94,9 @@
     {#if step.after.length}<span>← {step.after.join(", ")}</span>{/if}
     {#each step.outputs as o (o)}<span>→ {o}</span>{/each}
   </div>
+  {#if suggestion}<div class="what">{what}</div>{/if}
+  </div>
   {#if suggestion}
-    <div class="what">{what}</div>
     <div class="rev">
       <button type="button" onclick={() => plans.review([suggestion.change.id], false)}>{t("plan.sug.revert")}</button>
       <button type="button" onclick={() => plans.review([suggestion.change.id], true)}>{t("plan.sug.keep")}</button>
@@ -151,6 +151,15 @@
   .card.removed .ttl,
   .card.removed .ins {
     text-decoration: line-through;
+  }
+
+  .face {
+    outline: none;
+  }
+
+  .card:has(.face:focus-visible) {
+    outline: 1px solid var(--focus);
+    outline-offset: 1px;
   }
 
   .top {

@@ -22,6 +22,8 @@ export const MARGIN = 8;
 const GAP = 8;
 /** The panel's own cap (the CSS `max-height`). */
 const CAP = 420;
+/** The least height a panel is given, room or not: it may then cover its trigger, but it can be read. */
+export const FLOOR = 120;
 
 export function placePanel(
   trigger: Box,
@@ -36,5 +38,7 @@ export function placePanel(
   const above = trigger.top - GAP - MARGIN;
   const under = view.height - trigger.bottom - GAP - MARGIN;
   const below = Math.min(height, CAP) > above && under > above;
-  return { width, shift: left - natural, below, maxHeight: Math.max(0, Math.min(CAP, below ? under : above)) };
+  const room = below ? under : above;
+  const floor = Math.min(FLOOR, Math.max(0, view.height - 2 * MARGIN));
+  return { width, shift: left - natural, below, maxHeight: Math.min(CAP, Math.max(room, floor)) };
 }

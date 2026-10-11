@@ -3,7 +3,7 @@
   import { store } from "./store.svelte";
   import PlanGraph from "./PlanGraph.svelte";
   import PlanDrawer from "./PlanDrawer.svelte";
-  import { differsFromLast, openNeedsConfirm, resultsOf, sameVersion, saveTarget } from "./planGraph";
+  import { differsFromNewest, differsFromVersion, openNeedsConfirm, resultsOf, sameVersion, saveTarget } from "./planGraph";
   import { whenFull } from "./time";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
@@ -43,9 +43,14 @@
 
   /** What "save over" writes into, and whether it would change anything. */
   const target = $derived(saveTarget(doc));
-  const canOver = $derived(target !== undefined && plans.unsaved);
-  const canNew = $derived(differsFromLast(doc));
-  const saveBlocked = $derived(pending > 0 ? t("plan.saveSettleFirst", { n: pending }) : !canNew && !canOver ? t("plan.saveNothing") : "");
+  const canOver = $derived(target !== undefined && differsFromVersion(doc, target));
+  const canNew = $derived(differsFromNewest(doc));
+  /** Why saving is off now, or "" when it is on. */
+  const saveBlocked = $derived.by(() => {
+    if (pending > 0) return t("plan.saveSettleFirst", { n: pending });
+    if (!canNew && !canOver) return t("plan.saveNothing");
+    return "";
+  });
 
   /** The saved version the working plan is now (marked in the list). */
   const same = $derived(sameVersion(doc));
@@ -98,7 +103,7 @@
         type="button"
         class="tb save"
         class:ready={!saveBlocked}
-        disabled={!!saveBlocked}
+        disabled={!!saveBlocked || plans.saving}
         title={saveBlocked || t("plan.saveHint")}
         aria-expanded={saving}
         onclick={() => {
@@ -111,14 +116,14 @@
           <label class="f">
             <span class="flab">{t("plan.saveNote")}</span>
             <!-- svelte-ignore a11y_autofocus -->
-            <input bind:value={note} maxlength="200" autofocus onkeydown={(e) => e.key === "Enter" && canNew && save()} />
+            <input bind:value={note} maxlength="200" autofocus onkeydown={(e) => e.key === "Enter" && canNew && !plans.saving && save()} />
           </label>
           <div class="macts">
             <button type="button" class="tb" onclick={() => (saving = false)}>{t("plan.cancel")}</button>
             {#if target !== undefined}
-              <button type="button" class="tb" disabled={!canOver} onclick={() => save(target)}>{t("plan.saveOver", { n: target })}</button>
+              <button type="button" class="tb" disabled={!canOver || plans.saving} onclick={() => save(target)}>{t("plan.saveOver", { n: target })}</button>
             {/if}
-            <button type="button" class="tb ready" disabled={!canNew} onclick={() => save()}>{t("plan.saveNew", { n: (plans.lastSaved ?? 0) + 1 })}</button>
+            <button type="button" class="tb ready" disabled={!canNew || plans.saving} onclick={() => save()}>{t("plan.saveNew", { n: (plans.newest ?? 0) + 1 })}</button>
           </div>
         </div>
       {/if}

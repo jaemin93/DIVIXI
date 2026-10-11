@@ -15,8 +15,11 @@ import {
   editedFields,
   runGate,
   saveTarget,
-  differsFromLast,
+  differsFromNewest,
+  differsFromVersion,
+  mergeLive,
   pressedRun,
+  runVersion,
   nextRunsLimit,
   openNeedsConfirm,
   sameVersion,
@@ -104,6 +107,16 @@ test("a pin that the order of steps has overtaken is let go (lay out after a cha
   const early = [step("s1", [], { x: 900, y: 0 }), step("s2", ["s1"], { x: 100, y: 0 })];
   const e = layout(early);
   assert.ok(e.get("s1")!.x < e.get("s2")!.x);
+});
+
+test("one pin out of order lets go of itself, not of a good pin before it", () => {
+  // Found checking the app: s3 moved down (in order), then s11 dragged left
+  // of s3. s11's pin reads out of order; s3's still does not.
+  const col = CARD_W + GAP_X;
+  const steps = [step("s1"), step("s3", ["s1"], { x: col + 11, y: 160 }), step("s11", ["s3"], { x: 0, y: 171 })];
+  const at = layout(steps);
+  assert.deepEqual(at.get("s3"), { x: col + 11, y: 160 }, "s3 stays where it was put");
+  assert.ok(at.get("s11")!.x > at.get("s3")!.x, "s11 goes back after s3");
 });
 
 test("a change in a step's words is unsaved; a move on the graph is not", () => {
@@ -209,7 +222,8 @@ test("a run's step results read what is usable and leave the rest", () => {
   assert.deepEqual([...r.keys()], ["s1", "s2"]);
   assert.equal(r.get("s2")!.note, "no network");
   assert.equal(resultsOf("nonsense").size, 0);
-  assert.equal(resultGlyphs(["s1", "s2", "s3"], r), "✓✗–", "a step it said nothing of reads as skipped");
+  assert.equal(resultGlyphs(["s1", "s2", "s3"], r), "✓✗·", "a step it said nothing of is not a skipped one");
+  assert.equal(resultGlyphs(["s1", "s4"], resultsOf([{ id: "s1", status: "skipped" }])), "–·", "skipped and not said read apart");
 });
 
 test("a first draft is asked for once: a routine with no plan, an empty plan, nothing under way", () => {
@@ -292,7 +306,10 @@ test("the history menu reads more runs until a page comes back short", () => {
 test("the moment Run is pressed, the first wave shows as running", () => {
   const saved = [{ n: 2, at: 1, note: "", steps: diamond() }];
   const live = pressedRun({ ...emptyPlan(), steps: diamond(), saved });
-  assert.equal(live.plan!.version, 2, "the last saved version is what the run gets");
+  assert.equal(live.plan!.version, 2, "the run version is what the run gets");
+  assert.equal(live.plan!.steps[1].instruction, "", "every word of each step, as the core keeps it");
+  const older = pressedRun({ ...emptyPlan(), saved: [{ n: 1, at: 1, note: "", steps: diamond() }, { n: 2, at: 2, note: "", steps: [step("x")] }], run: 1 });
+  assert.equal(older.plan!.version, 1, "saved over, v1 is what runs get, though v2 is newer");
   const v = runView(diamond(), live)!;
   assert.equal(v.told, false);
   assert.deepEqual(
@@ -329,6 +346,33 @@ test("every field of a step counts as unsaved, a move does not", () => {
   assert.equal(unsaved(edit({ x: 9, y: 9 })), false);
 });
 
+test("a run in flight shows every word of the step it was given", () => {
+  const given = { ...step("s1"), title: "pull", instruction: "fetch as saved" };
+  const live = { run: "rr1", plan: { version: 1, steps: [given] }, progress: {} };
+  const v = runView([{ ...step("s1"), title: "renamed", instruction: "edited since" }], live)!;
+  assert.equal(v.steps[0].title, "pull");
+  assert.equal(v.steps[0].instruction, "fetch as saved");
+});
+
+test("an account of the run read before some step news does not undo that news", () => {
+  const got = { run: "rr1", plan: null, progress: { s1: { status: "started" as const, note: "" } } };
+  const had = { run: "rr1", plan: null, progress: { s1: { status: "done" as const, note: "ok" }, s2: { status: "started" as const, note: "" } } };
+  assert.deepEqual(mergeLive(had, got)!.progress, had.progress, "the furthest word of each step stands");
+  const newer = { run: "rr1", plan: null, progress: { s2: { status: "failed" as const, note: "x" } } };
+  assert.equal(mergeLive(had, newer)!.progress.s2.status, "failed", "and a further word from the account wins");
+  assert.deepEqual(mergeLive({ ...had, run: "rr0" }, got), got, "another run's news is not this run's");
+  assert.deepEqual(mergeLive({ ...had, run: "" }, got)!.progress.s2, had.progress.s2, "the run shown at the press is this run");
+  assert.equal(mergeLive(had, null), null, "no run in flight: none");
+});
+
+test("the drawer writes only the boxes typed in, so a change made elsewhere is not written back", () => {
+  const s = step("s2", [], { title: "deps", instruction: "changed by the agent meanwhile" });
+  const boxes = { title: "deps v2", instruction: "list deps", inputs: "", outputs: "", done_when: "" };
+  assert.deepEqual(editedFields(s, boxes, new Set(["title"] as const)), { title: "deps v2" });
+  assert.deepEqual(editedFields(s, boxes), { title: "deps v2", instruction: "list deps" }, "without the touched set, every changed box");
+  assert.deepEqual(editedFields(step("s2"), { ...boxes, title: "s2", instruction: "", inputs: "repo, lock file" }), { inputs: ["repo, lock file"] }, "one item a line: a comma is part of it");
+});
+
 test("the drawer writes the fields as typed, and only the changed ones", () => {
   const s = step("s2", ["s1"], { title: "deps", instruction: "list deps", inputs: ["repo"], outputs: [], done_when: "" });
   const typed = { title: "deps", instruction: "list deps", inputs: "repo", outputs: "", done_when: "" };
@@ -346,12 +390,30 @@ test("Run asks first when the plan on screen is not what the run would get", () 
   assert.equal(runGate({ ...emptyPlan(), steps, saved: [v1] }), "run", "the last saved version is the plan on screen");
   assert.equal(runGate({ ...emptyPlan(), steps: [...steps, step("s5")], saved: [v1] }), "askUnsaved");
   assert.equal(runGate({ ...emptyPlan(), steps: [...steps, step("s5")], saved: [v1], changes: [{ id: 1, target: "s5", run: null, before: null, after: step("s5") }] }), "settle", "suggestions wait: settle first");
-  // Back at an older version: saved, but not what a run gets (the last).
+  // Back at an older version: in a saved version, but not the one runs get.
   const v2 = { n: 2, at: 2, note: "", steps: [...steps, step("s5")] };
   const back = { ...emptyPlan(), steps, saved: [v1, v2] };
-  assert.equal(unsaved(back), false);
-  assert.equal(differsFromLast(back), true);
+  assert.equal(unsaved(back), true, "Unsaved compares with the run version");
   assert.equal(runGate(back), "askUnsaved");
+  // Saved over v1: v1 is the run version now, though v2 is newer.
+  const over = { ...back, run: 1 };
+  assert.equal(runVersion(over)!.n, 1);
+  assert.equal(unsaved(over), false);
+  assert.equal(runGate(over), "run");
+  assert.equal(differsFromNewest(over), true, "save as new still has something to save");
+  assert.equal(differsFromVersion(over, 1), false, "and save over v1 has nothing");
+  assert.equal(runVersion({ ...back, run: 9 })!.n, 2, "a run version let go reads as the newest");
+});
+
+test("Run answers by the same rule as the conductor's run_routine (plan.rs, same cases)", () => {
+  const steps = diamond();
+  const v1 = { n: 1, at: 1, note: "", steps };
+  assert.equal(runGate(emptyPlan()), "run", "no plan");
+  assert.equal(runGate({ ...emptyPlan(), steps }), "askSave", "steps never saved");
+  assert.equal(runGate({ ...emptyPlan(), steps, saved: [v1] }), "run", "the version runs are given");
+  assert.equal(runGate({ ...emptyPlan(), steps: [], saved: [v1] }), "askUnsaved", "every step taken off, not saved: v1 would still run");
+  const agentEdit = { id: 1, target: "s1", run: null, before: steps[0], after: { ...steps[0], title: "from the agent" } };
+  assert.equal(runGate({ ...emptyPlan(), steps, saved: [v1], changes: [agentEdit] }), "settle", "a suggestion waiting settles first");
 });
 
 test("save over writes into the version the working plan came from, else the last", () => {

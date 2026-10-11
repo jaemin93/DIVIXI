@@ -1,6 +1,6 @@
 <script lang="ts">
   import { plans } from "./plan.svelte";
-  import { beforeChoices, editedFields, type PlanStep } from "./planGraph";
+  import { beforeChoices, editedFields, type PlanStep, type StepDraft } from "./planGraph";
   import { t } from "./i18n.svelte";
 
   /**
@@ -19,17 +19,18 @@
   let filled = $state("");
 
   // Refilled when another step is picked, or when this one changed elsewhere
-  // (the agent, an undo) -- but never under a field being typed in.
-  let typing = $state(false);
+  // (the agent, an undo) -- every box but the ones being typed in, so a
+  // change made elsewhere shows, and is never written back over.
+  const touched = new Set<keyof StepDraft>();
   $effect(() => {
     const key = `${step.id}:${JSON.stringify(step)}`;
-    if (key === filled || typing) return;
+    if (key === filled) return;
     filled = key;
-    title = step.title;
-    instruction = step.instruction;
-    inputs = step.inputs.join("\n");
-    outputs = step.outputs.join("\n");
-    doneWhen = step.done_when;
+    if (!touched.has("title")) title = step.title;
+    if (!touched.has("instruction")) instruction = step.instruction;
+    if (!touched.has("inputs")) inputs = step.inputs.join("\n");
+    if (!touched.has("outputs")) outputs = step.outputs.join("\n");
+    if (!touched.has("done_when")) doneWhen = step.done_when;
   });
 
   async function write(fields: Record<string, unknown>) {
@@ -45,20 +46,21 @@
   function flush() {
     if (timer) clearTimeout(timer);
     timer = null;
-    const fields = editedFields(step, { title, instruction, inputs, outputs, done_when: doneWhen });
+    // Only the boxes typed in: the others may be behind a change made elsewhere.
+    const fields = editedFields(step, { title, instruction, inputs, outputs, done_when: doneWhen }, touched);
     if (Object.keys(fields).length) void write(fields);
   }
 
-  function typed() {
-    typing = true;
+  function typed(field: keyof StepDraft) {
+    touched.add(field);
     if (timer) clearTimeout(timer);
     timer = setTimeout(flush, 500);
   }
 
-  function leave() {
-    typing = false;
+  function leave(field: keyof StepDraft) {
     if (!title.trim()) title = step.title;
     flush();
+    touched.delete(field);
   }
 
   const choices = $derived(beforeChoices(plans.doc.steps, step.id));
@@ -73,19 +75,19 @@
   <div class="grid">
     <label class="f">
       <span class="flab">{t("plan.step.title")}</span>
-      <input bind:value={title} oninput={typed} onblur={leave} />
+      <input bind:value={title} oninput={() => typed("title")} onblur={() => leave("title")} />
     </label>
     <label class="f">
       <span class="flab">{t("plan.step.inputs")}</span>
-      <textarea rows="2" bind:value={inputs} placeholder={t("plan.step.listHint")} oninput={typed} onblur={leave}></textarea>
+      <textarea rows="2" bind:value={inputs} placeholder={t("plan.step.listHint")} oninput={() => typed("inputs")} onblur={() => leave("inputs")}></textarea>
     </label>
     <label class="f">
       <span class="flab">{t("plan.step.outputs")}</span>
-      <textarea rows="2" bind:value={outputs} placeholder={t("plan.step.listHint")} oninput={typed} onblur={leave}></textarea>
+      <textarea rows="2" bind:value={outputs} placeholder={t("plan.step.listHint")} oninput={() => typed("outputs")} onblur={() => leave("outputs")}></textarea>
     </label>
     <label class="f span2">
       <span class="flab">{t("plan.step.instruction")}</span>
-      <textarea rows="3" bind:value={instruction} oninput={typed} onblur={leave}></textarea>
+      <textarea rows="3" bind:value={instruction} oninput={() => typed("instruction")} onblur={() => leave("instruction")}></textarea>
     </label>
     <div class="f">
       <span class="flab">{t("plan.step.before")}</span>
@@ -104,7 +106,7 @@
     </div>
     <label class="f span2">
       <span class="flab">{t("plan.step.doneWhen")}</span>
-      <input bind:value={doneWhen} oninput={typed} onblur={leave} />
+      <input bind:value={doneWhen} oninput={() => typed("done_when")} onblur={() => leave("done_when")} />
     </label>
     <div class="f">
       <span class="flab">{t("plan.step.onFail")}</span>

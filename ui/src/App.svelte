@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { listFits } from "./lib/crowd";
   import { store, NEW_ROUTINE } from "./lib/store.svelte";
   import Rail from "./lib/Rail.svelte";
   import TrackList from "./lib/TrackList.svelte";
@@ -63,10 +64,30 @@
     };
   });
 
+  /** The window's width, for whether a list column still fits beside a side panel. */
+  let windowWidth = $state(typeof window === "undefined" ? 1280 : window.innerWidth);
+  const railWidth = $derived(store.railCollapsed ? 48 : store.railWidth);
+  /** On a desktop window, whether a list fits beside a panel `side` wide (a phone lays them over). */
+  const fits = (list: number, side: number) => narrow || listFits(windowWidth, railWidth, list, side);
+
   /** The track list sits beside every view but settings, once a track exists. */
   const listShown = $derived(
-    store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.view !== "routines" && !(narrow && store.view === "new-track") && store.trackListOpen && store.tracks.length > 0,
+    store.view !== "settings" &&
+      store.view !== "design" &&
+      store.view !== "knowledge" &&
+      store.view !== "routines" &&
+      !(narrow && store.view === "new-track") &&
+      store.trackListOpen &&
+      store.tracks.length > 0 &&
+      (!store.panelOpen || fits(store.trackListWidth, store.panelWidth)),
   );
+  /** The routine list beside a routine, stepping aside when its plan's panel leaves no room. */
+  const routineListShown = $derived.by(() => {
+    if (!store.routineListOpen) return false;
+    if (store.planChatOpen && store.planInfo) return fits(store.routineListWidth, store.artifactChatWidth);
+    if (store.planFilesOpen) return fits(store.routineListWidth, store.panelWidth);
+    return true;
+  });
 
   // Browser-style zoom keys, app-wide.
   function onKey(e: KeyboardEvent) {
@@ -94,7 +115,7 @@
 
 <!-- The webview's own right-click menu (reload, inspect, …) is not the app's:
      it never opens. The app's menus open where they belong. -->
-<svelte:window onkeydown={onKey} oncontextmenu={(e) => e.preventDefault()} />
+<svelte:window onkeydown={onKey} oncontextmenu={(e) => e.preventDefault()} bind:innerWidth={windowWidth} />
 
 <!-- Errors from anywhere in the app, over whatever is on screen. Mounted
      once, outside every view, so none of them has to carry its own. -->
@@ -169,7 +190,7 @@
         <AgentPanel kind="graph" />
       {/if}
     {:else if store.view === "routines"}
-      {#if store.routineListOpen}
+      {#if routineListShown}
         <div class="sidebox" transition:slide={side}><RoutineList /></div>
       {/if}
       <RoutineView />

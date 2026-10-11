@@ -9,6 +9,7 @@
   import SplitHandle from "./SplitHandle.svelte";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
+  import { colorOrNone } from "./cssColor";
   import { whenLabel } from "./time";
   import ArtifactMenu from "./ArtifactMenu.svelte";
   import { plans } from "./plan.svelte";
@@ -42,14 +43,13 @@
 
   /** Delete from the menu: "" when it is gone, else why not (the menu says it). */
   async function remove(id: string): Promise<string> {
-    store.lastError = "";
-    await store.deleteRoutine(id);
-    return store.routines.some((r) => r.id === id) ? store.lastError || "?" : "";
+    return store.deleteRoutine(id);
   }
 
-  function last(r: { updated_at: number; runs: number }): string {
-    if (!r.runs) return t("routines.never");
-    return t("routines.lastRun", { when: whenLabel(r.updated_at, now, store.lang) });
+  /** When it last ran: the run's own time, not when it was last edited. */
+  function last(r: { last_run_at?: number | null; runs: number }): string {
+    if (!r.runs || !r.last_run_at) return t("routines.never");
+    return t("routines.lastRun", { when: whenLabel(r.last_run_at, now, store.lang) });
   }
 </script>
 
@@ -89,7 +89,7 @@
           class="row"
           class:on={store.routine === r.id}
           class:menued={menu?.id === r.id}
-          style="border-left-color: {r.color || 'transparent'}"
+          style="border-left-color: {colorOrNone(r.color)}"
           oncontextmenu={(e) => openMenu(e, r.id)}
           role="presentation"
         >
@@ -118,6 +118,7 @@
           </button>
           <button
             class="go"
+            disabled={!live && store.routineRequesting(r.id)}
             title={live ? t("routines.stop") : t("routines.runNow")}
             aria-label={live ? t("routines.stop") : t("routines.runNow")}
             onclick={() => (live ? store.cancelRoutine(r.id) : r.plan ? plans.requestRun(r.id) : store.runRoutine(r.id))}
