@@ -24,9 +24,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 mod attach;
+mod claude_cli;
 mod process;
 mod session;
 pub use attach::{file_uri, mime_of};
+pub use claude_cli::{
+    bundled_cli_version, claude_cli_search_dirs, find_claude_cli_in, ClaudeCli, CLAUDE_BUNDLED_CLI_VERSION, CLAUDE_CLI_ENV,
+};
 pub use process::{spawn as spawn_agent, AgentProcess};
 pub use session::{AgentSession, McpHttp, RefusedOption, SessionOptions};
 
@@ -124,21 +128,35 @@ impl AgentSpec {
     /// nothing installed costs ten seconds per session on a warm cache and twenty
     /// on a cold one, all of it before `initialize`. Without a local install
     /// this falls back to `npx`.
+    ///
+    /// The adapter runs the installed `claude` when there is one recent
+    /// enough (see [`ClaudeCli`]), so sessions offer the models the user's
+    /// own Claude Code does.
     pub fn claude_code() -> Self {
+        let (spec, script) = Self::claude_adapter();
+        let found = find_claude_cli_in(claude_cli_search_dirs(Vec::new()));
+        let version = found.as_deref().and_then(|p| claude_cli::cli_version_blocking(p, Duration::from_secs(20)));
+        let cli = ClaudeCli::choose(found.as_deref(), version.as_deref(), &bundled_cli_version(script.as_deref()));
+        cli.log();
+        spec.with_claude_cli(&cli)
+    }
+
+    /// The adapter alone, and its entry script when it is a local one.
+    fn claude_adapter() -> (Self, Option<PathBuf>) {
         if let Some(explicit) = std::env::var_os(ADAPTER_ENV) {
             let path = PathBuf::from(explicit);
             if path.is_file() {
                 tracing::info!(script = %path.display(), "using adapter from {ADAPTER_ENV}");
-                return Self::node_script(path);
+                return (Self::node_script(&path), Some(path));
             }
             tracing::warn!(path = %path.display(), "{ADAPTER_ENV} is set but is not a file");
         }
         if let Some(script) = find_local_script(CLAUDE_ADAPTER_SCRIPT) {
             tracing::info!(script = %script.display(), "using locally installed adapter");
-            return Self::node_script(script);
+            return (Self::node_script(&script), Some(script));
         }
         tracing::info!(package = CLAUDE_ADAPTER, "no local adapter install; falling back to npx");
-        Self::npx(CLAUDE_ADAPTER, &[])
+        (Self::npx(CLAUDE_ADAPTER, &[]), None)
     }
 }
 

@@ -238,7 +238,7 @@ pub type AgentLines = Lines<
 pub fn spawn(spec: &AgentSpec) -> anyhow::Result<(AgentProcess, AgentLines)> {
     let mut cmd = tokio::process::Command::new(&spec.program);
     cmd.args(&spec.args)
-        .envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .envs(spec.env.iter().filter(|(k, v)| crate::claude_cli::keep_env(k, v)).map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

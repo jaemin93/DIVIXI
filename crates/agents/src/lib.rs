@@ -26,7 +26,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use orchestra_acp::{authenticate, find_local_script, probe, AgentSpec, ProbeReport, SessionProbe};
+use orchestra_acp::{
+    authenticate, bundled_cli_version, claude_cli_search_dirs, find_claude_cli_in, find_local_script, probe, AgentSpec,
+    ClaudeCli, ProbeReport, SessionProbe,
+};
 use serde::{Deserialize, Serialize};
 
 /// The agents Divixi knows how to drive.
@@ -258,7 +261,10 @@ pub async fn detect_all(opts: &DetectOptions) -> Vec<AgentStatus> {
 pub async fn detect(kind: AgentKind, opts: &DetectOptions) -> AgentStatus {
     let cli = locate_cli(kind).await;
     let adapter = resolve_adapter(kind, cli.as_ref(), &opts.adapters_dir);
-    let spec = spec_for(&adapter);
+    let mut spec = spec_for(&adapter);
+    if let (AgentKind::ClaudeCode, Some(s)) = (kind, spec.take()) {
+        spec = Some(with_installed_claude(s, &adapter, cli.as_ref()).await);
+    }
 
     let mut status = AgentStatus {
         kind,
@@ -369,6 +375,29 @@ fn spec_for(adapter: &Adapter) -> Option<AgentSpec> {
         }
         Adapter::NeedsDownload { .. } | Adapter::Missing { .. } => None,
     }
+}
+
+/// Point the Claude adapter at the installed `claude` when it can run the
+/// sessions (see [`ClaudeCli`]): the adapter otherwise runs the CLI its SDK
+/// bundles, which offers only the models that build knew about.
+///
+/// Detection runs on the machine the sessions run on, a remote instance
+/// included, so the CLI found is that machine's.
+async fn with_installed_claude(spec: AgentSpec, adapter: &Adapter, located: Option<&CliInfo>) -> AgentSpec {
+    let found = find_claude_cli_in(claude_cli_search_dirs(registry_path_dirs()));
+    let version = match (&found, located) {
+        // `locate_cli` already asked this one.
+        (Some(p), Some(c)) if Path::new(&c.path) == p.as_path() => c.version.clone(),
+        (Some(p), _) => cli_version(p).await,
+        (None, _) => None,
+    };
+    let script = match adapter {
+        Adapter::LocalScript { path } => Some(PathBuf::from(path)),
+        _ => None,
+    };
+    let cli = ClaudeCli::choose(found.as_deref(), version.as_deref(), &bundled_cli_version(script.as_deref()));
+    cli.log();
+    spec.with_claude_cli(&cli)
 }
 
 fn resolve_adapter(kind: AgentKind, cli: Option<&CliInfo>, adapters_dir: &Path) -> Adapter {
