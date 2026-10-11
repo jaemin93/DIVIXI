@@ -11,6 +11,7 @@ import {
   GAP_X,
   instructionChanged,
   layout,
+  needsFirstDraft,
   resultGlyphs,
   resultsOf,
   shownSteps,
@@ -201,4 +202,16 @@ test("a run's step results read what is usable and leave the rest", () => {
   assert.equal(r.get("s2")!.note, "no network");
   assert.equal(resultsOf("nonsense").size, 0);
   assert.equal(resultGlyphs(["s1", "s2", "s3"], r), "✓✗–", "a step it said nothing of reads as skipped");
+});
+
+test("a first draft is asked for once: a routine with no plan, an empty plan, nothing under way", () => {
+  const empty = emptyPlan();
+  assert.equal(needsFirstDraft({ hadPlan: false, doc: empty, asked: false, busy: false }), true);
+  assert.equal(needsFirstDraft({ hadPlan: true, doc: empty, asked: false, busy: false }), false, "a routine that had a plan: just show it");
+  assert.equal(needsFirstDraft({ hadPlan: false, doc: empty, asked: true, busy: false }), false, "asked already (pressed again)");
+  assert.equal(needsFirstDraft({ hadPlan: false, doc: empty, asked: false, busy: true }), false, "a turn under way (came back to the page)");
+  const drafted = { ...empty, steps: diamond() };
+  assert.equal(needsFirstDraft({ hadPlan: false, doc: drafted, asked: false, busy: false }), false, "it has steps");
+  const suggested = { ...empty, changes: [{ id: 1, target: "s1", run: null, before: null, after: step("s1") }] };
+  assert.equal(needsFirstDraft({ hadPlan: false, doc: suggested, asked: false, busy: false }), false, "suggestions are on their way");
 });

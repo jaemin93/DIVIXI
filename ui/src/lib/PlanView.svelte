@@ -5,6 +5,7 @@
   import PlanStepEditor from "./PlanStepEditor.svelte";
   import { resultsOf } from "./planGraph";
   import { whenFull } from "./time";
+  import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
 
   /**
@@ -130,6 +131,12 @@
     </div>
   </div>
 
+  {#if plans.drafting}
+    <div class="band draft" role="status">
+      <Working size={11} />
+      <span>{t("plan.drafting")}</span>
+    </div>
+  {/if}
   {#if plans.changed}
     <div class="band warn">
       <span>⚠ {t("plan.changedBand")}</span>
@@ -166,7 +173,7 @@
 
   {#if !doc.steps.length && !pending}
     <div class="empty">
-      <p class="et">{t("plan.emptyTitle")}</p>
+      <p class="et">{plans.drafting ? t("plan.drafting") : t("plan.emptyTitle")}</p>
       <button type="button" class="tb" onclick={addStep}>+ {t("plan.addStep")}</button>
     </div>
   {:else}
@@ -357,6 +364,11 @@
     align-items: flex-start;
     background: var(--okbg);
     border-color: var(--okln);
+  }
+
+  .band.draft {
+    color: var(--txt);
+    background: var(--sel);
   }
 
   .band.res {

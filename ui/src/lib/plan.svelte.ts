@@ -1,6 +1,15 @@
 import { invoke, listen } from "./ipc.svelte";
-import { store, type ArtifactInfo, type Routine } from "./store.svelte";
-import { emptyPlan, instructionChanged, unsaved, type PlanDoc, type PlanEvent } from "./planGraph";
+import { store, artifactKey, type ArtifactInfo, type Routine } from "./store.svelte";
+import { t } from "./i18n.svelte";
+import { emptyPlan, instructionChanged, needsFirstDraft, unsaved, type PlanDoc, type PlanEvent } from "./planGraph";
+
+/**
+ * Plans whose first draft was asked for, for as long as the app runs: a
+ * second press, or coming back to the page while the agent works, does not
+ * ask again. (Across a restart the routine already has its plan, which
+ * asks nothing either.)
+ */
+const drafted = new Set<string>();
 
 /**
  * A routine's plan on screen (src-tauri/src/plan.rs keeps it): its steps
@@ -61,11 +70,28 @@ class Plans {
     store.planSelected = [];
   }
 
+  /** The plan's agent has a turn in flight, or one waiting in line. */
+  get agentBusy(): boolean {
+    if (!this.id) return false;
+    const key = artifactKey(this.id);
+    return store.busyFor(key) || store.queued.some((q) => q.key === key && !q.held);
+  }
+
+  /** The first draft is being made: asked for, and the agent still at it. */
+  get drafting(): boolean {
+    return !!this.id && drafted.has(this.id) && this.agentBusy;
+  }
+
   /**
-   * Open the routine's plan, made when it has none. Nothing is sent to its
-   * agent: the human asks it, from the robot panel, when they want to.
+   * Open the routine's plan, made when it has none. The first time (the
+   * routine had no plan), the routine agent is asked for a draft from the
+   * instruction: the request and the reply are in its panel's history, the
+   * panel stays as it was (it does not open by itself), and the graph shows
+   * the draft arriving as suggestion cards. A routine that has a plan just
+   * shows it; changing it is asked for in the panel.
    */
   async openFor(routine: string): Promise<boolean> {
+    const hadPlan = !!store.routines.find((r) => r.id === routine)?.plan;
     this.follow(routine);
     this.busy = true;
     try {
@@ -78,6 +104,10 @@ class Plans {
       // The routine now carries its plan's id; the list hears it too.
       store.routines = store.routines.map((r) => (r.id === routine ? got.routine : r));
       void store.refreshArtifactSession();
+      if (needsFirstDraft({ hadPlan, doc: got.doc, asked: drafted.has(got.plan.id), busy: this.agentBusy })) {
+        drafted.add(got.plan.id);
+        void store.sendToArtifact(got.plan.id, got.plan.agent, t("plan.ask.draft"));
+      }
       return true;
     } catch (err) {
       store.lastError = String(err);

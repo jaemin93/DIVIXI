@@ -248,6 +248,17 @@ export function unsaved(doc: PlanDoc): boolean {
   return content(last.steps) !== content(doc.steps);
 }
 
+/**
+ * Whether opening a routine's plan should ask its agent for a first draft:
+ * only when the routine had no plan before this press, the plan is still
+ * empty (no steps, no suggestions), and no draft was asked for it already
+ * and none is under way. Pressing again, or coming back to the page while
+ * the agent works, asks nothing more.
+ */
+export function needsFirstDraft(o: { hadPlan: boolean; doc: PlanDoc; asked: boolean; busy: boolean }): boolean {
+  return !o.hadPlan && !o.asked && !o.busy && o.doc.steps.length === 0 && o.doc.changes.length === 0;
+}
+
 /** Whether the routine's instruction moved on since the plan was made. */
 export function instructionChanged(doc: PlanDoc, instruction: string): boolean {
   return !!doc.source && doc.source.instruction.trim() !== instruction.trim();

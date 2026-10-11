@@ -3694,6 +3694,27 @@ class Store {
     }
   }
 
+  /**
+   * A message to an artifact's agent whose panel may not be open (a
+   * routine's first plan draft). It joins that conversation's line as a
+   * typed one would, and is kept in its history.
+   */
+  async sendToArtifact(id: string, agent: string, text: string) {
+    const key = artifactKey(id);
+    const out: Queued = { id: `q${++this.queueSeq}-${Date.now()}`, key, target: id, agent, text, files: [], picks: [], selected: [], at: Date.now() };
+    if (this.busyFor(key) || liveQueuedFor(this.queued, key).length) {
+      this.setQueued(pushQueued(this.queued, out));
+      this.startPump();
+      return;
+    }
+    try {
+      await this.dispatch(out);
+    } catch (err) {
+      this.setQueued(pushQueued(this.queued, { ...out, held: true }));
+      this.raise(String(err));
+    }
+  }
+
   // ----- the waiting line: messages sent while a turn was in flight -----
 
   /** Messages waiting for their conversation's turn to end, oldest first. */

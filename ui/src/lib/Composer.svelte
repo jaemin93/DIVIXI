@@ -36,6 +36,7 @@
   let contextOpen = $state(false);
   /** Talking to the knowledge graph's conversation rather than a design's. */
   const graphChat = $derived(store.chatArtifact && store.currentArtifact?.kind === GRAPH_KIND);
+  const planChat = $derived(store.chatArtifact && store.currentArtifact?.kind === "plan");
   let box = $state<HTMLTextAreaElement>();
   /** Highlighted row in the slash list. */
   let slashIndex = $state(0);
@@ -780,8 +781,8 @@
         bind:value={draft}
         rows="1"
         placeholder={narrow
-          ? store.busy ? t("composer.responding") : store.chatArtifact ? t(graphChat ? "kb.agentPlaceholderShort" : "design.placeholderShort") : t("composer.placeholderShort")
-          : store.busy ? t("composer.responding") : store.chatArtifact ? t(graphChat ? "kb.agentPlaceholder" : "design.placeholder") : t("composer.placeholder")}
+          ? store.busy ? t("composer.responding") : store.chatArtifact ? t(graphChat ? "kb.agentPlaceholderShort" : planChat ? "plan.placeholder" : "design.placeholderShort") : t("composer.placeholderShort")
+          : store.busy ? t("composer.responding") : store.chatArtifact ? t(graphChat ? "kb.agentPlaceholder" : planChat ? "plan.placeholder" : "design.placeholder") : t("composer.placeholder")}
         aria-label={t("composer.placeholder")}
         onkeydown={onKey}
         oninput={() => {
