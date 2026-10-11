@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store } from "./store.svelte";
   import { kb } from "./knowledge.svelte";
+  import { plans } from "./plan.svelte";
   import type { Chip } from "./graphContext";
   import SplitHandle from "./SplitHandle.svelte";
   import Timeline from "./Timeline.svelte";
@@ -14,10 +15,16 @@
    * Composer as a track's, on the page's own artifact: the open design, or
    * the knowledge graph's conversation. For the graph, what goes with the
    * next message (store.graphChips) sits above it as chips to take out and
-   * put back; a design sends its board and the items picked on it.
+   * put back; a design sends its board and the items picked on it. A
+   * routine's plan sends the routine, the plan and the steps picked on it;
+   * its agent is its own (the composer's picker below sets it for the plan),
+   * never the routine's, which runs the work.
    */
-  let { kind }: { kind: "design" | "graph" } = $props();
-  const design = $derived(kind === "design");
+  let { kind }: { kind: "design" | "graph" | "plan" } = $props();
+  /** The design's and the plan's panel share a width: both sit beside a page of their own. */
+  const design = $derived(kind === "design" || kind === "plan");
+  const label = $derived(kind === "plan" ? t("plan.agentLabel") : kind === "design" ? t("design.agentLabel") : t("kb.agentLabel"));
+  const planSteps = $derived(kind === "plan" ? plans.doc.steps.filter((s) => store.planSelected.includes(s.id)) : []);
 
   function chipLabel(c: Chip): string {
     switch (c.kind) {
@@ -36,7 +43,7 @@
 <aside
   class="talk"
   style="width: {design ? store.artifactChatWidth : store.graphChatWidth}px"
-  aria-label={design ? t("design.agentLabel") : t("kb.agentLabel")}
+  aria-label={label}
 >
   {#if design}
     <SplitHandle
@@ -60,16 +67,33 @@
     />
   {/if}
   <div class="head">
-    <span class="mono hlab">{design ? t("design.agentLabel") : t("kb.agentLabel")}</span>
+    <span class="mono hlab">{label}</span>
     <span class="grow"></span>
     <button
       class="x"
-      onclick={() => (design ? store.setDesignChat(false) : store.closeGraphChat())}
+      onclick={() => (kind === "plan" ? plans.setChat(false) : design ? store.setDesignChat(false) : store.closeGraphChat())}
       aria-label={t("panel.agentClose")}
       title={t("panel.agentClose")}>×</button
     >
   </div>
-  {#if !design}
+  {#if kind === "plan"}
+  <div class="ctx">
+    <div class="mono ctxlab">{t("kb.agentContext")}</div>
+    <p class="ctxlib">{t("plan.agentContext", { name: plans.routineOnScreen?.name ?? "" })}</p>
+    {#if planSteps.length}
+      <div class="chips">
+        {#each planSteps as s (s.id)}
+          <button class="kchip" title={t("kb.agentChipRemove")} onclick={() => plans.pick(s.id, true)}>
+            <span class="clabel">{t("plan.agentChip", { id: s.id, title: s.title })}</span>
+            <span class="cx" aria-hidden="true">×</span>
+          </button>
+        {/each}
+      </div>
+    {:else}
+      <p class="ctxnone">{t("plan.agentNothing")}</p>
+    {/if}
+  </div>
+  {:else if !design}
   <div class="ctx">
     <div class="mono ctxlab">{t("kb.agentContext")}</div>
     <!-- The library on screen goes with every message (none yet: nothing to say). -->

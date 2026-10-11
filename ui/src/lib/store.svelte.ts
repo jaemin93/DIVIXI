@@ -354,7 +354,8 @@ export type View = "track" | "settings" | "worker" | "new-track" | "edit-track" 
 
 // ----- artifacts: what the human keeps beside tracks and attaches to them —
 // designs (a sketch board worked out with an agent), knowledge later -----
-export type ArtifactKind = "design" | "knowledge" | "graph";
+/** `plan` is a routine's plan: reached through its routine, never listed with the rest. */
+export type ArtifactKind = "design" | "knowledge" | "graph" | "plan";
 export type ArtifactInfo = {
   id: string;
   kind: ArtifactKind;
@@ -391,6 +392,8 @@ export type Routine = {
   updated_at: number;
   runs: number;
   last_run: string | null;
+  /** Its plan: the id of an artifact of kind `plan`, or empty for none. */
+  plan?: string;
 };
 
 /** Where one run of a routine stands. Its own words: a worker run's `done`
@@ -415,6 +418,10 @@ export type RoutineRun = {
   tools: number;
   /** The checked report, when the run left one. */
   report: WorkerReport | null;
+  /** The plan it was given beyond its instruction, as it read then. */
+  plan?: { version: number; steps: { id: string; title: string }[] } | null;
+  /** What its agent said of each step of that plan. */
+  steps?: unknown;
 };
 
 export type Stroke = { points: [number, number, number][]; color: string; size: number };
@@ -1040,8 +1047,21 @@ class Store {
   get chatArtifactId(): string {
     if (this.view === "design") return this.artifact;
     if (this.view === "knowledge" && this.graphChatOpen) return this.graphChat;
+    if (this.view === "routines" && this.planChatOpen && this.planInfo) return this.planInfo.id;
     return "";
   }
+
+  /**
+   * The open routine's plan, as an artifact (its agent and options), when it
+   * has one and it is open. Plans are left out of `artifacts` (the core lists
+   * them only when asked by kind), so the one on screen is held here; the
+   * plan itself is plan.svelte.ts's.
+   */
+  planInfo = $state<ArtifactInfo | null>(null);
+  /** Whether the plan's agent is open beside the routine. */
+  planChatOpen = $state(false);
+  /** Steps picked on the plan: they go with the next message to its agent. */
+  planSelected = $state<string[]>([]);
 
   /**
    * What the person picked for the on-screen artifact conversation's next
@@ -1049,11 +1069,13 @@ class Store {
    * not the library on screen, which goes along but is not a message.
    */
   get chatPicks(): string[] {
+    if (this.view === "routines") return this.planSelected;
     return this.view === "design" ? this.designSelected : picksOf(this.graphChips, this.graphExcluded);
   }
 
   /** What goes with the on-screen artifact conversation's next message. */
   get chatSelected(): string[] {
+    if (this.view === "routines") return this.planSelected;
     return this.view === "design" ? this.designSelected : this.graphSelected;
   }
   /** The open artifact's agent session. */
@@ -2155,6 +2177,7 @@ class Store {
   /** The artifact whose conversation is on screen, else the open design. */
   get currentArtifact(): ArtifactInfo | undefined {
     const id = this.chatArtifactId || this.artifact;
+    if (this.planInfo && this.planInfo.id === id) return this.planInfo;
     return this.artifacts.find((d) => d.id === id);
   }
 
@@ -2421,6 +2444,8 @@ class Store {
     try {
       const d = await invoke<ArtifactInfo>("update_artifact", { id, ...patch });
       this.artifacts = this.artifacts.map((x) => (x.id === id ? d : x));
+      // The plan on screen is not in that list (see planInfo).
+      if (this.planInfo?.id === id) this.planInfo = d;
     } catch (err) {
       this.lastError = String(err);
     }

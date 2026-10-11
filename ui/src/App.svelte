@@ -170,6 +170,10 @@
         <div class="sidebox" transition:slide={side}><RoutineList /></div>
       {/if}
       <RoutineView />
+      <!-- The routine's plan's agent: its own, beside the plan, as a design's is. -->
+      {#if store.planChatOpen && store.planInfo}
+        <AgentPanel kind="plan" />
+      {/if}
     {:else if store.view === "worker"}
       <WorkerView />
     {:else if store.view === "new-track" || !store.currentTrack}

@@ -5,6 +5,10 @@
   import Icon from "./Icon.svelte";
   import Working from "./Working.svelte";
   import Markdown from "./Markdown.svelte";
+  import PlanView from "./PlanView.svelte";
+  import { plans } from "./plan.svelte";
+  import { resultGlyphs, resultsOf } from "./planGraph";
+  import { untrack } from "svelte";
   import { t } from "./i18n.svelte";
   import { whenFull } from "./time";
 
@@ -102,6 +106,51 @@
     else filledFrom = "";
   }
 
+  // ----- the plan: the routine's instruction as steps, worked out with an agent of its own -----
+
+  // The plan on screen belongs to the routine on screen; another one closes it.
+  $effect(() => {
+    const id = making ? "" : (saved?.id ?? "");
+    untrack(() => plans.follow(id));
+  });
+
+  const planOn = $derived(!making && !!saved && plans.open && plans.routine === saved.id);
+  const hasPlan = $derived(!!saved?.plan);
+  /** In plan mode the form folds to one line; this opens it. */
+  let formOpen = $state(false);
+
+  /**
+   * The Plan button. A form not saved yet is saved first (it needs all four
+   * answers, as saving does). A routine with no plan gets one and its agent
+   * is asked for a first draft. Pressed again on a plan that is open, it
+   * offers to bring the plan in line with the instruction (as suggestions)
+   * or to start over (the old plan kept in its history).
+   */
+  async function planPress() {
+    if (!complete || plans.busy) return;
+    if (making || dirty) {
+      await save();
+      if (failed) return;
+    }
+    const id = store.routine;
+    if (!id || id === NEW_ROUTINE) return;
+    if (planOn) {
+      plans.menu = !plans.menu;
+      return;
+    }
+    const had = !!store.routines.find((r) => r.id === id)?.plan;
+    formOpen = false;
+    if (!(await plans.openFor(id))) return;
+    if (!plans.doc.steps.length) await plans.draft();
+    else if (had) plans.menu = true;
+  }
+
+  /** A run's step results in one line, in the order of the plan it was given. */
+  function glyphsOf(run: RoutineRun): string {
+    const order = run.plan?.steps?.map((s) => s.id) ?? [];
+    return order.length ? resultGlyphs(order, resultsOf(run.steps)) : "";
+  }
+
   async function remove() {
     if (!saved) return;
     if (!armed) {
@@ -119,11 +168,35 @@
       <h1>{making ? t("routines.newTitle") : (saved?.name ?? "")}</h1>
       <p class="meta">{t("routines.standalone")}</p>
     </div>
-    {#if !making && saved}
+    {#if making}
+      <div class="acts">
+        <button
+          class="plan"
+          disabled={!complete || plans.busy}
+          title={complete ? t("plan.buttonNew") : t("plan.buttonIncomplete")}
+          onclick={planPress}
+        >
+          {t("plan.button")}
+        </button>
+      </div>
+    {:else if saved}
       <div class="acts">
         <button class="del" class:armed onclick={remove} onblur={() => (armed = false)}>
           {armed ? t("routines.deleteArm") : t("routines.delete")}
         </button>
+        <button
+          class="plan"
+          class:on={planOn}
+          aria-pressed={planOn}
+          disabled={!complete || plans.busy}
+          title={!complete ? t("plan.buttonIncomplete") : planOn ? t("plan.buttonAgain") : hasPlan ? t("plan.buttonOpen") : t("plan.buttonNew")}
+          onclick={planPress}
+        >
+          {t("plan.button")}{#if hasPlan && !planOn}<span class="dot" aria-hidden="true"></span>{/if}
+        </button>
+        {#if planOn}
+          <button class="ghost" onclick={() => plans.close()} title={t("plan.hide")} aria-label={t("plan.hide")}>×</button>
+        {/if}
         {#if live}
           <button class="run" onclick={() => store.cancelRoutine(saved.id)}>
             <Working size={12} /> {t("routines.stop")}
@@ -137,7 +210,7 @@
     {/if}
   </header>
 
-  <div class="body">
+  {#snippet form()}
     <!-- Where and on what, above the words: the same order the form asks a
          person to think in, and it is never hidden behind a menu. -->
     <div class="grid">
@@ -199,6 +272,41 @@
         {making ? t("routines.create") : t("routines.save")}
       </button>
     </div>
+  {/snippet}
+
+  {#if planOn && saved}
+    <div class="planning">
+      <div class="summary">
+        <button class="fold" aria-expanded={formOpen} onclick={() => (formOpen = !formOpen)}>{formOpen ? "▾" : "▸"} {t("plan.form")}</button>
+        <span>{t("routines.folder")} <b class="mono">{saved.cwd}</b></span>
+        <span>{t("plan.runsOn")} <b>{agentLabel(saved.agent)}</b></span>
+        {#if dirty}<span class="bad">{t("plan.unsaved")}</span>{/if}
+      </div>
+      {#if formOpen}
+        <div class="body formbody">{@render form()}</div>
+      {/if}
+      <PlanView />
+      {#if store.routineRuns.length}
+        <div class="strip" role="group" aria-label={t("routines.history")}>
+          <span class="flab">{t("routines.history")}</span>
+          {#each store.routineRuns.slice(0, 6) as run (run.id)}
+            {@const g = glyphsOf(run)}
+            <button
+              class="srun"
+              class:on={plans.resultRun === run.id}
+              disabled={!g}
+              title={g ? t("plan.showResults") : t("plan.noPlanInRun")}
+              onclick={() => (plans.resultRun = plans.resultRun === run.id ? "" : run.id)}
+            >
+              {whenFull(run.started_at, store.lang)} · <span class:bad={run.status === "failed"}>{t(`routines.status.${run.status}`)}</span>{#if g} · <span class="mono">{g}</span>{/if}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {:else}
+  <div class="body">
+    {@render form()}
 
     {#if !making && saved}
       <div class="block">
@@ -213,6 +321,7 @@
                   <span class="rwhen">{whenFull(run.started_at, store.lang)}</span>
                   <span class="rstat" class:bad={run.status === "failed"}>{t(`routines.status.${run.status}`)}</span>
                   {#if run.tools}<span class="rtools">{t("routines.tools", { n: run.tools })}</span>{/if}
+                  {#if glyphsOf(run)}<span class="rsteps mono" title={t("plan.stepResults")}>{glyphsOf(run)}</span>{/if}
                   <span class="rid mono">{run.id}</span>
                 </div>
                 {#if run.error}
@@ -233,6 +342,7 @@
       </div>
     {/if}
   </div>
+  {/if}
 </section>
 
 {#if remotePick}
@@ -480,5 +590,122 @@
     cursor: pointer;
     color: var(--lab);
     font-size: 11px;
+  }
+  /* The Plan button: a plain button (the one filled one is Run), marked when
+     the routine has a plan and lit while it is open. */
+  .plan {
+    position: relative;
+    height: 30px;
+    padding: 0 12px;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--txt);
+  }
+
+  .plan:hover:not(:disabled),
+  .plan.on {
+    color: var(--hi);
+    border-color: var(--acc);
+  }
+
+  .plan.on {
+    background: var(--accbg);
+  }
+
+  .plan:disabled {
+    opacity: 0.45;
+  }
+
+  .plan .dot {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--acc);
+  }
+
+  .planning {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .summary {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 8px 20px;
+    font-size: 12px;
+    color: var(--lab);
+  }
+
+  .summary b {
+    color: var(--txt);
+    font-weight: 500;
+  }
+
+  .fold {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--lab);
+    font-size: 12px;
+  }
+
+  .fold:hover {
+    color: var(--hi);
+  }
+
+  .formbody {
+    flex: none;
+    max-height: 45vh;
+    border-top: 1px solid var(--line);
+  }
+
+  .strip {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 20px;
+    border-top: 1px solid var(--line);
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  .srun {
+    height: 24px;
+    padding: 0 8px;
+    font-size: 11.5px;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--lab);
+  }
+
+  .srun.on {
+    color: var(--txt);
+    border-color: var(--hi);
+  }
+
+  .srun:disabled {
+    opacity: 0.6;
+  }
+
+  .rsteps {
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--txt);
+  }
+
+  @media (max-width: 640px) {
+    .summary,
+    .strip {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
   }
 </style>

@@ -3,6 +3,7 @@ import "./lib/tokens.css";
 import App from "./App.svelte";
 import { connectEvents, store } from "./lib/store.svelte";
 import { connectKnowledge } from "./lib/knowledge.svelte";
+import { connectPlans } from "./lib/plan.svelte";
 import { arrive, ready, inTauri, instance, overWeb } from "./lib/ipc.svelte";
 import { step } from "./lib/startup.svelte";
 import { DEADLINE_MS } from "./lib/startup";
@@ -33,6 +34,9 @@ void arrive()
       store.lastError = String(err);
     });
     connectKnowledge().catch((err) => {
+      store.lastError = String(err);
+    });
+    connectPlans().catch((err) => {
       store.lastError = String(err);
     });
     const restoring = store.restore();
