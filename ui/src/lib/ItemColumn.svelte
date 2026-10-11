@@ -25,6 +25,7 @@
   import { cubicOut } from "svelte/easing";
   import SplitHandle from "./SplitHandle.svelte";
   import Icon from "./Icon.svelte";
+  import NewButton from "./NewButton.svelte";
   import ListSearch from "./ListSearch.svelte";
   import { store } from "./store.svelte";
   import { t } from "./i18n.svelte";
@@ -56,7 +57,6 @@
     onwidth,
     onclose,
     newLabel,
-    newButton,
     newPlaceholder,
     searchPlaceholder,
     maxlength = 80,
@@ -82,9 +82,8 @@
     widthLabel: string;
     onwidth: (px: number, persist: boolean) => void;
     onclose: () => void;
+    /** What the "+" makes ("New design"): its name and tooltip, and the box's. */
     newLabel: string;
-    /** The head's button, as the tracks column's "+ TRACK". */
-    newButton: string;
     newPlaceholder: string;
     searchPlaceholder: string;
     maxlength?: number;
@@ -188,14 +187,13 @@
       <span class="mlab">{title}</span>
       <span class="grow"></span>
       <div class="plus" bind:this={menuEl}>
-        <button
-          class="btn newbtn"
-          class:on={creating || choosing}
-          title={newLabel}
+        <NewButton
+          label={newLabel}
+          on={creating || choosing}
           aria-haspopup={options.length ? "menu" : undefined}
           aria-expanded={options.length ? choosing : creating}
-          onclick={plus}>{newButton}</button
-        >
+          onclick={plus}
+        />
         {#if choosing}
           <div class="newmenu" role="menu" aria-label={newLabel}>
             {#each options as o (o.id)}
@@ -314,17 +312,6 @@
     gap: 8px;
     padding: 0 10px 0 16px;
     border-bottom: 1px solid var(--line);
-  }
-
-  /* The head's "+", as the tracks column's "+ TRACK". */
-  .newbtn {
-    height: 26px;
-    padding: 0 9px;
-  }
-
-  .newbtn.on {
-    color: var(--hi);
-    border-color: var(--acc);
   }
 
   /* The "+" and, with options, its menu under it. */

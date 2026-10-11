@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store, agentLabel, TRACK_COLORS, type TrackSort } from "./store.svelte";
   import Icon from "./Icon.svelte";
+  import NewButton from "./NewButton.svelte";
   import SplitHandle from "./SplitHandle.svelte";
   import ListSearch from "./ListSearch.svelte";
   import { t } from "./i18n.svelte";
@@ -312,7 +313,7 @@
   <div class="head">
     <span class="mlab">{t("tracks.title")}</span>
     <span class="grow"></span>
-    <button class="btn new" class:on={store.view === "new-track"} title={t("tracks.newTitle")} onclick={() => (store.view = "new-track")}>{t("tracks.new")}</button>
+    <NewButton label={t("tracks.newTitle")} on={store.view === "new-track"} onclick={() => (store.view = "new-track")} />
     <button class="x" onclick={() => store.setTrackList(false)} aria-label={t("tracks.close")} title={t("tracks.close")}>
       <Icon name="collapse" />
     </button>
@@ -588,16 +589,6 @@
 
   .grow {
     flex: 1;
-  }
-
-  .new {
-    height: 26px;
-    padding: 0 9px;
-  }
-
-  .new.on {
-    color: var(--hi);
-    border-color: var(--acc);
   }
 
   .x {

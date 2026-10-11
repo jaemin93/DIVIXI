@@ -72,7 +72,6 @@
       onwidth={(px, persist) => store.setDesignListWidth(px, persist)}
       onclose={() => store.setDesignList(false)}
       newLabel={t("design.new")}
-      newButton={t("design.newButton")}
       newPlaceholder={t("design.newPh")}
       searchPlaceholder={t("design.search")}
       oncreate={create}

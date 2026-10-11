@@ -19,6 +19,7 @@
     | "files"
     | "refresh"
     | "close"
+    | "plus"
     | "filter"
     | "remote"
     | "terminal"
@@ -87,6 +88,8 @@
     <path d="M13 8a5 5 0 1 1-1.5-3.5" /><path d="M13 2.5v3h-3" />
   {:else if name === "close"}
     <path d="M4 4l8 8M12 4l-8 8" />
+  {:else if name === "plus"}
+    <path d="M8 3v10M3 8h10" />
   {:else if name === "terminal"}
     <rect x="1.5" y="2.5" width="13" height="11" /><path d="M4.5 6l2 2-2 2M8 10.5h3.5" />
   {:else if name === "book"}

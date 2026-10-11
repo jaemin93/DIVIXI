@@ -60,8 +60,7 @@
   widthLabel={t("kb.lib.listWidth")}
   onwidth={(px, persist) => store.setKbListWidth(px, persist)}
   onclose={() => store.setKbList(false)}
-  newLabel={t("kb.lib.new")}
-  newButton={t("kb.lib.newButton")}
+  newLabel={t("kb.lib.newTitle")}
   newPlaceholder={t("kb.lib.newPh")}
   searchPlaceholder={t("kb.lib.search")}
   maxlength={MAX_NAME}

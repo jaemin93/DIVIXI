@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store, NEW_ROUTINE } from "./store.svelte";
   import Icon from "./Icon.svelte";
+  import NewButton from "./NewButton.svelte";
   import SplitHandle from "./SplitHandle.svelte";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
@@ -11,8 +12,8 @@
    * to no track and is nobody's worker, so this is a flat list — there is
    * no owner to group it under.
    *
-   * Two ways in, and both are here: the button at the top opens a blank
-   * form for the human to fill, and a routine the conductor wrote appears
+   * Two ways in, and both are here: the "+" in the head (the one every list
+   * column has, NewButton) opens a blank form for the human to fill, and a routine the conductor wrote appears
    * in the list beside it. Neither is the "real" one.
    */
   const now = Date.now();
@@ -33,15 +34,11 @@
     label={t("routines.width")}
     onchange={(px, persist) => store.setRoutineListWidth(px, persist)}
   />
+  <!-- As the tracks column: the title, then the "+", over a rule. -->
   <div class="head">
-    <Icon name="routines" size={15} />
-    <span class="title">{t("rail.routines")}</span>
-  </div>
-
-  <div class="newrow">
-    <button class="new" class:on={store.routine === NEW_ROUTINE} onclick={() => store.newRoutine()}>
-      + {t("routines.new")}
-    </button>
+    <span class="mlab">{t("rail.routines")}</span>
+    <span class="grow"></span>
+    <NewButton label={t("routines.new")} on={store.routine === NEW_ROUTINE} onclick={() => store.newRoutine()} />
   </div>
 
   <div class="scroll">
@@ -93,40 +90,17 @@
     gap: 8px;
     padding: 0 10px 0 16px;
     border-bottom: 1px solid var(--line);
-    color: var(--lab);
   }
 
-  .title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--hi);
-  }
-
-  .newrow {
-    flex-shrink: 0;
-    padding: 10px 12px 6px;
-  }
-
-  .new {
-    width: 100%;
-    height: 32px;
-    background: var(--inp);
-    border: 1px solid var(--line);
-    color: var(--lab);
-    font-size: 13px;
-  }
-
-  .new:hover,
-  .new.on {
-    color: var(--hi);
-    border-color: var(--acc);
+  .grow {
+    flex: 1;
   }
 
   .scroll {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 2px 0 12px;
+    padding: 4px 0 12px;
   }
 
   .empty {
