@@ -90,6 +90,16 @@ export const LIST_FOLDS = {
 
 export type ListFold = keyof typeof LIST_FOLDS;
 
+/**
+ * A list column after its page's rail item is pressed. On the page already,
+ * the press folds the column or brings it back. Coming from another page,
+ * the column stays as it was last left (folded stays folded): the press goes
+ * to the page, and a second one unfolds it, as on the tracks page.
+ */
+export function listAfterRail(open: boolean, onPage: boolean): boolean {
+  return onPage ? !open : open;
+}
+
 /** A list column's state as it is written, in the setting and in a browser alike. */
 export function foldValue(open: boolean): "open" | "closed" {
   return open ? "open" : "closed";

@@ -28,7 +28,7 @@ import {
 import { addError, dropError, errorLife, type AppError } from "./errors";
 import { withTrack } from "./tracks";
 import { keepsSetting } from "./layoutSettings";
-import { clampZoom, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, parseZoom, settingOpen, WEB_RAIL_KEY, webPanelOpen, type ListFold } from "./uiMemory";
+import { clampZoom, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, listAfterRail, parseZoom, settingOpen, WEB_RAIL_KEY, webPanelOpen, type ListFold } from "./uiMemory";
 import { pairing, type Paired } from "./pairing.svelte";
 import { openKey, parseMemory, pruneOpen, remember, treeReply, underOpen, type WsEntry as WsEntryType } from "./fileTree";
 
@@ -2201,13 +2201,13 @@ class Store {
 
   /** Show the routines: the last one open, else the newest, else the form. */
   async showRoutines() {
-    // As the designs: shown already, the rail's second click folds the column away, and back.
-    if (this.view === "routines") {
-      await this.setRoutineList(!this.routineListOpen);
-      return;
-    }
+    // As the designs: shown already, the rail's second click folds the column away, and back;
+    // from another page, the column stays as it was last left.
+    const onPage = this.view === "routines";
+    const open = listAfterRail(this.routineListOpen, onPage);
+    if (open !== this.routineListOpen) await this.setRoutineList(open);
+    if (onPage) return;
     this.view = "routines";
-    if (!this.routineListOpen) void this.setRoutineList(true);
     await this.loadRoutines();
     if (this.routine === NEW_ROUTINE) return;
     const pick = this.routines.find((r) => r.id === this.routine) ?? this.routines[0];
@@ -2314,12 +2314,13 @@ class Store {
 
   /** Show the designs: the last one open, else the newest. */
   async showDesigns() {
-    if (this.view === "design") {
-      await this.setDesignList(!this.designListOpen);
-      return;
-    }
+    // Shown already, the rail's second click folds the column away, and back;
+    // from another page, the column stays as it was last left.
+    const onPage = this.view === "design";
+    const open = listAfterRail(this.designListOpen, onPage);
+    if (open !== this.designListOpen) await this.setDesignList(open);
+    if (onPage) return;
     this.view = "design";
-    if (!this.designListOpen) void this.setDesignList(true);
     if (!this.artifacts.length) await this.loadArtifacts();
     const pick = this.designs.find((d) => d.id === this.artifact) ?? this.designs[0];
     if (pick) await this.openArtifact(pick.id);

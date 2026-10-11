@@ -6,6 +6,7 @@
   import Mark from "./Mark.svelte";
   import SplitHandle from "./SplitHandle.svelte";
   import { t, type Key } from "./i18n.svelte";
+  import { listAfterRail } from "./uiMemory";
 
   /**
    * The rail's map. Adding a feature is one entry here: an icon, a label,
@@ -37,12 +38,12 @@
       icon: "book",
       label: "rail.knowledge",
       go: () => {
-        // As the designs: a second click folds the libraries column away, and back.
-        if (store.view === "knowledge") void store.setKbList(!store.kbListOpen);
-        else {
-          if (!store.kbListOpen) void store.setKbList(true);
-          void kb.show();
-        }
+        // As the designs: a second click folds the libraries column away, and back;
+        // from another page, the column stays as it was last left.
+        const onPage = store.view === "knowledge";
+        const open = listAfterRail(store.kbListOpen, onPage);
+        if (open !== store.kbListOpen) void store.setKbList(open);
+        if (!onPage) void kb.show();
       },
     },
     { id: "routines", icon: "routines", label: "rail.routines", go: () => void store.showRoutines() },

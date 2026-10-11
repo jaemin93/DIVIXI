@@ -2,7 +2,7 @@
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { clampZoom, FIELD_MIN_PX, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, parseZoom, settingOpen, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen, ZOOM_MAX, ZOOM_MIN } from "./uiMemory.ts";
+import { clampZoom, FIELD_MIN_PX, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, listAfterRail, parseZoom, settingOpen, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen, ZOOM_MAX, ZOOM_MIN } from "./uiMemory.ts";
 import { isLayoutSetting, keepsSetting } from "./layoutSettings.ts";
 
 test("a zoom asked for lands on a step within bounds", () => {
@@ -130,4 +130,43 @@ test("a list column's fold is the window's layout, not shared with a phone", () 
     assert.ok(l.web.startsWith("divixi."), l.web);
     assert.notEqual(l.web, l.setting);
   }
+});
+
+test("coming to a page from the rail leaves its list as it was last left", () => {
+  assert.equal(listAfterRail(false, false), false);
+  assert.equal(listAfterRail(true, false), true);
+});
+
+test("pressing the rail item of the page shown folds its list, and back", () => {
+  assert.equal(listAfterRail(true, true), false);
+  assert.equal(listAfterRail(false, true), true);
+});
+
+test("folded, restarted, come back to: still folded, and a second press opens it", () => {
+  // Desktop: folded with the head's button, kept as the PC's setting.
+  let kept = foldValue(false);
+  // Restart: read back, then the rail from the tracks page, then again on the page.
+  let open = settingOpen(kept);
+  open = listAfterRail(open, false);
+  assert.equal(open, false);
+  open = listAfterRail(open, true);
+  assert.equal(open, true);
+  kept = foldValue(open);
+  assert.equal(settingOpen(kept), true);
+});
+
+test("a phone's lists still start folded, are kept on the phone, and fold on a pick (#66)", () => {
+  // Nothing kept on this phone: folded, and coming to the page does not open it.
+  let open = webPanelOpen(null, true);
+  assert.equal(open, false);
+  open = listAfterRail(open, false);
+  assert.equal(open, false);
+  // A second press opens it, and the phone keeps that for its next start.
+  open = listAfterRail(open, true);
+  let stored = foldValue(open);
+  assert.equal(webPanelOpen(stored, true), true);
+  // Picking a row folds it on a narrow phone, and that is kept too.
+  assert.equal(foldsOnPick(true, true), true);
+  stored = foldValue(false);
+  assert.equal(listAfterRail(webPanelOpen(stored, true), false), false);
 });
