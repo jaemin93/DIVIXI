@@ -87,7 +87,6 @@
       menued={menu?.id ?? null}
       onpick={(id) => store.openArtifact(id)}
       onmenu={(id, x, y) => (menu = { id, x, y })}
-      empty={t("design.none")}
     />
   {/if}
 
@@ -174,10 +173,8 @@
       </div>
     </section>
   {:else}
-    <section class="main blank">
-      <p class="serif">{t("design.startTitle")}</p>
-      <p class="hint">{t("design.startHint")}</p>
-    </section>
+    <!-- No design open (none made yet): the page is left empty. -->
+    <section class="main"></section>
   {/if}
 </div>
 
@@ -193,26 +190,6 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-  }
-
-  .main.blank {
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-  }
-
-  .blank p {
-    margin: 0;
-  }
-
-  .blank .serif {
-    font-size: 24px;
-    color: var(--dim);
-  }
-
-  .blank .hint {
-    font-size: 13px;
-    color: var(--lab);
   }
 
   header {

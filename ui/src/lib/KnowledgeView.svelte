@@ -222,7 +222,8 @@
           <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
         </div>
       {:else if !shown.length && !kb.loading}
-        <p class="none">{kb.shownQuery ? t("kb.noResults") : t("kb.noItems")}</p>
+        <!-- A search that found nothing says so; an empty list is left empty. -->
+        {#if kb.shownQuery}<p class="none">{t("kb.noResults")}</p>{/if}
       {/if}
 
       {#each groups as g (g.id)}
@@ -276,9 +277,6 @@
           <button class="btn btn-acc" onclick={() => kb.pickAndAdd()}>{t("kb.addSource")}</button>
         {/if}
       </div>
-      {#if !kb.shown.length}
-        <p class="none">{kb.libraries.length ? t("kb.lib.empty") : t("kb.lib.none")}</p>
-      {/if}
       {#each kb.shown as s (s.id)}
         {@const art = kb.artifactOf(s.id)}
         <div

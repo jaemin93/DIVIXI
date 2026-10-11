@@ -78,7 +78,6 @@
     note = "";
     menu = { id: Number(id), x, y };
   }}
-  empty={t("kb.lib.none")}
 />
 
 {#if menu && menuLibrary}

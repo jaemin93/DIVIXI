@@ -47,9 +47,8 @@
   </div>
 
   <div class="scroll">
-    {#if !store.routines.length}
-      <p class="empty">{t("routines.empty")}</p>
-    {:else}
+    <!-- No routines: the list is left empty; the head's "+" makes one. -->
+    {#if store.routines.length}
       {#each store.routines as r (r.id)}
         {@const live = store.routineLive(r.id)}
         <div class="row" class:on={store.routine === r.id}>
@@ -113,13 +112,6 @@
     min-height: 0;
     overflow-y: auto;
     padding: 4px 0 12px;
-  }
-
-  .empty {
-    margin: 10px 16px;
-    font-size: 12px;
-    line-height: 1.6;
-    color: var(--lab);
   }
 
   .row {

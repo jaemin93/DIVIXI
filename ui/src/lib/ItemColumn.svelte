@@ -72,7 +72,6 @@
     menued = null,
     onpick,
     onmenu,
-    empty,
   }: {
     title: string;
     width: number;
@@ -104,7 +103,6 @@
     menued?: string | null;
     onpick: (id: string) => void;
     onmenu: (id: string, x: number, y: number) => void;
-    empty: string;
   } = $props();
 
   /** Slides like the tracks column; not for those who asked for less motion. */
@@ -275,9 +273,8 @@
           </button>
         </div>
       {/each}
-      {#if !items.length}
-        <div class="mono empty">{empty}</div>
-      {:else if filtering && !shown.length}
+      <!-- An empty list is left empty: the head's "+" is the way to a first one. -->
+      {#if filtering && !shown.length}
         <!-- Nothing the search or filter lets through: said as the tracks column says it. -->
         <div class="mono empty">{t("tracks.none")}</div>
       {/if}
