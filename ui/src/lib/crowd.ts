@@ -4,7 +4,7 @@
  * When it does not, the list steps aside (not folded for good: it is back
  * as soon as there is room), so the page in the middle never gets no width.
  */
-export const MAIN_MIN = 360;
+export const MAIN_MIN = 280;
 
 export function listFits(windowWidth: number, rail: number, list: number, side: number, min = MAIN_MIN): boolean {
   return windowWidth - rail - list - side >= min;

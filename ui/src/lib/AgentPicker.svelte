@@ -24,6 +24,8 @@
     agent: string;
     config: OptionConfig;
     note?: string;
+    /** It picks the planning agent, which works in a mode that asks (whatever the agent's own). */
+    planning?: boolean;
     setAgent: (agent: string) => void;
     setOption: (id: string, value: string) => void;
   };
@@ -49,6 +51,9 @@
       return !q || `${c.id} ${c.name} ${c.group ?? ""}`.toLowerCase().includes(q);
     }),
   );
+
+  /** A plan's agent: its mode is set by the core (one that asks), so no mode is shown. */
+  const planning = $derived(target ? target.planning === true : artifactMode && store.currentArtifact?.kind === "plan");
 
   /** Whom the menu picks for, for a screen reader (not drawn: the chip and panel say it). */
   const menuLabel = $derived(
@@ -139,7 +144,7 @@
     </div>
     {/if}
     <span class="grow"></span>
-    {#if modeInEffect}
+    {#if modeInEffect && !planning}
       <span class="mono modetag" title={t("composer.modeTitle")}>{t("picker.mode")} · {modeKey(modeInEffect)}</span>
     {/if}
   </div>

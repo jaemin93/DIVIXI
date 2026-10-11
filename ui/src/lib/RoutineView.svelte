@@ -231,6 +231,7 @@
     <AgentPicker
       target={{
         label: t("plan.agentLabel"),
+        planning: true,
         agent: plans.draftAgent.agent,
         config: plans.draftAgent.config,
         note: t("plan.agentNote"),
