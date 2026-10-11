@@ -128,6 +128,16 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
         .begin_routine_run(&r.id, &r.agent, &r.cwd, &r.instruction)
         .map_err(|e| e.to_string())?;
 
+    // Its plan, when it has one with steps and the human did not turn it
+    // off for runs: given in the same prompt, and kept with the run.
+    let guided = guidance(&state, r);
+    if let Some(g) = &guided {
+        if let Err(err) = state.store.set_routine_run_plan(&run, &g.snapshot) {
+            tracing::warn!(%err, %run, "could not keep the plan a routine run was given");
+        }
+    }
+    let ids: Vec<String> = guided.as_ref().map(|g| g.ids.clone()).unwrap_or_default();
+
     // Held for the turn: what the human answers and stops.
     state
         .routines
@@ -143,7 +153,7 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
 
     // The report rules are the same ones a worker is given: they describe
     // the block, not the worker.
-    let sent = format!("{}\n\n---\n{}", r.instruction, report::instructions());
+    let sent = prompt(&r.instruction, guided.as_ref().map(|g| g.section.as_str()));
 
     let (app_t, id_t, run_t, name_t) = (app.clone(), r.id.clone(), run.clone(), r.name.clone());
     tauri::async_runtime::spawn(async move {
@@ -170,6 +180,15 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
         // not do, and a made-up "partial" would read as a finding.
         let report = (status == RoutineStatus::Done).then(|| checked(&text));
         let as_json = report.as_ref().and_then(|r| serde_json::to_value(r).ok());
+        // What the agent said of each step, read the same way: only from a
+        // run that finished by itself.
+        if status == RoutineStatus::Done && !ids.is_empty() {
+            if let Some(steps) = crate::plan::step_results(&text, &ids) {
+                if let Err(err) = st.store.set_routine_run_steps(&run_t, &steps) {
+                    tracing::warn!(%err, run = %run_t, "could not keep a routine run's step results");
+                }
+            }
+        }
         if let Err(err) = st.store.end_routine_run(
             &run_t,
             status,
@@ -195,6 +214,32 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
     });
 
     Ok(json!({ "routine": r.id, "run": run, "agent": r.agent, "cwd": r.cwd, "status": "running" }))
+}
+
+/// What a routine's session is sent: its instruction, its plan when it is
+/// given one, and the report rules. Without a plan it is exactly what it
+/// always was.
+fn prompt(instruction: &str, plan: Option<&str>) -> String {
+    match plan {
+        None => format!("{}\n\n---\n{}", instruction, report::instructions()),
+        Some(plan) => format!("{}\n\n---\n{}\n\n---\n{}", instruction, plan, report::instructions()),
+    }
+}
+
+/// The plan a run is given, if its routine has one to give. A plan that
+/// cannot be read is said in the log and the run goes on without it: the
+/// instruction alone is still the routine.
+fn guidance(state: &AppState, r: &Routine) -> Option<crate::plan::Guidance> {
+    if r.plan.is_empty() {
+        return None;
+    }
+    match crate::plan::doc(state, &r.plan) {
+        Ok(doc) => crate::plan::guidance(&doc),
+        Err(err) => {
+            tracing::warn!(%err, routine = %r.id, plan = %r.plan, "running without the plan: it could not be read");
+            None
+        }
+    }
 }
 
 /// Read the turn's events for the two things a routine's history keeps: what
@@ -284,4 +329,23 @@ pub async fn cancel(app: &AppHandle, id: &str) {
 /// Tell the window a routine's list has moved.
 pub fn notify(app: &AppHandle) -> Result<(), String> {
     app.emit("routines", ()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A routine without a plan is sent what it always was, to the byte.
+    #[test]
+    fn without_a_plan_the_prompt_is_as_before() {
+        let before = format!("{}\n\n---\n{}", "list the stale dependencies", report::instructions());
+        assert_eq!(prompt("list the stale dependencies", None), before);
+    }
+
+    #[test]
+    fn with_a_plan_it_sits_between_the_instruction_and_the_report_rules() {
+        let sent = prompt("check deps", Some("[plan] Wave 1"));
+        let (i, p, r) = (sent.find("check deps").unwrap(), sent.find("[plan]").unwrap(), sent.find(report::FENCE).unwrap());
+        assert!(i < p && p < r, "{sent}");
+    }
 }

@@ -184,8 +184,10 @@ fn text(o: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> String
     keys.iter().find_map(|k| o.get(*k).and_then(|v| v.as_str())).unwrap_or_default().to_string()
 }
 
-/// The JSON inside the last report block of a reply.
-fn block(reply: &str) -> Result<&str, String> {
+/// The JSON inside the last report block of a reply. Public for what a
+/// caller adds to the block beyond the report itself (a routine's step
+/// results), read from the same place.
+pub fn block(reply: &str) -> Result<&str, String> {
     let at = reply.rfind(FENCE).ok_or_else(|| format!("no {FENCE} block"))?;
     let body = &reply[at + FENCE.len()..];
     let body = body.strip_prefix('\r').unwrap_or(body);

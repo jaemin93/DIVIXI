@@ -1318,6 +1318,22 @@ impl Store {
         Ok(())
     }
 
+    /// Keep the plan a run of a routine was given beyond its instruction, as
+    /// it read then. Like the instruction, it is the run's own copy: the plan
+    /// changing afterwards does not rewrite what this run was asked to do.
+    pub fn set_routine_run_plan(&self, id: &str, plan: &serde_json::Value) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("UPDATE routine_runs SET plan = ?2 WHERE id = ?1", params![id, serde_json::to_string(plan)?])?;
+        Ok(())
+    }
+
+    /// Keep what a run's agent said of each step of its plan.
+    pub fn set_routine_run_steps(&self, id: &str, steps: &serde_json::Value) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("UPDATE routine_runs SET steps = ?2 WHERE id = ?1", params![id, serde_json::to_string(steps)?])?;
+        Ok(())
+    }
+
     /// Close runs of routines that were live when the app last closed, as
     /// [`Store::close_interrupted_runs`] does for a track's.
     fn close_interrupted_routine_runs(&self) -> anyhow::Result<()> {
@@ -2491,6 +2507,15 @@ mod tests {
         let run = store.begin_routine_run(&r.id, "codex", "/w", "check").unwrap();
         let read = store.routine_run(&run).unwrap().unwrap();
         assert_eq!((read.plan, read.steps), (None, None));
+
+        // A run given a plan keeps it, and what its agent said of the steps.
+        let given = serde_json::json!({ "version": 3, "steps": [{ "id": "s1", "title": "pull" }] });
+        store.set_routine_run_plan(&run, &given).unwrap();
+        store.set_routine_run_steps(&run, &serde_json::json!([{ "id": "s1", "status": "done", "note": "" }])).unwrap();
+        let read = store.routine_run(&run).unwrap().unwrap();
+        assert_eq!(read.plan.unwrap()["version"], 3);
+        assert_eq!(read.steps.unwrap()[0]["status"], "done");
+        assert_eq!(read.instruction, "check", "the instruction it was sent is its own, as before");
     }
 
     /// The bug this table exists for: a routine ran on the agent a track

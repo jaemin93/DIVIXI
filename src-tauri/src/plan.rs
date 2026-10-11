@@ -1020,6 +1020,96 @@ fn routine_of(state: &AppState, id: &str) -> Result<Routine, String> {
         .ok_or_else(|| format!("the routine of plan {id} is gone"))
 }
 
+// ----- the plan in a run -----
+
+/// What a run is given beyond its instruction: the plan, wave by wave, as
+/// one section of its prompt, and the plan as it read then (kept with the
+/// run, so its step results can be read against the steps it was given).
+/// None when there is nothing to give: no steps, or the human turned the
+/// plan off for runs. A routine without a plan then runs exactly as before.
+pub struct Guidance {
+    pub section: String,
+    pub snapshot: Value,
+    /// The step ids, in plan order: the only ones a result is read for.
+    pub ids: Vec<String>,
+}
+
+pub fn guidance(doc: &Doc) -> Option<Guidance> {
+    if !doc.use_in_run || doc.steps.is_empty() {
+        return None;
+    }
+    let waves = doc.waves();
+    let mut out = String::from(
+        "[plan] Work through these steps wave by wave. The steps of one wave do not wait for each other; a wave starts when the waves before it are done.\n",
+    );
+    for (i, wave) in waves.iter().enumerate() {
+        out.push_str(&format!("\nWave {}{}\n", i + 1, if wave.len() > 1 { " (side by side)" } else { "" }));
+        for id in wave {
+            let Some(s) = doc.step(id) else { continue };
+            out.push_str(&format!("- {} \"{}\"", s.id, s.title));
+            if !s.after.is_empty() {
+                out.push_str(&format!(" (after {})", s.after.join(", ")));
+            }
+            out.push('\n');
+            if !s.instruction.is_empty() {
+                for line in s.instruction.lines() {
+                    out.push_str(&format!("  {line}\n"));
+                }
+            }
+            if !s.inputs.is_empty() {
+                out.push_str(&format!("  uses: {}\n", s.inputs.join("; ")));
+            }
+            if !s.outputs.is_empty() {
+                out.push_str(&format!("  leaves: {}\n", s.outputs.join("; ")));
+            }
+            if !s.done_when.is_empty() {
+                out.push_str(&format!("  done when: {}\n", s.done_when));
+            }
+            if s.approval == Approval::Ask {
+                out.push_str("  ask a person before starting this step\n");
+            }
+            if s.on_fail == OnFail::Continue {
+                out.push_str("  if it fails: carry on with the steps that do not depend on it\n");
+            }
+        }
+    }
+    out.push_str(
+        "\nIf a step fails, stop the steps that depend on it unless it says to carry on. A step marked \"ask a person before starting\" waits for that permission; without it, skip the step and the steps that depend on it.\n\
+         In the report block at the end, add a \"steps\" list with one entry for every step: {\"id\": \"s1\", \"status\": \"done\" | \"failed\" | \"skipped\", \"note\": \"one short line\"}.",
+    );
+    let steps: Vec<Value> = doc
+        .steps
+        .iter()
+        .map(|s| json!({ "id": s.id, "title": s.title, "after": s.after, "approval": s.approval, "on_fail": s.on_fail }))
+        .collect();
+    Some(Guidance {
+        section: out,
+        snapshot: json!({ "version": doc.version, "steps": steps, "waves": waves }),
+        ids: doc.steps.iter().map(|s| s.id.clone()).collect(),
+    })
+}
+
+/// What a finished run's agent said of each step: the `steps` list of its
+/// report block, kept for the steps it was given and only in the shape
+/// asked for. None when there is no such list to keep.
+pub fn step_results(reply: &str, ids: &[String]) -> Option<Value> {
+    let raw = orchestra_core::report::block(reply).ok()?;
+    let v: Value = serde_json::from_str(raw).ok()?;
+    let list = v.get("steps")?.as_array()?;
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut out = Vec::new();
+    for item in list {
+        let Some(id) = item.get("id").and_then(Value::as_str) else { continue };
+        let Some(status) = item.get("status").and_then(Value::as_str) else { continue };
+        if !ids.iter().any(|x| x == id) || !matches!(status, "done" | "failed" | "skipped") || !seen.insert(id) {
+            continue;
+        }
+        let note: String = item.get("note").and_then(Value::as_str).unwrap_or_default().chars().take(300).collect();
+        out.push(json!({ "id": id, "status": status, "note": note }));
+    }
+    (!out.is_empty()).then(|| Value::Array(out))
+}
+
 // ----- the agent -----
 
 /// What goes with each message: the routine, the plan, and the steps the
@@ -1625,6 +1715,42 @@ mod tests {
         let body: Doc = serde_json::from_str(&new_body(&r).unwrap()).unwrap();
         assert_eq!(body.routine, "ro001");
         assert_eq!(body.source.unwrap().instruction, "check");
+    }
+
+    #[test]
+    fn a_run_is_given_the_plan_wave_by_wave() {
+        let mut d = diamond();
+        d.apply(ops(json!([{ "op": "update_step", "id": "s3", "approval": "ask", "on_fail": "continue" }])), &Actor::Human);
+        let g = guidance(&d).unwrap();
+        let (w1, w2, w3) = (g.section.find("Wave 1").unwrap(), g.section.find("Wave 2 (side by side)").unwrap(), g.section.find("Wave 3").unwrap());
+        assert!(w1 < w2 && w2 < w3, "{}", g.section);
+        assert!(g.section.contains("- s4 \"report\" (after s2, s3)"), "{}", g.section);
+        assert!(g.section.contains("ask a person before starting this step"));
+        assert!(g.section.contains("carry on"));
+        assert!(g.section.contains("\"steps\""), "the report is asked for step results");
+        assert_eq!(g.ids, ["s1", "s2", "s3", "s4"]);
+        assert_eq!(g.snapshot["steps"][3]["after"], json!(["s2", "s3"]));
+        assert_eq!(g.snapshot["waves"], json!([["s1"], ["s2", "s3"], ["s4"]]));
+
+        // Nothing to give: no steps, or turned off for runs.
+        assert!(guidance(&Doc::default()).is_none());
+        d.apply(ops(json!([{ "op": "use_in_run", "on": false }])), &Actor::Human);
+        assert!(guidance(&d).is_none());
+    }
+
+    #[test]
+    fn step_results_are_read_from_the_report_block_and_kept_to_the_plan() {
+        let ids: Vec<String> = ["s1", "s2", "s3"].iter().map(|s| s.to_string()).collect();
+        let reply = "done.\n\n```divixi-report\n{\"status\":\"done\",\"summary\":\"ok\",\"steps\":[\
+            {\"id\":\"s1\",\"status\":\"done\"},\
+            {\"id\":\"s2\",\"status\":\"failed\",\"note\":\"no network\"},\
+            {\"id\":\"s2\",\"status\":\"done\"},\
+            {\"id\":\"s9\",\"status\":\"done\"},\
+            {\"id\":\"s3\",\"status\":\"maybe\"}]}\n```";
+        let got = step_results(reply, &ids).unwrap();
+        assert_eq!(got, json!([{ "id": "s1", "status": "done", "note": "" }, { "id": "s2", "status": "failed", "note": "no network" }]));
+        assert!(step_results("no block here", &ids).is_none());
+        assert!(step_results("```divixi-report\n{\"status\":\"done\",\"summary\":\"ok\"}\n```", &ids).is_none(), "a report without steps keeps none");
     }
 
     #[test]
