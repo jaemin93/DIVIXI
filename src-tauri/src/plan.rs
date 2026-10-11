@@ -17,6 +17,12 @@
 //! human edit to a suggested step keeps it, and undo takes back only the
 //! human's own edits.
 //!
+//! Edits, the human's and the agent's, gather in the working plan. A run is
+//! given the plan as it was last saved: saving makes a numbered version
+//! (when, and a note if the human wrote one), a run keeps the number of the
+//! version it ran, and any saved version can be brought back into the
+//! working plan. A plan never saved is not given to runs.
+//!
 //! Plans are reached through their routine and nowhere else: they are left
 //! out of the artifact list that the designs page, the composer's
 //! attachments and other devices read (see `artifact::listed`).
@@ -47,8 +53,9 @@ const MAX_IO_TEXT: usize = 200;
 const MAX_AGENT: usize = 64;
 const MAX_PROPOSAL: usize = 20_000;
 const MAX_OPS: usize = 100;
-/// Earlier plans kept when a plan is started over.
-const HISTORY: usize = 5;
+/// Saved versions kept per plan; the oldest go first.
+const MAX_VERSIONS: usize = 50;
+const MAX_NOTE: usize = 200;
 
 // ----- the plan -----
 
@@ -141,11 +148,22 @@ pub struct Proposal {
     pub at: i64,
 }
 
-/// A plan as it was before it was started over.
+/// A saved version of the plan: what runs are given, until the next.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Snapshot {
+pub struct Version {
+    /// 1, 2, 3...: never reused, even when old versions are let go.
+    pub n: u32,
+    /// Unix milliseconds.
     pub at: i64,
+    /// What the human said of it, if anything.
+    #[serde(default)]
+    pub note: String,
     pub steps: Vec<Step>,
+}
+
+/// The steps as they bear on a run: where they sit on the graph does not.
+fn content(steps: &[Step]) -> Vec<Step> {
+    steps.iter().map(|s| Step { x: None, y: None, ..s.clone() }).collect()
 }
 
 fn yes() -> bool {
@@ -175,9 +193,9 @@ pub struct Doc {
     pub use_in_run: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<Proposal>,
-    /// Earlier plans, newest last.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub history: Vec<Snapshot>,
+    /// Saved versions, oldest first. Runs are given the last.
+    #[serde(default)]
+    pub saved: Vec<Version>,
     /// What the human's edit in progress touched, each step as it was
     /// before; turned into an undo step when the edit is kept. Not saved.
     #[serde(skip)]
@@ -195,7 +213,7 @@ impl Default for Doc {
             source: None,
             use_in_run: true,
             proposal: None,
-            history: Vec::new(),
+            saved: Vec::new(),
             journal: Vec::new(),
         }
     }
@@ -280,11 +298,15 @@ pub enum Op {
     Restamp { instruction: String },
     /// The human's: put the agent's proposed instruction away.
     DismissProposal {},
-    /// The human's: keep the plan as it is in the history, and start over.
-    Reset {},
-    /// The human's: bring back an earlier plan (an index into the history),
-    /// keeping the current one in its place.
-    Restore { index: usize },
+    /// The human's: save the working plan as a new version, the one runs
+    /// are given. Refused while agent suggestions wait to be settled.
+    Save {
+        #[serde(default)]
+        note: String,
+    },
+    /// The human's: bring a saved version back into the working plan (an
+    /// edit like any other: it can be undone, and saved again).
+    Open { n: u32 },
 }
 
 impl Op {
@@ -293,8 +315,8 @@ impl Op {
             Op::UseInRun { .. } => Some("use_in_run"),
             Op::Restamp { .. } => Some("restamp"),
             Op::DismissProposal {} => Some("dismiss_proposal"),
-            Op::Reset {} => Some("reset"),
-            Op::Restore { .. } => Some("restore"),
+            Op::Save { .. } => Some("save"),
+            Op::Open { .. } => Some("open"),
             _ => None,
         }
     }
@@ -482,6 +504,20 @@ impl Doc {
         out
     }
 
+    /// The version runs are given now, if the plan was ever saved.
+    pub fn last_saved(&self) -> Option<&Version> {
+        self.saved.last()
+    }
+
+    /// Whether the working plan differs from the last saved version in what
+    /// a run would be given (where steps sit on the graph does not count).
+    pub fn unsaved(&self) -> bool {
+        match self.saved.last() {
+            Some(v) => content(&v.steps) != content(&self.steps),
+            None => !self.steps.is_empty(),
+        }
+    }
+
     /// Whether the routine's instruction has moved on since the plan was made.
     pub fn instruction_changed(&self, instruction: &str) -> bool {
         self.source.as_ref().is_some_and(|s| s.instruction.trim() != instruction.trim())
@@ -511,6 +547,8 @@ impl Doc {
             "pending_suggestions": pending,
             "issues": self.issues(),
             "use_in_run": self.use_in_run,
+            "saved_version": self.saved.last().map(|v| v.n),
+            "unsaved_changes": self.unsaved(),
         });
         if let Some(p) = &self.proposal {
             out["proposed_instruction"] = json!(p.text);
@@ -753,43 +791,49 @@ impl Doc {
                         self.proposal = None;
                         Ok(json!({ "ok": true }))
                     }
-                    Op::Reset {} => {
-                        if !self.steps.is_empty() {
-                            self.history.push(Snapshot { at: now_ms(), steps: self.steps.clone() });
-                            let over = self.history.len().saturating_sub(HISTORY);
-                            self.history.drain(..over);
+                    Op::Save { note } => {
+                        if !self.changes.is_empty() {
+                            return Err(format!("keep or revert the {} suggestion(s) first", self.changes.len()));
                         }
-                        for s in std::mem::take(&mut self.steps) {
-                            let id = s.id.clone();
-                            self.record(actor, &id, Some(s));
+                        if !self.unsaved() {
+                            return Err("nothing has changed since the last saved version".to_string());
                         }
-                        self.changes.clear();
-                        Ok(json!({ "ok": true, "kept": self.history.len() }))
+                        let note = note.trim().to_string();
+                        check_len(&note, MAX_NOTE, "a note")?;
+                        let n = self.saved.last().map(|v| v.n + 1).unwrap_or(1);
+                        self.saved.push(Version { n, at: now_ms(), note, steps: self.steps.clone() });
+                        let over = self.saved.len().saturating_sub(MAX_VERSIONS);
+                        self.saved.drain(..over);
+                        Ok(json!({ "ok": true, "version": n }))
                     }
-                    Op::Restore { index } => {
-                        if index >= self.history.len() {
-                            return Err(format!("no earlier plan {index}"));
+                    Op::Open { n } => {
+                        if !self.changes.is_empty() {
+                            return Err(format!("keep or revert the {} suggestion(s) first", self.changes.len()));
                         }
-                        let back = self.history.remove(index);
-                        if !self.steps.is_empty() {
-                            self.history.push(Snapshot { at: now_ms(), steps: self.steps.clone() });
-                        }
-                        for s in std::mem::take(&mut self.steps) {
+                        let back = self.saved.iter().find(|v| v.n == n).ok_or_else(|| format!("no saved version {n}"))?.steps.clone();
+                        // Each step that changes is a human edit: undone one by
+                        // one if the human thinks better of it.
+                        let gone: Vec<Step> = self.steps.iter().filter(|s| !back.iter().any(|b| b.id == s.id)).cloned().collect();
+                        for s in gone {
                             let id = s.id.clone();
+                            self.steps.retain(|x| x.id != id);
                             self.record(actor, &id, Some(s));
                         }
-                        // Ids are never reused, so the plan brought back keeps
-                        // its own and the counter stays ahead of them.
-                        for s in back.steps {
-                            let n: u64 = s.id.trim_start_matches('s').parse().unwrap_or(0);
-                            self.next = self.next.max(n);
-                            let id = s.id.clone();
-                            self.steps.push(s);
-                            self.record(actor, &id, None);
+                        for b in &back {
+                            let before = self.step(&b.id).cloned();
+                            if before.as_ref() == Some(b) {
+                                continue;
+                            }
+                            self.restore(&b.id, Some(b));
+                            self.record(actor, &b.id, before);
+                            // Ids are never reused: the counter stays ahead of every one brought back.
+                            let num: u64 = b.id.trim_start_matches('s').parse().unwrap_or(0);
+                            self.next = self.next.max(num);
                         }
-                        self.changes.clear();
+                        // In the version's order.
+                        self.steps.sort_by_key(|s| back.iter().position(|b| b.id == s.id).unwrap_or(usize::MAX));
                         self.repair();
-                        Ok(json!({ "ok": true }))
+                        Ok(json!({ "ok": true, "opened": n }))
                     }
                 }
             })();
@@ -1035,9 +1079,15 @@ pub struct Guidance {
 }
 
 pub fn guidance(doc: &Doc) -> Option<Guidance> {
-    if !doc.use_in_run || doc.steps.is_empty() {
+    if !doc.use_in_run {
         return None;
     }
+    let version = doc.last_saved()?;
+    if version.steps.is_empty() {
+        return None;
+    }
+    // The version as a plan of its own, so its waves are its own.
+    let doc = &Doc { steps: version.steps.clone(), ..Doc::default() };
     let waves = doc.waves();
     let mut out = String::from(
         "[plan] Work through these steps wave by wave. The steps of one wave do not wait for each other; a wave starts when the waves before it are done.\n",
@@ -1084,7 +1134,7 @@ pub fn guidance(doc: &Doc) -> Option<Guidance> {
         .collect();
     Some(Guidance {
         section: out,
-        snapshot: json!({ "version": doc.version, "steps": steps, "waves": waves }),
+        snapshot: json!({ "version": version.n, "saved_at": version.at, "note": version.note, "steps": steps, "waves": waves }),
         ids: doc.steps.iter().map(|s| s.id.clone()).collect(),
     })
 }
@@ -1152,6 +1202,7 @@ pub fn preamble(lang: &str, name: &str) -> String {
 - `plan_propose_instruction`: 계획에 맞춘 되풀이 지시문을 제안합니다. 지시문은 사람이 받아들일 때만 바뀝니다.
 - 글(title, instruction, done_when, inputs, outputs)은 글자 그대로 씁니다. `양` 같은 이스케이프로 바꾸지 마세요. 도구는 보드에 담긴 글을 돌려주니, 보낸 것과 맞춰 보고 어긋나면 한 번 다시 씁니다.
 - 당신이 바꾼 것은 사람이 유지하거나 되돌리기 전까지 "제안"으로 표시됩니다. 되돌려진 것을 다시 밀어붙이지 마세요.
+- 실행에는 사람이 [계획 저장]으로 저장한 마지막 버전이 쓰입니다. 저장은 사람이 합니다.
 
 짜는 법:
 - 단계는 작고 확인할 수 있게 나눕니다. 한 단계에 한 가지 일.
@@ -1182,6 +1233,7 @@ Tools:
 - `plan_propose_instruction`: propose an instruction for the routine that fits the plan. It changes only if the human takes it.
 - Write words (title, instruction, done_when, inputs, outputs) as they are, never as escapes such as `양`. The tools answer with the words the plan now holds; read them against what you sent and write once more if they came out wrong.
 - What you change shows as a suggestion until the human keeps or reverts it. Do not push back what was reverted.
+- Runs are given the version the human last saved with [Save plan]. Saving is the human's.
 
 How to plan:
 - Small steps that can be checked; one job per step.
@@ -1568,7 +1620,7 @@ mod tests {
     #[test]
     fn the_humans_only_ops_are_refused_to_the_agent() {
         let mut d = diamond();
-        for op in [json!({ "op": "use_in_run", "on": false }), json!({ "op": "reset" }), json!({ "op": "dismiss_proposal" })] {
+        for op in [json!({ "op": "use_in_run", "on": false }), json!({ "op": "save" }), json!({ "op": "open", "n": 1 }), json!({ "op": "dismiss_proposal" })] {
             let r = d.apply(ops(json!([op])), &agent());
             assert_eq!(r[0]["ok"], false, "{r:?}");
         }
@@ -1628,20 +1680,76 @@ mod tests {
     }
 
     #[test]
-    fn reset_keeps_the_old_plan_and_restore_brings_it_back() {
+    fn saving_makes_versions_and_a_version_comes_back_into_the_working_plan() {
         let mut d = diamond();
-        d.apply(ops(json!([{ "op": "reset" }])), &Actor::Human);
-        assert!(d.steps.is_empty());
-        assert_eq!(d.history.len(), 1);
-        d.apply(ops(json!([{ "op": "add_step", "title": "new", "instruction": "x" }])), &Actor::Human);
-        assert_eq!(d.step("s5").unwrap().title, "new", "ids are not reused");
-        d.apply(ops(json!([{ "op": "restore", "index": 0 }])), &Actor::Human);
-        assert_eq!(d.steps.len(), 4);
-        assert_eq!(d.waves().len(), 3);
-        assert_eq!(d.history.len(), 1, "the plan it replaced is kept");
-        assert_eq!(d.history[0].steps[0].title, "new");
-        let r = d.apply(ops(json!([{ "op": "add_step", "title": "after", "instruction": "x" }])), &Actor::Human);
-        assert_eq!(r[0]["id"], "s6");
+        assert!(d.unsaved(), "a plan never saved has unsaved changes");
+        let r = d.apply(ops(json!([{ "op": "save", "note": "first" }])), &Actor::Human);
+        assert_eq!(r[0]["version"], 1);
+        assert!(!d.unsaved());
+        let r = d.apply(ops(json!([{ "op": "save" }])), &Actor::Human);
+        assert_eq!(r[0]["ok"], false, "nothing to save");
+
+        // Moving a card is not a change a run would see.
+        d.apply(ops(json!([{ "op": "move", "id": "s2", "x": 10, "y": 20 }])), &Actor::Human);
+        assert!(!d.unsaved());
+
+        d.apply(ops(json!([{ "op": "update_step", "id": "s2", "title": "dependencies" }, { "op": "delete", "ids": ["s3"] }])), &Actor::Human);
+        assert!(d.unsaved());
+        d.apply(ops(json!([{ "op": "save" }])), &Actor::Human);
+        assert_eq!(d.saved.iter().map(|v| v.n).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(d.saved[0].note, "first");
+
+        // Version 1 back into the working plan: s3 returns, s2 has its old title.
+        d.journal.clear();
+        let r = d.apply(ops(json!([{ "op": "open", "n": 1 }])), &Actor::Human);
+        assert_eq!(r[0]["ok"], true, "{r:?}");
+        assert_eq!(d.step("s2").unwrap().title, "deps");
+        assert!(d.step("s3").is_some());
+        assert_eq!(d.steps.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s1", "s2", "s3", "s4"]);
+        assert!(d.unsaved(), "the working plan is version 1's, not the last saved");
+        assert_eq!(d.saved.len(), 2, "opening a version saves nothing by itself");
+        let step = d.take_step().unwrap();
+        assert!(!step.is_empty(), "bringing a version back is an edit that can be undone");
+        let r = d.apply(ops(json!([{ "op": "add_step", "title": "new", "instruction": "x" }])), &Actor::Human);
+        assert_eq!(r[0]["id"], "s5", "ids are not reused");
+        let r = d.apply(ops(json!([{ "op": "open", "n": 9 }])), &Actor::Human);
+        assert_eq!(r[0]["ok"], false);
+    }
+
+    #[test]
+    fn suggestions_waiting_hold_back_saving_and_opening() {
+        let mut d = diamond();
+        d.apply(ops(json!([{ "op": "save" }])), &Actor::Human);
+        d.apply(ops(json!([{ "op": "update_step", "id": "s3", "title": "advisories" }])), &agent());
+        let r = d.apply(ops(json!([{ "op": "save" }])), &Actor::Human);
+        assert_eq!(r[0]["ok"], false);
+        assert!(r[0]["error"].as_str().unwrap().contains("suggestion"));
+        let r = d.apply(ops(json!([{ "op": "open", "n": 1 }])), &Actor::Human);
+        assert_eq!(r[0]["ok"], false);
+        // And neither is the agent's to do.
+        let all: Vec<u64> = d.changes.iter().map(|c| c.id).collect();
+        d.review(&all, true);
+        let r = d.apply(ops(json!([{ "op": "save" }])), &agent());
+        assert_eq!(r[0]["ok"], false);
+        let r = d.apply(ops(json!([{ "op": "save" }])), &Actor::Human);
+        assert_eq!(r[0]["version"], 2);
+    }
+
+    #[test]
+    fn auto_layout_lets_go_of_every_pin_after_the_order_changed() {
+        // The reported case: a card placed by hand, then its steps before
+        // changed, then "lay out": no card may stay where the hand put it.
+        let mut d = diamond();
+        d.apply(ops(json!([{ "op": "move", "id": "s4", "x": 10, "y": 10 }, { "op": "move", "id": "s2", "x": 900, "y": 0 }])), &Actor::Human);
+        d.apply(ops(json!([{ "op": "set_after", "id": "s4", "after": ["s3"] }, { "op": "update_step", "id": "s4", "inputs": ["audit.json"] }])), &Actor::Human);
+        let r = d.apply(ops(json!([{ "op": "auto_layout" }])), &Actor::Human);
+        assert_eq!(r[0]["ok"], true);
+        assert!(d.steps.iter().all(|s| s.x.is_none() && s.y.is_none()), "{:?}", d.steps);
+        assert_eq!(d.step("s4").unwrap().after, vec!["s3"], "the order it was given stays");
+        assert_eq!(d.step("s4").unwrap().inputs, vec!["audit.json"]);
+        // The window sees the steps without positions: the serialized step has none.
+        let wire = serde_json::to_value(d.step("s4").unwrap()).unwrap();
+        assert!(wire.get("x").is_none() && wire.get("y").is_none(), "{wire}");
     }
 
     #[test]
@@ -1721,6 +1829,8 @@ mod tests {
     fn a_run_is_given_the_plan_wave_by_wave() {
         let mut d = diamond();
         d.apply(ops(json!([{ "op": "update_step", "id": "s3", "approval": "ask", "on_fail": "continue" }])), &Actor::Human);
+        assert!(guidance(&d).is_none(), "a plan never saved is not given to runs");
+        d.apply(ops(json!([{ "op": "save", "note": "v1" }])), &Actor::Human);
         let g = guidance(&d).unwrap();
         let (w1, w2, w3) = (g.section.find("Wave 1").unwrap(), g.section.find("Wave 2 (side by side)").unwrap(), g.section.find("Wave 3").unwrap());
         assert!(w1 < w2 && w2 < w3, "{}", g.section);
@@ -1731,6 +1841,18 @@ mod tests {
         assert_eq!(g.ids, ["s1", "s2", "s3", "s4"]);
         assert_eq!(g.snapshot["steps"][3]["after"], json!(["s2", "s3"]));
         assert_eq!(g.snapshot["waves"], json!([["s1"], ["s2", "s3"], ["s4"]]));
+        assert_eq!(g.snapshot["version"], 1);
+        assert_eq!(g.snapshot["note"], "v1");
+
+        // The last saved version is what runs get, not the working plan.
+        d.apply(ops(json!([{ "op": "update_step", "id": "s1", "title": "fetch" }, { "op": "add_step", "title": "extra", "instruction": "x" }])), &Actor::Human);
+        let g = guidance(&d).unwrap();
+        assert!(g.section.contains("s1 \"pull\"") && !g.section.contains("extra"), "{}", g.section);
+        assert_eq!(g.ids.len(), 4);
+        d.apply(ops(json!([{ "op": "save" }])), &Actor::Human);
+        let g = guidance(&d).unwrap();
+        assert!(g.section.contains("s1 \"fetch\"") && g.section.contains("extra"));
+        assert_eq!(g.snapshot["version"], 2);
 
         // Nothing to give: no steps, or turned off for runs.
         assert!(guidance(&Doc::default()).is_none());
