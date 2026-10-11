@@ -12,6 +12,9 @@ import {
   instructionChanged,
   layout,
   needsFirstDraft,
+  nextRunsLimit,
+  openNeedsConfirm,
+  sameVersion,
   runView,
   resultGlyphs,
   resultsOf,
@@ -252,4 +255,30 @@ test("a plan edited during a run is shown as the run has it", () => {
   assert.equal(v.steps.find((s) => s.id === "s3")!.title, "s3", "and the run's own title where it is not");
   assert.deepEqual(v.steps.find((s) => s.id === "s4")!.after, ["s2", "s3"], "the run's waits");
   assert.equal(v.steps.find((s) => s.id === "s2")!.x, undefined, "laid out as the run's graph");
+});
+
+test("opening a version asks first only when the working plan is in no saved version", () => {
+  const v1 = diamond();
+  const v2 = [...diamond(), step("s5", ["s4"])];
+  const doc = { ...emptyPlan(), steps: v2, saved: [{ n: 1, at: 1, note: "", steps: v1 }, { n: 2, at: 2, note: "", steps: v2 }] };
+  assert.equal(sameVersion(doc), 2, "the working plan is v2");
+  assert.equal(openNeedsConfirm(doc, 1), false, "v2 is saved: nothing is lost");
+  assert.equal(openNeedsConfirm(doc, 2), false, "already v2");
+  // A card moved by hand is no change.
+  assert.equal(openNeedsConfirm({ ...doc, steps: v2.map((s) => ({ ...s, x: 3, y: 4 })) }, 1), false);
+  // Edited past every version: opening one would drop the edit.
+  const edited = { ...doc, steps: v2.map((s) => (s.id === "s1" ? { ...s, title: "pull first" } : s)) };
+  assert.equal(sameVersion(edited), undefined);
+  assert.equal(openNeedsConfirm(edited, 1), true);
+  // Working plan back at v1 (opened earlier): opening v2 loses nothing.
+  assert.equal(openNeedsConfirm({ ...doc, steps: v1 }, 2), false);
+  // Nothing on the working plan at all: nothing to lose.
+  assert.equal(openNeedsConfirm({ ...doc, steps: [] }, 1), false);
+});
+
+test("the history menu reads more runs until a page comes back short", () => {
+  assert.equal(nextRunsLimit(20, 20), 40, "a full page: there may be more");
+  assert.equal(nextRunsLimit(40, 40, 10), 50);
+  assert.equal(nextRunsLimit(13, 20), null, "a short page: that is all of them");
+  assert.equal(nextRunsLimit(0, 20), null);
 });

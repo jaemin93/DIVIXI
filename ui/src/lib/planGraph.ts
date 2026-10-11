@@ -259,6 +259,31 @@ export function needsFirstDraft(o: { hadPlan: boolean; doc: PlanDoc; asked: bool
   return !o.hadPlan && !o.asked && !o.busy && o.doc.steps.length === 0 && o.doc.changes.length === 0;
 }
 
+/** The saved version the working plan is, if any (the newest of equals). */
+export function sameVersion(doc: PlanDoc): number | undefined {
+  const now = content(doc.steps);
+  return [...(doc.saved ?? [])].reverse().find((v) => content(v.steps) === now)?.n;
+}
+
+/**
+ * Whether opening version `n` should ask first: it would replace a working
+ * plan that is in no saved version (changes that would be lost). Opening
+ * the version the working plan already is asks nothing.
+ */
+export function openNeedsConfirm(doc: PlanDoc, n: number): boolean {
+  const same = sameVersion(doc);
+  if (same === n) return false;
+  return same === undefined && doc.steps.length > 0;
+}
+
+/** Runs read per page of the history menu. */
+export const RUNS_PAGE = 20;
+
+/** The next limit to read the history with, or null when everything is in (a page came back short). */
+export function nextRunsLimit(loaded: number, limit: number, page = RUNS_PAGE): number | null {
+  return loaded < limit ? null : limit + page;
+}
+
 /** Whether the routine's instruction moved on since the plan was made. */
 export function instructionChanged(doc: PlanDoc, instruction: string): boolean {
   return !!doc.source && doc.source.instruction.trim() !== instruction.trim();

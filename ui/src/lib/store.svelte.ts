@@ -5,6 +5,7 @@ import { i18n, systemLang, t, type Key, type Lang, type LangPref } from "./i18n.
 import { picksOf, toggleChip, type Chip } from "./graphContext";
 import { parseTags } from "./listFilter";
 import { ROUTINE_TAGS_KEY } from "./routineFilter";
+import { nextRunsLimit, RUNS_PAGE } from "./planGraph";
 import { libraryPick } from "./libraries";
 import { download, tooLarge } from "./designFile";
 import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
@@ -2325,6 +2326,7 @@ class Store {
   }
 
   async openRoutine(id: string) {
+    if (this.routine !== id) this.routineRunsLimit = RUNS_PAGE;
     this.routine = id;
     this.view = "routines";
     await this.loadRoutineRuns(id);
@@ -2337,16 +2339,27 @@ class Store {
     this.view = "routines";
   }
 
+  /** How many of the open routine's runs are read: a page more each time the history asks. */
+  routineRunsLimit = $state(RUNS_PAGE);
+
   async loadRoutineRuns(id = this.routine) {
     if (!id || id === NEW_ROUTINE) {
       this.routineRuns = [];
       return;
     }
     try {
-      this.routineRuns = await invoke<RoutineRun[]>("routine_runs", { id, limit: 50 });
+      this.routineRuns = await invoke<RoutineRun[]>("routine_runs", { id, limit: this.routineRunsLimit });
     } catch (err) {
       this.lastError = String(err);
     }
+  }
+
+  /** Read the next page of the open routine's runs, when there may be more. */
+  async loadMoreRoutineRuns() {
+    const next = nextRunsLimit(this.routineRuns.length, this.routineRunsLimit);
+    if (next === null) return;
+    this.routineRunsLimit = next;
+    await this.loadRoutineRuns();
   }
 
   routineLive(id: string): boolean {

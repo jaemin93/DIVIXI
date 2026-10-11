@@ -3,7 +3,7 @@
   import { store } from "./store.svelte";
   import PlanGraph from "./PlanGraph.svelte";
   import PlanStepEditor from "./PlanStepEditor.svelte";
-  import { resultsOf } from "./planGraph";
+  import { openNeedsConfirm, resultsOf, sameVersion } from "./planGraph";
   import { whenFull } from "./time";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
@@ -38,6 +38,26 @@
   let versionsOpen = $state(false);
 
   const saveBlocked = $derived(pending > 0 ? t("plan.saveSettleFirst", { n: pending }) : !plans.unsaved ? t("plan.saveNothing") : "");
+
+  /** The saved version the working plan is now (marked in the list). */
+  const same = $derived(sameVersion(doc));
+  /** The version waiting on "open it anyway?", if one is. */
+  let confirmN = $state<number | null>(null);
+
+  /** Open a version as the working plan: asking first when that would lose changes kept nowhere. */
+  async function openVersion(n: number, sure = false) {
+    if (n === same) {
+      versionsOpen = false;
+      return;
+    }
+    if (!sure && openNeedsConfirm(doc, n)) {
+      confirmN = n;
+      return;
+    }
+    confirmN = null;
+    versionsOpen = false;
+    await plans.openVersion(n);
+  }
 
   async function save() {
     if (saveBlocked) return;
@@ -105,25 +125,31 @@
           {:else}
             {#if pending}<p class="mnote warn">{t("plan.saveSettleFirst", { n: pending })}</p>{/if}
             {#each versions as v (v.n)}
-              <div class="ver">
-                <div class="vt">
+              {#if confirmN === v.n}
+                <div class="ver confirm" role="alertdialog" aria-label={t("plan.versionOpenConfirm")}>
+                  <span>{t("plan.versionOpenConfirm")}</span>
+                  <div class="macts">
+                    <button type="button" class="tb" onclick={() => (confirmN = null)}>{t("plan.cancel")}</button>
+                    <!-- svelte-ignore a11y_autofocus -->
+                    <button type="button" class="tb ready" autofocus onclick={() => openVersion(v.n, true)}>{t("plan.versionOpenYes")}</button>
+                  </div>
+                </div>
+              {:else}
+                <button
+                  type="button"
+                  class="ver"
+                  class:current={v.n === same}
+                  role="menuitemradio"
+                  aria-checked={v.n === same}
+                  disabled={!!pending}
+                  onclick={() => openVersion(v.n)}
+                >
                   <b>v{v.n}</b>
                   <span>{whenFull(v.at, store.lang)} · {t("plan.versionSteps", { n: v.steps.length })}</span>
                   {#if v.note}<span class="vnote">{v.note}</span>{/if}
                   {#if v.n === plans.lastSaved}<span class="vrun">{t("plan.versionUsed")}</span>{/if}
-                </div>
-                <button
-                  type="button"
-                  class="tb"
-                  role="menuitem"
-                  disabled={!!pending}
-                  title={t("plan.versionOpenHint")}
-                  onclick={() => {
-                    versionsOpen = false;
-                    void plans.openVersion(v.n);
-                  }}>{t("plan.versionOpen")}</button
-                >
-              </div>
+                </button>
+              {/if}
             {/each}
           {/if}
         </div>
@@ -312,28 +338,54 @@
     color: var(--warn);
   }
 
+  /* A version is a button: hover, focus and the one the working plan is now. */
   .ver {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 4px;
-    border-top: 1px solid var(--lineq);
-  }
-
-  .vt {
-    flex: 1;
-    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 2px;
+    width: 100%;
+    text-align: left;
+    padding: 7px 8px;
+    background: transparent;
+    border: 0;
+    border-left: 2px solid transparent;
+    border-top: 1px solid var(--lineq);
     font-size: 11.5px;
     color: var(--lab);
   }
 
-  .vt b {
+  button.ver:hover:not(:disabled),
+  button.ver:focus-visible {
+    background: var(--sel);
+    color: var(--txt);
+  }
+
+  button.ver:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: -1px;
+  }
+
+  .ver.current {
+    border-left-color: var(--acc);
+    background: var(--sel);
+    color: var(--txt);
+  }
+
+  .ver:disabled {
+    opacity: 0.5;
+  }
+
+  .ver b {
     color: var(--hi);
     font-size: 12.5px;
   }
+
+  .ver.confirm {
+    color: var(--warn);
+    gap: 6px;
+  }
+
+
 
   .vnote {
     color: var(--txt);

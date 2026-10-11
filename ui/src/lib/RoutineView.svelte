@@ -7,6 +7,7 @@
   import Markdown from "./Markdown.svelte";
   import PlanView from "./PlanView.svelte";
   import PanelToggle from "./PanelToggle.svelte";
+  import RunHistory from "./RunHistory.svelte";
   import { plans } from "./plan.svelte";
   import { resultGlyphs, resultsOf } from "./planGraph";
   import { untrack } from "svelte";
@@ -275,20 +276,8 @@
       {/if}
       <PlanView />
       {#if store.routineRuns.length}
-        <div class="strip" role="group" aria-label={t("routines.history")}>
-          <span class="flab">{t("routines.history")}</span>
-          {#each store.routineRuns.slice(0, 6) as run (run.id)}
-            {@const g = glyphsOf(run)}
-            <button
-              class="srun"
-              class:on={plans.resultRun === run.id}
-              disabled={!g}
-              title={g ? t("plan.showResults") : t("plan.noPlanInRun")}
-              onclick={() => (plans.resultRun = plans.resultRun === run.id ? "" : run.id)}
-            >
-              {whenFull(run.started_at, store.lang)} · <span class:bad={run.status === "failed"}>{t(`routines.status.${run.status}`)}</span>{#if g} · <span class="mono">{g}</span>{/if}
-            </button>
-          {/each}
+        <div class="strip">
+          <RunHistory />
         </div>
       {/if}
     </div>
@@ -649,27 +638,12 @@
     gap: 8px;
     padding: 8px 20px;
     border-top: 1px solid var(--line);
-    overflow-x: auto;
+    overflow: visible;
     white-space: nowrap;
   }
 
-  .srun {
-    height: 24px;
-    padding: 0 8px;
-    font-size: 11.5px;
-    background: transparent;
-    border: 1px solid var(--line);
-    color: var(--lab);
-  }
 
-  .srun.on {
-    color: var(--txt);
-    border-color: var(--hi);
-  }
 
-  .srun:disabled {
-    opacity: 0.6;
-  }
 
   .rsteps {
     font-size: 11px;
