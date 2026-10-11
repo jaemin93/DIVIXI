@@ -87,6 +87,8 @@ pub const ALLOWED: &[&str] = &[
     "run_routine",
     "routine_cancel",
     "running_routines",
+    // a routine's plan, read only (its chat is the artifact's, above)
+    "plan_doc",
     // the app
     "agent_statuses",
     "app_info",
@@ -121,6 +123,12 @@ const OWNER_ALLOWED: &[&str] = &[
     "design_apply",
     "design_review",
     "design_undo",
+    // A routine's plan, made on first opening, and edited as a design's
+    // board is: a phone keeps or reverts what the plan's agent suggested.
+    "routine_plan_open",
+    "plan_apply",
+    "plan_review",
+    "plan_undo",
     "design_add_blob",
     // A design as a file: written out for the browser to download, and one
     // uploaded made into a new design (the PC's own dialogs stay its own).
@@ -280,6 +288,8 @@ mod tests {
             "term_close",
             "workspace_write",
             "design_apply",
+            "plan_doc",
+            "plan_apply",
             "download_agent",
             "knowledge_add",
             "knowledge_embed_test",

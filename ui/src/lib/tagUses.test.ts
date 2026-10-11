@@ -21,6 +21,12 @@ test("the knowledge agent's conversation is not something a person tags", () => 
   assert.equal(tagUses("docs", { tracks: [], artifacts: [{ kind: "graph", tags: ["docs"] }], libraries: [] }).total, 0);
 });
 
+test("a routine's plan is not counted as a design or a document", () => {
+  // The core leaves plans out of the list of every artifact; should one
+  // still reach the window, it is counted nowhere.
+  assert.equal(tagUses("docs", { tracks: [], artifacts: [{ kind: "plan", tags: ["docs"] }], libraries: [] }).total, 0);
+});
+
 test("a tag nothing carries counts nothing", () => {
   assert.deepEqual(tagUses("none", things), { tracks: 0, designs: 0, documents: 0, libraries: 0, total: 0 });
 });

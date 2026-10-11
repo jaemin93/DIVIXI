@@ -44,6 +44,7 @@ mod knowledge;
 mod logging;
 mod mask;
 mod metrics;
+mod plan;
 mod preview;
 mod routine;
 #[cfg(all(target_os = "macos", not(feature = "server")))]
@@ -125,6 +126,8 @@ pub struct AppState {
     pub(crate) routines: routine::Routines,
     /// Designs' boards, cached from the store.
     pub(crate) boards: design::Boards,
+    /// Routines' plans, cached from the store.
+    pub(crate) plans: plan::Plans,
     /// Last detection result, mirrored from the store for quick lookups.
     agents: Mutex<Option<Vec<AgentStatus>>>,
     /// Conductor and session sessions, across tracks.
@@ -586,12 +589,109 @@ fn check_routine(state: &AppState, patch: &RoutinePatch) -> Result<(), String> {
     Ok(())
 }
 
-/// Forget a routine, and the runs it made. Nothing else holds them.
-#[tauri::command(async)]
-fn delete_routine(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+/// Forget a routine, the runs it made, and its plan with the plan's
+/// conversation. Nothing else holds them.
+#[tauri::command]
+async fn delete_routine(app: AppHandle, id: String) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let plan = state.store.routine(&id).map_err(|e| e.to_string())?.map(|r| r.plan).unwrap_or_default();
+    // Refused before anything goes, as deleting the plan alone would be.
+    if !plan.is_empty() && state.artifacts.is_busy(&plan) {
+        return Err("its plan's agent is still responding; wait for it to finish".to_string());
+    }
     state.store.delete_routine(&id).map_err(|e| e.to_string())?;
+    if !plan.is_empty() {
+        if let Err(err) = remove_artifact(&app, &plan).await {
+            tracing::warn!(%err, routine = %id, %plan, "could not remove a deleted routine's plan");
+        }
+    }
     let _ = routine::notify(&app);
     Ok(())
+}
+
+/// A routine's plan, made when it has none. Returns the routine, the plan's
+/// artifact (its agent and options) and the plan itself.
+///
+/// The plan's agent is its own, never the routine's: the one asked for, else
+/// the one last chosen for a plan, else (on a first plan) the routine's.
+#[tauri::command(async)]
+fn routine_plan_open(app: AppHandle, state: State<'_, AppState>, routine: String, agent: Option<String>) -> Result<serde_json::Value, String> {
+    // One at a time, so two quick presses do not make two plans.
+    static OPENING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let _held = OPENING.lock();
+    let r = state.store.routine(&routine).map_err(|e| e.to_string())?.ok_or_else(|| format!("no routine {routine}"))?;
+    if !r.plan.is_empty() {
+        if let Some((info, _)) = state.store.artifact(&r.plan).map_err(|e| e.to_string())? {
+            if info.kind == plan::KIND {
+                let doc = plan::doc(&state, &info.id)?;
+                return Ok(serde_json::json!({ "routine": r, "plan": info, "doc": doc }));
+            }
+        }
+    }
+    let remembered: Option<(String, std::collections::BTreeMap<String, String>)> = state
+        .store
+        .get_meta(PLAN_AGENT_DEFAULT)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| {
+            let agent = v.get("agent")?.as_str()?.to_string();
+            let config = serde_json::from_value(v.get("config").cloned().unwrap_or_default()).unwrap_or_default();
+            Some((agent, config))
+        });
+    let (agent, config) = match agent.filter(|a| !a.trim().is_empty()) {
+        Some(a) => (a, Default::default()),
+        None => match remembered.filter(|(a, _)| state.spec_for(a).is_ok()) {
+            Some(pair) => pair,
+            None => (r.agent.clone(), Default::default()),
+        },
+    };
+    state.spec_for(&agent)?;
+    let body = plan::new_body(&r)?;
+    let mut info = state.store.create_artifact(plan::KIND, &r.name, &agent, &body).map_err(|e| e.to_string())?;
+    if !config.is_empty() {
+        info = state
+            .store
+            .update_artifact(&info.id, &ArtifactPatch { config: Some(config), ..Default::default() })
+            .map_err(|e| e.to_string())?;
+    }
+    let r = state.store.set_routine_plan(&r.id, &info.id).map_err(|e| e.to_string())?;
+    let doc = plan::doc(&state, &info.id)?;
+    let _ = routine::notify(&app);
+    Ok(serde_json::json!({ "routine": r, "plan": info, "doc": doc }))
+}
+
+/// Where the agent and options last chosen for a plan are kept, as the
+/// start of the next plan.
+const PLAN_AGENT_DEFAULT: &str = "plan_agent_default";
+
+/// A routine's plan as it is now.
+#[tauri::command(async)]
+fn plan_doc(state: State<'_, AppState>, id: String) -> Result<plan::Doc, String> {
+    plan::doc(&state, &id)
+}
+
+/// The human edits a plan.
+#[tauri::command(async)]
+fn plan_apply(app: AppHandle, id: String, ops: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>, String> {
+    let ops: Vec<plan::Op> = ops
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("bad edit: {e}"))?;
+    plan::apply(&app, &id, ops, plan::Actor::Human)
+}
+
+/// Keep or revert the plan agent's suggestions.
+#[tauri::command(async)]
+fn plan_review(app: AppHandle, id: String, changes: Vec<u64>, keep: bool) -> Result<(), String> {
+    plan::review(&app, &id, &changes, keep)
+}
+
+/// Undo (or redo, with `again`) the human's last edit on a plan.
+#[tauri::command(async)]
+fn plan_undo(app: AppHandle, id: String, again: bool) -> Result<bool, String> {
+    plan::undo(&app, &id, again)
 }
 
 /// A routine's runs, newest first.
@@ -615,7 +715,8 @@ async fn routine_cancel(app: AppHandle, id: String) {
 /// Artifacts of one kind, or of every kind, most recently touched first.
 #[tauri::command(async)]
 fn list_artifacts(state: State<'_, AppState>, kind: Option<String>) -> Result<Vec<ArtifactInfo>, String> {
-    state.store.artifacts(kind.as_deref()).map_err(|e| e.to_string())
+    let all = state.store.artifacts(kind.as_deref()).map_err(|e| e.to_string())?;
+    Ok(artifact::listed(kind.as_deref(), all))
 }
 
 /// Start an empty artifact of a kind, on an agent when the kind has one.
@@ -623,6 +724,11 @@ fn list_artifacts(state: State<'_, AppState>, kind: Option<String>) -> Result<Ve
 fn create_artifact(state: State<'_, AppState>, kind: String, title: String, agent: Option<String>) -> Result<ArtifactInfo, String> {
     if !artifact::KINDS.contains(&kind.as_str()) {
         return Err(format!("unknown artifact kind {kind}"));
+    }
+    // A plan belongs to a routine from its first moment, so only opening
+    // the routine's plan makes one.
+    if kind == plan::KIND {
+        return Err("a plan is made from its routine (routine_plan_open)".to_string());
     }
     let agent = agent.unwrap_or_default();
     if !agent.is_empty() {
@@ -657,19 +763,39 @@ fn update_artifact(
     let mut look = TrackPatch { color, tags, ..Default::default() };
     check_patch(&mut look)?;
     let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-    state
+    let chose = agent.is_some() || config.is_some();
+    let info = state
         .store
         .update_artifact(&id, &ArtifactPatch { body: None, title, agent, config, color: look.color, tags: look.tags })
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // The agent and options chosen for a plan start the next plan too.
+    if chose && info.kind == plan::KIND {
+        let remembered = serde_json::json!({ "agent": info.agent, "config": info.config }).to_string();
+        if let Err(err) = state.store.set_meta(PLAN_AGENT_DEFAULT, &remembered) {
+            tracing::warn!(%err, "could not remember the plan agent");
+        }
+    }
+    Ok(info)
 }
 
 /// Delete an artifact with its body, conversation and agent session.
 #[tauri::command]
 async fn delete_artifact(app: AppHandle, id: String) -> Result<(), String> {
+    remove_artifact(&app, &id).await
+}
+
+/// Delete an artifact with its body, conversation, agent session and
+/// folder. A plan leaves its routine without one.
+async fn remove_artifact(app: &AppHandle, id: &str) -> Result<(), String> {
+    let id = id.to_string();
     let state = app.state::<AppState>();
     if state.artifacts.is_busy(&id) {
         return Err("its agent is still responding; wait for it to finish".to_string());
     }
+    let planned_for = match state.store.artifact(&id).ok().flatten() {
+        Some((a, _)) if a.kind == plan::KIND => plan::doc(&state, &id).ok().map(|d| d.routine),
+        _ => None,
+    };
     state.artifacts.close(&id).await;
     // A document's source shares its artifact's id; only a document's
     // deletion takes the source (and what was drawn from it) along. Data
@@ -680,8 +806,17 @@ async fn delete_artifact(app: AppHandle, id: String) -> Result<(), String> {
     // Forgotten only once the record is gone, so a read in between cannot
     // bring the board back into the cache.
     state.boards.forget(&id);
+    state.plans.forget(&id);
+    if let Some(routine) = planned_for {
+        if state.store.routine(&routine).ok().flatten().is_some_and(|r| r.plan == id) {
+            if let Err(err) = state.store.set_routine_plan(&routine, "") {
+                tracing::warn!(%err, %routine, "could not unlink a deleted plan");
+            }
+            let _ = routine::notify(app);
+        }
+    }
     if document && state.library.db.source(&id).ok().flatten().is_some() {
-        knowledge::remove(&app, &id);
+        knowledge::remove(app, &id);
     }
     let dir = state.artifacts_dir.join(&id);
     if dir.exists() {
@@ -1841,6 +1976,11 @@ pub fn run() {
             run_routine,
             routine_cancel,
             running_routines,
+            routine_plan_open,
+            plan_doc,
+            plan_apply,
+            plan_review,
+            plan_undo,
             list_artifacts,
             create_artifact,
             update_artifact,
@@ -1996,6 +2136,7 @@ pub fn run() {
                 artifacts: artifact::Artifacts::default(),
                 routines: routine::Routines::default(),
                 boards: design::Boards::default(),
+                plans: plan::Plans::default(),
                 agents: Mutex::new(None),
                 sessions: conductor::Sessions::default(),
                 meter: metrics::Meter::default(),

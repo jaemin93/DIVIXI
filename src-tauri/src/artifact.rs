@@ -23,13 +23,27 @@ use crate::AppHandle;
 use tokio::sync::Mutex;
 
 use crate::conductor::{fingerprint, session_options, with_attachments, Live};
-use crate::{design, pump, AppState};
+use crate::{design, plan, pump, AppState};
 
 /// The session an artifact's agent turns are recorded under.
 pub const SESSION: &str = "artifact";
 
 /// The kinds there are.
-pub const KINDS: [&str; 3] = [design::KIND, crate::knowledge::KIND, crate::knowledge::GRAPH_KIND];
+pub const KINDS: [&str; 4] = [design::KIND, crate::knowledge::KIND, crate::knowledge::GRAPH_KIND, plan::KIND];
+
+/// Kinds left out of the list of every artifact. A routine's plan is
+/// reached through its routine: shown among designs, offered as something
+/// to attach to a track, or listed on another device, it would be a stray
+/// with no page of its own. Asked for by kind, it is listed.
+pub const UNLISTED: [&str; 1] = [plan::KIND];
+
+/// What `list_artifacts` answers: the kind asked for, or every listed kind.
+pub fn listed(kind: Option<&str>, all: Vec<ArtifactInfo>) -> Vec<ArtifactInfo> {
+    match kind {
+        Some(_) => all,
+        None => all.into_iter().filter(|a| !UNLISTED.contains(&a.kind.as_str())).collect(),
+    }
+}
 
 /// Runs of an artifact are kept under this track key, apart from tracks.
 pub fn run_key(id: &str) -> String {
@@ -150,6 +164,8 @@ async fn open(app: &AppHandle, a: &ArtifactInfo) -> Result<(Arc<AgentSession>, b
             design::KIND => design::tools(app.clone(), a.id.clone()),
             // The graph's conversation reads the library, and nothing else.
             crate::knowledge::GRAPH_KIND => crate::knowledge::library_tools(app.clone()),
+            // A plan's agent changes the plan, and nothing else.
+            plan::KIND => plan::tools(app.clone(), a.id.clone()),
             other => return Err(format!("{other} artifacts have no agent yet")),
         };
         let spec = state.spec_for(&a.agent)?;
@@ -239,6 +255,8 @@ pub async fn turn(
                 let context = tokio::task::spawn_blocking(move || crate::knowledge::graph_context(&db, &picks)).await.map_err(|e| e.to_string())??;
                 (crate::knowledge::graph_preamble(&lang), context)
             }
+            // The routine and its plan, and the steps the human picked.
+            plan::KIND => (plan::preamble(&lang, &a.title), plan::context(&state, &id, &selected)?),
             other => return Err(format!("{other} artifacts have no agent yet")),
         };
         let body = if text.trim().is_empty() { "(look at it)".to_string() } else { text.clone() };
@@ -335,3 +353,34 @@ pub fn export(state: &AppState, id: &str, markdown: &str, png: Option<&str>) -> 
     Ok(out)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(id: &str, kind: &str) -> ArtifactInfo {
+        ArtifactInfo {
+            id: id.into(),
+            kind: kind.into(),
+            title: id.into(),
+            agent: String::new(),
+            config: Default::default(),
+            color: String::new(),
+            tags: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    /// The window loads every artifact with no kind and picks designs,
+    /// documents and the graph's conversation out of that list (the designs
+    /// page, the composer's attachments, the tag counts) -- and so does
+    /// another device, over the bridge. A plan is in none of them.
+    #[test]
+    fn plans_are_left_out_of_the_list_of_everything() {
+        let all = vec![info("ar1", design::KIND), info("ar2", plan::KIND), info("ar3", crate::knowledge::KIND), info("ar4", crate::knowledge::GRAPH_KIND)];
+        let ids = |v: Vec<ArtifactInfo>| v.into_iter().map(|a| a.id).collect::<Vec<_>>();
+        assert_eq!(ids(listed(None, all.clone())), ["ar1", "ar3", "ar4"]);
+        assert_eq!(ids(listed(Some(plan::KIND), vec![all[1].clone()])), ["ar2"], "asked for by kind, plans are listed");
+        assert!(KINDS.contains(&plan::KIND), "a plan has an agent session like the other kinds");
+    }
+}
