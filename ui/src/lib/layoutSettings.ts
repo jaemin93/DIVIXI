@@ -28,6 +28,7 @@ export const LAYOUT_SETTINGS = [
   "kblibrary",
   "designlist_tags",
   "kblist_tags",
+  "routinelist_tags",
   "artifact_chat_width",
   "settings_nav_width",
   "routinelist",

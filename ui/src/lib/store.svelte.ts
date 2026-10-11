@@ -4,6 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { i18n, systemLang, t, type Key, type Lang, type LangPref } from "./i18n.svelte";
 import { picksOf, toggleChip, type Chip } from "./graphContext";
 import { parseTags } from "./listFilter";
+import { ROUTINE_TAGS_KEY } from "./routineFilter";
 import { libraryPick } from "./libraries";
 import { download, tooLarge } from "./designFile";
 import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
@@ -1314,6 +1315,14 @@ class Store {
   async setDesignTags(tags: string[]) {
     this.designTags = tags;
     await this.keepList("designlist_tags", tags);
+  }
+
+  /** The tags the routines column is narrowed to (every one of them). Kept as the designs' are. */
+  routineTags = $state<string[]>([]);
+
+  async setRoutineTags(tags: string[]) {
+    this.routineTags = tags;
+    await this.keepList(ROUTINE_TAGS_KEY, tags);
   }
 
   async setKbTags(tags: string[]) {
@@ -3300,7 +3309,7 @@ class Store {
         this.lastError = String(err);
       }
       try {
-        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineList, routineListWidth, designChat, kbList, kbListWidth, kbLibrary, designTags, kbTags] = await Promise.all([
+        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineList, routineListWidth, designChat, kbList, kbListWidth, kbLibrary, designTags, kbTags, routineTags] = await Promise.all([
           setting("terminal"),
           setting("terminal_height"),
           setting("artifact_chat_width"),
@@ -3315,6 +3324,7 @@ class Store {
           setting("kblibrary"),
           setting("designlist_tags"),
           setting("kblist_tags"),
+          setting(ROUTINE_TAGS_KEY),
         ]);
         const dc = Number(artifactChat);
         if (Number.isFinite(dc) && dc > 0) this.setArtifactChatWidth(dc);
@@ -3335,6 +3345,7 @@ class Store {
         this.kbLibrarySaved = kbLibrary ?? "";
         this.designTags = parseTags(designTags);
         this.kbTags = parseTags(kbTags);
+        this.routineTags = parseTags(routineTags);
         const h = Number(termHeight);
         if (Number.isFinite(h) && h > 0) this.setTermHeight(h);
         if (term === "open") void this.setTerminal(true);

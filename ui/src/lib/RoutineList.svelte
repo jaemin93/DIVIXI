@@ -11,6 +11,9 @@
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
   import ArtifactMenu from "./ArtifactMenu.svelte";
+  import ListSearch from "./ListSearch.svelte";
+  import { routinesShown, routineTagCount } from "./routineFilter";
+  import { toggleTag } from "./trackFilter";
 
   /**
    * Second column: every routine, newest activity first. A routine belongs
@@ -22,6 +25,10 @@
    * in the list beside it. Neither is the "real" one.
    */
   const now = Date.now();
+
+  /** The search row and tag filter the other columns have (ListSearch): every picked tag must be on a routine. */
+  let query = $state("");
+  const shown = $derived(routinesShown(store.routines, query, store.routineTags));
 
   /** The right-click menu: the one designs have (rename, tags, colour, delete), with no export. */
   let menu = $state<{ id: string; x: number; y: number } | null>(null);
@@ -63,10 +70,19 @@
     <FoldButton onclick={() => store.setRoutineList(false)} />
   </div>
 
+  <ListSearch
+    bind:query
+    placeholder={t("routines.search")}
+    picked={store.routineTags}
+    ontoggle={(tag) => store.setRoutineTags(toggleTag(store.routineTags, tag))}
+    onclear={() => store.setRoutineTags([])}
+    tagCount={(tag) => routineTagCount(store.routines, tag)}
+  />
+
   <div class="scroll">
     <!-- No routines: the list is left empty; the head's "+" makes one. -->
     {#if store.routines.length}
-      {#each store.routines as r (r.id)}
+      {#each shown as r (r.id)}
         {@const live = store.routineLive(r.id)}
         <div
           class="row"

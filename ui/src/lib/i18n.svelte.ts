@@ -50,6 +50,7 @@ const ko = {
   "routines.notice.stopped": "실행이 중지됐습니다",
   "routines.notice.running": "실행 중",
   "routines.busyNote": "실행 중에는 지울 수 없습니다",
+  "routines.search": "되풀이 검색",
   "routines.deleteNote": "실행 기록과 계획도 지워집니다",
   // Plans: a routine's instruction as steps, worked out with a planning agent of its own.
   "plan.button": "계획",
@@ -1223,6 +1224,7 @@ const en: Record<Key, string> = {
   "routines.notice.stopped": "was stopped",
   "routines.notice.running": "is running",
   "routines.busyNote": "It cannot be deleted while it runs",
+  "routines.search": "Search routines",
   "routines.deleteNote": "Its runs and plan are deleted too",
   // Plans
   "plan.button": "Plan",
