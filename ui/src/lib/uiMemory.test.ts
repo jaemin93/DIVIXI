@@ -2,7 +2,7 @@
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { clampZoom, FIELD_MIN_PX, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, listAfterRail, parseZoom, settingOpen, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen, ZOOM_MAX, ZOOM_MIN } from "./uiMemory.ts";
+import { clampZoom, FIELD_MIN_PX, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, listAfterRail, railListAction, parseZoom, settingOpen, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen, ZOOM_MAX, ZOOM_MIN } from "./uiMemory.ts";
 import { isLayoutSetting, keepsSetting } from "./layoutSettings.ts";
 
 test("a zoom asked for lands on a step within bounds", () => {
@@ -169,4 +169,37 @@ test("a phone's lists still start folded, are kept on the phone, and fold on a p
   assert.equal(foldsOnPick(true, true), true);
   stored = foldValue(false);
   assert.equal(listAfterRail(webPanelOpen(stored, true), false), false);
+});
+
+test("on its page, a list page's rail item offers to show a folded list or hide an open one", () => {
+  assert.equal(railListAction(false, true), "show");
+  assert.equal(railListAction(true, true), "hide");
+});
+
+test("from another page, the rail item offers nothing about the list: it goes to the page", () => {
+  assert.equal(railListAction(false, false), null);
+  assert.equal(railListAction(true, false), null);
+});
+
+test("with no list to show (no tracks yet), the rail item offers nothing", () => {
+  assert.equal(railListAction(null, true), null);
+  assert.equal(railListAction(null, false), null);
+});
+
+test("what the rail item offers is what a press then does", () => {
+  for (const open of [true, false]) {
+    const action = railListAction(open, true);
+    assert.equal(listAfterRail(open, true), action === "show");
+  }
+});
+
+test("the tracks page now keeps a folded list on entry too, and toggles on its own press", () => {
+  // Folded on the tracks page, gone to the designs, back with the rail: still folded.
+  let open = listAfterRail(true, true);
+  assert.equal(open, false);
+  open = listAfterRail(open, false);
+  assert.equal(open, false);
+  assert.equal(railListAction(open, true), "show");
+  open = listAfterRail(open, true);
+  assert.equal(open, true);
 });

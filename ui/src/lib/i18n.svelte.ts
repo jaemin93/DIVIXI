@@ -72,7 +72,8 @@ const ko = {
   // Tracks column
   "tracks.title": "Tracks",
   "tracks.newTitle": "새 트랙",
-  "tracks.close": "목록 닫기",
+  "list.hide": "목록 접기",
+  "list.show": "목록 펼치기",
   "tracks.search": "Track 검색",
   "tracks.width": "Tracks 열 너비",
   "tracks.foldWorkers": "작업자 접기",
@@ -1154,7 +1155,8 @@ const en: Record<Key, string> = {
 
   "tracks.title": "Tracks",
   "tracks.newTitle": "New track",
-  "tracks.close": "Close list",
+  "list.hide": "Hide list",
+  "list.show": "Show list",
   "tracks.search": "Search tracks",
   "tracks.width": "Tracks column width",
   "tracks.foldWorkers": "Fold workers",

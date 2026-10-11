@@ -100,6 +100,17 @@ export function listAfterRail(open: boolean, onPage: boolean): boolean {
   return onPage ? !open : open;
 }
 
+/**
+ * What a list page's rail item offers to do to its list, said in its tooltip
+ * and `aria-expanded`: on its page, show the folded list or hide the open
+ * one (what `listAfterRail` will do); from another page, nothing, as the
+ * press goes to the page. No list to speak of (no tracks yet), nothing.
+ */
+export function railListAction(open: boolean | null, onPage: boolean): "show" | "hide" | null {
+  if (!onPage || open === null) return null;
+  return open ? "hide" : "show";
+}
+
 /** A list column's state as it is written, in the setting and in a browser alike. */
 export function foldValue(open: boolean): "open" | "closed" {
   return open ? "open" : "closed";

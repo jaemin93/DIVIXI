@@ -10,7 +10,7 @@
   let { onclick }: { onclick: () => void } = $props();
 </script>
 
-<button class="x" {onclick} aria-label={t("tracks.close")} title={t("tracks.close")}>
+<button class="x" {onclick} aria-label={t("list.hide")} title={t("list.hide")}>
   <Icon name="collapse" />
 </button>
 

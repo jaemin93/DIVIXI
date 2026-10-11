@@ -6,7 +6,7 @@
   import Mark from "./Mark.svelte";
   import SplitHandle from "./SplitHandle.svelte";
   import { t, type Key } from "./i18n.svelte";
-  import { listAfterRail } from "./uiMemory";
+  import { listAfterRail, railListAction } from "./uiMemory";
 
   /**
    * The rail's map. Adding a feature is one entry here: an icon, a label,
@@ -16,23 +16,37 @@
    * The rail is only ever one level deep; lists (tracks, workers, agents)
    * live in the column it opens, like Kiro Crew's session panel.
    */
-  type Item = { id: string; icon: IconName; label: Key; soon?: boolean; go?: () => void };
+  type Item = {
+    id: string;
+    icon: IconName;
+    label: Key;
+    soon?: boolean;
+    go?: () => void;
+    /** A page with a list column: whether it is open (null: no list to show yet). */
+    list?: () => boolean | null;
+  };
+
+  /** The tracks page: a track, a worker, the track form, anything not another page. */
+  const onTracksPage = () =>
+    store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.view !== "routines";
 
   const primary: Item[] = [
     {
       id: "tracks",
       icon: "tracks",
       label: "rail.tracks",
+      // As every list page: a second click folds the list away, and back;
+      // from another page, the list stays as it was last left.
       go: () => {
-        // Second click on the active item folds the list away.
-        if (store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.trackListOpen) store.setTrackList(false);
-        else {
-          store.view = store.currentTrack ? "track" : "new-track";
-          store.setTrackList(true);
-        }
+        const onPage = onTracksPage();
+        const open = listAfterRail(store.trackListOpen, onPage);
+        if (open !== store.trackListOpen) void store.setTrackList(open);
+        if (!onPage) store.view = store.currentTrack ? "track" : "new-track";
       },
+      // No tracks yet: the page is the form, with no list beside it.
+      list: () => (store.tracks.length ? store.trackListOpen : null),
     },
-    { id: "design", icon: "draft", label: "rail.design", go: () => void store.showDesigns() },
+    { id: "design", icon: "draft", label: "rail.design", go: () => void store.showDesigns(), list: () => store.designListOpen },
     {
       id: "knowledge",
       icon: "book",
@@ -45,8 +59,9 @@
         if (open !== store.kbListOpen) void store.setKbList(open);
         if (!onPage) void kb.show();
       },
+      list: () => store.kbListOpen,
     },
-    { id: "routines", icon: "routines", label: "rail.routines", go: () => void store.showRoutines() },
+    { id: "routines", icon: "routines", label: "rail.routines", go: () => void store.showRoutines(), list: () => store.routineListOpen },
   ];
 
   const secondary: Item[] = [
@@ -62,8 +77,7 @@
   const collapsed = $derived(store.railCollapsed);
 
   function active(item: Item): boolean {
-    if (item.id === "tracks")
-      return store.view !== "settings" && store.view !== "design" && store.view !== "knowledge" && store.view !== "routines";
+    if (item.id === "tracks") return onTracksPage();
     if (item.id === "design") return store.view === "design";
     if (item.id === "knowledge") return store.view === "knowledge";
     if (item.id === "routines") return store.view === "routines";
@@ -105,12 +119,16 @@
   </div>
 
   {#snippet entry(item: Item)}
+    <!-- On a list page, its item says what a press does to the list; elsewhere, its name when folded. -->
+    {@const action = item.list ? railListAction(item.list(), active(item)) : null}
     <button
       class="item"
       class:active={active(item)}
       class:soon={item.soon}
       disabled={item.soon}
-      title={collapsed ? t(item.label) : undefined}
+      title={action ? t(action === "show" ? "list.show" : "list.hide") : collapsed ? t(item.label) : undefined}
+      aria-label={collapsed ? t(item.label) : undefined}
+      aria-expanded={action ? action === "hide" : undefined}
       onclick={item.go}
     >
       <Icon name={item.icon} />
