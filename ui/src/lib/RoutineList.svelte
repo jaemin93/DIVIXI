@@ -2,6 +2,10 @@
   import { store, NEW_ROUTINE } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import NewButton from "./NewButton.svelte";
+  import FoldButton from "./FoldButton.svelte";
+  import { overWeb } from "./ipc.svelte";
+  import { phoneWidth } from "./phone";
+  import { foldsOnPick } from "./uiMemory";
   import SplitHandle from "./SplitHandle.svelte";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
@@ -34,11 +38,12 @@
     label={t("routines.width")}
     onchange={(px, persist) => store.setRoutineListWidth(px, persist)}
   />
-  <!-- As the tracks column: the title, then the "+", over a rule. -->
+  <!-- As the tracks column: the title, the "+", then folding the column away, over a rule. -->
   <div class="head">
     <span class="mlab">{t("rail.routines")}</span>
     <span class="grow"></span>
     <NewButton label={t("routines.new")} on={store.routine === NEW_ROUTINE} onclick={() => store.newRoutine()} />
+    <FoldButton onclick={() => store.setRoutineList(false)} />
   </div>
 
   <div class="scroll">
@@ -48,7 +53,14 @@
       {#each store.routines as r (r.id)}
         {@const live = store.routineLive(r.id)}
         <div class="row" class:on={store.routine === r.id}>
-          <button class="pick" onclick={() => store.openRoutine(r.id)}>
+          <button
+            class="pick"
+            onclick={() => {
+              void store.openRoutine(r.id);
+              // A phone: done with once a row is picked, as the other lists are.
+              if (foldsOnPick(overWeb, phoneWidth(innerWidth))) void store.setRoutineList(false);
+            }}
+          >
             <span class="mark">
               {#if live}<Working size={11} />{:else}<span class="dot"></span>{/if}
             </span>

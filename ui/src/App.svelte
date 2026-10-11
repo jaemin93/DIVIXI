@@ -166,7 +166,9 @@
         <AgentPanel kind="graph" />
       {/if}
     {:else if store.view === "routines"}
-      <RoutineList />
+      {#if store.routineListOpen}
+        <div class="sidebox" transition:slide={side}><RoutineList /></div>
+      {/if}
       <RoutineView />
     {:else if store.view === "worker"}
       <WorkerView />

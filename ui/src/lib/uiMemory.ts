@@ -72,6 +72,37 @@ export const WEB_RAIL_KEY = "divixi.rail";
 /** The designs and libraries columns, as the track list. */
 export const WEB_DESIGNLIST_KEY = "divixi.designlist";
 export const WEB_KBLIST_KEY = "divixi.kblist";
+export const WEB_ROUTINELIST_KEY = "divixi.routinelist";
+
+/**
+ * Each list column that folds, and where its open-or-folded is kept: the
+ * PC's setting for the desktop window (`layoutSettings`), the browser's own
+ * key for a phone. Every list column writes and reads it the same way
+ * (`foldValue`, `settingOpen`, `webPanelOpen`); only the keys differ, and
+ * no two are the same.
+ */
+export const LIST_FOLDS = {
+  tracks: { setting: "tracklist", web: WEB_TRACKLIST_KEY },
+  designs: { setting: "designlist", web: WEB_DESIGNLIST_KEY },
+  libraries: { setting: "kblist", web: WEB_KBLIST_KEY },
+  routines: { setting: "routinelist", web: WEB_ROUTINELIST_KEY },
+} as const;
+
+export type ListFold = keyof typeof LIST_FOLDS;
+
+/** A list column's state as it is written, in the setting and in a browser alike. */
+export function foldValue(open: boolean): "open" | "closed" {
+  return open ? "open" : "closed";
+}
+
+/**
+ * A list column's setting read back in the desktop window: open unless it
+ * was folded. Nothing kept yet (a first start, an older build), or anything
+ * else, is open, as the columns always started.
+ */
+export function settingOpen(stored: string | null | undefined): boolean {
+  return stored !== "closed";
+}
 
 /**
  * Whether a browser's side panel (the track list, the rail spelled out)

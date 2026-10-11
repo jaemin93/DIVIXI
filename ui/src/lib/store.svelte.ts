@@ -28,7 +28,7 @@ import {
 import { addError, dropError, errorLife, type AppError } from "./errors";
 import { withTrack } from "./tracks";
 import { keepsSetting } from "./layoutSettings";
-import { clampZoom, fieldFontPx, foldsOnPick, instanceZoomKey, parseZoom, WEB_DESIGNLIST_KEY, WEB_KBLIST_KEY, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen } from "./uiMemory";
+import { clampZoom, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, parseZoom, settingOpen, WEB_RAIL_KEY, webPanelOpen, type ListFold } from "./uiMemory";
 import { pairing, type Paired } from "./pairing.svelte";
 import { openKey, parseMemory, pruneOpen, remember, treeReply, underOpen, type WsEntry as WsEntryType } from "./fileTree";
 
@@ -716,6 +716,14 @@ function readLocal(key: string): string | null {
   }
 }
 
+/**
+ * Whether a list column starts open: in the desktop window open (its setting
+ * is read at start, `settingOpen`); in a browser, as this device last left it.
+ */
+function startsOpen(list: ListFold): boolean {
+  return !overWeb || webPanelOpen(readLocal(LIST_FOLDS[list].web), phoneScreen());
+}
+
 function writeLocal(key: string, value: string): void {
   try {
     localStorage.setItem(key, value);
@@ -854,7 +862,7 @@ class Store {
   /** Left rail folded to icons. Persisted; in a browser, by that browser (folded on a phone). */
   railCollapsed = $state(overWeb && !webPanelOpen(readLocal(WEB_RAIL_KEY), phoneScreen()));
   /** Second column (tracks and their workers) shown. Persisted; in a browser, by that browser (closed on a phone). */
-  trackListOpen = $state(!overWeb || webPanelOpen(readLocal(WEB_TRACKLIST_KEY), phoneScreen()));
+  trackListOpen = $state(startsOpen("tracks"));
   /** Which settings section is open. */
   settingsSection = $state<SettingsSection>("overview");
   /** The rail's phone dialog: show a pairing code for this PC's Divixi. */
@@ -914,7 +922,7 @@ class Store {
   /** Width of the conversation beside a design's board. Persisted. */
   artifactChatWidth = $state(460);
   /** The designs column shown. Persisted. */
-  designListOpen = $state(!overWeb || webPanelOpen(readLocal(WEB_DESIGNLIST_KEY), phoneScreen()));
+  designListOpen = $state(startsOpen("designs"));
 
   setArtifactChatWidth(px: number, persist = false) {
     this.artifactChatWidth = Math.min(760, Math.max(340, Math.round(px)));
@@ -923,14 +931,7 @@ class Store {
 
   async setDesignList(open: boolean) {
     this.designListOpen = open;
-    // A browser keeps its own, as the track list (a phone's is not the PC's).
-    if (overWeb) return writeLocal(WEB_DESIGNLIST_KEY, open ? "open" : "closed");
-    if (!this.keeps("designlist")) return;
-    try {
-      await invoke("set_setting", { key: "designlist", value: open ? "open" : "closed" });
-    } catch (err) {
-      this.lastError = String(err);
-    }
+    await this.keepFold("designs", open);
   }
 
   /** Items picked on the board; they go with the next message. */
@@ -1179,6 +1180,22 @@ class Store {
     return keepsSetting(key, local);
   }
 
+  /**
+   * Keep a list column open or folded, as every list column does: a
+   * browser in its own storage (a phone's is not the PC's), the desktop
+   * window in the PC's setting. The keys are `LIST_FOLDS`'.
+   */
+  private async keepFold(list: ListFold, open: boolean) {
+    const { setting, web } = LIST_FOLDS[list];
+    if (overWeb) return writeLocal(web, foldValue(open));
+    if (!this.keeps(setting)) return;
+    try {
+      await invoke("set_setting", { key: setting, value: foldValue(open) });
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
   private persistWidth(key: string, value: number) {
     if (!this.keeps(key)) return;
     invoke("set_setting", { key, value: String(value) }).catch((err) => {
@@ -1196,11 +1213,13 @@ class Store {
   designListWidth = $state(264);
   /** Width of the routines column. Persisted. */
   routineListWidth = $state(260);
+  /** The routines column shown. Persisted ("routinelist"), as the designs column is. */
+  routineListOpen = $state(startsOpen("routines"));
   /** Width of the settings column. Persisted. */
   settingsNavWidth = $state(232);
 
   /** The knowledge page's libraries column shown. Persisted ("kblist"), as the designs column is. */
-  kbListOpen = $state(!overWeb || webPanelOpen(readLocal(WEB_KBLIST_KEY), phoneScreen()));
+  kbListOpen = $state(startsOpen("libraries"));
   /** Its width. Persisted. */
   kbListWidth = $state(264);
   /** The library the knowledge page showed ("all" or an id), as remembered ("kblibrary"). */
@@ -1208,13 +1227,12 @@ class Store {
 
   async setKbList(open: boolean) {
     this.kbListOpen = open;
-    if (overWeb) return writeLocal(WEB_KBLIST_KEY, open ? "open" : "closed");
-    if (!this.keeps("kblist")) return;
-    try {
-      await invoke("set_setting", { key: "kblist", value: open ? "open" : "closed" });
-    } catch (err) {
-      this.lastError = String(err);
-    }
+    await this.keepFold("libraries", open);
+  }
+
+  async setRoutineList(open: boolean) {
+    this.routineListOpen = open;
+    await this.keepFold("routines", open);
   }
 
   setKbListWidth(px: number, persist = false) {
@@ -2183,7 +2201,13 @@ class Store {
 
   /** Show the routines: the last one open, else the newest, else the form. */
   async showRoutines() {
+    // As the designs: shown already, the rail's second click folds the column away, and back.
+    if (this.view === "routines") {
+      await this.setRoutineList(!this.routineListOpen);
+      return;
+    }
     this.view = "routines";
+    if (!this.routineListOpen) void this.setRoutineList(true);
     await this.loadRoutines();
     if (this.routine === NEW_ROUTINE) return;
     const pick = this.routines.find((r) => r.id === this.routine) ?? this.routines[0];
@@ -3072,14 +3096,7 @@ class Store {
 
   async setTrackList(open: boolean) {
     this.trackListOpen = open;
-    // A browser keeps its own (a phone's list open or shut is not the PC's).
-    if (overWeb) return writeLocal(WEB_TRACKLIST_KEY, open ? "open" : "closed");
-    if (!this.keeps("tracklist")) return;
-    try {
-      await invoke("set_setting", { key: "tracklist", value: open ? "open" : "closed" });
-    } catch (err) {
-      this.lastError = String(err);
-    }
+    await this.keepFold("tracks", open);
   }
 
   /** Rebuild the timeline, agent list and preferences from the store. Called once at startup; false if it could not be read. */
@@ -3161,7 +3178,7 @@ class Store {
       // A browser's panels were read from the browser as it started (above).
       if (!overWeb) {
         this.railCollapsed = rail === "collapsed";
-        this.trackListOpen = tracklist !== "closed";
+        this.trackListOpen = settingOpen(tracklist);
       }
       if (chatFont === "s" || chatFont === "m" || chatFont === "l") this.chatFont = chatFont;
       document.documentElement.dataset.chatFont = this.chatFont;
@@ -3179,13 +3196,14 @@ class Store {
         this.lastError = String(err);
       }
       try {
-        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineListWidth, designChat, kbList, kbListWidth, kbLibrary, designTags, kbTags] = await Promise.all([
+        const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineList, routineListWidth, designChat, kbList, kbListWidth, kbLibrary, designTags, kbTags] = await Promise.all([
           setting("terminal"),
           setting("terminal_height"),
           setting("artifact_chat_width"),
           setting("designlist"),
           setting("designlist_width"),
           setting("settings_nav_width"),
+          setting("routinelist"),
           setting("routinelist_width"),
           setting("designchat"),
           setting("kblist"),
@@ -3203,9 +3221,10 @@ class Store {
         const rl = Number(routineListWidth);
         if (Number.isFinite(rl) && rl > 0) this.setRoutineListWidth(rl);
         // A browser's columns were read from the browser as it started (above).
-        if (!overWeb) this.designListOpen = designList !== "closed";
+        if (!overWeb) this.designListOpen = settingOpen(designList);
+        if (!overWeb) this.routineListOpen = settingOpen(routineList);
         this.designChatOpen = designChat !== "closed";
-        if (!overWeb) this.kbListOpen = kbList !== "closed";
+        if (!overWeb) this.kbListOpen = settingOpen(kbList);
         const kw = Number(kbListWidth);
         if (Number.isFinite(kw) && kw > 0) this.setKbListWidth(kw);
         this.kbLibrarySaved = kbLibrary ?? "";

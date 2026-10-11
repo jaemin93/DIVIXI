@@ -27,6 +27,7 @@ export const LAYOUT_SETTINGS = [
   "kblist_tags",
   "artifact_chat_width",
   "settings_nav_width",
+  "routinelist",
   "routinelist_width",
   "track",
   "track_headers",

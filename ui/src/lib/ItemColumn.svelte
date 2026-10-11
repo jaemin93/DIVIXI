@@ -24,8 +24,8 @@
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import SplitHandle from "./SplitHandle.svelte";
-  import Icon from "./Icon.svelte";
   import NewButton from "./NewButton.svelte";
+  import FoldButton from "./FoldButton.svelte";
   import ListSearch from "./ListSearch.svelte";
   import { store } from "./store.svelte";
   import { t } from "./i18n.svelte";
@@ -202,9 +202,7 @@
           </div>
         {/if}
       </div>
-      <button class="x" onclick={onclose} aria-label={t("tracks.close")} title={t("tracks.close")}>
-        <Icon name="collapse" />
-      </button>
+      <FoldButton onclick={onclose} />
     </div>
     {#if creating}
       <form class="new" onsubmit={create}>
@@ -360,22 +358,6 @@
 
   .grow {
     flex: 1;
-  }
-
-  .x {
-    width: 28px;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: transparent;
-    border: 0;
-    color: var(--lab);
-  }
-
-  .x:hover {
-    color: var(--hi);
-    background: var(--sel);
   }
 
   .new {

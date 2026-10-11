@@ -2,7 +2,8 @@
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { clampZoom, FIELD_MIN_PX, fieldFontPx, foldsOnPick, instanceZoomKey, parseZoom, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen, ZOOM_MAX, ZOOM_MIN } from "./uiMemory.ts";
+import { clampZoom, FIELD_MIN_PX, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, parseZoom, settingOpen, WEB_RAIL_KEY, WEB_TRACKLIST_KEY, webPanelOpen, ZOOM_MAX, ZOOM_MIN } from "./uiMemory.ts";
+import { isLayoutSetting, keepsSetting } from "./layoutSettings.ts";
 
 test("a zoom asked for lands on a step within bounds", () => {
   assert.equal(clampZoom(110), 110);
@@ -85,5 +86,48 @@ test("a phone zoomed out grows its fields back to 16px on screen", () => {
   assert.equal(fieldFontPx(10), 32); // clamped to ZOOM_MIN first
   for (let z = ZOOM_MIN; z <= ZOOM_MAX; z += 10) {
     assert.ok((fieldFontPx(z) * z) / 100 >= FIELD_MIN_PX, String(z));
+  }
+});
+
+test("a list column folded comes back folded, and open comes back open", () => {
+  for (const open of [true, false]) {
+    // The desktop window, through the PC's setting.
+    assert.equal(settingOpen(foldValue(open)), open);
+    // A browser, through its own storage, on a phone and elsewhere alike.
+    assert.equal(webPanelOpen(foldValue(open), true), open);
+    assert.equal(webPanelOpen(foldValue(open), false), open);
+  }
+});
+
+test("a list column with nothing kept starts open in the desktop window", () => {
+  assert.equal(settingOpen(null), true);
+  assert.equal(settingOpen(undefined), true);
+  assert.equal(settingOpen(""), true);
+  assert.equal(settingOpen("collapsed"), true);
+  assert.equal(settingOpen("closed"), false);
+});
+
+test("every list column folds, the routines column too", () => {
+  assert.deepEqual(Object.keys(LIST_FOLDS).sort(), ["designs", "libraries", "routines", "tracks"]);
+  assert.equal(LIST_FOLDS.routines.setting, "routinelist");
+  assert.equal(LIST_FOLDS.routines.web, "divixi.routinelist");
+});
+
+test("no two list columns keep their fold under the same key", () => {
+  const lists = Object.values(LIST_FOLDS);
+  const keys = [...lists.map((l) => l.setting), ...lists.map((l) => l.web), WEB_RAIL_KEY, "rail"];
+  assert.equal(new Set(keys).size, keys.length);
+  // Not the width kept beside it either.
+  assert.ok(lists.every((l) => !l.setting.endsWith("_width")));
+});
+
+test("a list column's fold is the window's layout, not shared with a phone", () => {
+  for (const l of Object.values(LIST_FOLDS)) {
+    assert.ok(isLayoutSetting(l.setting), l.setting);
+    assert.equal(keepsSetting(l.setting, false), false);
+    assert.equal(keepsSetting(l.setting, true), true);
+    // A browser's key is its own, never the PC's setting.
+    assert.ok(l.web.startsWith("divixi."), l.web);
+    assert.notEqual(l.web, l.setting);
   }
 });
