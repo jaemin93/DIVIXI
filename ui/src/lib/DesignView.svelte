@@ -117,7 +117,10 @@
         <div class="hrow">
           <div class="mlab">DESIGN / {d.id}</div>
           <span class="grow"></span>
-          <PanelToggle on={store.designChatOpen} title={t("panel.agent")} onclick={() => store.setDesignChat(!store.designChatOpen)} />
+          <div class="toggles">
+            <PanelToggle icon="bot" on={store.designChatOpen} title={t("panel.agent")} onclick={() => store.setDesignChat(!store.designChatOpen)} />
+            <PanelToggle on={store.designFilesOpen} title={t("ws.toggle")} onclick={() => store.setDesignFiles(!store.designFilesOpen)} />
+          </div>
         </div>
         <div class="titlerow">
           {#if renaming}
@@ -284,4 +287,9 @@
     color: var(--hi);
   }
 
+
+  .toggles {
+    display: flex;
+    gap: 6px;
+  }
 </style>

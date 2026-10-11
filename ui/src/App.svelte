@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store } from "./lib/store.svelte";
+  import { store, NEW_ROUTINE } from "./lib/store.svelte";
   import Rail from "./lib/Rail.svelte";
   import TrackList from "./lib/TrackList.svelte";
   import Timeline from "./lib/Timeline.svelte";
@@ -158,6 +158,9 @@
       <!-- The design's agent: a column of the layout, as the working folder is beside a track. -->
       {#if store.designChatOpen && store.currentArtifact?.kind === "design"}
         <AgentPanel kind="design" />
+      {:else if store.designFilesOpen && store.artifact}
+        <!-- The design's own folder (its reference files and extracted text), as a track's beside it. -->
+        <div class="sidebox" transition:slide={side}><Workspace /></div>
       {/if}
     {:else if store.view === "knowledge"}
       <KnowledgeView />
@@ -173,6 +176,9 @@
       <!-- The routine's plan's agent: its own, beside the plan, as a design's is. -->
       {#if store.planChatOpen && store.planInfo}
         <AgentPanel kind="plan" />
+      {:else if store.planFilesOpen && store.routine && store.routine !== NEW_ROUTINE}
+        <!-- The routine's folder, as a track's beside it. -->
+        <div class="sidebox" transition:slide={side}><Workspace /></div>
       {/if}
     {:else if store.view === "worker"}
       <WorkerView />

@@ -3,14 +3,15 @@
 
   /**
    * The right-hand panel's toggle: the same square, the same place (the top
-   * right of a page's head) on every page that has one — the working folder
-   * beside a track, the agent beside a design or the knowledge page.
+   * right of a page's head) on every page that has one. The panel icon opens
+   * a folder as files (beside a track, a routine, a design); the robot opens
+   * the page's AI agent (beside a design, the knowledge page, a routine's plan).
    */
-  let { on, title, onclick }: { on: boolean; title: string; onclick: () => void } = $props();
+  let { on, title, onclick, icon = "panel" }: { on: boolean; title: string; onclick: () => void; icon?: "panel" | "bot" } = $props();
 </script>
 
 <button class="tog" class:on type="button" {title} aria-label={title} aria-pressed={on} {onclick}>
-  <Icon name="panel" size={14} />
+  <Icon name={icon} size={14} />
 </button>
 
 <style>

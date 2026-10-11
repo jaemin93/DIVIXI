@@ -146,6 +146,7 @@
     <div class="kbtns">
       <!-- The agent panel, from any tab: the same toggle, in the same place, as a track's working folder. -->
       <PanelToggle
+        icon="bot"
         on={store.graphChatOpen}
         title={t("panel.agent")}
         onclick={() => (store.graphChatOpen ? store.closeGraphChat() : void store.openGraphChat())}

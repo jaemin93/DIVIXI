@@ -1031,12 +1031,52 @@ class Store {
 
   async setDesignChat(open: boolean) {
     this.designChatOpen = open;
-    if (!this.keeps("designchat")) return;
-    try {
-      await invoke("set_setting", { key: "designchat", value: open ? "open" : "closed" });
-    } catch (err) {
-      this.lastError = String(err);
+    if (open && this.designFilesOpen) void this.setDesignFiles(false);
+    this.keepSide("designchat", open);
+  }
+
+  /**
+   * The right of the designs page and of a routine: its agent (the robot) or
+   * its folder as files (the panel icon, as beside a track) -- one at a time,
+   * as a track has one column on its right. Kept like the design's agent
+   * column: on this PC's own Divixi, as it was left.
+   */
+  designFilesOpen = $state(false);
+  planFilesOpen = $state(false);
+
+  async setDesignFiles(open: boolean) {
+    this.designFilesOpen = open;
+    if (open && this.designChatOpen) void this.setDesignChat(false);
+    this.keepSide("designfiles", open);
+  }
+
+  async setPlanChat(open: boolean) {
+    this.planChatOpen = open;
+    if (open && this.planFilesOpen) void this.setPlanFiles(false);
+    this.keepSide("planchat", open);
+  }
+
+  async setPlanFiles(open: boolean) {
+    this.planFilesOpen = open;
+    if (open && this.planChatOpen) void this.setPlanChat(false);
+    this.keepSide("planfiles", open);
+  }
+
+  private keepSide(key: string, open: boolean) {
+    if (!this.keeps(key)) return;
+    invoke("set_setting", { key, value: open ? "open" : "closed" }).catch((err) => (this.lastError = String(err)));
+  }
+
+  /** The side panels as they were left (the design's agent is restored with the rest of the layout). */
+  async restoreSides() {
+    const read = async (key: string) => (this.keeps(key) ? await invoke<string | null>("get_setting", { key }).catch(() => null) : null);
+    const [df, pc, pf] = await Promise.all([read("designfiles"), read("planchat"), read("planfiles")]);
+    if (df === "open") {
+      this.designFilesOpen = true;
+      this.designChatOpen = false;
     }
+    this.planChatOpen = pc === "open";
+    this.planFilesOpen = pf === "open" && !this.planChatOpen;
   }
 
   /**
@@ -1375,9 +1415,34 @@ class Store {
 
   /** Where this track's open folders are remembered: the track and its folder. */
   private get wsKey(): string {
-    const track = this.track;
-    if (!track) return "";
-    return openKey(track, this.tracks.find((tr) => tr.id === track)?.cwd ?? "");
+    const target = this.wsTarget;
+    if (!target) return "";
+    const cwd = this.tracks.find((tr) => tr.id === target)?.cwd ?? this.routines.find((r) => `routine:${r.id}` === target)?.cwd ?? target;
+    return openKey(target, cwd);
+  }
+
+  /**
+   * Whose folder the file browser shows: the track's on a track; beside a
+   * routine its folder (`routine:<id>`), beside a design the design's own
+   * (`artifact:<id>`). The core reads the prefix (track_root); every
+   * workspace command and the preview take it as they take a track.
+   */
+  get wsTarget(): string {
+    if (this.view === "routines") return this.routine && this.routine !== NEW_ROUTINE ? `routine:${this.routine}` : "";
+    if (this.view === "design") return this.artifact ? `artifact:${this.artifact}` : "";
+    return this.wsTarget;
+  }
+
+  /** The target the panel's rows were read for. */
+  private wsLoaded = "";
+
+  /** When the browser now shows another folder, forget the last one's rows and read this one's. */
+  syncWorkspace() {
+    const target = this.wsTarget;
+    if (target === this.wsLoaded) return;
+    this.clearWorkspace();
+    this.wsLoaded = target;
+    if (target) void this.refreshWorkspace();
   }
 
   /** The folders the file browser has open on the track showing now. */
@@ -1413,9 +1478,14 @@ class Store {
   private setOpenDirs(open: string[]) {
     const key = this.wsKey;
     if (!key) return;
-    this.wsOpen = remember(this.wsOpen, key, open, new Set(this.tracks.map((tr) => tr.id)));
+    this.wsOpen = remember(this.wsOpen, key, open, this.wsLive());
     if (!this.keeps(WS_OPEN_SETTING)) return;
     invoke("set_setting", { key: WS_OPEN_SETTING, value: JSON.stringify(this.wsOpen) }).catch(tracing);
+  }
+
+  /** Keys the open-folder memory keeps: every track, routine and design there is. */
+  private wsLive(): Set<string> {
+    return new Set([...this.tracks.map((tr) => tr.id), ...this.routines.map((r) => `routine:${r.id}`), ...this.artifacts.map((a) => `artifact:${a.id}`)]);
   }
 
   private async restoreWsOpen() {
@@ -1445,10 +1515,10 @@ class Store {
 
   /** Reload the tree, the git status and every open file. */
   async refreshWorkspace() {
-    if (!this.track) return;
+    if (!this.wsTarget) return;
     // The whole-folder list is read again only if something already asked
     // for it; nothing here starts that walk on its own.
-    const hadFiles = this.fileListOf === this.track;
+    const hadFiles = this.fileListOf === this.wsTarget;
     this.fileListOf = "";
     await Promise.all([
       this.loadTree(),
@@ -1465,7 +1535,7 @@ class Store {
    * that are no longer on disk drop out of the memory here, quietly.
    */
   async loadTree() {
-    const track = this.track;
+    const track = this.wsTarget;
     if (!track) return;
     // Opening one folder after another leaves more than one listing in
     // flight; only the newest lands, so the rows cannot fall behind.
@@ -1474,7 +1544,7 @@ class Store {
     this.treeLoading = true;
     try {
       const [entries, cut] = treeReply(await invoke("workspace_tree", { track, open: asked }));
-      if (this.track !== track || seq !== this.treeSeq) return;
+      if (this.wsTarget !== track || seq !== this.treeSeq) return;
       this.tree = entries;
       this.treeCut = cut;
       const left = pruneOpen(asked, entries, cut);
@@ -1492,39 +1562,39 @@ class Store {
 
   /** Whether the rows in hand are this track's, so "no files" can be believed. */
   get treeReady(): boolean {
-    return !!this.track && this.treeOf === this.track;
+    return !!this.wsTarget && this.treeOf === this.wsTarget;
   }
 
   /** The same for the whole-folder list the name filter draws. */
   get fileListReady(): boolean {
-    return !!this.track && this.fileListOf === this.track;
+    return !!this.wsTarget && this.fileListOf === this.wsTarget;
   }
 
   /** Every file under the track folder, for searching by name and for `@`. */
   async loadFileList() {
-    const track = this.track;
+    const track = this.wsTarget;
     if (!track || this.fileListLoading || this.fileListOf === track) return;
     this.fileListLoading = true;
     try {
       const [entries] = treeReply(await invoke("workspace_tree", { track, open: null }));
-      if (this.track === track) this.fileList = entries;
+      if (this.wsTarget === track) this.fileList = entries;
     } catch (err) {
       this.lastError = String(err);
     } finally {
       this.fileListLoading = false;
       // Marked read even when it failed, so a filter does not set the
       // whole walk going again on every keystroke; a refresh tries afresh.
-      if (this.track === track) this.fileListOf = track;
+      if (this.wsTarget === track) this.fileListOf = track;
     }
   }
 
   async loadGit() {
-    const track = this.track;
+    const track = this.wsTarget;
     if (!track) return;
     this.gitLoading = true;
     try {
       const git = await invoke<WsGit>("workspace_git_status", { track });
-      if (this.track === track) {
+      if (this.wsTarget === track) {
         this.git = git;
         if (this.diffPath && !git.changes.some((c) => c.path === this.diffPath)) this.diffPath = "";
       }
@@ -1537,24 +1607,24 @@ class Store {
 
   /** Show one change's diff in the changes tab. */
   async loadDiff(path: string) {
-    const track = this.track;
+    const track = this.wsTarget;
     const change = this.git?.changes.find((c) => c.path === path);
     if (!track || !change) return;
     this.diffPath = path;
     try {
       const text = await invoke<string>("workspace_git_diff", { track, path, untracked: change.untracked });
-      if (this.track === track) this.diffs = { ...this.diffs, [path]: text };
+      if (this.wsTarget === track) this.diffs = { ...this.diffs, [path]: text };
     } catch (err) {
       this.lastError = String(err);
     }
   }
 
   private async loadFile(path: string) {
-    const track = this.track;
+    const track = this.wsTarget;
     if (!track) return;
     try {
       const file = await invoke<WsFile>("workspace_read", { track, path });
-      if (this.track === track) this.files = { ...this.files, [path]: file };
+      if (this.wsTarget === track) this.files = { ...this.files, [path]: file };
     } catch (err) {
       this.lastError = String(err);
     }
@@ -1578,7 +1648,7 @@ class Store {
   }
 
   private draftKey(path: string): string {
-    return `${this.track}\0${path}`;
+    return `${this.wsTarget}\0${path}`;
   }
 
   /**
@@ -1621,7 +1691,7 @@ class Store {
    * `force`.
    */
   async saveFile(path: string, force = false) {
-    const track = this.track;
+    const track = this.wsTarget;
     const key = this.draftKey(path);
     const draft = this.drafts[key];
     if (!track || !draft || this.saving[key]) return;
@@ -1634,7 +1704,7 @@ class Store {
       this.drafts = now && now.text !== draft.text ? { ...rest, [key]: { text: now.text, base: file.text ?? "" } } : rest;
       const { [key]: _c, ...conflicts } = this.saveConflicts;
       this.saveConflicts = conflicts;
-      if (this.track === track) {
+      if (this.wsTarget === track) {
         this.files = { ...this.files, [path]: file };
         void this.loadGit();
       }
@@ -1683,9 +1753,9 @@ class Store {
 
   /** Select a file in the system file manager. */
   async revealFile(path: string) {
-    if (!this.track) return;
+    if (!this.wsTarget) return;
     try {
-      await invoke("workspace_reveal", { track: this.track, path });
+      await invoke("workspace_reveal", { track: this.wsTarget, path });
     } catch (err) {
       this.lastError = String(err);
     }
@@ -2777,6 +2847,7 @@ class Store {
     this.view = "track";
     if (changed) {
       this.clearWorkspace();
+      this.wsLoaded = id;
       if (this.panelOpen) void this.refreshWorkspace();
       void this.refreshConductor();
       void this.refreshWorkerSessions();
@@ -3251,6 +3322,7 @@ class Store {
         if (!overWeb) this.designListOpen = settingOpen(designList);
         if (!overWeb) this.routineListOpen = settingOpen(routineList);
         this.designChatOpen = designChat !== "closed";
+        void this.restoreSides();
         if (!overWeb) this.kbListOpen = settingOpen(kbList);
         const kw = Number(kbListWidth);
         if (Number.isFinite(kw) && kw > 0) this.setKbListWidth(kw);

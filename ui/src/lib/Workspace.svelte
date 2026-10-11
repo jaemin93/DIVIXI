@@ -8,6 +8,7 @@
   import { highlight, languageFor } from "./highlight";
   import { t } from "./i18n.svelte";
   import { invoke, previewBase, saveAs, local } from "./ipc.svelte";
+  import { untrack } from "svelte";
 
   /**
    * The track's working folder beside the conversation, after Kiro Crew's
@@ -17,6 +18,20 @@
    * file the tree opens as a drawer from the right, as in Kiro: the file
    * stays where it is underneath; a click beside the drawer or Esc closes it.
    */
+  // Beside a track, a routine or a design: the rows are the folder on
+  // screen's, read again when the page shows another one.
+  $effect(() => {
+    void store.wsTarget;
+    untrack(() => store.syncWorkspace());
+  });
+
+  /** Close this panel, wherever it is open. */
+  function closePanel() {
+    if (store.view === "routines") void store.setPlanFiles(false);
+    else if (store.view === "design") void store.setDesignFiles(false);
+    else void store.setPanel(false);
+  }
+
   let filter = $state("");
   /** The drawer shows the files or the git changes. */
   let drawerMode = $state<"files" | "changes">("files");
@@ -31,7 +46,7 @@
   let searchSeq = 0;
   $effect(() => {
     const q = filter.trim();
-    const track = store.track;
+    const track = store.wsTarget;
     if (searchBy !== "content" || !q || !track) {
       found = [];
       foundCut = false;
@@ -77,7 +92,7 @@
   async function download(path: string) {
     menu = null;
     try {
-      await saveAs(store.track, path);
+      await saveAs(store.wsTarget, path);
     } catch (err) {
       store.lastError = String(err);
     }
@@ -102,14 +117,14 @@
   // Whether the open file is in the knowledge library; the book button adds it.
   let kbAdding = $state(false);
   $effect(() => {
-    const track = store.track;
+    const track = store.wsTarget;
     const path = store.activeFile;
     if (track && path && store.panelTab === "file") void knowledge.checkViewer(track, path);
   });
-  const inLibrary = $derived(!!knowledge.viewerSource && knowledge.viewerKey === `${store.track}\0${store.activeFile}`);
+  const inLibrary = $derived(!!knowledge.viewerSource && knowledge.viewerKey === `${store.wsTarget}\0${store.activeFile}`);
   const canAdd = $derived(!!activeFile && activeFile.kind !== "image" && knowledge.formats.includes(activeFile.ext.toLowerCase()));
   async function addToLibrary() {
-    const track = store.track;
+    const track = store.wsTarget;
     const path = store.activeFile;
     if (!track || !path) return;
     kbAdding = true;
@@ -127,7 +142,7 @@
   // Searching by name looks past the folders open, so it wants the whole
   // list; browsing never asks for it.
   $effect(() => {
-    if (byName && store.track) void store.loadFileList();
+    if (byName && store.wsTarget) void store.loadFileList();
   });
 
   /** The tree as rows with their depth; `shown` decides folding at render time. */
@@ -207,7 +222,7 @@
   function previewUrl(path: string): string {
     const base = previewBase();
     // The theme picks the scrollbar colours the page is served with.
-    return base + [store.track ?? "", ...path.split("/")].map(encodeURIComponent).join("/") + `?theme=${store.theme}`;
+    return base + [store.wsTarget ?? "", ...path.split("/")].map(encodeURIComponent).join("/") + `?theme=${store.theme}`;
   }
 
   /** Markdown and HTML open rendered, with their source a toggle away. */
@@ -274,7 +289,7 @@
       <Icon name="refresh" size={14} />
     </button>
     <!-- A phone: the panel is the whole screen, so it closes from here. -->
-    <button class="tab icon closepanel" title={t("ws.closePanel")} aria-label={t("ws.closePanel")} onclick={() => store.setPanel(false)}>
+    <button class="tab icon closepanel" title={t("ws.closePanel")} aria-label={t("ws.closePanel")} onclick={closePanel}>
       <Icon name="close" size={14} />
     </button>
   </div>

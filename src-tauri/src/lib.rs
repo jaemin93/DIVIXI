@@ -1363,6 +1363,24 @@ fn last_crash(state: State<'_, AppState>) -> Option<crash::Crash> {
 
 /// A track's folder, checked to exist.
 fn track_root(state: &AppState, track: &str) -> Result<PathBuf, String> {
+    // The file browser beside other pages: a routine's folder, and a
+    // design's own (its reference files, its extracted text). Named by a
+    // prefix so every workspace command and the preview take them as a
+    // track's, with the same checks on paths inside.
+    if let Some(id) = track.strip_prefix("routine:") {
+        let r = state.store.routine(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no routine {id}"))?;
+        let root = PathBuf::from(&r.cwd);
+        if !root.is_dir() {
+            return Err(format!("the routine's folder is gone: {}", r.cwd));
+        }
+        return Ok(root);
+    }
+    if let Some(id) = track.strip_prefix("artifact:") {
+        match state.store.artifact(id).map_err(|e| e.to_string())? {
+            Some((a, _)) if a.kind == design::KIND => return artifact::workdir(state, id),
+            _ => return Err(format!("no design {id}")),
+        }
+    }
     let info = state
         .store
         .track(track)
