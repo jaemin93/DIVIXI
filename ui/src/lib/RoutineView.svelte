@@ -6,6 +6,7 @@
   import Working from "./Working.svelte";
   import Markdown from "./Markdown.svelte";
   import PlanView from "./PlanView.svelte";
+  import PanelToggle from "./PanelToggle.svelte";
   import { plans } from "./plan.svelte";
   import { resultGlyphs, resultsOf } from "./planGraph";
   import { untrack } from "svelte";
@@ -120,13 +121,16 @@
   let formOpen = $state(false);
 
   /**
-   * The Plan button. A form not saved yet is saved first (it needs all four
-   * answers, as saving does). A routine with no plan gets one and its agent
-   * is asked for a first draft. Pressed again on a plan that is open, it
-   * offers to bring the plan in line with the instruction (as suggestions)
-   * or to start over (the old plan kept in its history).
+   * The Plan button: shows the routine's plan, or hides it. A form not saved
+   * yet is saved first (it needs all four answers, as saving does), and a
+   * routine with no plan gets one. Nothing is sent to the plan's agent: the
+   * human asks it from the robot panel when they want to.
    */
   async function planPress() {
+    if (planOn) {
+      plans.close();
+      return;
+    }
     if (!complete || plans.busy) return;
     if (making || dirty) {
       await save();
@@ -134,15 +138,8 @@
     }
     const id = store.routine;
     if (!id || id === NEW_ROUTINE) return;
-    if (planOn) {
-      plans.menu = !plans.menu;
-      return;
-    }
-    const had = !!store.routines.find((r) => r.id === id)?.plan;
     formOpen = false;
-    if (!(await plans.openFor(id))) return;
-    if (!plans.doc.steps.length) await plans.draft();
-    else if (had) plans.menu = true;
+    await plans.openFor(id);
   }
 
   /** A run's step results in one line, in the order of the plan it was given. */
@@ -166,7 +163,6 @@
   <header>
     <div class="who">
       <h1>{making ? t("routines.newTitle") : (saved?.name ?? "")}</h1>
-      <p class="meta">{t("routines.standalone")}</p>
     </div>
     {#if making}
       <div class="acts">
@@ -189,14 +185,11 @@
           class:on={planOn}
           aria-pressed={planOn}
           disabled={!complete || plans.busy}
-          title={!complete ? t("plan.buttonIncomplete") : planOn ? t("plan.buttonAgain") : hasPlan ? t("plan.buttonOpen") : t("plan.buttonNew")}
+          title={!complete ? t("plan.buttonIncomplete") : planOn ? t("plan.hide") : hasPlan ? t("plan.buttonOpen") : t("plan.buttonNew")}
           onclick={planPress}
         >
           {t("plan.button")}{#if hasPlan && !planOn}<span class="dot" aria-hidden="true"></span>{/if}
         </button>
-        {#if planOn}
-          <button class="ghost" onclick={() => plans.close()} title={t("plan.hide")} aria-label={t("plan.hide")}>×</button>
-        {/if}
         {#if live}
           <button class="run" onclick={() => store.cancelRoutine(saved.id)}>
             <Working size={12} /> {t("routines.stop")}
@@ -206,6 +199,14 @@
             <Icon name="play" size={12} /> {t("routines.runNow")}
           </button>
         {/if}
+        <!-- The right of the page: the plan's agent (the robot, once the plan is
+             open) and the routine's folder as files, as beside a track. -->
+        <div class="toggles">
+          {#if planOn && store.planInfo}
+            <PanelToggle icon="bot" on={store.planChatOpen} title={t("panel.agent")} onclick={() => store.setPlanChat(!store.planChatOpen)} />
+          {/if}
+          <PanelToggle on={store.planFilesOpen} title={t("ws.toggle")} onclick={() => store.setPlanFiles(!store.planFilesOpen)} />
+        </div>
       </div>
     {/if}
   </header>
@@ -387,12 +388,6 @@
     color: var(--hi);
   }
 
-  .meta {
-    margin: 4px 0 0;
-    font-size: 11px;
-    line-height: 1.5;
-    color: var(--lab);
-  }
 
   .acts {
     display: flex;
@@ -707,5 +702,12 @@
       padding-left: 12px;
       padding-right: 12px;
     }
+  }
+
+  .toggles {
+    display: flex;
+    gap: 6px;
+    margin-left: 4px;
+    align-self: center;
   }
 </style>

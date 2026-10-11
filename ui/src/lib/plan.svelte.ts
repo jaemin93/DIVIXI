@@ -1,23 +1,17 @@
 import { invoke, listen } from "./ipc.svelte";
 import { store, type ArtifactInfo, type Routine } from "./store.svelte";
-import { t } from "./i18n.svelte";
-import { emptyPlan, instructionChanged, type PlanDoc, type PlanEvent } from "./planGraph";
+import { emptyPlan, instructionChanged, unsaved, type PlanDoc, type PlanEvent } from "./planGraph";
 
 /**
- * A routine's plan on screen (src-tauri/src/plan.rs keeps it): its steps,
- * the graph or the list they are shown as, the step picked, and the moves
- * that change it. The conversation with the plan's agent is the store's
- * artifact conversation (store.planInfo, store.planChatOpen), as a design's
- * is; this is the plan beside it.
+ * A routine's plan on screen (src-tauri/src/plan.rs keeps it): its steps
+ * as a graph, the step picked, its saved versions, and the moves that
+ * change it. The conversation with the plan's agent is the store's artifact
+ * conversation (store.planInfo, opened from the robot toggle), as a
+ * design's is; this is the plan beside it.
  */
 
 /** What `routine_plan_open` answers. */
 type Opened = { routine: Routine; plan: ArtifactInfo; doc: PlanDoc };
-
-export type PlanShow = "graph" | "list";
-
-/** A phone-sized screen gets the list: the graph has no room there. */
-const narrowQuery = typeof matchMedia === "function" ? matchMedia("(max-width: 640px)") : null;
 
 class Plans {
   /** The routine whose plan this is, and whether its plan is on screen. */
@@ -26,38 +20,13 @@ class Plans {
   doc = $state<PlanDoc>(emptyPlan());
   /** The plan's artifact id, once known. */
   id = $state("");
-  /** The graph or the list, as the human last chose (a phone always has the list). */
-  chosen = $state<PlanShow>("graph");
-  narrow = $state(narrowQuery?.matches ?? false);
   /** The step whose drawer is open. */
   picked = $state("");
   busy = $state(false);
-  /** The "plan again" menu: bring in line with the instruction, or start over. */
-  menu = $state(false);
   /** The run whose step results the plan shows; empty is the newest that has any. */
   resultRun = $state("");
-
-  constructor() {
-    narrowQuery?.addEventListener("change", (e) => (this.narrow = e.matches));
-  }
-
-  get show(): PlanShow {
-    return this.narrow ? "list" : this.chosen;
-  }
-
-  setShow(v: PlanShow) {
-    this.chosen = v;
-    void invoke("set_setting", { key: "plan_show", value: v }).catch(() => {});
-  }
-
-  async restoreShow() {
-    try {
-      const v = await invoke<string | null>("get_setting", { key: "plan_show" });
-      if (v === "graph" || v === "list") this.chosen = v;
-    } catch {
-      // A preference; the graph it is.
-    }
-  }
+  /** Bumped when the graph should frame the whole plan again (after a layout). */
+  refit = $state(0);
 
   /** The routine on screen, if it is the one this plan belongs to. */
   get routineOnScreen(): Routine | undefined {
@@ -69,6 +38,16 @@ class Plans {
     return !!r && instructionChanged(this.doc, r.instruction);
   }
 
+  /** The working plan differs from the version runs are given. */
+  get unsaved(): boolean {
+    return unsaved(this.doc);
+  }
+
+  /** The version runs are given now, if any. */
+  get lastSaved(): number | undefined {
+    return this.doc.saved?.at(-1)?.n;
+  }
+
   /** Leave the plan when another routine is opened. */
   follow(routine: string) {
     if (routine === this.routine) return;
@@ -77,17 +56,14 @@ class Plans {
     this.id = "";
     this.doc = emptyPlan();
     this.picked = "";
-    this.menu = false;
     this.resultRun = "";
     store.planInfo = null;
-    store.planChatOpen = false;
     store.planSelected = [];
   }
 
   /**
-   * Open the routine's plan, made when it has none. The plan's agent starts
-   * as the one last chosen for a plan (the core remembers), never the
-   * routine's own by intent; the routine's is only the very first fallback.
+   * Open the routine's plan, made when it has none. Nothing is sent to its
+   * agent: the human asks it, from the robot panel, when they want to.
    */
   async openFor(routine: string): Promise<boolean> {
     this.follow(routine);
@@ -99,7 +75,6 @@ class Plans {
       this.doc = got.doc;
       this.open = true;
       store.planInfo = got.plan;
-      store.planChatOpen = true;
       // The routine now carries its plan's id; the list hears it too.
       store.routines = store.routines.map((r) => (r.id === routine ? got.routine : r));
       void store.refreshArtifactSession();
@@ -114,11 +89,7 @@ class Plans {
 
   close() {
     this.open = false;
-    store.planChatOpen = false;
-  }
-
-  setChat(open: boolean) {
-    store.planChatOpen = open && !!store.planInfo;
+    this.picked = "";
   }
 
   /** A change the core sent: taken when it is this plan's and not older. */
@@ -161,6 +132,31 @@ class Plans {
     }
   }
 
+  /**
+   * Lay every step out again. A field still being typed in is written
+   * first, so the layout is of the plan as it now reads; then the graph
+   * frames the whole plan, so what moved is in view.
+   */
+  async autoLayout() {
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    // The field's write goes out on blur; let it land first.
+    await new Promise((r) => setTimeout(r, 0));
+    await this.apply([{ op: "auto_layout" }]);
+    setTimeout(() => this.refit++, 60);
+  }
+
+  /** Save the working plan as the version runs are given. */
+  async save(note: string): Promise<boolean> {
+    const out = await this.apply([{ op: "save", note }]);
+    return out[0]?.ok === true;
+  }
+
+  /** Bring a saved version back into the working plan. */
+  async openVersion(n: number) {
+    await this.apply([{ op: "open", n }]);
+    setTimeout(() => this.refit++, 60);
+  }
+
   /** Pick a step: its drawer opens, and it goes with the next message. */
   pick(id: string, add = false) {
     if (add) {
@@ -171,38 +167,6 @@ class Plans {
     }
     store.planSelected = id ? [id] : [];
     this.picked = id;
-  }
-
-  /** A message to the plan's agent, as if typed in its composer. */
-  private async say(text: string) {
-    if (!store.planInfo) return;
-    store.planChatOpen = true;
-    await store.send(text);
-  }
-
-  /** The first draft: the plan's agent splits the instruction into steps. */
-  async draft() {
-    await this.say(t("plan.ask.draft"));
-  }
-
-  /** Bring the plan in line with the instruction; what changes comes as suggestions. */
-  async merge() {
-    // The plan answers to the instruction as it reads now; the band goes,
-    // and what the agent changes to match comes as suggestions.
-    await this.restamp();
-    await this.say(t("plan.ask.merge"));
-  }
-
-  /** Keep the plan in the history, empty it, and ask for a new draft. */
-  async startOver() {
-    await this.apply([{ op: "reset" }]);
-    await this.restamp();
-    await this.draft();
-  }
-
-  /** Bring back an earlier plan from the history (the current one takes its place there). */
-  async restore(index: number) {
-    await this.apply([{ op: "restore", index }]);
   }
 
   /** The plan now answers to the instruction as it reads (the band goes). */
@@ -226,5 +190,5 @@ export const plans = new Plans();
 
 /** Subscribe once. */
 export async function connectPlans() {
-  await Promise.all([plans.restoreShow(), listen<PlanEvent>("plan", (e) => plans.take(e.payload))]);
+  await listen<PlanEvent>("plan", (e) => plans.take(e.payload));
 }

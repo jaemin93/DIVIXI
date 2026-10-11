@@ -1,24 +1,22 @@
 <script lang="ts">
   import { plans } from "./plan.svelte";
-  import { store, artifactKey } from "./store.svelte";
+  import { store } from "./store.svelte";
   import PlanGraph from "./PlanGraph.svelte";
-  import PlanList from "./PlanList.svelte";
   import PlanStepEditor from "./PlanStepEditor.svelte";
   import { resultsOf } from "./planGraph";
   import { whenFull } from "./time";
   import { t } from "./i18n.svelte";
 
   /**
-   * A routine's plan, open beside its form: the graph or the list, the bands
-   * that want the human (the instruction moved on since the plan was made,
-   * the agent's suggestions, an instruction the agent proposed), and the
-   * picked step's drawer. Its agent is the panel on the right.
+   * A routine's plan, open beside its form: the graph, the bands that want
+   * the human (the instruction moved on since the plan was made, the agent's
+   * suggestions, an instruction it proposed), the saved versions, and the
+   * picked step's drawer. Its agent is the robot panel on the right.
    */
   const doc = $derived(plans.doc);
   const pending = $derived(doc.changes.length);
   const picked = $derived(doc.steps.find((s) => s.id === plans.picked));
-  /** The plan's agent has a turn in flight (its own conversation, whatever else is open). */
-  const busy = $derived(store.runs.some((r) => r.track === artifactKey(plans.id) && (r.status === "running" || r.status === "connecting")));
+  const versions = $derived([...(doc.saved ?? [])].reverse());
 
   /** The run whose step results the cards show. */
   const run = $derived(
@@ -33,65 +31,99 @@
     if (typeof id === "string") plans.pick(id);
   }
 
-  let confirmOver = $state(false);
-  async function startOver() {
-    if (!confirmOver) {
-      confirmOver = true;
-      return;
-    }
-    confirmOver = false;
-    plans.menu = false;
-    await plans.startOver();
-  }
+  // ----- saving, and the versions -----
+  let saving = $state(false);
+  let note = $state("");
+  let versionsOpen = $state(false);
 
-  async function merge() {
-    plans.menu = false;
-    await plans.merge();
+  const saveBlocked = $derived(pending > 0 ? t("plan.saveSettleFirst", { n: pending }) : !plans.unsaved ? t("plan.saveNothing") : "");
+
+  async function save() {
+    if (saveBlocked) return;
+    if (await plans.save(note)) {
+      note = "";
+      saving = false;
+    }
   }
 </script>
 
 <div class="plan">
   <div class="tools" role="toolbar" aria-label={t("plan.tools")}>
-    {#if !plans.narrow}
-      <div class="seg" role="group" aria-label={t("plan.showLabel")}>
-        <button type="button" class:on={plans.show === "graph"} aria-pressed={plans.show === "graph"} onclick={() => plans.setShow("graph")}>{t("plan.showGraph")}</button>
-        <button type="button" class:on={plans.show === "list"} aria-pressed={plans.show === "list"} onclick={() => plans.setShow("list")}>{t("plan.showList")}</button>
-      </div>
-    {/if}
     <button type="button" class="tb" onclick={addStep}>+ {t("plan.addStep")}</button>
-    {#if plans.show === "graph"}
-      <button type="button" class="tb" onclick={() => plans.apply([{ op: "auto_layout" }])} title={t("plan.autoLayoutHint")}>{t("plan.autoLayout")}</button>
-    {/if}
+    <button type="button" class="tb" onclick={() => plans.autoLayout()} title={t("plan.autoLayoutHint")}>{t("plan.autoLayout")}</button>
     <button type="button" class="tb" onclick={() => plans.undo()} title={t("plan.undo")} aria-label={t("plan.undo")}>↶</button>
     <span class="grow"></span>
     <label class="use" title={t("plan.useInRunHint")}>
       <input type="checkbox" checked={doc.use_in_run} onchange={(e) => plans.apply([{ op: "use_in_run", on: (e.currentTarget as HTMLInputElement).checked }])} />
       {t("plan.useInRun")}
     </label>
-    <div class="menuwrap">
-      <button type="button" class="tb" aria-expanded={plans.menu} onclick={() => (plans.menu = !plans.menu)}>{t("plan.again")} ▾</button>
-      {#if plans.menu}
+    {#if plans.unsaved}
+      <span class="dirty" title={t("plan.unsavedHint")}>● {t("plan.unsavedBadge")}</span>
+    {/if}
+    <div class="pop">
+      <button
+        type="button"
+        class="tb save"
+        class:ready={!saveBlocked}
+        disabled={!!saveBlocked}
+        title={saveBlocked || t("plan.saveHint")}
+        aria-expanded={saving}
+        onclick={() => {
+          saving = !saving;
+          versionsOpen = false;
+        }}>{t("plan.save")}</button
+      >
+      {#if saving && !saveBlocked}
+        <div class="menu" role="dialog" aria-label={t("plan.save")}>
+          <label class="f">
+            <span class="flab">{t("plan.saveNote")}</span>
+            <!-- svelte-ignore a11y_autofocus -->
+            <input bind:value={note} maxlength="200" autofocus onkeydown={(e) => e.key === "Enter" && save()} />
+          </label>
+          <div class="macts">
+            <button type="button" class="tb" onclick={() => (saving = false)}>{t("plan.cancel")}</button>
+            <button type="button" class="tb ready" onclick={save}>{t("plan.saveAs", { n: (plans.lastSaved ?? 0) + 1 })}</button>
+          </div>
+        </div>
+      {/if}
+    </div>
+    <div class="pop">
+      <button
+        type="button"
+        class="tb"
+        aria-expanded={versionsOpen}
+        onclick={() => {
+          versionsOpen = !versionsOpen;
+          saving = false;
+        }}>{plans.lastSaved ? t("plan.versionNow", { n: plans.lastSaved }) : t("plan.neverSaved")} ▾</button
+      >
+      {#if versionsOpen}
         <div class="menu" role="menu">
-          {#if pending}
-            <p class="mnote">{t("plan.againSettleFirst", { n: pending })}</p>
-          {/if}
-          <button type="button" role="menuitem" disabled={!!pending || busy} onclick={merge}>
-            <b>{t("plan.againMerge")}</b>
-            <span>{t("plan.againMergeHint")}</span>
-          </button>
-          <button type="button" role="menuitem" class:armed={confirmOver} disabled={!!pending || busy} onclick={startOver} onblur={() => (confirmOver = false)}>
-            <b>{confirmOver ? t("plan.againOverArm") : t("plan.againOver")}</b>
-            <span>{t("plan.againOverHint")}</span>
-          </button>
-          {#if doc.history?.length}
-            <div class="hist">
-              <span class="mnote">{t("plan.history")}</span>
-              {#each doc.history as h, i (h.at)}
-                <button type="button" role="menuitem" disabled={!!pending} onclick={() => { plans.menu = false; void plans.restore(i); }}>
-                  {t("plan.historyItem", { when: whenFull(h.at, store.lang), n: h.steps.length })}
-                </button>
-              {/each}
-            </div>
+          {#if !versions.length}
+            <p class="mnote">{t("plan.noVersions")}</p>
+          {:else}
+            {#if pending}<p class="mnote warn">{t("plan.saveSettleFirst", { n: pending })}</p>{/if}
+            {#each versions as v (v.n)}
+              <div class="ver">
+                <div class="vt">
+                  <b>v{v.n}</b>
+                  <span>{whenFull(v.at, store.lang)} · {t("plan.versionSteps", { n: v.steps.length })}</span>
+                  {#if v.note}<span class="vnote">{v.note}</span>{/if}
+                  {#if v.n === plans.lastSaved}<span class="vrun">{t("plan.versionUsed")}</span>{/if}
+                </div>
+                <button
+                  type="button"
+                  class="tb"
+                  role="menuitem"
+                  disabled={!!pending}
+                  title={t("plan.versionOpenHint")}
+                  onclick={() => {
+                    versionsOpen = false;
+                    void plans.openVersion(v.n);
+                  }}>{t("plan.versionOpen")}</button
+                >
+              </div>
+            {/each}
           {/if}
         </div>
       {/if}
@@ -102,7 +134,6 @@
     <div class="band warn">
       <span>⚠ {t("plan.changedBand")}</span>
       <span class="grow"></span>
-      <button type="button" class="tb" disabled={!!pending || busy} onclick={merge}>{t("plan.againMerge")}</button>
       <button type="button" class="tb" onclick={() => plans.restamp()}>{t("plan.changedIgnore")}</button>
     </div>
   {/if}
@@ -122,7 +153,7 @@
       </div>
       <div class="pacts">
         <button type="button" class="tb" onclick={() => plans.apply([{ op: "dismiss_proposal" }])}>{t("plan.proposalDismiss")}</button>
-        <button type="button" class="tb keep" onclick={() => plans.takeProposal()}>{t("plan.proposalTake")}</button>
+        <button type="button" class="tb ready" onclick={() => plans.takeProposal()}>{t("plan.proposalTake")}</button>
       </div>
     </div>
   {/if}
@@ -135,17 +166,11 @@
 
   {#if !doc.steps.length && !pending}
     <div class="empty">
-      <p class="et">{busy ? t("plan.drafting") : t("plan.emptyTitle")}</p>
-      <p class="eh">{t("plan.emptyHint")}</p>
-      <div class="eacts">
-        <button type="button" class="tb keep" disabled={busy} onclick={() => plans.draft()}>{t("plan.askDraft")}</button>
-        <button type="button" class="tb" onclick={addStep}>+ {t("plan.addStep")}</button>
-      </div>
+      <p class="et">{t("plan.emptyTitle")}</p>
+      <button type="button" class="tb" onclick={addStep}>+ {t("plan.addStep")}</button>
     </div>
-  {:else if plans.show === "graph"}
-    <PlanGraph {results} />
   {:else}
-    <PlanList {results} />
+    <PlanGraph {results} />
   {/if}
 
   {#if picked}
@@ -177,29 +202,6 @@
     flex: 1;
   }
 
-  .seg {
-    display: flex;
-    border: 1px solid var(--line);
-  }
-
-  .seg button {
-    height: 26px;
-    padding: 0 11px;
-    background: none;
-    border: 0;
-    color: var(--lab);
-    font-size: 12px;
-  }
-
-  .seg button + button {
-    border-left: 1px solid var(--line);
-  }
-
-  .seg button.on {
-    color: var(--hi);
-    background: var(--sel);
-  }
-
   .tb {
     height: 26px;
     padding: 0 10px;
@@ -218,9 +220,13 @@
     opacity: 0.45;
   }
 
-  .tb.keep {
+  .tb.ready {
     color: var(--hi);
     border-color: var(--acc);
+  }
+
+  .tb.save.ready {
+    background: var(--accbg);
   }
 
   .use {
@@ -231,7 +237,12 @@
     color: var(--txt);
   }
 
-  .menuwrap {
+  .dirty {
+    font-size: 11.5px;
+    color: var(--warn);
+  }
+
+  .pop {
     position: relative;
   }
 
@@ -240,63 +251,84 @@
     right: 0;
     top: 30px;
     z-index: 20;
-    width: 300px;
+    width: 320px;
+    max-height: 60vh;
+    overflow-y: auto;
     background: var(--card);
     border: 1px solid var(--lines);
-    padding: 6px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .f {
     display: flex;
     flex-direction: column;
     gap: 4px;
   }
 
-  .menu button {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    text-align: left;
-    padding: 7px 9px;
-    background: transparent;
-    border: 1px solid transparent;
-    color: var(--txt);
-  }
-
-  .menu button:hover:not(:disabled) {
-    border-color: var(--acc);
-  }
-
-  .menu button:disabled {
-    opacity: 0.45;
-  }
-
-  .menu button.armed b {
-    color: var(--deltx);
-  }
-
-  .menu b {
+  .flab {
+    font-size: 11px;
     font-weight: 600;
+    color: var(--lab);
+  }
+
+  .f input {
+    padding: 6px 9px;
+    background: var(--inp);
+    border: 1px solid var(--line);
+    color: var(--hi);
+    font: inherit;
     font-size: 12.5px;
   }
 
-  .menu span {
-    font-size: 11px;
-    color: var(--lab);
+  .macts {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
   }
 
   .mnote {
-    margin: 2px 4px 4px;
-    font-size: 11px;
+    margin: 2px 2px 4px;
+    font-size: 11.5px;
+    color: var(--lab);
+  }
+
+  .mnote.warn {
     color: var(--warn);
   }
 
-  .hist {
-    border-top: 1px solid var(--line);
-    padding-top: 4px;
+  .ver {
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 4px;
+    border-top: 1px solid var(--lineq);
   }
 
-  .hist .mnote {
+  .vt {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 11.5px;
     color: var(--lab);
+  }
+
+  .vt b {
+    color: var(--hi);
+    font-size: 12.5px;
+  }
+
+  .vnote {
+    color: var(--txt);
+    overflow-wrap: anywhere;
+  }
+
+  .vrun {
+    color: var(--oktx);
   }
 
   .band {
@@ -370,7 +402,7 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 6px;
+    gap: 10px;
     padding: 30px 18px;
     text-align: center;
     background: var(--kg-paper);
@@ -383,20 +415,6 @@
     color: var(--hi);
   }
 
-  .eh {
-    margin: 0;
-    max-width: 440px;
-    font-size: 12px;
-    line-height: 1.6;
-    color: var(--lab);
-  }
-
-  .eacts {
-    margin-top: 8px;
-    display: flex;
-    gap: 8px;
-  }
-
   @media (max-width: 640px) {
     .tools,
     .band {
@@ -405,7 +423,11 @@
     }
 
     .menu {
-      width: min(300px, calc(100vw - 24px));
+      position: fixed;
+      left: 12px;
+      right: 12px;
+      top: auto;
+      width: auto;
     }
   }
 </style>

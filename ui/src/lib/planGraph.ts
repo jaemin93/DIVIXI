@@ -47,8 +47,12 @@ export type PlanDoc = {
   source: { instruction: string; at: number } | null;
   use_in_run: boolean;
   proposal?: { text: string; run: string | null; at: number } | null;
-  history?: { at: number; steps: PlanStep[] }[];
+  /** Saved versions, oldest first; runs are given the last. */
+  saved?: PlanVersion[];
 };
+
+/** Mirrors `plan::Version`. */
+export type PlanVersion = { n: number; at: number; note: string; steps: PlanStep[] };
 
 /** Mirrors `plan::PlanEvent`: the plan whole after a change. */
 export type PlanEvent = { id: string; base: number; doc: PlanDoc };
@@ -65,7 +69,7 @@ export const emptyPlan = (): PlanDoc => ({
   source: null,
   use_in_run: true,
   proposal: null,
-  history: [],
+  saved: [],
 });
 
 const byId = (steps: PlanStep[]) => new Map(steps.map((s) => [s.id, s]));
@@ -114,8 +118,14 @@ export const GAP_Y = 36;
 /**
  * Where each step sits: a column per wave, left to right; within a column,
  * steps ordered by where the steps they wait for sit (a few sweeps of the
- * barycentre), and the column centred on the tallest. A step a person put
- * somewhere stays there.
+ * barycentre), and the column centred on the tallest.
+ *
+ * A step a person put somewhere stays there -- while that place still
+ * reads in order: to the right of every step it waits for and to the left
+ * of every step that waits for it. Once its steps before change so that
+ * the place would put it out of order, the place is let go and the layout
+ * places it (the "lay out did nothing" report: a card pinned by an earlier
+ * drag kept its spot through a change of order).
  */
 export function layout(steps: PlanStep[]): Map<string, { x: number; y: number }> {
   const ws = waves(steps);
@@ -137,17 +147,25 @@ export function layout(steps: PlanStep[]): Map<string, { x: number; y: number }>
     });
   }
   const tallest = Math.max(1, ...ws.map((w) => w.length));
-  const out = new Map<string, { x: number; y: number }>();
+  const auto = new Map<string, { x: number; y: number }>();
   ws.forEach((w, col) => {
     const offset = ((tallest - w.length) * (CARD_H + GAP_Y)) / 2;
-    w.forEach((id, k) => {
-      const s = index.get(id)!;
-      out.set(id, {
-        x: s.x ?? col * (CARD_W + GAP_X),
-        y: s.y ?? offset + k * (CARD_H + GAP_Y),
-      });
-    });
+    w.forEach((id, k) => auto.set(id, { x: col * (CARD_W + GAP_X), y: offset + k * (CARD_H + GAP_Y) }));
   });
+  // Where each step ends up: its pin when the pin still reads in order.
+  const out = new Map(auto);
+  const placedX = (id: string) => out.get(id)!.x;
+  for (const w of ws) {
+    for (const id of w) {
+      const s = index.get(id)!;
+      if (s.x === undefined || s.y === undefined) continue;
+      const before = s.after.filter((a) => out.has(a));
+      const afterIt = steps.filter((o) => o.after.includes(id)).map((o) => o.id);
+      const rightOfBefore = before.every((a) => s.x! > placedX(a));
+      const leftOfAfter = afterIt.every((o) => s.x! < (index.get(o)!.x ?? auto.get(o)!.x));
+      if (rightOfBefore && leftOfAfter) out.set(id, { x: s.x, y: s.y });
+    }
+  }
   return out;
 }
 
@@ -216,6 +234,18 @@ export function shownSteps(doc: PlanDoc): { step: PlanStep; removed: boolean }[]
     if (c.before && !c.after) out.push({ step: c.before, removed: true });
   }
   return out;
+}
+
+/** The steps as a run would be given them: where they sit on the graph does not count. */
+function content(steps: PlanStep[]): string {
+  return JSON.stringify(steps.map(({ x: _x, y: _y, ...rest }) => rest));
+}
+
+/** Whether the working plan differs from the last saved version (a plan never saved, once it has steps). */
+export function unsaved(doc: PlanDoc): boolean {
+  const last = doc.saved?.at(-1);
+  if (!last) return doc.steps.length > 0;
+  return content(last.steps) !== content(doc.steps);
 }
 
 /** Whether the routine's instruction moved on since the plan was made. */

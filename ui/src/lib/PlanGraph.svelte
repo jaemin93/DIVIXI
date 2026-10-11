@@ -10,7 +10,8 @@
    * card to put it somewhere (it stays there until the layout is redone);
    * drag a card's right handle onto another card to make that one wait for
    * it. A wait that would close a cycle is shown as refused while dragging,
-   * and the core refuses it anyway.
+   * and the core refuses it anyway. On a phone: one finger pans, two pinch
+   * to zoom, a tap picks a card (its drawer opens below).
    */
   let { results }: { results: Map<string, StepResult> } = $props();
 
@@ -42,14 +43,23 @@
     view = { k, x: (el.clientWidth - (x1 - x0) * k) / 2 - x0 * k, y: (el.clientHeight - (y1 - y0) * k) / 2 - y0 * k };
   }
 
-  // Framed when the plan first has steps, and when another plan opens.
+  // Framed when the plan first has steps, when another plan opens, and
+  // after a layout (plans.refit), so what moved is in view.
   let framed = "";
   $effect(() => {
-    const key = `${plans.id}:${shown.length > 0}`;
+    const key = `${plans.id}:${shown.length > 0}:${plans.refit}`;
     if (key === framed || !el) return;
     framed = key;
     queueMicrotask(fit);
   });
+
+  // ----- two fingers: pinch to zoom about their middle -----
+  const touches = new Map<number, { x: number; y: number }>();
+  let pinch: { d: number; k: number } | null = null;
+  const spread = () => {
+    const [a, b] = [...touches.values()];
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  };
 
   function toWorld(e: PointerEvent): { x: number; y: number } {
     const r = el!.getBoundingClientRect();
@@ -66,6 +76,16 @@
   }
 
   function downEmpty(e: PointerEvent) {
+    if (e.pointerType === "touch") {
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2) {
+        // A second finger: no pan, no card drag, a pinch.
+        panning = null;
+        moving = null;
+        pinch = { d: spread(), k: view.k };
+        return;
+      }
+    }
     if ((e.target as HTMLElement).closest("[data-step]")) return;
     plans.pick("");
     panning = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
@@ -100,6 +120,16 @@
   }
 
   function move(e: PointerEvent) {
+    if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && touches.size === 2) {
+      const r = el!.getBoundingClientRect();
+      const [a, b] = [...touches.values()];
+      const cx = (a.x + b.x) / 2 - r.left;
+      const cy = (a.y + b.y) / 2 - r.top;
+      const k = Math.min(2, Math.max(0.3, (pinch.k * spread()) / Math.max(1, pinch.d)));
+      view = { k, x: cx - ((cx - view.x) * k) / view.k, y: cy - ((cy - view.y) * k) / view.k };
+      return;
+    }
     if (panning) {
       view = { ...view, x: panning.vx + e.clientX - panning.x, y: panning.vy + e.clientY - panning.y };
     } else if (moving) {
@@ -114,7 +144,12 @@
     }
   }
 
-  function up() {
+  function up(e?: PointerEvent) {
+    if (e) touches.delete(e.pointerId);
+    if (pinch) {
+      if (touches.size < 2) pinch = null;
+      return;
+    }
     if (moving?.moved && dragging) void plans.apply([{ op: "move", id: dragging.id, x: dragging.x, y: dragging.y }]);
     if (linking?.over && !refused) void plans.apply([{ op: "link", from: linking.from, to: linking.over }]);
     panning = null;
@@ -204,8 +239,8 @@
 <style>
   .plate {
     position: relative;
-    flex: 1;
-    min-height: 260px;
+    flex: 1 1 auto;
+    min-height: 140px;
     overflow: hidden;
     background-color: var(--kg-paper);
     background-image: linear-gradient(var(--kg-grid) 1px, transparent 1px), linear-gradient(90deg, var(--kg-grid) 1px, transparent 1px);

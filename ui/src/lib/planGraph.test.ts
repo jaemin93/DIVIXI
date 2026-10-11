@@ -15,6 +15,7 @@ import {
   resultsOf,
   shownSteps,
   suggestions,
+  unsaved,
   waves,
   type PlanDoc,
   type PlanStep,
@@ -78,6 +79,33 @@ test("the graph orders a column by where the steps waited for sit", () => {
   const steps = [step("a"), step("b"), step("x", ["b"]), step("y", ["a"])];
   const at = layout(steps);
   assert.ok(at.get("y")!.y < at.get("x")!.y);
+});
+
+test("a pin that the order of steps has overtaken is let go (lay out after a change of order)", () => {
+  // s4 was put by hand right of s2 and s3. Then its steps before changed:
+  // it now waits for s5, which sits further right. The old place would put
+  // it before a step it waits for, so the layout places it after s5.
+  const steps = [step("s1"), step("s2", ["s1"]), step("s3", ["s1"]), step("s5", ["s2"]), step("s4", ["s3", "s5"], { x: 2 * (CARD_W + GAP_X), y: 0 })];
+  const at = layout(steps);
+  assert.ok(at.get("s4")!.x > at.get("s5")!.x, `s4 at ${at.get("s4")!.x}, s5 at ${at.get("s5")!.x}`);
+  // A pin that still reads in order stays.
+  const kept = [step("s1"), step("s2", ["s1"], { x: 500, y: 7 })];
+  assert.deepEqual(layout(kept).get("s2"), { x: 500, y: 7 });
+  // One left of a step that waits for it is let go too.
+  const early = [step("s1", [], { x: 900, y: 0 }), step("s2", ["s1"], { x: 100, y: 0 })];
+  const e = layout(early);
+  assert.ok(e.get("s1")!.x < e.get("s2")!.x);
+});
+
+test("a change in a step's words is unsaved; a move on the graph is not", () => {
+  const steps = diamond();
+  const doc = { ...emptyPlan(), steps, saved: [{ n: 1, at: 1, note: "", steps }] };
+  assert.equal(unsaved(doc), false);
+  assert.equal(unsaved({ ...doc, steps: steps.map((s) => (s.id === "s2" ? { ...s, x: 40, y: 9 } : s)) }), false);
+  assert.equal(unsaved({ ...doc, steps: steps.map((s) => (s.id === "s2" ? { ...s, inputs: ["repo"] } : s)) }), true);
+  assert.equal(unsaved({ ...doc, steps: steps.map((s) => (s.id === "s4" ? { ...s, after: ["s3"] } : s)) }), true);
+  assert.equal(unsaved({ ...emptyPlan(), steps }), true, "never saved, with steps");
+  assert.equal(unsaved(emptyPlan()), false, "never saved, empty");
 });
 
 test("a step a person put somewhere stays there", () => {

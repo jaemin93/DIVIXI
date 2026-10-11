@@ -141,13 +141,27 @@
 </div>
 
 <style>
+  /* Shares the plan's height with the graph and scrolls inside, so every
+     field can be reached however short the window: it was a fixed share
+     of the window under a graph that would not shrink, and its lower
+     fields fell off the bottom. */
   .drawer {
-    flex-shrink: 0;
+    flex: 0 1 auto;
+    min-height: 120px;
+    max-height: 58%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     border-top: 1px solid var(--line);
     background: var(--bg);
-    padding: 10px 18px 14px;
-    max-height: 46vh;
-    overflow-y: auto;
+    padding: 10px 18px 18px;
+  }
+
+  .dh {
+    position: sticky;
+    top: -10px;
+    z-index: 1;
+    background: var(--bg);
+    padding-top: 2px;
   }
 
   .dh {
@@ -294,8 +308,8 @@
     }
 
     .drawer {
-      max-height: none;
-      padding: 10px 14px 18px;
+      max-height: 62%;
+      padding: 10px 14px 24px;
     }
   }
 </style>

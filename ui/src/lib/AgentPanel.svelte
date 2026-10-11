@@ -71,16 +71,16 @@
     <span class="grow"></span>
     <button
       class="x"
-      onclick={() => (kind === "plan" ? plans.setChat(false) : design ? store.setDesignChat(false) : store.closeGraphChat())}
+      onclick={() => (kind === "plan" ? store.setPlanChat(false) : design ? store.setDesignChat(false) : store.closeGraphChat())}
       aria-label={t("panel.agentClose")}
       title={t("panel.agentClose")}>×</button
     >
   </div>
   {#if kind === "plan"}
-  <div class="ctx">
-    <div class="mono ctxlab">{t("kb.agentContext")}</div>
-    <p class="ctxlib">{t("plan.agentContext", { name: plans.routineOnScreen?.name ?? "" })}</p>
-    {#if planSteps.length}
+  <!-- The steps picked on the plan go with the next message; nothing is said
+       about it when none are. -->
+  {#if planSteps.length}
+    <div class="ctx">
       <div class="chips">
         {#each planSteps as s (s.id)}
           <button class="kchip" title={t("kb.agentChipRemove")} onclick={() => plans.pick(s.id, true)}>
@@ -89,10 +89,8 @@
           </button>
         {/each}
       </div>
-    {:else}
-      <p class="ctxnone">{t("plan.agentNothing")}</p>
-    {/if}
-  </div>
+    </div>
+  {/if}
   {:else if !design}
   <div class="ctx">
     <div class="mono ctxlab">{t("kb.agentContext")}</div>
