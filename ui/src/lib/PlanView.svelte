@@ -3,7 +3,7 @@
   import { store } from "./store.svelte";
   import PlanGraph from "./PlanGraph.svelte";
   import PlanStepEditor from "./PlanStepEditor.svelte";
-  import { openNeedsConfirm, resultsOf, sameVersion } from "./planGraph";
+  import { differsFromLast, openNeedsConfirm, resultsOf, sameVersion, saveTarget } from "./planGraph";
   import { whenFull } from "./time";
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
@@ -37,7 +37,11 @@
   let note = $state("");
   let versionsOpen = $state(false);
 
-  const saveBlocked = $derived(pending > 0 ? t("plan.saveSettleFirst", { n: pending }) : !plans.unsaved ? t("plan.saveNothing") : "");
+  /** What "save over" writes into, and whether it would change anything. */
+  const target = $derived(saveTarget(doc));
+  const canOver = $derived(target !== undefined && plans.unsaved);
+  const canNew = $derived(differsFromLast(doc));
+  const saveBlocked = $derived(pending > 0 ? t("plan.saveSettleFirst", { n: pending }) : !canNew && !canOver ? t("plan.saveNothing") : "");
 
   /** The saved version the working plan is now (marked in the list). */
   const same = $derived(sameVersion(doc));
@@ -59,9 +63,9 @@
     await plans.openVersion(n);
   }
 
-  async function save() {
+  async function save(over?: number) {
     if (saveBlocked) return;
-    if (await plans.save(note)) {
+    if (await plans.save(note, over)) {
       note = "";
       saving = false;
     }
@@ -95,11 +99,14 @@
           <label class="f">
             <span class="flab">{t("plan.saveNote")}</span>
             <!-- svelte-ignore a11y_autofocus -->
-            <input bind:value={note} maxlength="200" autofocus onkeydown={(e) => e.key === "Enter" && save()} />
+            <input bind:value={note} maxlength="200" autofocus onkeydown={(e) => e.key === "Enter" && canNew && save()} />
           </label>
           <div class="macts">
             <button type="button" class="tb" onclick={() => (saving = false)}>{t("plan.cancel")}</button>
-            <button type="button" class="tb ready" onclick={save}>{t("plan.saveAs", { n: (plans.lastSaved ?? 0) + 1 })}</button>
+            {#if target !== undefined}
+              <button type="button" class="tb" disabled={!canOver} onclick={() => save(target)}>{t("plan.saveOver", { n: target })}</button>
+            {/if}
+            <button type="button" class="tb ready" disabled={!canNew} onclick={() => save()}>{t("plan.saveNew", { n: (plans.lastSaved ?? 0) + 1 })}</button>
           </div>
         </div>
       {/if}
@@ -142,6 +149,7 @@
                 >
                   <b>v{v.n}</b>
                   <span>{whenFull(v.at, store.lang)} · {t("plan.versionSteps", { n: v.steps.length })}</span>
+                  {#if v.edited_at}<span>{t("plan.savedOver", { when: whenFull(v.edited_at, store.lang) })}</span>{/if}
                   {#if v.note}<span class="vnote">{v.note}</span>{/if}
                   {#if v.n === plans.lastSaved}<span class="vrun">{t("plan.versionUsed")}</span>{/if}
                 </button>

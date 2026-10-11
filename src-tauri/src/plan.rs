@@ -148,6 +148,9 @@ pub struct Version {
     #[serde(default)]
     pub note: String,
     pub steps: Vec<Step>,
+    /// When it was last saved over, if it was (Unix milliseconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<i64>,
 }
 
 /// The steps as they bear on a run: where they sit on the graph does not.
@@ -178,6 +181,10 @@ pub struct Doc {
     /// Saved versions, oldest first. Runs are given the last.
     #[serde(default)]
     pub saved: Vec<Version>,
+    /// The version the working plan was last opened from or saved as: what
+    /// "save over" writes into. None before any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened: Option<u32>,
     /// What the human's edit in progress touched, each step as it was
     /// before; turned into an undo step when the edit is kept. Not saved.
     #[serde(skip)]
@@ -262,6 +269,10 @@ pub enum Op {
     Save {
         #[serde(default)]
         note: String,
+        /// Save over this version instead of making a new one. Runs that
+        /// already went keep the plan they were given (their own copy).
+        #[serde(default)]
+        over: Option<u32>,
     },
     /// The human's: bring a saved version back into the working plan (an
     /// edit like any other: it can be undone, and saved again).
@@ -470,10 +481,11 @@ impl Doc {
     /// Whether the working plan differs from the last saved version in what
     /// a run would be given (where steps sit on the graph does not count).
     pub fn unsaved(&self) -> bool {
-        match self.saved.last() {
-            Some(v) => content(&v.steps) != content(&self.steps),
-            None => !self.steps.is_empty(),
+        if self.saved.is_empty() {
+            return !self.steps.is_empty();
         }
+        let now = content(&self.steps);
+        !self.saved.iter().any(|v| content(&v.steps) == now)
     }
 
     /// Whether the routine's instruction has moved on since the plan was made.
@@ -740,19 +752,36 @@ impl Doc {
                         self.proposal = None;
                         Ok(json!({ "ok": true }))
                     }
-                    Op::Save { note } => {
+                    Op::Save { note, over } => {
                         if !self.changes.is_empty() {
                             return Err(format!("keep or revert the {} suggestion(s) first", self.changes.len()));
                         }
-                        if !self.unsaved() {
-                            return Err("nothing has changed since the last saved version".to_string());
-                        }
                         let note = note.trim().to_string();
                         check_len(&note, MAX_NOTE, "a note")?;
+                        let now = content(&self.steps);
+                        if let Some(n) = over {
+                            let steps = self.steps.clone();
+                            let v = self.saved.iter_mut().find(|v| v.n == n).ok_or_else(|| format!("no saved version {n}"))?;
+                            if content(&v.steps) == now {
+                                return Err(format!("v{n} already has this plan"));
+                            }
+                            v.steps = steps;
+                            v.edited_at = Some(now_ms());
+                            // A new note replaces the old one; none keeps it.
+                            if !note.is_empty() {
+                                v.note = note;
+                            }
+                            self.opened = Some(n);
+                            return Ok(json!({ "ok": true, "version": n, "over": true }));
+                        }
+                        if self.saved.last().is_some_and(|v| content(&v.steps) == now) || (self.saved.is_empty() && self.steps.is_empty()) {
+                            return Err("nothing has changed since the last saved version".to_string());
+                        }
                         let n = self.saved.last().map(|v| v.n + 1).unwrap_or(1);
-                        self.saved.push(Version { n, at: now_ms(), note, steps: self.steps.clone() });
-                        let over = self.saved.len().saturating_sub(MAX_VERSIONS);
-                        self.saved.drain(..over);
+                        self.saved.push(Version { n, at: now_ms(), note, steps: self.steps.clone(), edited_at: None });
+                        let drop = self.saved.len().saturating_sub(MAX_VERSIONS);
+                        self.saved.drain(..drop);
+                        self.opened = Some(n);
                         Ok(json!({ "ok": true, "version": n }))
                     }
                     Op::Open { n } => {
@@ -782,6 +811,7 @@ impl Doc {
                         // In the version's order.
                         self.steps.sort_by_key(|s| back.iter().position(|b| b.id == s.id).unwrap_or(usize::MAX));
                         self.repair();
+                        self.opened = Some(n);
                         Ok(json!({ "ok": true, "opened": n }))
                     }
                 }
@@ -1078,7 +1108,7 @@ pub fn guidance(doc: &Doc) -> Option<Guidance> {
         .collect();
     Some(Guidance {
         section: out,
-        snapshot: json!({ "version": version.n, "saved_at": version.at, "note": version.note, "steps": steps, "waves": waves }),
+        snapshot: json!({ "version": version.n, "saved_at": version.edited_at.unwrap_or(version.at), "note": version.note, "steps": steps, "waves": waves }),
         ids: doc.steps.iter().map(|s| s.id.clone()).collect(),
     })
 }
@@ -1649,13 +1679,48 @@ mod tests {
         assert_eq!(d.step("s2").unwrap().title, "deps");
         assert!(d.step("s3").is_some());
         assert_eq!(d.steps.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s1", "s2", "s3", "s4"]);
-        assert!(d.unsaved(), "the working plan is version 1's, not the last saved");
+        assert!(!d.unsaved(), "the working plan is version 1's: saved, as v1");
+        assert_eq!(d.opened, Some(1));
         assert_eq!(d.saved.len(), 2, "opening a version saves nothing by itself");
         let step = d.take_step().unwrap();
         assert!(!step.is_empty(), "bringing a version back is an edit that can be undone");
         let r = d.apply(ops(json!([{ "op": "add_step", "title": "new", "instruction": "x" }])), &Actor::Human);
         assert_eq!(r[0]["id"], "s5", "ids are not reused");
         let r = d.apply(ops(json!([{ "op": "open", "n": 9 }])), &Actor::Human);
+        assert_eq!(r[0]["ok"], false);
+    }
+
+    #[test]
+    fn saving_over_a_version_keeps_its_number_and_runs_keep_what_they_were_given() {
+        let mut d = diamond();
+        d.apply(ops(json!([{ "op": "save", "note": "first" }])), &Actor::Human);
+        let given = guidance(&d).unwrap().snapshot; // a run that went with v1
+        assert_eq!(d.opened, Some(1));
+
+        d.apply(ops(json!([{ "op": "update_step", "id": "s2", "instruction": "list direct deps only" }])), &Actor::Human);
+        assert!(d.unsaved());
+        let r = d.apply(ops(json!([{ "op": "save", "over": 1 }])), &Actor::Human);
+        assert_eq!(r[0]["version"], 1, "{r:?}");
+        assert_eq!(d.saved.len(), 1, "no new version");
+        assert!(d.saved[0].edited_at.is_some(), "the time it was saved over is kept");
+        assert_eq!(d.saved[0].note, "first", "no new note keeps the old one");
+        assert!(!d.unsaved());
+        assert_eq!(given["steps"][1]["title"], "deps", "the earlier run's copy is its own");
+        assert_eq!(guidance(&d).unwrap().snapshot["version"], 1);
+        assert!(guidance(&d).unwrap().section.contains("list direct deps only"), "the next run gets the new words");
+        let r = d.apply(ops(json!([{ "op": "save", "over": 1 }])), &Actor::Human);
+        assert_eq!(r[0]["ok"], false, "nothing to save over with");
+
+        // A new version beside it; then v1 opened, edited and saved over again.
+        d.apply(ops(json!([{ "op": "update_step", "id": "s3", "title": "advisories" }, { "op": "save", "note": "second" }])), &Actor::Human);
+        assert_eq!((d.saved.len(), d.opened), (2, Some(2)));
+        d.apply(ops(json!([{ "op": "open", "n": 1 }])), &Actor::Human);
+        assert_eq!(d.opened, Some(1));
+        assert!(!d.unsaved(), "back at v1, which is saved");
+        d.apply(ops(json!([{ "op": "update_step", "id": "s1", "title": "fetch" }, { "op": "save", "over": 1, "note": "redo" }])), &Actor::Human);
+        assert_eq!(d.saved[0].note, "redo");
+        assert_eq!(d.saved[1].steps[0].title, "pull", "v2 untouched");
+        let r = d.apply(ops(json!([{ "op": "save", "over": 7 }])), &Actor::Human);
         assert_eq!(r[0]["ok"], false);
     }
 
@@ -1812,7 +1877,7 @@ mod tests {
         // Nothing to give: no saved version, or one with no steps.
         assert!(guidance(&Doc::default()).is_none());
         let mut emptied = Doc::default();
-        emptied.saved.push(Version { n: 1, at: 1, note: String::new(), steps: Vec::new() });
+        emptied.saved.push(Version { n: 1, at: 1, note: String::new(), steps: Vec::new(), edited_at: None });
         assert!(guidance(&emptied).is_none());
         // An old switch left off in a stored body changes nothing: the last saved version is given.
         let old: Doc = serde_json::from_value(json!({ "use_in_run": false, "steps": [], "saved": serde_json::to_value(&d.saved).unwrap() })).unwrap();

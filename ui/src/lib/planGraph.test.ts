@@ -12,6 +12,10 @@ import {
   instructionChanged,
   layout,
   needsFirstDraft,
+  editedFields,
+  runGate,
+  saveTarget,
+  differsFromLast,
   pressedRun,
   nextRunsLimit,
   openNeedsConfirm,
@@ -309,4 +313,47 @@ test("signals take over from the first guess, step by step", () => {
   assert.deepEqual(said({ s1: { status: "done", note: "" } }), ["done", "running", "running", "waiting"], "the next wave is under way");
   assert.deepEqual(said({ s1: { status: "done", note: "" }, s2: { status: "done", note: "" }, s3: { status: "failed", note: "x" } }), ["done", "done", "failed", "waiting"], "a failed step holds back what waits for it");
   assert.deepEqual(said({ s1: { status: "skipped", note: "" }, s2: { status: "done", note: "" }, s3: { status: "done", note: "" } }), ["skipped", "done", "done", "running"]);
+});
+
+test("every field of a step counts as unsaved, a move does not", () => {
+  const steps = diamond();
+  const doc = { ...emptyPlan(), steps, saved: [{ n: 1, at: 1, note: "", steps }] };
+  const edit = (patch: Partial<PlanStep>) => ({ ...doc, steps: steps.map((s) => (s.id === "s2" ? { ...s, ...patch } : s)) });
+  for (const patch of [{ title: "t" }, { instruction: "i" }, { inputs: ["a"] }, { outputs: ["b"] }, { done_when: "d" }, { on_fail: "continue" as const }, { after: [] }]) {
+    assert.equal(unsaved(edit(patch)), true, JSON.stringify(patch));
+  }
+  assert.equal(unsaved(edit({ x: 9, y: 9 })), false);
+});
+
+test("the drawer writes the fields as typed, and only the changed ones", () => {
+  const s = step("s2", ["s1"], { title: "deps", instruction: "list deps", inputs: ["repo"], outputs: [], done_when: "" });
+  const typed = { title: "deps", instruction: "list deps", inputs: "repo", outputs: "", done_when: "" };
+  assert.deepEqual(editedFields(s, typed), {}, "nothing typed, nothing written");
+  assert.deepEqual(editedFields(s, { ...typed, instruction: "list direct deps " }), { instruction: "list direct deps" });
+  assert.deepEqual(editedFields(s, { ...typed, inputs: "repo\nlock file", outputs: "deps.json", done_when: "listed" }), { inputs: ["repo", "lock file"], outputs: ["deps.json"], done_when: "listed" });
+  assert.deepEqual(editedFields(s, { ...typed, title: "  " }), {}, "an empty title keeps the old one");
+});
+
+test("Run asks first when the plan on screen is not what the run would get", () => {
+  const steps = diamond();
+  const v1 = { n: 1, at: 1, note: "", steps };
+  assert.equal(runGate(emptyPlan()), "run", "no plan: run straight away");
+  assert.equal(runGate({ ...emptyPlan(), steps }), "askSave", "steps, never saved");
+  assert.equal(runGate({ ...emptyPlan(), steps, saved: [v1] }), "run", "the last saved version is the plan on screen");
+  assert.equal(runGate({ ...emptyPlan(), steps: [...steps, step("s5")], saved: [v1] }), "askUnsaved");
+  assert.equal(runGate({ ...emptyPlan(), steps: [...steps, step("s5")], saved: [v1], changes: [{ id: 1, target: "s5", run: null, before: null, after: step("s5") }] }), "settle", "suggestions wait: settle first");
+  // Back at an older version: saved, but not what a run gets (the last).
+  const v2 = { n: 2, at: 2, note: "", steps: [...steps, step("s5")] };
+  const back = { ...emptyPlan(), steps, saved: [v1, v2] };
+  assert.equal(unsaved(back), false);
+  assert.equal(differsFromLast(back), true);
+  assert.equal(runGate(back), "askUnsaved");
+});
+
+test("save over writes into the version the working plan came from, else the last", () => {
+  const v = (n: number) => ({ n, at: n, note: "", steps: diamond() });
+  assert.equal(saveTarget(emptyPlan()), undefined);
+  assert.equal(saveTarget({ ...emptyPlan(), saved: [v(1), v(2)] }), 2);
+  assert.equal(saveTarget({ ...emptyPlan(), saved: [v(1), v(2)], opened: 1 }), 1);
+  assert.equal(saveTarget({ ...emptyPlan(), saved: [v(2)], opened: 1 }), 2, "a version let go falls back to the last");
 });

@@ -11,6 +11,7 @@
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
   import ArtifactMenu from "./ArtifactMenu.svelte";
+  import { plans } from "./plan.svelte";
   import ListSearch from "./ListSearch.svelte";
   import { routinesShown, routineTagCount } from "./routineFilter";
   import { toggleTag } from "./trackFilter";
@@ -119,7 +120,7 @@
             class="go"
             title={live ? t("routines.stop") : t("routines.runNow")}
             aria-label={live ? t("routines.stop") : t("routines.runNow")}
-            onclick={() => (live ? store.cancelRoutine(r.id) : store.runRoutine(r.id))}
+            onclick={() => (live ? store.cancelRoutine(r.id) : r.plan ? plans.requestRun(r.id) : store.runRoutine(r.id))}
           >
             <Icon name={live ? "close" : "play"} size={13} />
           </button>

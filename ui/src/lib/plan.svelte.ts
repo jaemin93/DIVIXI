@@ -1,7 +1,7 @@
 import { invoke, listen } from "./ipc.svelte";
 import { store, artifactKey, type ArtifactInfo, type Routine } from "./store.svelte";
 import { t } from "./i18n.svelte";
-import { emptyPlan, instructionChanged, needsFirstDraft, pressedRun, unsaved, type LiveRun, type PlanDoc, type PlanEvent } from "./planGraph";
+import { emptyPlan, instructionChanged, needsFirstDraft, pressedRun, runGate, unsaved, type LiveRun, type PlanDoc, type PlanEvent, type RunGate } from "./planGraph";
 
 /** Mirrors `routine::StepProgress`: a run's agent saying where it is (status "begun": a run given a plan started). */
 type StepProgress = { routine: string; run: string; step: string; status: string; note: string };
@@ -41,6 +41,41 @@ class Plans {
   refit = $state(0);
   /** The routine's run in flight, as its plan shows it; null when not running. */
   live = $state<LiveRun | null>(null);
+  /** Run was pressed and the plan on screen is not what the run would get: what to ask. */
+  gate = $state<RunGate | null>(null);
+
+  /**
+   * Run a routine, asking first when its plan on screen is not what the
+   * run would get (never saved, or changed since the last save). A routine
+   * with no plan runs straight away, as before.
+   */
+  async requestRun(routine: string) {
+    this.gate = null;
+    if (store.routine !== routine) await store.openRoutine(routine);
+    const r = store.routines.find((x) => x.id === routine);
+    if (r?.plan && !(this.open && this.routine === routine)) await this.openFor(routine);
+    if (!r?.plan || this.routine !== routine || !this.id) {
+      await store.runRoutine(routine);
+      return;
+    }
+    const g = runGate(this.doc);
+    if (g === "run") await store.runRoutine(routine);
+    else this.gate = g;
+  }
+
+  /** Save the working plan as a new version, then run with it. */
+  async saveAndRun() {
+    const routine = this.routine;
+    if (!(await this.save(""))) return;
+    this.gate = null;
+    await store.runRoutine(routine);
+  }
+
+  /** Run with the last saved version, leaving the working plan as it is. */
+  async runLastSaved() {
+    this.gate = null;
+    await store.runRoutine(this.routine);
+  }
 
   /** Read the run in flight (opening the plan, or a run beginning). */
   async loadLive() {
@@ -114,6 +149,7 @@ class Plans {
     this.picked = "";
     this.resultRun = "";
     this.live = null;
+    this.gate = null;
     store.planInfo = null;
     store.planSelected = [];
   }
@@ -224,10 +260,21 @@ class Plans {
     setTimeout(() => this.refit++, 60);
   }
 
-  /** Save the working plan as the version runs are given. */
-  async save(note: string): Promise<boolean> {
-    const out = await this.apply([{ op: "save", note }]);
-    return out[0]?.ok === true;
+  /**
+   * Save the working plan: as a new version, or over version `over`. The
+   * plan is read back before this returns, so what comes next (a run shown
+   * at once) sees the saved version.
+   */
+  async save(note: string, over?: number): Promise<boolean> {
+    const out = await this.apply([over ? { op: "save", note, over } : { op: "save", note }]);
+    if (out[0]?.ok !== true) return false;
+    try {
+      const doc = await invoke<PlanDoc>("plan_doc", { id: this.id });
+      if (doc.version >= this.doc.version) this.doc = doc;
+    } catch {
+      // The event brings it anyway.
+    }
+    return true;
   }
 
   /** Bring a saved version back into the working plan. */

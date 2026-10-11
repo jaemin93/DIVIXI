@@ -1,6 +1,6 @@
 <script lang="ts">
   import { plans } from "./plan.svelte";
-  import { beforeChoices, type PlanStep } from "./planGraph";
+  import { beforeChoices, editedFields, type PlanStep } from "./planGraph";
   import { t } from "./i18n.svelte";
 
   /**
@@ -33,32 +33,33 @@
     doneWhen = step.done_when;
   });
 
-  const lines = (v: string) =>
-    v
-      .split(/\n|,/)
-      .map((x) => x.trim())
-      .filter(Boolean);
-
   async function write(fields: Record<string, unknown>) {
     await plans.apply([{ op: "update_step", id: step.id, ...fields }]);
   }
 
-  function leave(field: "title" | "instruction" | "inputs" | "outputs" | "done_when") {
+  /**
+   * Write what the boxes hold, the changed fields only. Called a moment
+   * after typing stops, and when a box is left: so "Unsaved" shows while
+   * typing, not only once the box is left.
+   */
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  function flush() {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    const fields = editedFields(step, { title, instruction, inputs, outputs, done_when: doneWhen });
+    if (Object.keys(fields).length) void write(fields);
+  }
+
+  function typed() {
+    typing = true;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(flush, 500);
+  }
+
+  function leave() {
     typing = false;
-    if (field === "title") {
-      if (!title.trim()) {
-        title = step.title;
-        return;
-      }
-      if (title.trim() !== step.title) void write({ title: title.trim() });
-    } else if (field === "instruction") {
-      if (instruction.trim() !== step.instruction) void write({ instruction: instruction.trim() });
-    } else if (field === "done_when") {
-      if (doneWhen.trim() !== step.done_when) void write({ done_when: doneWhen.trim() });
-    } else {
-      const next = lines(field === "inputs" ? inputs : outputs);
-      if (JSON.stringify(next) !== JSON.stringify(step[field])) void write({ [field]: next });
-    }
+    if (!title.trim()) title = step.title;
+    flush();
   }
 
   const choices = $derived(beforeChoices(plans.doc.steps, step.id));
@@ -93,19 +94,19 @@
   <div class="grid">
     <label class="f">
       <span class="flab">{t("plan.step.title")}</span>
-      <input bind:value={title} onfocus={() => (typing = true)} onblur={() => leave("title")} />
+      <input bind:value={title} oninput={typed} onblur={leave} />
     </label>
     <label class="f">
       <span class="flab">{t("plan.step.inputs")}</span>
-      <textarea rows="2" bind:value={inputs} placeholder={t("plan.step.listHint")} onfocus={() => (typing = true)} onblur={() => leave("inputs")}></textarea>
+      <textarea rows="2" bind:value={inputs} placeholder={t("plan.step.listHint")} oninput={typed} onblur={leave}></textarea>
     </label>
     <label class="f">
       <span class="flab">{t("plan.step.outputs")}</span>
-      <textarea rows="2" bind:value={outputs} placeholder={t("plan.step.listHint")} onfocus={() => (typing = true)} onblur={() => leave("outputs")}></textarea>
+      <textarea rows="2" bind:value={outputs} placeholder={t("plan.step.listHint")} oninput={typed} onblur={leave}></textarea>
     </label>
     <label class="f span2">
       <span class="flab">{t("plan.step.instruction")}</span>
-      <textarea rows="3" bind:value={instruction} onfocus={() => (typing = true)} onblur={() => leave("instruction")}></textarea>
+      <textarea rows="3" bind:value={instruction} oninput={typed} onblur={leave}></textarea>
     </label>
     <div class="f">
       <span class="flab">{t("plan.step.before")}</span>
@@ -124,7 +125,7 @@
     </div>
     <label class="f span2">
       <span class="flab">{t("plan.step.doneWhen")}</span>
-      <input bind:value={doneWhen} onfocus={() => (typing = true)} onblur={() => leave("done_when")} />
+      <input bind:value={doneWhen} oninput={typed} onblur={leave} />
     </label>
     <div class="f">
       <span class="flab">{t("plan.step.onFail")}</span>

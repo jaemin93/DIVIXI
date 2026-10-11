@@ -114,6 +114,15 @@
 
   const planOn = $derived(!making && !!saved && plans.open && plans.routine === saved.id);
   const hasPlan = $derived(!!saved?.plan);
+
+  // A routine with a plan shows it, always: the plan is how it runs.
+  $effect(() => {
+    const id = saved?.id;
+    if (!id || !hasPlan || making) return;
+    untrack(() => {
+      if (!(plans.open && plans.routine === id) && !plans.busy) void plans.openFor(id);
+    });
+  });
   /** In plan mode the form folds to one line; this opens it. */
   let formOpen = $state(false);
 
@@ -124,10 +133,6 @@
    * human asks it from the robot panel when they want to.
    */
   async function planPress() {
-    if (planOn) {
-      plans.close();
-      return;
-    }
     if (!complete || plans.busy) return;
     if (making || dirty) {
       await save();
@@ -153,37 +158,37 @@
     <div class="who">
       <h1>{making ? t("routines.newTitle") : (saved?.name ?? "")}</h1>
     </div>
-    {#if making}
+    {#if saved && !making}
       <div class="acts">
-        <button
-          class="plan"
-          disabled={!complete || plans.busy}
-          title={complete ? t("plan.buttonNew") : t("plan.buttonIncomplete")}
-          onclick={planPress}
-        >
-          {t("plan.button")}
-        </button>
-      </div>
-    {:else if saved}
-      <div class="acts">
-        <button
-          class="plan"
-          class:on={planOn}
-          aria-pressed={planOn}
-          disabled={!complete || plans.busy}
-          title={!complete ? t("plan.buttonIncomplete") : planOn ? t("plan.hide") : hasPlan ? t("plan.buttonOpen") : t("plan.buttonNew")}
-          onclick={planPress}
-        >
-          {t("plan.button")}{#if hasPlan && !planOn}<span class="dot" aria-hidden="true"></span>{/if}
-        </button>
         {#if live}
           <button class="run" onclick={() => store.cancelRoutine(saved.id)}>
             <Working size={12} /> {t("routines.stop")}
           </button>
         {:else}
-          <button class="run" disabled={dirty} title={dirty ? t("routines.saveFirst") : ""} onclick={() => store.runRoutine(saved.id)}>
-            <Icon name="play" size={12} /> {t("routines.runNow")}
-          </button>
+          <div class="gatewrap">
+            <button class="run" disabled={dirty} title={dirty ? t("routines.saveFirst") : ""} onclick={() => plans.requestRun(saved.id)}>
+              <Icon name="play" size={12} /> {t("routines.runNow")}
+            </button>
+            {#if plans.gate && plans.routine === saved.id}
+              <!-- The plan on screen is not what the run would get: ask, briefly. -->
+              <div class="gate" role="alertdialog" aria-label={t("routines.runNow")}>
+                {#if plans.gate === "settle"}
+                  <p>{t("plan.gateSettle", { n: plans.doc.changes.length })}</p>
+                  <div class="gacts"><button class="ghost" onclick={() => (plans.gate = null)}>{t("plan.cancel")}</button></div>
+                {:else}
+                  <p>{plans.gate === "askSave" ? t("plan.gateSave") : t("plan.gateUnsaved", { n: plans.lastSaved ?? 0 })}</p>
+                  <div class="gacts">
+                    <button class="ghost" onclick={() => (plans.gate = null)}>{t("plan.cancel")}</button>
+                    {#if plans.gate === "askUnsaved"}
+                      <button class="ghost" onclick={() => plans.runLastSaved()}>{t("plan.gateRunLast", { n: plans.lastSaved ?? 0 })}</button>
+                    {/if}
+                    <!-- svelte-ignore a11y_autofocus -->
+                    <button class="run" autofocus onclick={() => plans.saveAndRun()}>{t("plan.gateSaveRun")}</button>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
         {/if}
         <!-- What the run goes on: picked here, kept with the routine, used from the next run. -->
         <AgentPicker
@@ -278,6 +283,10 @@
         </button>
       {:else}
         <button class="save" disabled={!complete || !dirty} onclick={save}>{t("routines.save")}</button>
+        {#if !hasPlan}
+          <!-- A saved routine with no plan yet (one the conductor wrote, say): plan it from here. -->
+          <button class="save" disabled={!complete || plans.busy} title={t("plan.buttonNew")} onclick={planPress}>{t("plan.button")}</button>
+        {/if}
       {/if}
     </div>
   {/snippet}
@@ -575,40 +584,10 @@
     color: var(--lab);
     font-size: 11px;
   }
-  /* The Plan button: a plain button (the one filled one is Run), marked when
-     the routine has a plan and lit while it is open. */
-  .plan {
-    position: relative;
-    height: 30px;
-    padding: 0 12px;
-    background: transparent;
-    border: 1px solid var(--line);
-    color: var(--txt);
-  }
 
-  .plan:hover:not(:disabled),
-  .plan.on {
-    color: var(--hi);
-    border-color: var(--acc);
-  }
 
-  .plan.on {
-    background: var(--accbg);
-  }
 
-  .plan:disabled {
-    opacity: 0.45;
-  }
 
-  .plan .dot {
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--acc);
-  }
 
   .planning {
     flex: 1;
@@ -683,5 +662,48 @@
     gap: 6px;
     margin-left: 4px;
     align-self: center;
+  }
+
+  .gatewrap {
+    position: relative;
+  }
+
+  /* Asked under Run: a few words and the ways on. */
+  .gate {
+    position: absolute;
+    right: 0;
+    top: 36px;
+    z-index: 25;
+    width: 300px;
+    padding: 10px;
+    background: var(--card);
+    border: 1px solid var(--lines);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .gate p {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--txt);
+  }
+
+  .gacts {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  @media (max-width: 640px) {
+    .gate {
+      position: fixed;
+      left: 8px;
+      right: 8px;
+      top: auto;
+      bottom: 12px;
+      width: auto;
+    }
   }
 </style>

@@ -46,10 +46,12 @@ export type PlanDoc = {
   proposal?: { text: string; run: string | null; at: number } | null;
   /** Saved versions, oldest first; runs are given the last. */
   saved?: PlanVersion[];
+  /** The version the working plan was last opened from or saved as. */
+  opened?: number | null;
 };
 
 /** Mirrors `plan::Version`. */
-export type PlanVersion = { n: number; at: number; note: string; steps: PlanStep[] };
+export type PlanVersion = { n: number; at: number; note: string; steps: PlanStep[]; edited_at?: number | null };
 
 /** Mirrors `plan::PlanEvent`: the plan whole after a change. */
 export type PlanEvent = { id: string; base: number; doc: PlanDoc };
@@ -237,11 +239,69 @@ function content(steps: PlanStep[]): string {
   return JSON.stringify(steps.map(({ x: _x, y: _y, ...rest }) => rest));
 }
 
-/** Whether the working plan differs from the last saved version (a plan never saved, once it has steps). */
+/**
+ * Whether the working plan has changes kept in no saved version (a plan
+ * never saved, once it has steps). Back at an older version, it is saved:
+ * as that version. Every field of a step counts; where it sits does not.
+ */
 export function unsaved(doc: PlanDoc): boolean {
+  if (!doc.saved?.length) return doc.steps.length > 0;
+  const now = content(doc.steps);
+  return !doc.saved.some((v) => content(v.steps) === now);
+}
+
+/** Whether a run now would get something other than the working plan (it gets the last saved version). */
+export function differsFromLast(doc: PlanDoc): boolean {
   const last = doc.saved?.at(-1);
   if (!last) return doc.steps.length > 0;
   return content(last.steps) !== content(doc.steps);
+}
+
+/** What "save over" writes into: the version the working plan came from, else the last. */
+export function saveTarget(doc: PlanDoc): number | undefined {
+  const saved = doc.saved ?? [];
+  if (doc.opened != null && saved.some((v) => v.n === doc.opened)) return doc.opened;
+  return saved.at(-1)?.n;
+}
+
+/**
+ * What pressing Run does with the plan on screen:
+ * - "run": straight away (no plan, or the working plan is the last saved one);
+ * - "askSave": it has steps but was never saved -- save and run, or not;
+ * - "askUnsaved": it differs from the last saved version -- save and run,
+ *   run the last saved one, or not;
+ * - "settle": suggestions wait, so it cannot be saved: settle them first.
+ */
+export type RunGate = "run" | "askSave" | "askUnsaved" | "settle";
+
+export function runGate(doc: PlanDoc): RunGate {
+  const pending = doc.changes.length > 0;
+  if (!differsFromLast(doc) && !pending) return "run";
+  if (pending) return "settle";
+  return doc.saved?.length ? "askUnsaved" : "askSave";
+}
+
+/** The fields of a step a drawer's text boxes hold, as typed. */
+export type StepDraft = { title: string; instruction: string; inputs: string; outputs: string; done_when: string };
+
+const lines = (v: string) =>
+  v
+    .split(/\n|,/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+/** The edit a drawer's text boxes make to a step: only the fields that changed (an empty title keeps the old one). */
+export function editedFields(step: PlanStep, d: StepDraft): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const title = d.title.trim();
+  if (title && title !== step.title) out.title = title;
+  if (d.instruction.trim() !== step.instruction) out.instruction = d.instruction.trim();
+  if (d.done_when.trim() !== step.done_when) out.done_when = d.done_when.trim();
+  const inputs = lines(d.inputs);
+  if (JSON.stringify(inputs) !== JSON.stringify(step.inputs)) out.inputs = inputs;
+  const outputs = lines(d.outputs);
+  if (JSON.stringify(outputs) !== JSON.stringify(step.outputs)) out.outputs = outputs;
+  return out;
 }
 
 /**
