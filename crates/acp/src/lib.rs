@@ -403,7 +403,7 @@ fn config_options_of(options: Option<&Vec<SessionConfigOption>>) -> Vec<ConfigOp
                             .collect(),
                         _ => Vec::new(),
                     };
-                    (sel.current_value.to_string(), flat)
+                    (sel.current_value.to_string(), unique_choices(flat))
                 }
                 SessionConfigKind::Boolean(b) => (b.current_value.to_string(), Vec::new()),
                 _ => (String::new(), Vec::new()),
@@ -418,6 +418,17 @@ fn config_options_of(options: Option<&Vec<SessionConfigOption>>) -> Vec<ConfigOp
             }
         })
         .collect()
+}
+
+/// One choice per value id, the first one listed winning.
+///
+/// Copilot CLI lists its models more than once (`auto` three times, every
+/// other model twice, once per source it merges). A value id is what a
+/// session is set to, so a repeat is the same choice; and the UI keys its
+/// lists by id, which a repeat breaks outright.
+fn unique_choices(choices: Vec<ConfigChoice>) -> Vec<ConfigChoice> {
+    let mut seen = std::collections::HashSet::new();
+    choices.into_iter().filter(|c| seen.insert(c.id.clone())).collect()
 }
 
 /// Launch an agent, run the `initialize` handshake, try to open a session,
@@ -795,6 +806,94 @@ mod spec_tests {
         assert!(shown.contains("ANTHROPIC_API_KEY"), "the name says enough to debug with: {shown}");
         assert!(!shown.contains("sk-secret"), "the value never goes in a log: {shown}");
         assert!(shown.contains("claude") && shown.contains("--acp"), "{shown}");
+    }
+}
+
+#[cfg(test)]
+mod session_shape_tests {
+    use super::session_shape_of;
+    use agent_client_protocol::schema::v1::NewSessionResponse;
+
+    fn choice(value: &str, name: &str) -> serde_json::Value {
+        serde_json::json!({ "value": value, "name": name, "description": name })
+    }
+
+    /// Copilot CLI's `session/new` answer, trimmed: its model selector lists
+    /// `auto` three times and every other model twice.
+    fn copilot_session() -> NewSessionResponse {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "claude-sonnet-4.6",
+                    "options": [
+                        { "value": "auto", "name": "Auto", "description": "Let Copilot pick the best model", "_meta": null },
+                        { "value": "auto", "name": "Auto", "description": "Auto", "_meta": { "copilotUsage": "1x" } },
+                        choice("claude-sonnet-4.6", "Claude Sonnet 4.6"),
+                        choice("gpt-5.4", "GPT-5.4"),
+                        choice("gpt-5-mini", "GPT-5 mini"),
+                        { "value": "auto", "name": "Auto", "description": "Auto", "_meta": { "copilotUsage": "1x" } },
+                        choice("claude-sonnet-4.6", "Claude Sonnet 4.6"),
+                        choice("gpt-5.4", "GPT-5.4"),
+                        choice("gpt-5-mini", "GPT-5 mini")
+                    ]
+                },
+                {
+                    "id": "reasoning_effort",
+                    "name": "Reasoning Effort",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "medium",
+                    "options": [choice("low", "low"), choice("medium", "medium"), choice("high", "high")]
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_model_listed_twice_is_offered_once() {
+        let (options, _, _) = session_shape_of(&copilot_session());
+        let model = options.iter().find(|o| o.category == "model").unwrap();
+        let ids: Vec<&str> = model.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["auto", "claude-sonnet-4.6", "gpt-5.4", "gpt-5-mini"]);
+        // The first listing wins: Copilot's own description of `auto`.
+        assert_eq!(model.choices[0].description.as_deref(), Some("Let Copilot pick the best model"));
+        assert_eq!(model.current, "claude-sonnet-4.6");
+    }
+
+    #[test]
+    fn options_without_repeats_are_left_alone() {
+        let (options, _, _) = session_shape_of(&copilot_session());
+        let effort = options.iter().find(|o| o.category == "thought_level").unwrap();
+        let ids: Vec<&str> = effort.choices.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["low", "medium", "high"]);
+    }
+
+    #[test]
+    fn grouped_choices_repeated_across_groups_are_offered_once() {
+        let resp: NewSessionResponse = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "configOptions": [{
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "a",
+                "options": [
+                    { "group": "one", "name": "One", "options": [choice("a", "A"), choice("b", "B")] },
+                    { "group": "two", "name": "Two", "options": [choice("b", "B"), choice("c", "C")] }
+                ]
+            }]
+        }))
+        .unwrap();
+        let (options, _, _) = session_shape_of(&resp);
+        let pairs: Vec<(&str, Option<&str>)> = options[0].choices.iter().map(|c| (c.id.as_str(), c.group.as_deref())).collect();
+        assert_eq!(pairs, [("a", Some("One")), ("b", Some("One")), ("c", Some("Two"))]);
     }
 }
 

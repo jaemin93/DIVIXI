@@ -27,6 +27,7 @@ import {
 
 import { addError, dropError, errorLife, type AppError } from "./errors";
 import { withTrack } from "./tracks";
+import { pickable } from "./agentOptions";
 import { keepsSetting } from "./layoutSettings";
 import { clampZoom, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, listAfterRail, parseZoom, settingOpen, WEB_RAIL_KEY, webPanelOpen, type ListFold } from "./uiMemory";
 import { pairing, type Paired } from "./pairing.svelte";
@@ -2833,7 +2834,7 @@ class Store {
 
   /** The select options an agent advertised at detection (mode, model, effort, …). */
   optionsOf(agent: string): ConfigOption[] {
-    return (this.agents?.find((a) => a.kind === agent)?.probe?.config_options ?? []).filter((o) => o.choices.length > 0);
+    return pickable(this.agents?.find((a) => a.kind === agent)?.probe?.config_options ?? []);
   }
 
   /** The mode Divixi picks for an agent when the track chooses none. */
