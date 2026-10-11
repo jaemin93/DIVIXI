@@ -31,6 +31,7 @@ import { addError, dropError, errorLife, type AppError } from "./errors";
 import { withTrack } from "./tracks";
 import { pickable } from "./agentOptions";
 import { keepsSetting } from "./layoutSettings";
+import { headerFolded, parseHeaderFolds, withHeaderFold, withoutTrack, type HeaderFolds } from "./trackHeaders";
 import { clampZoom, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, listAfterRail, parseZoom, settingOpen, WEB_RAIL_KEY, webPanelOpen, type ListFold } from "./uiMemory";
 import { pairing, type Paired } from "./pairing.svelte";
 import { workspaceTarget } from "./workspaceTarget";
@@ -1405,35 +1406,33 @@ class Store {
   // ----- the track header above the conversation: open or folded away -----
 
   /**
-   * Tracks whose header is folded to one line, by id. A track not listed is
-   * open: the first time anyone sees a track, they should see what it is
-   * for. Persisted per track, so one long brief folded away stays folded
-   * without hiding the next track's.
+   * Each track's header, folded to one line (true) or open (false), by id.
+   * A track not listed is folded, so the conversation gets the room
+   * (`trackHeaders`). Persisted per track, so one brief opened stays open
+   * without opening the next track's.
    */
-  headerFolded = $state<Record<string, boolean>>({});
+  headerFolded = $state<HeaderFolds>({});
 
   /** Whether a track's header is folded to one line. */
   isHeaderFolded(track = this.track): boolean {
-    return !!this.headerFolded[track];
+    return headerFolded(this.headerFolded, track);
   }
 
   /** Fold a track's header away, or open it again; persisted. */
   setHeaderFolded(track: string, folded: boolean) {
-    const { [track]: _was, ...rest } = this.headerFolded;
-    this.headerFolded = folded ? { ...rest, [track]: true } : rest;
+    this.saveHeaders(withHeaderFold(this.headerFolded, track, folded));
+  }
+
+  private saveHeaders(folds: HeaderFolds) {
+    this.headerFolded = folds;
     if (!this.keeps(HEADERS_SETTING)) return;
-    invoke("set_setting", { key: HEADERS_SETTING, value: JSON.stringify(this.headerFolded) }).catch(tracing);
+    invoke("set_setting", { key: HEADERS_SETTING, value: JSON.stringify(folds) }).catch(tracing);
   }
 
   private async restoreHeaders() {
     if (!this.keeps(HEADERS_SETTING)) return;
     try {
-      const raw = await invoke<string | null>("get_setting", { key: HEADERS_SETTING });
-      const parsed: unknown = raw ? JSON.parse(raw) : {};
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-      const out: Record<string, boolean> = {};
-      for (const [id, folded] of Object.entries(parsed as Record<string, unknown>)) if (folded === true) out[id] = true;
-      this.headerFolded = out;
+      this.headerFolded = parseHeaderFolds(await invoke<string | null>("get_setting", { key: HEADERS_SETTING }));
     } catch (err) {
       tracing(err);
     }
@@ -2984,7 +2983,7 @@ class Store {
     this.tracks = this.tracks.filter((t) => t.id !== id);
     this.runs = this.runs.filter((r) => r.track !== id);
     this.setQueued(this.queued.filter((q) => q.key !== `track:${id}`));
-    if (this.headerFolded[id]) this.setHeaderFolded(id, false);
+    if (id in this.headerFolded) this.saveHeaders(withoutTrack(this.headerFolded, id));
     if (this.track === id) {
       const next = this.tracks.at(-1);
       if (next) await this.selectTrack(next.id);
