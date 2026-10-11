@@ -19,6 +19,7 @@
     result,
     run,
     told = false,
+    pinned = step.x !== undefined,
     style = "",
     onpointerdown,
     onhandle,
@@ -31,6 +32,8 @@
     run?: RunState;
     /** Whether the run's agent has said anything yet (until then, nothing is dimmed). */
     told?: boolean;
+    /** Sitting where a person put it (a pin out of order is let go, and not marked). */
+    pinned?: boolean;
     style?: string;
     onpointerdown?: (e: PointerEvent) => void;
     onhandle?: (e: PointerEvent) => void;
@@ -78,7 +81,7 @@
   <div class="top mono">
     <span>{step.id}</span>
     <span>{step.by === "agent" ? t("plan.by.agent") : t("plan.by.human")}</span>
-    {#if step.x !== undefined}<span class="pin" title={t("plan.pinned")}>📌</span>{/if}
+    {#if pinned}<span class="pin" title={t("plan.pinned")}>📌</span>{/if}
     <span class="grow"></span>
     {#if run === "running"}
       <Working size={11} />

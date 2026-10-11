@@ -231,6 +231,7 @@
             result={running ? undefined : results.get(s.step.id)}
             run={running?.states.get(s.step.id)}
             told={running?.told ?? false}
+            pinned={s.step.x !== undefined && p.x === s.step.x && p.y === s.step.y}
             onpointerdown={(e) => downCard(e, s.step.id, s.removed)}
             onhandle={s.removed || running ? undefined : (e) => downHandle(e, s.step.id)}
           />
