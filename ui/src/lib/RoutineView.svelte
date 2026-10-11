@@ -14,6 +14,7 @@
   import { resultGlyphs, resultsOf } from "./planGraph";
   import { untrack } from "svelte";
   import { t } from "./i18n.svelte";
+  import { shownChoice } from "./agentOptions";
   import { whenFull } from "./time";
 
   /**
@@ -267,7 +268,7 @@
         <label class="f">
           <span class="flab">{modelOption.name}</span>
           <select
-            value={config[modelOption.id] ?? ""}
+            value={shownChoice(modelOption, config[modelOption.id])}
             onchange={(e) => {
               const v = (e.currentTarget as HTMLSelectElement).value;
               const next = { ...config };
@@ -276,7 +277,6 @@
               config = next;
             }}
           >
-            <option value="">{t("routines.agentDefault", { what: store.choiceName(modelOption, modelOption.current) })}</option>
             {#each modelOption.choices as c (c.id)}
               <option value={c.id}>{c.name}</option>
             {/each}

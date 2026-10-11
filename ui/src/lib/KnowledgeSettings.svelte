@@ -4,6 +4,7 @@
   import { kb } from "./knowledge.svelte";
   import { K_AGENT, K_CONFIG, K_EMBED_DIMS, K_EMBED_ENABLED, K_EMBED_KEY, K_EMBED_MODEL, K_EMBED_RATE, K_EMBED_URL, K_EXTRACT, K_POOL, embedSettable, paneKeys } from "./knowledgeKeys";
   import { t } from "./i18n.svelte";
+  import { shownChoice } from "./agentOptions";
 
   /** The embedding is set on this PC only: from another device it is not shown, read or saved. */
   const embedHere = embedSettable(local);
@@ -212,7 +213,7 @@
         <div class="help">{t("kb.set.modelHelp")}</div>
         <div class="models" role="radiogroup" aria-label={t("kb.set.model")}>
           {#each modelOption.choices as c (c.id)}
-            {@const chosen = (sConfig[modelOption.id] ?? "") === c.id}
+            {@const chosen = shownChoice(modelOption, sConfig[modelOption.id]) === c.id}
             <button class="model" class:on={chosen} role="radio" aria-checked={chosen} disabled={!sExtract} onclick={() => setOption(modelOption.id, c.id)}>
               <span class="mname">{c.name}</span>
               {#if cheap[modelOption.id] === c.id}<span class="mono cheap">{t("kb.set.cheapest")}</span>{/if}

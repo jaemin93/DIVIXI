@@ -13,12 +13,15 @@
     open = $bindable(false),
     align = "left",
     width = 320,
+    label,
     trigger,
     children,
   }: {
     open?: boolean;
     align?: "left" | "right";
     width?: number;
+    /** What the panel is, for a screen reader. */
+    label?: string;
     trigger: Snippet;
     children: Snippet;
   } = $props();
@@ -69,6 +72,8 @@
       class="panel"
       class:right={align === "right"}
       class:below={placed?.below}
+      role="dialog"
+      aria-label={label}
       bind:this={panel}
       style="width: {placed?.width ?? width}px; transform: translateX({placed?.shift ?? 0}px);{placed ? ` max-height: ${placed.maxHeight}px;` : ''}"
     >

@@ -52,7 +52,7 @@
       min={340}
       max={760}
       reset={460}
-      label={t("design.chatResize")}
+      label={t("panel.chatResize")}
       onchange={(px, persist) => store.setArtifactChatWidth(px, persist)}
     />
   {:else}

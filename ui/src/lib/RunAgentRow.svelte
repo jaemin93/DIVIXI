@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store, agentLabel, type Routine } from "./store.svelte";
   import { t } from "./i18n.svelte";
+  import { shownChoice } from "./agentOptions";
 
   /**
    * The routine's run agent, in its settings: one line with what runs it
@@ -47,8 +48,7 @@
     {#if modelOption}
       <label>
         <span class="flab">{modelOption.name}</span>
-        <select value={routine.config[modelOption.id] ?? ""} onchange={(e) => setModel((e.currentTarget as HTMLSelectElement).value)}>
-          <option value="">{t("routines.agentDefault", { what: store.choiceName(modelOption, modelOption.current) })}</option>
+        <select value={shownChoice(modelOption, routine.config[modelOption.id])} onchange={(e) => setModel((e.currentTarget as HTMLSelectElement).value)}>
           {#each modelOption.choices as c (c.id)}
             <option value={c.id}>{c.name}</option>
           {/each}

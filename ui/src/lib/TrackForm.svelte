@@ -5,6 +5,7 @@
   import Mark from "./Mark.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
+  import { shownChoice } from "./agentOptions";
   import { startup } from "./startup.svelte";
   import { empty } from "./startup";
 
@@ -296,11 +297,13 @@
     {#each ordered(options) as option (option.id)}
       <label class="field">
         <span class="mlab-sm">{option.name} <span class="mono cat">{option.category}</span></span>
+        <!-- A model list is the agent's models, nothing saved showing its current
+             one; other options keep their "leave it" entry. -->
         <select
-          value={config[option.id] ?? ""}
+          value={option.category === "model" ? shownChoice(option, config[option.id]) : (config[option.id] ?? "")}
           onchange={(e) => setOption(option.id, (e.currentTarget as HTMLSelectElement).value)}
         >
-          <option value="">{defaultLabel(effectiveAgent, option)}</option>
+          {#if option.category !== "model"}<option value="">{defaultLabel(effectiveAgent, option)}</option>{/if}
           {#each option.choices as c (c.id)}
             <option value={c.id}>{c.name}{c.group ? ` · ${c.group}` : ""}{c.id !== c.name ? ` (${c.id.replace(/^.*[#/]/, "")})` : ""}</option>
           {/each}

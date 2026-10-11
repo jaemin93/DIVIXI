@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { store, agentLabel, workerAgentOf, workerConfigOf, type Role, type OptionConfig } from "./store.svelte";
+  import { store, agentLabel, workerAgentOf, workerConfigOf, GRAPH_KIND, type Role, type OptionConfig } from "./store.svelte";
+  import { choiceList } from "./agentOptions";
 
   /** In an artifact there is one agent, the artifact's. */
   const artifactMode = $derived(store.chatArtifact);
@@ -39,15 +40,23 @@
   const modelOption = $derived(options.find((o) => o.category === "model"));
   const modeOption = $derived(options.find((o) => o.category === "mode"));
 
-  const modelInEffect = $derived(modelOption ? store.effective(agent, config, modelOption) : "");
-  const chosenModel = $derived(modelOption ? (config[modelOption.id] ?? "") : "");
   const modeInEffect = $derived(modeOption ? store.effective(agent, config, modeOption) : store.autonomousModeOf(agent));
 
+  // The agent's models only: nothing saved shows its current one picked.
   const models = $derived(
-    (modelOption?.choices ?? []).filter((c) => {
+    (modelOption ? choiceList(modelOption, config[modelOption.id]) : []).filter((c) => {
       const q = filter.trim().toLowerCase();
       return !q || `${c.id} ${c.name} ${c.group ?? ""}`.toLowerCase().includes(q);
     }),
+  );
+
+  /** Whom the menu picks for, for a screen reader (not drawn: the chip and panel say it). */
+  const menuLabel = $derived(
+    target
+      ? target.label
+      : artifactMode
+        ? t(store.currentArtifact?.kind === "plan" ? "plan.agentLabel" : store.currentArtifact?.kind === GRAPH_KIND ? "kb.agentLabel" : "design.agentLabel")
+        : t("picker.title"),
   );
 
   /** Mode ids like `…/session-modes#autopilot` read as their last segment. */
@@ -99,7 +108,7 @@
   }
 </script>
 
-<Popover bind:open width={520}>
+<Popover bind:open width={520} label={menuLabel}>
   {#snippet trigger()}
     <button class="chip" onclick={() => (open = !open)} title={t("picker.title")} aria-haspopup="dialog" aria-expanded={open}>
       {#if target}
@@ -123,11 +132,7 @@
   {/snippet}
 
   <div class="head">
-    {#if target}
-      <span class="mono role on">{target.label}</span>
-    {:else if artifactMode}
-      <span class="mono role on">{store.currentArtifact?.kind === "plan" ? t("plan.agentLabel") : t("design.agentLabel")}</span>
-    {:else}
+    {#if !target && !artifactMode}
     <div class="roles" role="tablist">
       <button class="role mono" class:on={role === "conductor"} role="tab" aria-selected={role === "conductor"} onclick={() => (role = "conductor")}>{t("picker.conductor")}</button>
       <button class="role mono" class:on={role === "worker"} role="tab" aria-selected={role === "worker"} onclick={() => (role = "worker")}>{t("picker.worker")}</button>
@@ -164,20 +169,13 @@
       {#if !modelOption}
         <div class="mono none">{t("picker.noModels")}</div>
       {:else}
-        <button class="opt" class:on={!chosenModel} onclick={() => pickModel("")}>
-          <span class="col2">
-            <span class="mono id">{t("picker.default")}</span>
-            <span class="desc">{store.choiceName(modelOption, modelOption.current)}</span>
-          </span>
-          {#if !chosenModel}<span class="mono check">✓</span>{/if}
-        </button>
         {#each models as c (c.id)}
-          <button class="opt" class:on={chosenModel === c.id} onclick={() => pickModel(c.id)}>
+          <button class="opt" class:on={c.on} onclick={() => pickModel(c.id)}>
             <span class="col2">
               <span class="mono id">{c.name}</span>
               <span class="desc">{c.id}{c.group ? ` · ${c.group}` : ""}{c.description ? ` · ${c.description}` : ""}</span>
             </span>
-            {#if chosenModel === c.id}<span class="mono check">✓</span>{:else if modelInEffect === c.id}<span class="mono dim">now</span>{/if}
+            {#if c.on}<span class="mono check">✓</span>{/if}
           </button>
         {/each}
       {/if}
@@ -188,7 +186,7 @@
     {#if target}
       <span class="dim">{target.note ?? ""}</span>
     {:else if artifactMode}
-      <span class="dim">{store.artifactSession.open ? t("picker.sessionOpen") : t("design.sessionNext")}</span>
+      <span class="dim">{store.artifactSession.open ? t("picker.sessionOpen") : t("panel.sessionNext")}</span>
     {:else}
     <span class="dim">{store.conductorState.open ? t("picker.sessionOpen") : t("picker.sessionClosed")}</span>
     {#if store.conductorState.open}

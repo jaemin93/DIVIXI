@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pickable } from "./agentOptions.ts";
+import { choiceList, pickable, shownChoice } from "./agentOptions.ts";
 
 const choice = (id: string, name = id, description: string | null = null) => ({ id, name, description, group: null });
 const option = (id: string, category: string, current: string, choices: ReturnType<typeof choice>[]) => ({
@@ -52,4 +52,31 @@ test("options with nothing to pick are left out", () => {
 test("the agent's list itself is not changed", () => {
   pickable([copilotModel]);
   assert.equal(copilotModel.choices.length, 7);
+});
+
+test("a model list has the agent's choices only, no agent-default entry", () => {
+  const m = option("model", "model", "sonnet", [choice("opus"), choice("sonnet"), choice("haiku")]);
+  const list = choiceList(m, undefined);
+  assert.deepEqual(
+    list.map((c) => c.id),
+    ["opus", "sonnet", "haiku"],
+  );
+  assert.ok(list.every((c) => c.id !== ""), "no empty (default) choice");
+});
+
+test("nothing saved shows the agent's current model as picked", () => {
+  const m = option("model", "model", "sonnet", [choice("opus"), choice("sonnet")]);
+  for (const saved of [undefined, ""]) {
+    assert.equal(shownChoice(m, saved), "sonnet");
+    assert.deepEqual(
+      choiceList(m, saved).filter((c) => c.on).map((c) => c.id),
+      ["sonnet"],
+    );
+  }
+});
+
+test("a saved model shows as picked; one the agent no longer lists shows its current", () => {
+  const m = option("model", "model", "sonnet", [choice("opus"), choice("sonnet")]);
+  assert.equal(shownChoice(m, "opus"), "opus");
+  assert.equal(shownChoice(m, "gone"), "sonnet");
 });
