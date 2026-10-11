@@ -16,7 +16,7 @@
   let { results }: { results: Map<string, StepResult> } = $props();
 
   /** A run in flight: the graph is the version it was given, with where each step is. */
-  const running = $derived(runView(plans.doc.steps, plans.live));
+  const running = $derived(runView(plans.doc.steps, plans.live, plans.doc.saved));
   const shown = $derived(running ? running.steps.map((step) => ({ step, removed: false })) : shownSteps(plans.doc));
   const sug = $derived(running ? new Map() : suggestions(plans.doc));
   /** Where each card is: laid out, or where it is being dragged. */

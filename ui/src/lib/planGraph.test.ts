@@ -253,8 +253,12 @@ test("a plan edited during a run is shown as the run has it", () => {
   const working = [step("s1"), step("s2", ["s1"], { title: "renamed", x: 500, y: 9 }), step("s4", ["s2"]), step("s5", ["s4"])];
   const v = runView(working, live)!;
   assert.deepEqual(v.steps.map((s) => s.id), ["s1", "s2", "s3", "s4"], "the run's steps, not the working plan's");
-  assert.equal(v.steps.find((s) => s.id === "s2")!.title, "renamed", "words from the working plan where the step is still there");
-  assert.equal(v.steps.find((s) => s.id === "s3")!.title, "s3", "and the run's own title where it is not");
+  assert.equal(v.steps.find((s) => s.id === "s2")!.title, "s2", "the run's own title, not the working plan's rename");
+  assert.equal(v.steps.find((s) => s.id === "s3")!.title, "s3", "and where the step is gone from the working plan");
+  // The rest of a step's words come from the version the run was given.
+  const given = diamond().map((s) => (s.id === "s2" ? { ...s, instruction: "as saved" } : s));
+  const withSaved = runView(working.map((s) => (s.id === "s2" ? { ...s, instruction: "edited since" } : s)), live, [{ n: 3, at: 1, note: "", steps: given }])!;
+  assert.equal(withSaved.steps.find((s) => s.id === "s2")!.instruction, "as saved");
   assert.deepEqual(v.steps.find((s) => s.id === "s4")!.after, ["s2", "s3"], "the run's waits");
   assert.equal(v.steps.find((s) => s.id === "s2")!.x, undefined, "laid out as the run's graph");
 });

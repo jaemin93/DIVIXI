@@ -378,9 +378,11 @@ export type RunState = "running" | "done" | "failed" | "skipped" | "waiting";
 
 /**
  * The plan as a run in flight shows it. The run goes by the version it was
- * given, so the graph does too: its steps (with the working plan's words
- * where a step is still there, its own title where not), each with where
- * the agent said it is. Edits made meanwhile wait for the next run.
+ * given, so the graph does too: its steps with their titles and waits as
+ * given, the rest of each step's words from that saved version (`saved`,
+ * when it is still there unchanged in id) or else the working plan, each
+ * with where the agent said it is. Edits made meanwhile wait for the next
+ * run.
  *
  * A step the agent has said nothing of is under way once every step it
  * waits for is done (or skipped), and waiting before that: so the first
@@ -388,13 +390,18 @@ export type RunState = "running" | "done" | "failed" | "skipped" | "waiting";
  * a word, and what it says (plan_step) takes over step by step. `told`
  * says whether it has said anything yet.
  */
-export function runView(working: PlanStep[], live: LiveRun | null): { steps: PlanStep[]; states: Map<string, RunState>; told: boolean } | null {
+export function runView(
+  working: PlanStep[],
+  live: LiveRun | null,
+  saved: PlanVersion[] = [],
+): { steps: PlanStep[]; states: Map<string, RunState>; told: boolean } | null {
   if (!live?.plan) return null;
-  const byId = new Map(working.map((s) => [s.id, s]));
+  const given = saved.find((v) => v.n === live.plan!.version)?.steps ?? [];
+  const byId = new Map([...working, ...given].map((s) => [s.id, s]));
   const steps: PlanStep[] = live.plan.steps.map((g) => {
     const w = byId.get(g.id);
-    // The run's own order of steps (its waits), whatever the working plan says now.
-    return w ? { ...w, title: w.title, after: g.after, x: undefined, y: undefined } : {
+    // The run's own title and waits, whatever the working plan says now.
+    return w ? { ...w, title: g.title, after: g.after, x: undefined, y: undefined } : {
       id: g.id, title: g.title, instruction: "", after: g.after, inputs: [], outputs: [], done_when: "", agent: "", on_fail: "stop", by: "",
     };
   });
