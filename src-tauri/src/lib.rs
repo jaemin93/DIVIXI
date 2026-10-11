@@ -567,8 +567,14 @@ fn create_routine(app: AppHandle, state: State<'_, AppState>, patch: RoutinePatc
 /// Rewrite a routine: its name, what it tells its agent, the folder, the
 /// agent, its options, or the track it tells when it has run.
 #[tauri::command(async)]
-fn update_routine(app: AppHandle, state: State<'_, AppState>, id: String, patch: RoutinePatch) -> Result<Routine, String> {
+fn update_routine(app: AppHandle, state: State<'_, AppState>, id: String, mut patch: RoutinePatch) -> Result<Routine, String> {
     check_routine(&state, &patch)?;
+    // The same rules (and tidying) as a track's colour and tags: the tags
+    // are one vocabulary.
+    let mut look = TrackPatch { color: patch.color.take(), tags: patch.tags.take(), ..Default::default() };
+    check_patch(&mut look)?;
+    patch.color = look.color;
+    patch.tags = look.tags;
     let saved = state.store.update_routine(&id, &patch).map_err(|e| e.to_string())?;
     let _ = routine::notify(&app);
     Ok(saved)
@@ -704,6 +710,13 @@ fn routine_runs(state: State<'_, AppState>, id: String, limit: Option<u32>) -> R
 #[tauri::command(async)]
 async fn run_routine(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
     routine::run(app, &id).await
+}
+
+/// The run of a routine in flight, as its plan shows it: the run, the plan
+/// it was given, and where its agent said it is. Null when not running.
+#[tauri::command]
+async fn routine_live(app: AppHandle, id: String) -> Option<serde_json::Value> {
+    routine::live(&app, &id).await
 }
 
 /// Stop a routine's turn in flight.
@@ -1995,6 +2008,7 @@ pub fn run() {
             routine_cancel,
             running_routines,
             routine_plan_open,
+            routine_live,
             plan_doc,
             plan_apply,
             plan_review,

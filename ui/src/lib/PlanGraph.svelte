@@ -1,7 +1,7 @@
 <script lang="ts">
   import { plans } from "./plan.svelte";
   import PlanCard from "./PlanCard.svelte";
-  import { arrows, CARD_H, CARD_W, closesCycle, layout, shownSteps, suggestions, type StepResult } from "./planGraph";
+  import { arrows, CARD_H, CARD_W, closesCycle, layout, runView, shownSteps, suggestions, type StepResult } from "./planGraph";
   import { t } from "./i18n.svelte";
 
   /**
@@ -15,8 +15,10 @@
    */
   let { results }: { results: Map<string, StepResult> } = $props();
 
-  const shown = $derived(shownSteps(plans.doc));
-  const sug = $derived(suggestions(plans.doc));
+  /** A run in flight: the graph is the version it was given, with where each step is. */
+  const running = $derived(runView(plans.doc.steps, plans.live));
+  const shown = $derived(running ? running.steps.map((step) => ({ step, removed: false })) : shownSteps(plans.doc));
+  const sug = $derived(running ? new Map() : suggestions(plans.doc));
   /** Where each card is: laid out, or where it is being dragged. */
   let dragging = $state<{ id: string; x: number; y: number } | null>(null);
   const at = $derived.by(() => {
@@ -97,6 +99,12 @@
 
   function downCard(e: PointerEvent, id: string, removed: boolean) {
     if (removed) return;
+    // During a run the graph is the run's: a card opens its step (if the
+    // working plan still has it) and does not move.
+    if (running) {
+      if (plans.doc.steps.some((s) => s.id === id)) plans.pick(id, e.shiftKey);
+      return;
+    }
     plans.pick(id, e.shiftKey);
     const p = at.get(id)!;
     const w = toWorld(e);
@@ -218,9 +226,11 @@
             step={s.step}
             suggestion={sug.get(s.step.id)}
             removed={s.removed}
-            result={results.get(s.step.id)}
+            result={running ? undefined : results.get(s.step.id)}
+            run={running?.states.get(s.step.id)}
+            told={running?.told ?? false}
             onpointerdown={(e) => downCard(e, s.step.id, s.removed)}
-            onhandle={s.removed ? undefined : (e) => downHandle(e, s.step.id)}
+            onhandle={s.removed || running ? undefined : (e) => downHandle(e, s.step.id)}
           />
         </div>
       {/if}

@@ -282,3 +282,43 @@ export function resultsOf(steps: unknown): Map<string, StepResult> {
 export function resultGlyphs(order: string[], results: Map<string, StepResult>): string {
   return order.map((id) => ({ done: "✓", failed: "✗", skipped: "–" })[results.get(id)?.status ?? "skipped"]).join("");
 }
+
+/** Mirrors `routine::live`: a run of the routine in flight. */
+export type LiveRun = {
+  run: string;
+  /** The plan it was given: its saved version (null when it was given none). */
+  plan: { version: number; steps: { id: string; title: string; after: string[] }[] } | null;
+  /** What its agent said so far of each step, through `plan_step`. */
+  progress: Record<string, { status: "started" | "done" | "failed" | "skipped"; note: string }>;
+};
+
+/** Where a step stands in a run in flight. */
+export type RunState = "running" | "done" | "failed" | "skipped" | "waiting";
+
+/**
+ * The plan as a run in flight shows it. The run goes by the version it was
+ * given, so the graph does too: its steps (with the working plan's words
+ * where a step is still there, its own title where not), each with where
+ * the agent said it is. Edits made meanwhile wait for the next run.
+ *
+ * `told` is whether the agent has said anything yet: until it does, steps
+ * are not dimmed as "waiting" -- all that is known is that the run is on.
+ */
+export function runView(working: PlanStep[], live: LiveRun | null): { steps: PlanStep[]; states: Map<string, RunState>; told: boolean } | null {
+  if (!live?.plan) return null;
+  const byId = new Map(working.map((s) => [s.id, s]));
+  const steps: PlanStep[] = live.plan.steps.map((g) => {
+    const w = byId.get(g.id);
+    // The run's own order of steps (its waits), whatever the working plan says now.
+    return w ? { ...w, title: w.title, after: g.after, x: undefined, y: undefined } : {
+      id: g.id, title: g.title, instruction: "", after: g.after, inputs: [], outputs: [], done_when: "", agent: "", approval: "none", on_fail: "stop", by: "",
+    };
+  });
+  const told = Object.keys(live.progress ?? {}).length > 0;
+  const states = new Map<string, RunState>();
+  for (const s of steps) {
+    const p = live.progress?.[s.id]?.status;
+    states.set(s.id, p === "started" ? "running" : p === "done" || p === "failed" || p === "skipped" ? p : "waiting");
+  }
+  return { steps, states, told };
+}

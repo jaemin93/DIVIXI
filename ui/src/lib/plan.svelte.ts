@@ -1,7 +1,10 @@
 import { invoke, listen } from "./ipc.svelte";
 import { store, artifactKey, type ArtifactInfo, type Routine } from "./store.svelte";
 import { t } from "./i18n.svelte";
-import { emptyPlan, instructionChanged, needsFirstDraft, unsaved, type PlanDoc, type PlanEvent } from "./planGraph";
+import { emptyPlan, instructionChanged, needsFirstDraft, unsaved, type LiveRun, type PlanDoc, type PlanEvent } from "./planGraph";
+
+/** Mirrors `routine::StepProgress`: a run's agent saying where it is (status "begun": a run given a plan started). */
+type StepProgress = { routine: string; run: string; step: string; status: string; note: string };
 
 /**
  * Plans whose first draft was asked for, for as long as the app runs: a
@@ -36,6 +39,39 @@ class Plans {
   resultRun = $state("");
   /** Bumped when the graph should frame the whole plan again (after a layout). */
   refit = $state(0);
+  /** The routine's run in flight, as its plan shows it; null when not running. */
+  live = $state<LiveRun | null>(null);
+
+  /** Read the run in flight (opening the plan, or a run beginning). */
+  async loadLive() {
+    const routine = this.routine;
+    if (!routine) return;
+    try {
+      const got = await invoke<LiveRun | null>("routine_live", { id: routine });
+      if (this.routine === routine) this.live = got;
+    } catch {
+      // Cosmetic: the run's result still comes at its end.
+    }
+  }
+
+  /** A run's agent said where it is in the plan. */
+  progress(e: StepProgress) {
+    if (e.routine !== this.routine) return;
+    if (e.status === "begun" || !this.live || this.live.run !== e.run) {
+      void this.loadLive();
+      return;
+    }
+    const status = e.status as LiveRun["progress"][string]["status"];
+    this.live = { ...this.live, progress: { ...this.live.progress, [e.step]: { status, note: e.note } } };
+    // The finished run's results are what the cards show next; read them then.
+  }
+
+  /** A run ended: the plan shows its results from here. */
+  ended(routine: string) {
+    if (routine !== this.routine) return;
+    this.live = null;
+    this.resultRun = "";
+  }
 
   /** The routine on screen, if it is the one this plan belongs to. */
   get routineOnScreen(): Routine | undefined {
@@ -66,6 +102,7 @@ class Plans {
     this.doc = emptyPlan();
     this.picked = "";
     this.resultRun = "";
+    this.live = null;
     store.planInfo = null;
     store.planSelected = [];
   }
@@ -101,6 +138,7 @@ class Plans {
       this.doc = got.doc;
       this.open = true;
       store.planInfo = got.plan;
+      void this.loadLive();
       // The routine now carries its plan's id; the list hears it too.
       store.routines = store.routines.map((r) => (r.id === routine ? got.routine : r));
       void store.refreshArtifactSession();
@@ -220,5 +258,9 @@ export const plans = new Plans();
 
 /** Subscribe once. */
 export async function connectPlans() {
-  await listen<PlanEvent>("plan", (e) => plans.take(e.payload));
+  await Promise.all([
+    listen<PlanEvent>("plan", (e) => plans.take(e.payload)),
+    listen<StepProgress>("routine_progress", (e) => plans.progress(e.payload)),
+    listen<{ routine: string }>("routine_done", (e) => plans.ended(e.payload.routine)),
+  ]);
 }

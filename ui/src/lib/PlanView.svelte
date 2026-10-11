@@ -131,6 +131,12 @@
     </div>
   </div>
 
+  {#if plans.live}
+    <div class="band live" role="status">
+      <Working size={11} />
+      <span>{plans.live.plan ? t("plan.running", { n: plans.live.plan.version }) : t("plan.runningNoPlan")}</span>
+    </div>
+  {/if}
   {#if plans.drafting}
     <div class="band draft" role="status">
       <Working size={11} />
@@ -164,7 +170,7 @@
       </div>
     </div>
   {/if}
-  {#if run && results.size}
+  {#if !plans.live && run && results.size}
     <div class="band res">
       <span>{t("plan.resultsOf", { when: whenFull(run.started_at, store.lang) })}</span>
       {#if plans.resultRun}<button type="button" class="link" onclick={() => (plans.resultRun = "")}>{t("plan.resultsLatest")}</button>{/if}
@@ -364,6 +370,12 @@
     align-items: flex-start;
     background: var(--okbg);
     border-color: var(--okln);
+  }
+
+  .band.live {
+    color: var(--txt);
+    background: var(--accbg);
+    border-color: var(--accln);
   }
 
   .band.draft {

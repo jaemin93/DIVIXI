@@ -1124,7 +1124,8 @@ pub fn guidance(doc: &Doc) -> Option<Guidance> {
         }
     }
     out.push_str(
-        "\nIf a step fails, stop the steps that depend on it unless it says to carry on. A step marked \"ask a person before starting\" waits for that permission; without it, skip the step and the steps that depend on it.\n\
+        "\nAs you begin each step, call the tool `plan_step` with its id and status \"started\"; when it ends, call it again with \"done\", \"failed\" or \"skipped\".\n\
+         If a step fails, stop the steps that depend on it unless it says to carry on. A step marked \"ask a person before starting\" waits for that permission; without it, skip the step and the steps that depend on it.\n\
          In the report block at the end, add a \"steps\" list with one entry for every step: {\"id\": \"s1\", \"status\": \"done\" | \"failed\" | \"skipped\", \"note\": \"one short line\"}.",
     );
     let steps: Vec<Value> = doc
@@ -1248,6 +1249,8 @@ How to plan:
 }
 
 pub const PLAN_GET: &str = "plan_get";
+/// The one tool of a run given a plan (routine.rs): where it is in the plan.
+pub const PLAN_STEP: &str = "plan_step";
 pub const PLAN_ADD_STEP: &str = "plan_add_step";
 pub const PLAN_UPDATE_STEP: &str = "plan_update_step";
 pub const PLAN_LINK: &str = "plan_link";
@@ -1819,6 +1822,8 @@ mod tests {
             runs: 0,
             last_run: None,
             plan: String::new(),
+            color: String::new(),
+            tags: Vec::new(),
         };
         let body: Doc = serde_json::from_str(&new_body(&r).unwrap()).unwrap();
         assert_eq!(body.routine, "ro001");
@@ -1838,6 +1843,7 @@ mod tests {
         assert!(g.section.contains("ask a person before starting this step"));
         assert!(g.section.contains("carry on"));
         assert!(g.section.contains("\"steps\""), "the report is asked for step results");
+        assert!(g.section.contains(PLAN_STEP), "and to say where it is as it goes");
         assert_eq!(g.ids, ["s1", "s2", "s3", "s4"]);
         assert_eq!(g.snapshot["steps"][3]["after"], json!(["s2", "s3"]));
         assert_eq!(g.snapshot["waves"], json!([["s1"], ["s2", "s3"], ["s4"]]));

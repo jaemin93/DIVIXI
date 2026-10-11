@@ -12,6 +12,7 @@ import {
   instructionChanged,
   layout,
   needsFirstDraft,
+  runView,
   resultGlyphs,
   resultsOf,
   shownSteps,
@@ -214,4 +215,41 @@ test("a first draft is asked for once: a routine with no plan, an empty plan, no
   assert.equal(needsFirstDraft({ hadPlan: false, doc: drafted, asked: false, busy: false }), false, "it has steps");
   const suggested = { ...empty, changes: [{ id: 1, target: "s1", run: null, before: null, after: step("s1") }] };
   assert.equal(needsFirstDraft({ hadPlan: false, doc: suggested, asked: false, busy: false }), false, "suggestions are on their way");
+});
+
+test("a run in flight shows where its agent said it is", () => {
+  const live = {
+    run: "rr1",
+    plan: { version: 3, steps: diamond().map((s) => ({ id: s.id, title: s.title, after: s.after })) },
+    progress: { s1: { status: "done" as const, note: "" }, s2: { status: "started" as const, note: "" } },
+  };
+  const v = runView(diamond(), live)!;
+  assert.deepEqual(
+    [...v.states.entries()],
+    [
+      ["s1", "done"],
+      ["s2", "running"],
+      ["s3", "waiting"],
+      ["s4", "waiting"],
+    ],
+  );
+  assert.equal(v.told, true);
+  // Nothing said yet: the run is on, nothing more is known.
+  const quiet = runView(diamond(), { ...live, progress: {} })!;
+  assert.equal(quiet.told, false);
+  // No run, or a run given no plan: nothing to show.
+  assert.equal(runView(diamond(), null), null);
+  assert.equal(runView(diamond(), { ...live, plan: null }), null);
+});
+
+test("a plan edited during a run is shown as the run has it", () => {
+  const live = { run: "rr1", plan: { version: 3, steps: diamond().map((s) => ({ id: s.id, title: s.title, after: s.after })) }, progress: {} };
+  // Meanwhile: s2 renamed and moved after s3, s3 deleted, s5 added, a card placed by hand.
+  const working = [step("s1"), step("s2", ["s1"], { title: "renamed", x: 500, y: 9 }), step("s4", ["s2"]), step("s5", ["s4"])];
+  const v = runView(working, live)!;
+  assert.deepEqual(v.steps.map((s) => s.id), ["s1", "s2", "s3", "s4"], "the run's steps, not the working plan's");
+  assert.equal(v.steps.find((s) => s.id === "s2")!.title, "renamed", "words from the working plan where the step is still there");
+  assert.equal(v.steps.find((s) => s.id === "s3")!.title, "s3", "and the run's own title where it is not");
+  assert.deepEqual(v.steps.find((s) => s.id === "s4")!.after, ["s2", "s3"], "the run's waits");
+  assert.equal(v.steps.find((s) => s.id === "s2")!.x, undefined, "laid out as the run's graph");
 });

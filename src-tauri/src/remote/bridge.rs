@@ -87,6 +87,7 @@ pub const ALLOWED: &[&str] = &[
     "run_routine",
     "routine_cancel",
     "running_routines",
+    "routine_live",
     // a routine's plan, read only (its chat is the artifact's, above)
     "plan_doc",
     // the app

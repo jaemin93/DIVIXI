@@ -1,7 +1,8 @@
 <script lang="ts">
   import { plans } from "./plan.svelte";
   import { store } from "./store.svelte";
-  import { changedFields, type PlanChange, type PlanStep, type StepResult, type SuggestionKind } from "./planGraph";
+  import { changedFields, type PlanChange, type PlanStep, type RunState, type StepResult, type SuggestionKind } from "./planGraph";
+  import Working from "./Working.svelte";
   import { t, type Key } from "./i18n.svelte";
 
   /**
@@ -16,6 +17,8 @@
     suggestion,
     removed = false,
     result,
+    run,
+    told = false,
     style = "",
     onpointerdown,
     onhandle,
@@ -24,6 +27,10 @@
     suggestion?: { change: PlanChange; kind: SuggestionKind };
     removed?: boolean;
     result?: StepResult;
+    /** Where the step is in a run in flight. */
+    run?: RunState;
+    /** Whether the run's agent has said anything yet (until then, nothing is dimmed). */
+    told?: boolean;
     style?: string;
     onpointerdown?: (e: PointerEvent) => void;
     onhandle?: (e: PointerEvent) => void;
@@ -37,7 +44,8 @@
         ? t("plan.sug.changed", { what: changedFields(suggestion.change).map((f) => t(`plan.field.${f}` as Key)).join(", ") })
         : t(`plan.sug.${suggestion.kind}` as Key),
   );
-  const glyph = $derived(result ? { done: "✓", failed: "✗", skipped: "–" }[result.status] : "");
+  const ended = $derived(run === "done" || run === "failed" || run === "skipped" ? run : result?.status);
+  const glyph = $derived(ended ? { done: "✓", failed: "✗", skipped: "–" }[ended] : "");
 
   function key(e: KeyboardEvent) {
     if (removed) return;
@@ -53,6 +61,8 @@
   class:sug={!!suggestion}
   class:removed
   class:picked
+  class:waiting={run === "waiting" && told}
+  class:running={run === "running"}
   {style}
   role="button"
   tabindex={removed ? -1 : 0}
@@ -71,7 +81,11 @@
     {#if step.x !== undefined}<span class="pin" title={t("plan.pinned")}>📌</span>{/if}
     {#if step.approval === "ask"}<span class="ask" title={t("plan.step.approval")}>?</span>{/if}
     <span class="grow"></span>
-    {#if glyph}<span class="res {result?.status}" title={result?.note ?? t(`plan.result.${result?.status}` as Key)}>{glyph}</span>{/if}
+    {#if run === "running"}
+      <Working size={11} />
+    {:else if glyph}
+      <span class="res {ended}" title={result?.note || t(`plan.result.${ended}` as Key)}>{glyph}</span>
+    {/if}
   </div>
   <div class="ttl">{step.title}</div>
   {#if step.instruction}<div class="ins">{step.instruction}</div>{/if}
@@ -121,6 +135,15 @@
 
   .card.removed {
     opacity: 0.6;
+  }
+
+  /* A run in flight: the step under way stands out, the ones still to come recede. */
+  .card.running {
+    border-color: var(--acc);
+  }
+
+  .card.waiting {
+    opacity: 0.45;
   }
 
   .card.removed .ttl,

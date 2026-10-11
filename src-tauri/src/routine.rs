@@ -57,6 +57,84 @@ struct Live {
     /// The run it is writing into.
     run: String,
     session: Arc<AgentSession>,
+    /// The plan it was given (its saved version), when it was given one.
+    plan: Option<Value>,
+    /// What its agent said so far of each step, through `plan_step`.
+    progress: Progress,
+}
+
+/// Each step's latest word from a run's agent: `started`, `done`, `failed`
+/// or `skipped`, and a short note.
+type Progress = Arc<parking_lot::Mutex<std::collections::BTreeMap<String, (String, String)>>>;
+
+/// What the window hears as a run's agent says where it is in its plan.
+#[derive(Clone, serde::Serialize)]
+pub struct StepProgress {
+    pub routine: String,
+    pub run: String,
+    pub step: String,
+    pub status: String,
+    pub note: String,
+}
+
+/// The run of a routine in flight, as the plan on screen shows it: the run,
+/// the plan it was given, and where its agent said it is. None when the
+/// routine is not running.
+pub async fn live(app: &AppHandle, id: &str) -> Option<Value> {
+    let state = app.state::<AppState>();
+    let live = state.routines.live.lock().await;
+    let l = live.get(id)?;
+    let progress: serde_json::Map<String, Value> =
+        l.progress.lock().iter().map(|(k, (status, note))| (k.clone(), json!({ "status": status, "note": note }))).collect();
+    Some(json!({ "run": l.run, "plan": l.plan, "progress": progress }))
+}
+
+/// The one tool a run given a plan has: saying a step has started, and how
+/// it ended. That is what the plan on screen shows while the run goes; the
+/// report at the end still has the last word.
+fn step_tool(app: AppHandle, routine: String, run: String, ids: Vec<String>, progress: Progress) -> orchestra_mcp::Tool {
+    orchestra_mcp::Tool::new(
+        crate::plan::PLAN_STEP,
+        "Say where you are in the plan: call it with status \"started\" as you begin a step, and \"done\", \"failed\" or \"skipped\" when it ends. The human watches the plan move with these.",
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "The step's id, as in the plan (s1, s2...)." },
+                "status": { "type": "string", "enum": ["started", "done", "failed", "skipped"] },
+                "note": { "type": "string", "description": "One short line, optional." }
+            },
+            "required": ["id", "status"],
+            "additionalProperties": false
+        }),
+        move |args| {
+            let (app, routine, run, ids, progress) = (app.clone(), routine.clone(), run.clone(), ids.clone(), progress.clone());
+            async move {
+                let step = args.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                let status = args.get("status").and_then(Value::as_str).unwrap_or_default().to_string();
+                if !ids.contains(&step) {
+                    return Err(format!("no step {step} in this plan; the steps are {}", ids.join(", ")));
+                }
+                if !matches!(status.as_str(), "started" | "done" | "failed" | "skipped") {
+                    return Err("status is started, done, failed or skipped".to_string());
+                }
+                let note: String = args.get("note").and_then(Value::as_str).unwrap_or_default().chars().take(300).collect();
+                progress.lock().insert(step.clone(), (status.clone(), note.clone()));
+                let _ = app.emit("routine_progress", StepProgress { routine, run, step, status, note });
+                Ok(json!({ "ok": true }))
+            }
+        },
+    )
+}
+
+/// Step results from what the agent said through `plan_step`, for a run
+/// whose report left none: the steps that ended, in plan order.
+fn results_from(progress: &Progress, ids: &[String]) -> Option<Value> {
+    let p = progress.lock();
+    let out: Vec<Value> = ids
+        .iter()
+        .filter_map(|id| p.get(id).filter(|(s, _)| s != "started").map(|(s, n)| json!({ "id": id, "status": s, "note": n })))
+        .collect();
+    (!out.is_empty()).then(|| Value::Array(out))
 }
 
 /// Every routine with a turn in flight, by routine id.
@@ -116,35 +194,61 @@ pub async fn run(app: AppHandle, id: &str) -> Result<Value, String> {
 async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
     let state = app.state::<AppState>();
     let spec = state.spec_for(&r.agent)?;
-    // No MCP server: a routine has no divixi tools to offer. It does work in
-    // a folder and says what it did.
-    let opts = session_options(&state, &r.agent, &r.cwd, &r.config, None);
-    // Deliberately no `opts.resume`: see the module note. Each run is new.
-    tracing::info!(routine = %r.id, agent = %r.agent, cwd = %r.cwd, "opening routine session");
-    let session = Arc::new(AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?);
 
+    // Its plan, when it has one saved and the human did not turn it off for
+    // runs: given in the same prompt, and kept with the run.
+    let guided = guidance(&state, r);
+    let ids: Vec<String> = guided.as_ref().map(|g| g.ids.clone()).unwrap_or_default();
+    let progress: Progress = Default::default();
+    // The run's id comes before the session, so the plan's one tool can name
+    // it; a session that does not open leaves the run failed, as any other.
     let run = state
         .store
         .begin_routine_run(&r.id, &r.agent, &r.cwd, &r.instruction)
         .map_err(|e| e.to_string())?;
 
-    // Its plan, when it has one with steps and the human did not turn it
-    // off for runs: given in the same prompt, and kept with the run.
-    let guided = guidance(&state, r);
+    // A run without a plan has no divixi tools: it does work in a folder and
+    // says what it did. A run given a plan has one, `plan_step`, to say
+    // where it is in it.
+    let mcp = match &guided {
+        Some(_) => {
+            let tool = step_tool(app.clone(), r.id.clone(), run.clone(), ids.clone(), progress.clone());
+            match orchestra_mcp::McpServer::start("divixi", vec![tool]).await {
+                Ok(server) => Some(server),
+                Err(err) => {
+                    tracing::warn!(%err, routine = %r.id, "running without step progress: its tool did not start");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let opts = session_options(&state, &r.agent, &r.cwd, &r.config, mcp.as_ref());
+    // Deliberately no `opts.resume`: see the module note. Each run is new.
+    tracing::info!(routine = %r.id, agent = %r.agent, cwd = %r.cwd, "opening routine session");
+    let session = match AgentSession::open(&spec, opts).await {
+        Ok(s) => Arc::new(s),
+        Err(err) => {
+            let why = err.to_string();
+            let _ = state.store.end_routine_run(&run, RoutineStatus::Failed, "", &why, 0, None);
+            return Err(why);
+        }
+    };
+
     if let Some(g) = &guided {
         if let Err(err) = state.store.set_routine_run_plan(&run, &g.snapshot) {
             tracing::warn!(%err, %run, "could not keep the plan a routine run was given");
         }
     }
-    let ids: Vec<String> = guided.as_ref().map(|g| g.ids.clone()).unwrap_or_default();
 
-    // Held for the turn: what the human answers and stops.
-    state
-        .routines
-        .live
-        .lock()
-        .await
-        .insert(r.id.clone(), Live { run: run.clone(), session: session.clone() });
+    // Held for the turn: what the human answers and stops, and where the plan is.
+    state.routines.live.lock().await.insert(
+        r.id.clone(),
+        Live { run: run.clone(), session: session.clone(), plan: guided.as_ref().map(|g| g.snapshot.clone()), progress: progress.clone() },
+    );
+    if guided.is_some() {
+        let _ = app.emit("routine_progress", StepProgress { routine: r.id.clone(), run: run.clone(), step: String::new(), status: "begun".into(), note: String::new() });
+    }
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     // The routine's own event reader. Not `pump`: that writes a run row and
@@ -159,8 +263,10 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
     tauri::async_runtime::spawn(async move {
         let failed = session.prompt_with(sent, Vec::new(), tx.clone()).await.err().map(|e| e.to_string());
         drop(tx); // ends the collector
-        // Let go here: the session lives for the turn and no longer.
+        // Let go here: the session lives for the turn and no longer, and
+        // the plan's tool with it.
         drop(session);
+        drop(mcp);
 
         let (text, tools) = collector.await.unwrap_or_default();
         let st = app_t.state::<AppState>();
@@ -183,7 +289,8 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
         // What the agent said of each step, read the same way: only from a
         // run that finished by itself.
         if status == RoutineStatus::Done && !ids.is_empty() {
-            if let Some(steps) = crate::plan::step_results(&text, &ids) {
+            // The report's own list, else what the agent said step by step.
+            if let Some(steps) = crate::plan::step_results(&text, &ids).or_else(|| results_from(&progress, &ids)) {
                 if let Err(err) = st.store.set_routine_run_steps(&run_t, &steps) {
                     tracing::warn!(%err, run = %run_t, "could not keep a routine run's step results");
                 }
@@ -347,5 +454,20 @@ mod tests {
         let sent = prompt("check deps", Some("[plan] Wave 1"));
         let (i, p, r) = (sent.find("check deps").unwrap(), sent.find("[plan]").unwrap(), sent.find(report::FENCE).unwrap());
         assert!(i < p && p < r, "{sent}");
+    }
+
+    #[test]
+    fn step_results_fall_back_to_what_the_agent_said_step_by_step() {
+        let progress: Progress = Default::default();
+        let ids: Vec<String> = ["s1", "s2", "s3"].iter().map(|s| s.to_string()).collect();
+        assert!(results_from(&progress, &ids).is_none(), "nothing said, nothing kept");
+        progress.lock().insert("s2".into(), ("failed".into(), "no network".into()));
+        progress.lock().insert("s1".into(), ("done".into(), String::new()));
+        progress.lock().insert("s3".into(), ("started".into(), String::new()));
+        assert_eq!(
+            results_from(&progress, &ids).unwrap(),
+            json!([{ "id": "s1", "status": "done", "note": "" }, { "id": "s2", "status": "failed", "note": "no network" }]),
+            "in plan order, and a step only started has no result"
+        );
     }
 }
