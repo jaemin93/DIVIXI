@@ -261,10 +261,7 @@ pub async fn detect_all(opts: &DetectOptions) -> Vec<AgentStatus> {
 pub async fn detect(kind: AgentKind, opts: &DetectOptions) -> AgentStatus {
     let cli = locate_cli(kind).await;
     let adapter = resolve_adapter(kind, cli.as_ref(), &opts.adapters_dir);
-    let mut spec = spec_for(&adapter);
-    if let (AgentKind::ClaudeCode, Some(s)) = (kind, spec.take()) {
-        spec = Some(with_installed_claude(s, &adapter, cli.as_ref()).await);
-    }
+    let spec = launch_spec(kind, &adapter, cli.as_ref()).await;
 
     let mut status = AgentStatus {
         kind,
@@ -374,6 +371,15 @@ fn spec_for(adapter: &Adapter) -> Option<AgentSpec> {
             Some(AgentSpec::binary(path, &args))
         }
         Adapter::NeedsDownload { .. } | Adapter::Missing { .. } => None,
+    }
+}
+
+/// The launch spec for an agent's adapter, the Claude adapter pointed at
+/// the installed `claude`. Every other agent keeps its spec as it is.
+async fn launch_spec(kind: AgentKind, adapter: &Adapter, cli: Option<&CliInfo>) -> Option<AgentSpec> {
+    match spec_for(adapter) {
+        Some(spec) if kind == AgentKind::ClaudeCode => Some(with_installed_claude(spec, adapter, cli).await),
+        other => other,
     }
 }
 
@@ -872,6 +878,25 @@ mod tests {
         assert_eq!(find_file(&dir, "srv.exe"), Some(nested.join("srv.exe")));
         assert_eq!(find_file(&dir, "other"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only Claude's spec is rewritten; the others launch as resolved. An
+    /// emptied spec reads as "not installed", which once hid Codex and
+    /// Copilot on a machine that had both.
+    #[test]
+    fn agents_other_than_claude_keep_their_launch_spec() {
+        let script = Adapter::LocalScript { path: "/adapters/codex-acp/dist/index.js".to_string() };
+        let codex = futures::executor::block_on(launch_spec(AgentKind::Codex, &script, None));
+        assert_eq!(codex, spec_for(&script));
+        assert!(codex.is_some());
+
+        let cli = CliInfo { path: "/bin/copilot".to_string(), version: None };
+        let own = Adapter::Cli { path: cli.path.clone() };
+        let copilot = futures::executor::block_on(launch_spec(AgentKind::Copilot, &own, Some(&cli)));
+        assert_eq!(copilot, Some(AgentSpec::binary(&cli.path, &["--acp"])));
+
+        let missing = Adapter::Missing { reason: "copilot CLI not found".to_string() };
+        assert_eq!(futures::executor::block_on(launch_spec(AgentKind::Copilot, &missing, None)), None);
     }
 
     #[test]
