@@ -5,7 +5,7 @@
   /**
    * The routine's run agent, in its settings: one line with what runs it
    * now, and a press opens the agent and model under it. A change is saved
-   * at once and taken from the next run. Not the routine agent (the plan's,
+   * at once and taken from the next run. Not the planning agent (the plan's,
    * in the right panel): that one is chosen there and beside [Plan].
    */
   let { routine }: { routine: Routine } = $props();

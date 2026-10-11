@@ -129,7 +129,7 @@
 
   /** [Plan] is offered here: a new routine, or a saved one with no plan. */
   const offersPlan = $derived(making || (!!saved && !hasPlan));
-  // The routine agent beside [Plan] starts as the one last used for a plan.
+  // The planning agent beside [Plan] starts as the one last used for a plan.
   $effect(() => {
     const key = offersPlan ? (making ? NEW_ROUTINE : (saved?.id ?? "")) : "";
     if (!key) return;
@@ -200,7 +200,7 @@
             {/if}
           </div>
         {/if}
-        <!-- The right of the page: the routine agent (the robot, once the plan is
+        <!-- The right of the page: the planning agent (the robot, once the plan is
              open) and the routine's folder as files, as beside a track. The run
              agent is in the settings, not here. -->
         <div class="toggles">
@@ -294,7 +294,7 @@
     <div class="erow">
       {#if failed}<span class="bad">{failed}</span>{/if}
       {#if offersPlan}
-        <!-- Who drafts the plan: the routine agent, picked before the plan exists;
+        <!-- Who drafts the plan: the planning agent, picked before the plan exists;
              the same choice as the panel's picker afterwards. -->
         {@render planAgent()}
       {/if}

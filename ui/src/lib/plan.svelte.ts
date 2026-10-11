@@ -47,12 +47,12 @@ class Plans {
   /** Run was pressed and the plan on screen is not what the run would get: what to ask. */
   gate = $state<RunGate | null>(null);
   /**
-   * The routine agent a new plan starts on, picked beside [Plan] before the
+   * The planning agent a new plan starts on, picked beside [Plan] before the
    * plan exists. Once it does, the plan's own agent (the panel's picker) is it.
    */
   draftAgent = $state<AgentChoice>({ agent: "", config: {} });
 
-  /** Start the picker beside [Plan]: the routine agent last used, else `fallback`. */
+  /** Start the picker beside [Plan]: the planning agent last used, else `fallback`. */
   async loadDraftAgent(fallback: string) {
     let got: AgentChoice | null = null;
     try {
@@ -187,7 +187,7 @@ class Plans {
 
   /**
    * Open the routine's plan, made when it has none. The first time (the
-   * routine had no plan), the routine agent is asked for a draft from the
+   * routine had no plan), the planning agent is asked for a draft from the
    * instruction: the request and the reply are in its panel's history, the
    * panel stays as it was (it does not open by itself), and the graph shows
    * the draft arriving as suggestion cards. A routine that has a plan just
@@ -198,7 +198,7 @@ class Plans {
     this.follow(routine);
     this.busy = true;
     try {
-      // A new plan is made on the routine agent picked beside [Plan].
+      // A new plan is made on the planning agent picked beside [Plan].
       const pick = !hadPlan && agent?.agent ? agent : null;
       const got = await invoke<Opened>("routine_plan_open", { routine, agent: pick?.agent ?? null, config: pick?.config ?? null });
       if (this.routine !== routine) return false;
