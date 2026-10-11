@@ -172,12 +172,12 @@
     {#if saved && !making}
       <div class="acts">
         {#if live}
-          <button class="run" onclick={() => store.cancelRoutine(saved.id)}>
+          <button class="go" onclick={() => store.cancelRoutine(saved.id)}>
             <Working size={12} /> {t("routines.stop")}
           </button>
         {:else}
           <div class="gatewrap">
-            <button class="run" disabled={dirty} title={dirty ? t("routines.saveFirst") : ""} onclick={() => plans.requestRun(saved.id)}>
+            <button class="go" disabled={dirty} title={dirty ? t("routines.saveFirst") : ""} onclick={() => plans.requestRun(saved.id)}>
               <Icon name="play" size={12} /> {t("routines.runNow")}
             </button>
             {#if plans.gate && plans.routine === saved.id}
@@ -437,6 +437,30 @@
   }
 
   .run:disabled {
+    opacity: 0.5;
+  }
+
+  /* Run and Stop in the head: neutral, as the toggles beside them, so the
+     turning mark inside Stop reads in either theme. Stop is told by that
+     mark and its word, not by colour. */
+  .go {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 12px;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--txt);
+    font-weight: 600;
+  }
+
+  .go:hover:not(:disabled) {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
+  .go:disabled {
     opacity: 0.5;
   }
 

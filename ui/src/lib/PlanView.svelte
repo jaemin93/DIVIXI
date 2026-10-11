@@ -2,7 +2,7 @@
   import { plans } from "./plan.svelte";
   import { store } from "./store.svelte";
   import PlanGraph from "./PlanGraph.svelte";
-  import PlanStepEditor from "./PlanStepEditor.svelte";
+  import PlanDrawer from "./PlanDrawer.svelte";
   import { differsFromLast, openNeedsConfirm, resultsOf, sameVersion, saveTarget } from "./planGraph";
   import { whenFull } from "./time";
   import Working from "./Working.svelte";
@@ -12,11 +12,11 @@
    * A routine's plan, open beside its form: the graph, the bands that want
    * the human (the instruction moved on since the plan was made, the agent's
    * suggestions, an instruction it proposed), the saved versions, and the
-   * picked step's drawer. Its agent is the robot panel on the right.
+   * step drawer, raised and lowered from the toolbar as the terminal is.
+   * Its agent is the robot panel on the right.
    */
   const doc = $derived(plans.doc);
   const pending = $derived(doc.changes.length);
-  const picked = $derived(doc.steps.find((s) => s.id === plans.picked));
   const versions = $derived([...(doc.saved ?? [])].reverse());
 
   /** The run whose step results the cards show. */
@@ -29,7 +29,11 @@
     const after = plans.picked ? [plans.picked] : [];
     const out = await plans.apply([{ op: "add_step", title: t("plan.newStep"), instruction: "", after }]);
     const id = out[0]?.id;
-    if (typeof id === "string") plans.pick(id);
+    if (typeof id === "string") {
+      plans.pick(id);
+      // A new step is empty: its fields are what comes next.
+      plans.setDrawer(true);
+    }
   }
 
   // ----- saving, and the versions -----
@@ -77,6 +81,14 @@
     <button type="button" class="tb" onclick={addStep}>+ {t("plan.addStep")}</button>
     <button type="button" class="tb" onclick={() => plans.autoLayout()} title={t("plan.autoLayoutHint")}>{t("plan.autoLayout")}</button>
     <button type="button" class="tb" onclick={() => plans.undo()} title={t("plan.undo")} aria-label={t("plan.undo")}>↶</button>
+    <button
+      type="button"
+      class="tb"
+      class:on={plans.drawerOpen}
+      aria-pressed={plans.drawerOpen}
+      title={plans.drawerOpen ? t("plan.drawerHide") : t("plan.drawerShow")}
+      onclick={() => plans.setDrawer(!plans.drawerOpen)}>{t("plan.drawer")} {plans.drawerOpen ? "▾" : "▴"}</button
+    >
     <span class="grow"></span>
     {#if plans.unsaved}
       <span class="dirty" title={t("plan.unsavedHint")}>● {t("plan.unsavedBadge")}</span>
@@ -216,11 +228,7 @@
     <PlanGraph {results} />
   {/if}
 
-  {#if picked}
-    {#key picked.id}
-      <PlanStepEditor step={picked} />
-    {/key}
-  {/if}
+  <PlanDrawer />
 </div>
 
 <style>
@@ -261,6 +269,11 @@
 
   .tb:disabled {
     opacity: 0.45;
+  }
+
+  .tb.on {
+    color: var(--hi);
+    border-color: var(--acc);
   }
 
   .tb.ready {

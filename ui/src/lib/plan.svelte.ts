@@ -1,4 +1,6 @@
-import { invoke, listen } from "./ipc.svelte";
+import { invoke, listen, local } from "./ipc.svelte";
+import { keepsSetting } from "./layoutSettings";
+import { DRAWER_HEIGHT_KEY, DRAWER_KEY, DRAWER_RESET, clampDrawer, drawerFromSettings, pickStep } from "./planDrawer";
 import { store, artifactKey, type ArtifactInfo, type OptionConfig, type Routine } from "./store.svelte";
 import { t } from "./i18n.svelte";
 import { emptyPlan, instructionChanged, needsFirstDraft, pressedRun, runGate, unsaved, type LiveRun, type PlanDoc, type PlanEvent, type RunGate } from "./planGraph";
@@ -35,8 +37,11 @@ class Plans {
   doc = $state<PlanDoc>(emptyPlan());
   /** The plan's artifact id, once known. */
   id = $state("");
-  /** The step whose drawer is open. */
+  /** The step picked: the drawer shows it when the drawer is open. */
   picked = $state("");
+  /** The step drawer under the graph, toggled as the terminal is; kept. */
+  drawerOpen = $state(false);
+  drawerHeight = $state(DRAWER_RESET);
   busy = $state(false);
   /** The run whose step results the plan shows; empty is the newest that has any. */
   resultRun = $state("");
@@ -304,16 +309,32 @@ class Plans {
     setTimeout(() => this.refit++, 60);
   }
 
-  /** Pick a step: its drawer opens, and it goes with the next message. */
+  /** Pick a step: it goes with the next message, and an open drawer shows it. It does not open the drawer. */
   pick(id: string, add = false) {
-    if (add) {
-      const has = store.planSelected.includes(id);
-      store.planSelected = has ? store.planSelected.filter((x) => x !== id) : [...store.planSelected, id];
-      this.picked = store.planSelected.length === 1 ? store.planSelected[0] : "";
-      return;
-    }
-    store.planSelected = id ? [id] : [];
-    this.picked = id;
+    const next = pickStep({ selected: store.planSelected, picked: this.picked, open: this.drawerOpen }, id, add);
+    store.planSelected = next.selected;
+    this.picked = next.picked;
+  }
+
+  /** Raise or lower the step drawer; kept, as the terminal is. */
+  setDrawer(open: boolean) {
+    this.drawerOpen = open;
+    keep(DRAWER_KEY, open ? "open" : "closed");
+  }
+
+  setDrawerHeight(px: number, persist = false) {
+    this.drawerHeight = clampDrawer(px, window.innerHeight);
+    if (persist) keep(DRAWER_HEIGHT_KEY, String(this.drawerHeight));
+  }
+
+  /** The drawer as it was left (this PC's window; a phone's lasts the page). */
+  async restoreDrawer() {
+    if (!keepsSetting(DRAWER_KEY, local)) return;
+    const read = (key: string) => invoke<string | null>("get_setting", { key }).catch(() => null);
+    const [open, height] = await Promise.all([read(DRAWER_KEY), read(DRAWER_HEIGHT_KEY)]);
+    const d = drawerFromSettings(open, height);
+    this.drawerOpen = d.open;
+    this.drawerHeight = clampDrawer(d.height, window.innerHeight);
   }
 
   /** The plan now answers to the instruction as it reads (the band goes). */
@@ -333,11 +354,18 @@ class Plans {
   }
 }
 
+/** Write a layout setting this window keeps. */
+function keep(key: string, value: string) {
+  if (!keepsSetting(key, local)) return;
+  invoke("set_setting", { key, value }).catch((err) => (store.lastError = String(err)));
+}
+
 export const plans = new Plans();
 store.routineStarted.push((id) => plans.started(id));
 
 /** Subscribe once. */
 export async function connectPlans() {
+  void plans.restoreDrawer();
   await Promise.all([
     listen<PlanEvent>("plan", (e) => plans.take(e.payload)),
     listen<StepProgress>("routine_progress", (e) => plans.progress(e.payload)),

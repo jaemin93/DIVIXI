@@ -4,8 +4,7 @@
   import { t } from "./i18n.svelte";
 
   /**
-   * One step, open for editing: under the graph on a wide screen, under the
-   * list on a phone. Each field is written when it is left (or, for the
+   * One step's fields, in the drawer under the graph (PlanDrawer). Each field is written when it is left (or, for the
    * checkboxes and selects, when it changes), as one edit the human can undo.
    * Editing a step the agent suggested keeps the suggestion, as on a design.
    */
@@ -68,29 +67,9 @@
     const after = on ? [...step.after, id] : step.after.filter((a) => a !== id);
     void plans.apply([{ op: "set_after", id: step.id, after }]);
   }
-
-  let armed = $state(false);
-  function remove() {
-    if (!armed) {
-      armed = true;
-      return;
-    }
-    armed = false;
-    void plans.apply([{ op: "delete", ids: [step.id] }]);
-    plans.pick("");
-  }
 </script>
 
-<div class="drawer" aria-label={t("plan.step.label", { id: step.id })}>
-  <div class="dh">
-    <span class="mono sid">{step.id}</span>
-    <span class="dt">{step.title}</span>
-    <span class="grow"></span>
-    <button class="btn sm" class:armed onclick={remove} onblur={() => (armed = false)}>
-      {armed ? t("plan.step.deleteArm") : t("plan.step.delete")}
-    </button>
-    <button class="btn sm" onclick={() => plans.pick("")} aria-label={t("plan.step.close")} title={t("plan.step.close")}>×</button>
-  </div>
+<div class="fields" role="group" aria-label={t("plan.step.label", { id: step.id })}>
   <div class="grid">
     <label class="f">
       <span class="flab">{t("plan.step.title")}</span>
@@ -138,72 +117,9 @@
 </div>
 
 <style>
-  /* Shares the plan's height with the graph and scrolls inside, so every
-     field can be reached however short the window: it was a fixed share
-     of the window under a graph that would not shrink, and its lower
-     fields fell off the bottom. */
-  .drawer {
-    flex: 0 1 auto;
-    min-height: 120px;
-    max-height: 58%;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    border-top: 1px solid var(--line);
-    background: var(--bg);
-    padding: 10px 18px 18px;
-  }
-
-  .dh {
-    position: sticky;
-    top: -10px;
-    z-index: 1;
-    background: var(--bg);
-    padding-top: 2px;
-  }
-
-  .dh {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
-  }
-
-  .sid {
-    font-size: 10px;
-    letter-spacing: 0.14em;
-    color: var(--dim);
-  }
-
-  .dt {
-    font-weight: 600;
-    color: var(--hi);
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .grow {
-    flex: 1;
-  }
-
-  .btn {
-    height: 24px;
-    padding: 0 9px;
-    font-size: 12px;
-    background: transparent;
-    border: 1px solid var(--line);
-    color: var(--lab);
-  }
-
-  .btn:hover {
-    color: var(--hi);
-    border-color: var(--acc);
-  }
-
-  .btn.armed {
-    color: var(--deltx);
-    border-color: var(--deltx);
+  /* The drawer scrolls; the fields only keep their margins. */
+  .fields {
+    padding: 2px 18px 18px;
   }
 
   .grid {
@@ -296,9 +212,8 @@
       grid-column: auto;
     }
 
-    .drawer {
-      max-height: 62%;
-      padding: 10px 14px 24px;
+    .fields {
+      padding: 2px 14px 24px;
     }
   }
 </style>

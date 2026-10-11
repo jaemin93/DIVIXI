@@ -23,6 +23,8 @@ export const LAYOUT_SETTINGS = [
   "designfiles",
   "planchat",
   "planfiles",
+  "plandrawer",
+  "plandrawer_height",
   "kblist",
   "kblist_width",
   "kblibrary",
