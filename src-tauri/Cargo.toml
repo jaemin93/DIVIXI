@@ -79,6 +79,9 @@ imagesize = "0.15"
 # Without default features it has no dependencies of its own (the defaults
 # pull in `image`).
 qrcode = { version = "0.14", default-features = false }
+# The OS language, for words the app sends while its language is "system"
+# (the conductor's run_routine refusal), as the interface reads it.
+sys-locale = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 # The terminal's PATH, read from the registry as Windows keeps it (src/windows_path.rs).

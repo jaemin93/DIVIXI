@@ -334,8 +334,7 @@ fn prompt(instruction: &str, plan: Option<&str>) -> String {
 }
 
 /// Why the conductor may not run this routine now (see
-/// `plan::run_refusal`), in the app's language; both when it follows the
-/// system's, so the conductor can pass on the one the human reads.
+/// `plan::run_refusal`), in the language the human reads the app in.
 pub fn refusal(app: &AppHandle, id: &str) -> Option<String> {
     let state = app.state::<AppState>();
     let r = state.store.routine(id).ok().flatten()?;
@@ -343,11 +342,19 @@ pub fn refusal(app: &AppHandle, id: &str) -> Option<String> {
         return None;
     }
     let doc = crate::plan::doc(&state, &r.plan).ok()?;
-    let lang = state.store.get_meta(&format!("{}language", crate::SETTING_PREFIX)).ok().flatten().unwrap_or_default();
-    match lang.as_str() {
-        l if l.starts_with("ko") => crate::plan::run_refusal(&doc, true),
-        l if l.starts_with("en") => crate::plan::run_refusal(&doc, false),
-        _ => crate::plan::run_refusal(&doc, true).map(|ko| format!("{ko}\n{}", crate::plan::run_refusal(&doc, false).unwrap_or_default())),
+    let pref = state.store.get_meta(&format!("{}language", crate::SETTING_PREFIX)).ok().flatten();
+    crate::plan::run_refusal(&doc, korean(pref.as_deref(), sys_locale::get_locale().as_deref()))
+}
+
+/// Whether the app shows Korean, as the interface decides it (`setLang` and
+/// `systemLang` in ui/src/lib/i18n.svelte.ts): "ko" or "en" when the human
+/// chose one; otherwise, as "system", Korean when the OS language starts
+/// with `ko`. No OS language read is Korean, the interface's own fallback.
+fn korean(pref: Option<&str>, os: Option<&str>) -> bool {
+    match pref {
+        Some("ko") => true,
+        Some("en") => false,
+        _ => os.is_none_or(|tag| tag.to_lowercase().starts_with("ko")),
     }
 }
 
@@ -458,6 +465,18 @@ pub fn notify(app: &AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_refusal_speaks_the_language_the_app_shows() {
+        assert!(korean(Some("ko"), Some("en-US")));
+        assert!(!korean(Some("en"), Some("ko-KR")));
+        // "system", or never chosen: the OS language decides, one language.
+        assert!(korean(Some("system"), Some("ko-KR")));
+        assert!(!korean(Some("system"), Some("en-US")));
+        assert!(korean(None, Some("KO")));
+        assert!(!korean(None, Some("ja-JP")));
+        assert!(korean(None, None));
+    }
+
     use super::*;
 
     /// A routine without a plan is sent what it always was, to the byte.
