@@ -92,13 +92,9 @@
     </div>
   {/if}
   {:else if !design}
-  <div class="ctx">
-    <div class="mono ctxlab">{t("kb.agentContext")}</div>
-    <!-- The library on screen goes with every message (none yet: nothing to say). -->
-    {#if kb.current}
-      <p class="ctxlib">{t("kb.lib.onScreen", { name: kb.libraryName(kb.current) })}</p>
-    {/if}
-    {#if store.graphChips.length}
+  <!-- What goes with the next message: the graph's chips, to take out and put back. -->
+  {#if store.graphChips.length}
+    <div class="ctx">
       <div class="chips">
         {#each store.graphChips as c (c.key)}
           {@const out = store.graphExcluded.has(c.key)}
@@ -114,10 +110,8 @@
           </button>
         {/each}
       </div>
-    {:else}
-      <p class="ctxnone">{t("kb.agentNothing")}</p>
-    {/if}
-  </div>
+    </div>
+  {/if}
   {/if}
   <Timeline />
   <Composer />
@@ -211,25 +205,8 @@
     background: var(--bg);
   }
 
-  .ctxlab {
-    font-size: 9px;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: var(--kg-acc);
-    margin-bottom: 6px;
-  }
 
-  .ctxlib {
-    margin: 0 0 7px;
-    font-size: 12px;
-    color: var(--txt);
-  }
 
-  .ctxnone {
-    margin: 0;
-    font-size: 12px;
-    color: var(--lab);
-  }
 
   .chips {
     display: flex;
