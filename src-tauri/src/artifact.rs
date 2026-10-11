@@ -174,6 +174,26 @@ async fn open(app: &AppHandle, a: &ArtifactInfo) -> Result<(Arc<AgentSession>, b
         // The knowledge agent opens as a design's does: the mode chosen in the
         // composer, else the agent's most permissive one.
         let mut opts = session_options(&state, &a.agent, &cwd.display().to_string(), &a.config, Some(&mcp));
+        if a.kind == plan::KIND {
+            // A plan's agent changes the plan and nothing else, and not on
+            // the prompt's word alone: it works in a mode that asks before it
+            // acts, and every question but its plan tools is answered no
+            // (conductor::route_permission). An agent with no such mode is
+            // held to the most restrictive one it has.
+            let modes: Vec<(String, String)> = state
+                .config_options_for(&a.agent)
+                .into_iter()
+                .filter(|o| o.category == "mode")
+                .flat_map(|o| o.choices.into_iter().map(|c| (c.id, c.name)))
+                .collect();
+            match plan::asking_mode(&modes) {
+                Some(mode) => opts.mode = Some(mode),
+                None => {
+                    opts.mode = None;
+                    opts.restricted = true;
+                }
+            }
+        }
         let key = format!("artifact_session:{}:{}", a.id, a.agent);
         opts.resume = state.store.get_meta(&key).ok().flatten();
         tracing::info!(artifact = %a.id, kind = %a.kind, agent = %a.agent, resume = ?opts.resume, "opening artifact session");

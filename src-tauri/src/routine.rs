@@ -146,16 +146,29 @@ fn results_from(progress: &Progress, ids: &[String]) -> Option<Value> {
 #[derive(Default)]
 pub struct Routines {
     live: Mutex<HashMap<String, Live>>,
+    /// Routines claimed by a run that is still opening its agent: between
+    /// the check and the `live` entry there are awaits, and a second Run
+    /// (the phone's, the conductor's, a double press) must not slip in.
+    starting: parking_lot::Mutex<HashSet<String>>,
     /// Runs a person stopped by hand, so the record says `stopped` and not
     /// `done`. Read once, when the run closes.
     stopped: parking_lot::Mutex<HashSet<String>>,
 }
 
 impl Routines {
-    /// The routines running right now.
+    /// The routines running right now, those still opening their agent too.
     pub async fn running(&self) -> Vec<String> {
-        self.live.lock().await.keys().cloned().collect()
+        let live = self.live.lock().await;
+        let mut out: Vec<String> = live.keys().cloned().collect();
+        out.extend(self.starting.lock().iter().filter(|id| !live.contains_key(*id)).cloned());
+        out
     }
+}
+
+/// Claim a routine for a run about to start: false when it is running, or
+/// another run is already starting it.
+fn claim(starting: &mut HashSet<String>, running: bool, id: &str) -> bool {
+    !running && starting.insert(id.to_string())
 }
 
 /// What a finished run tells the window, so the bell can say so.
@@ -180,12 +193,19 @@ pub async fn run(app: AppHandle, id: &str) -> Result<Value, String> {
     };
 
     // Said in the routine's own words. Nothing here can refuse for a
-    // worker's reasons, because there is no worker to be busy.
-    if app.state::<AppState>().routines.live.lock().await.contains_key(&r.id) {
-        return Err(format!("'{}' is already running. Wait for it to finish.", r.name));
+    // worker's reasons, because there is no worker to be busy. The check and
+    // the claim are one step, under the lock the running list is read under.
+    {
+        let state = app.state::<AppState>();
+        let live = state.routines.live.lock().await;
+        if !claim(&mut state.routines.starting.lock(), live.contains_key(&r.id), &r.id) {
+            return Err(format!("'{}' is already running. Wait for it to finish.", r.name));
+        }
     }
 
     let outcome = start(app.clone(), &r).await;
+    // Started (it is in `live` now) or not: the claim is done either way.
+    app.state::<AppState>().routines.starting.lock().remove(&r.id);
     let _ = notify(&app);
     outcome
 }
@@ -270,7 +290,13 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
 
         let (text, tools) = collector.await.unwrap_or_default();
         let st = app_t.state::<AppState>();
-        st.routines.live.lock().await.remove(&id_t);
+        {
+            // This run's entry only: never another run's of the same routine.
+            let mut live = st.routines.live.lock().await;
+            if live.get(&id_t).is_some_and(|l| l.run == run_t) {
+                live.remove(&id_t);
+            }
+        }
         let stopped = st.routines.stopped.lock().remove(&run_t);
 
         let status = match (&failed, stopped) {
@@ -286,11 +312,16 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
         // not do, and a made-up "partial" would read as a finding.
         let report = (status == RoutineStatus::Done).then(|| checked(&text));
         let as_json = report.as_ref().and_then(|r| serde_json::to_value(r).ok());
-        // What the agent said of each step, read the same way: only from a
-        // run that finished by itself.
-        if status == RoutineStatus::Done && !ids.is_empty() {
-            // The report's own list, else what the agent said step by step.
-            if let Some(steps) = crate::plan::step_results(&text, &ids).or_else(|| results_from(&progress, &ids)) {
+        // What the agent said of each step. A run that finished by itself:
+        // its report's list, else what it said step by step. One that failed
+        // or was stopped: what it said step by step, which is where it broke.
+        if !ids.is_empty() {
+            let steps = if status == RoutineStatus::Done {
+                crate::plan::step_results(&text, &ids).or_else(|| results_from(&progress, &ids))
+            } else {
+                results_from(&progress, &ids)
+            };
+            if let Some(steps) = steps {
                 if let Err(err) = st.store.set_routine_run_steps(&run_t, &steps) {
                     tracing::warn!(%err, run = %run_t, "could not keep a routine run's step results");
                 }
@@ -334,28 +365,28 @@ fn prompt(instruction: &str, plan: Option<&str>) -> String {
 }
 
 /// Why the conductor may not run this routine now (see
-/// `plan::run_refusal`), in the language the human reads the app in.
+/// `plan::run_refusal`), in the conductor's own language. A plan that
+/// cannot be read is a refusal too: the run would go without the plan the
+/// human sees.
 pub fn refusal(app: &AppHandle, id: &str) -> Option<String> {
     let state = app.state::<AppState>();
     let r = state.store.routine(id).ok().flatten()?;
     if r.plan.is_empty() {
         return None;
     }
-    let doc = crate::plan::doc(&state, &r.plan).ok()?;
     let pref = state.store.get_meta(&format!("{}language", crate::SETTING_PREFIX)).ok().flatten();
-    crate::plan::run_refusal(&doc, korean(pref.as_deref(), sys_locale::get_locale().as_deref()))
+    let ko = korean(pref.as_deref());
+    match crate::plan::doc(&state, &r.plan) {
+        Ok(doc) => crate::plan::run_refusal(&doc, ko),
+        Err(err) if ko => Some(format!("계획을 읽지 못해 실행하지 않았습니다: {err}")),
+        Err(err) => Some(format!("The plan could not be read, so it did not run: {err}")),
+    }
 }
 
-/// Whether the app shows Korean, as the interface decides it (`setLang` and
-/// `systemLang` in ui/src/lib/i18n.svelte.ts): "ko" or "en" when the human
-/// chose one; otherwise, as "system", Korean when the OS language starts
-/// with `ko`. No OS language read is Korean, the interface's own fallback.
-fn korean(pref: Option<&str>, os: Option<&str>) -> bool {
-    match pref {
-        Some("ko") => true,
-        Some("en") => false,
-        _ => os.is_none_or(|tag| tag.to_lowercase().starts_with("ko")),
-    }
+/// Whether the conductor speaks Korean, as it decides it (conductor.rs):
+/// everything but English chosen outright, "system" included.
+fn korean(pref: Option<&str>) -> bool {
+    pref != Some("en")
 }
 
 /// The plan a run is given, if its routine has one to give. A plan that
@@ -466,15 +497,22 @@ pub fn notify(app: &AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_refusal_speaks_the_language_the_app_shows() {
-        assert!(korean(Some("ko"), Some("en-US")));
-        assert!(!korean(Some("en"), Some("ko-KR")));
-        // "system", or never chosen: the OS language decides, one language.
-        assert!(korean(Some("system"), Some("ko-KR")));
-        assert!(!korean(Some("system"), Some("en-US")));
-        assert!(korean(None, Some("KO")));
-        assert!(!korean(None, Some("ja-JP")));
-        assert!(korean(None, None));
+    fn the_refusal_speaks_the_conductors_language() {
+        assert!(korean(Some("ko")));
+        assert!(!korean(Some("en")));
+        assert!(korean(Some("system")), "as the conductor reads it: anything but English is Korean");
+        assert!(korean(None));
+    }
+
+    #[test]
+    fn a_routine_is_claimed_once_while_it_starts() {
+        let mut starting = HashSet::new();
+        assert!(claim(&mut starting, false, "ro1"));
+        assert!(!claim(&mut starting, false, "ro1"), "a second Run while the first opens its agent");
+        assert!(claim(&mut starting, false, "ro2"), "another routine is its own");
+        starting.remove("ro1");
+        assert!(!claim(&mut starting, true, "ro1"), "running already");
+        assert!(claim(&mut starting, false, "ro1"), "free again once it ended");
     }
 
     use super::*;

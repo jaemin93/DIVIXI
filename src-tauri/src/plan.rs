@@ -178,17 +178,34 @@ pub struct Doc {
     pub source: Option<Source>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<Proposal>,
-    /// Saved versions, oldest first. Runs are given the last.
+    /// Saved versions, oldest first.
     #[serde(default)]
     pub saved: Vec<Version>,
     /// The version the working plan was last opened from or saved as: what
     /// "save over" writes into. None before any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened: Option<u32>,
+    /// The version runs are given: the one last saved or saved over. None
+    /// (a plan saved before this was kept) reads as the last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<u32>,
     /// What the human's edit in progress touched, each step as it was
     /// before; turned into an undo step when the edit is kept. Not saved.
     #[serde(skip)]
     journal: Vec<(String, Option<Step>)>,
+}
+
+/// What pressing Run does with a plan (see [`Doc::gate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    /// Straight away: no plan, or the working plan is the version runs are given.
+    Run,
+    /// Steps never saved: save and run, or not.
+    AskSave,
+    /// The working plan differs from the version runs are given.
+    AskUnsaved,
+    /// Suggestions wait, so it cannot be saved: settle them first.
+    Settle,
 }
 
 /// Who is editing.
@@ -473,19 +490,36 @@ impl Doc {
         out
     }
 
-    /// The version runs are given now, if the plan was ever saved.
-    pub fn last_saved(&self) -> Option<&Version> {
-        self.saved.last()
+    /// The version runs are given now, if the plan was ever saved: the one
+    /// last saved or saved over (the last, for a plan saved before that was
+    /// kept, or when that version was let go).
+    pub fn run_version(&self) -> Option<&Version> {
+        self.run.and_then(|n| self.saved.iter().find(|v| v.n == n)).or_else(|| self.saved.last())
     }
 
-    /// Whether the working plan differs from the last saved version in what
-    /// a run would be given (where steps sit on the graph does not count).
+    /// Whether the working plan differs from the version runs are given, in
+    /// what a run would get (where steps sit on the graph does not count).
+    /// A plan never saved differs once it has steps.
     pub fn unsaved(&self) -> bool {
-        if self.saved.is_empty() {
-            return !self.steps.is_empty();
+        match self.run_version() {
+            None => !self.steps.is_empty(),
+            Some(v) => content(&v.steps) != content(&self.steps),
         }
-        let now = content(&self.steps);
-        !self.saved.iter().any(|v| content(&v.steps) == now)
+    }
+
+    /// What pressing Run does with this plan: the one rule for the window's
+    /// Run (`runGate` in ui/src/lib/planGraph.ts, tested on the same cases)
+    /// and the conductor's `run_routine`, which can only refuse.
+    pub fn gate(&self) -> Gate {
+        if !self.changes.is_empty() {
+            Gate::Settle
+        } else if !self.unsaved() {
+            Gate::Run
+        } else if self.saved.is_empty() {
+            Gate::AskSave
+        } else {
+            Gate::AskUnsaved
+        }
     }
 
     /// Whether the routine's instruction has moved on since the plan was made.
@@ -516,7 +550,7 @@ impl Doc {
             "waves": self.waves(),
             "pending_suggestions": pending,
             "issues": self.issues(),
-            "saved_version": self.saved.last().map(|v| v.n),
+            "saved_version": self.run_version().map(|v| v.n),
             "unsaved_changes": self.unsaved(),
         });
         if let Some(p) = &self.proposal {
@@ -772,6 +806,8 @@ impl Doc {
                                 v.note = note;
                             }
                             self.opened = Some(n);
+                            // Saved over, it is what runs are given from here.
+                            self.run = Some(n);
                             return Ok(json!({ "ok": true, "version": n, "over": true }));
                         }
                         if self.saved.last().is_some_and(|v| content(&v.steps) == now) || (self.saved.is_empty() && self.steps.is_empty()) {
@@ -782,6 +818,7 @@ impl Doc {
                         let drop = self.saved.len().saturating_sub(MAX_VERSIONS);
                         self.saved.drain(..drop);
                         self.opened = Some(n);
+                        self.run = Some(n);
                         Ok(json!({ "ok": true, "version": n }))
                     }
                     Op::Open { n } => {
@@ -897,14 +934,22 @@ pub struct Plans {
 }
 
 impl Plans {
-    fn slot(&self, id: &str) -> Arc<parking_lot::Mutex<Slot>> {
-        self.docs.lock().entry(id.to_string()).or_default().clone()
-    }
-
     /// Forget a plan (its artifact is gone).
     pub fn forget(&self, id: &str) {
         self.docs.lock().remove(id);
     }
+}
+
+/// The plan's slot, loaded. A plan that does not load leaves no slot behind,
+/// so asking for ids that are not plans does not grow the map.
+fn loaded(state: &AppState, id: &str) -> Result<Arc<parking_lot::Mutex<Slot>>, String> {
+    if let Some(slot) = state.plans.docs.lock().get(id).cloned() {
+        return Ok(slot);
+    }
+    let doc = load_doc(state, id)?;
+    let mut docs = state.plans.docs.lock();
+    let slot = docs.entry(id.to_string()).or_insert_with(|| Arc::new(parking_lot::Mutex::new(Slot { doc: Some(doc), ..Slot::default() })));
+    Ok(slot.clone())
 }
 
 fn load_doc(state: &AppState, id: &str) -> Result<Doc, String> {
@@ -923,7 +968,7 @@ fn load_doc(state: &AppState, id: &str) -> Result<Doc, String> {
 
 /// The plan as it is now.
 pub fn doc(state: &AppState, id: &str) -> Result<Doc, String> {
-    let slot = state.plans.slot(id);
+    let slot = loaded(state, id)?;
     let mut guard = slot.lock();
     if guard.doc.is_none() {
         guard.doc = Some(load_doc(state, id)?);
@@ -944,7 +989,7 @@ pub struct PlanEvent {
 /// Run `f` on the plan (and its undo steps), save it, and tell the window.
 fn change<R>(app: &AppHandle, id: &str, f: impl FnOnce(&mut Doc, &mut Vec<UndoStep>, &mut Vec<UndoStep>) -> R) -> Result<R, String> {
     let state = app.state::<AppState>();
-    let slot = state.plans.slot(id);
+    let slot = loaded(&state, id)?;
     let (out, event) = {
         let mut guard = slot.lock();
         let held = &mut *guard;
@@ -1047,9 +1092,10 @@ fn routine_of(state: &AppState, id: &str) -> Result<Routine, String> {
 
 /// What a run is given beyond its instruction: the plan, wave by wave, as
 /// one section of its prompt, and the plan as it read then (kept with the
-/// run, so its step results can be read against the steps it was given).
-/// None when there is nothing to give: no steps, or the human turned the
-/// plan off for runs. A routine without a plan then runs exactly as before.
+/// run, every word of each step, so a version saved over later does not
+/// change what the run is shown to have been given). None when there is
+/// nothing to give: never saved, or a version with no steps. A routine
+/// without a plan then runs exactly as before.
 pub struct Guidance {
     pub section: String,
     pub snapshot: Value,
@@ -1058,7 +1104,7 @@ pub struct Guidance {
 }
 
 pub fn guidance(doc: &Doc) -> Option<Guidance> {
-    let version = doc.last_saved()?;
+    let version = doc.run_version()?;
     if version.steps.is_empty() {
         return None;
     }
@@ -1101,11 +1147,7 @@ pub fn guidance(doc: &Doc) -> Option<Guidance> {
          If a step fails, stop the steps that depend on it unless it says to carry on.\n\
          In the report block at the end, add a \"steps\" list with one entry for every step: {\"id\": \"s1\", \"status\": \"done\" | \"failed\" | \"skipped\", \"note\": \"one short line\"}.",
     );
-    let steps: Vec<Value> = doc
-        .steps
-        .iter()
-        .map(|s| json!({ "id": s.id, "title": s.title, "after": s.after, "on_fail": s.on_fail }))
-        .collect();
+    let steps = serde_json::to_value(content(&doc.steps)).unwrap_or_default();
     Some(Guidance {
         section: out,
         snapshot: json!({ "version": version.n, "saved_at": version.edited_at.unwrap_or(version.at), "note": version.note, "steps": steps, "waves": waves }),
@@ -1114,32 +1156,22 @@ pub fn guidance(doc: &Doc) -> Option<Guidance> {
 }
 
 /// Why a run started where no one can be asked (the conductor's
-/// `run_routine`) must not go: the routine has a plan on screen (steps on
-/// it) that a run would not get -- never saved, or changed since the last
-/// save. The words are for the conductor to pass on as they are. None when
-/// the run may go: no plan, or the working plan is the last saved one.
+/// `run_routine`) must not go: the same rule as the window's Run
+/// ([`Doc::gate`]), where every answer but "run" is a question the window
+/// asks and the conductor cannot. The words are for the conductor to pass
+/// on as they are. None when the run may go.
 pub fn run_refusal(doc: &Doc, ko: bool) -> Option<String> {
-    if doc.steps.is_empty() {
-        return None;
-    }
-    let same = doc.saved.last().is_some_and(|v| content(&v.steps) == content(&doc.steps));
-    if same {
-        return None;
-    }
-    let mut out = match (doc.saved.last(), ko) {
-        (None, true) => "계획이 저장되지 않았습니다. 되풀이 화면에서 [계획 저장]을 한 뒤 다시 실행하세요.".to_string(),
-        (None, false) => "The plan is not saved. Save it on the Routines page ([Save plan]), then run it again.".to_string(),
-        (Some(v), true) => format!("계획에 저장하지 않은 변경이 있습니다(마지막 저장본 v{}). 되풀이 화면에서 [계획 저장]을 한 뒤 다시 실행하세요.", v.n),
-        (Some(v), false) => format!("The plan has changes not saved (last saved: v{}). Save it on the Routines page ([Save plan]), then run it again.", v.n),
+    let n = doc.run_version().map(|v| v.n).unwrap_or(0);
+    let pending = doc.changes.len();
+    let out = match (doc.gate(), ko) {
+        (Gate::Run, _) => return None,
+        (Gate::AskSave, true) => "계획이 저장되지 않았습니다. 되풀이 화면에서 [계획 저장]을 한 뒤 다시 실행하세요.".to_string(),
+        (Gate::AskSave, false) => "The plan is not saved. Save it on the Routines page ([Save plan]), then run it again.".to_string(),
+        (Gate::AskUnsaved, true) => format!("계획에 저장하지 않은 변경이 있습니다(실행 버전 v{n}). 되풀이 화면에서 [계획 저장]을 한 뒤 다시 실행하세요."),
+        (Gate::AskUnsaved, false) => format!("The plan has changes not saved (runs use v{n}). Save it on the Routines page ([Save plan]), then run it again."),
+        (Gate::Settle, true) => format!("처리하지 않은 제안이 {pending}건 있습니다. 되풀이 화면에서 유지하거나 되돌리고 [계획 저장]을 한 뒤 다시 실행하세요."),
+        (Gate::Settle, false) => format!("{pending} suggestion(s) are waiting. Keep or revert them on the Routines page, save the plan, then run it again."),
     };
-    if !doc.changes.is_empty() {
-        out.push(' ');
-        out.push_str(&if ko {
-            format!("먼저 처리하지 않은 제안 {}건을 유지하거나 되돌려야 저장할 수 있습니다.", doc.changes.len())
-        } else {
-            format!("First keep or revert the {} suggestion(s) still waiting, or it cannot be saved.", doc.changes.len())
-        });
-    }
     Some(out)
 }
 
@@ -1258,6 +1290,33 @@ pub const PLAN_LINK: &str = "plan_link";
 pub const PLAN_EDIT: &str = "plan_edit";
 pub const PLAN_CHECK: &str = "plan_check";
 pub const PLAN_PROPOSE_INSTRUCTION: &str = "plan_propose_instruction";
+
+/// The plan's own tools, the only thing its agent is let do.
+const OWN_TOOLS: &[&str] = &[PLAN_GET, PLAN_ADD_STEP, PLAN_UPDATE_STEP, PLAN_LINK, PLAN_EDIT, PLAN_CHECK, PLAN_PROPOSE_INSTRUCTION];
+
+/// Whether a permission question from a plan's agent is about one of its
+/// own plan tools (allowed) rather than anything else it could do: write a
+/// file, run a command (refused). Read from the question's title and input,
+/// which name the tool (`mcp__divixi__plan_add_step` and the like).
+pub fn is_own_tool(title: &str, input: &str) -> bool {
+    let named = |text: &str| OWN_TOOLS.iter().any(|t| text.contains(&format!("divixi__{t}")) || text.trim() == *t);
+    named(title) || named(input)
+}
+
+/// The mode a plan's agent works in: one that asks before it acts, so that
+/// every act but its plan tools reaches [`is_own_tool`] and is refused.
+/// Among `(id, name)` modes, the first that asks: the agent's own default
+/// or manual, ask, then read-only. None when it offers none of these.
+pub fn asking_mode(modes: &[(String, String)]) -> Option<String> {
+    let key = |s: &str| s.rsplit(['#', '/']).next().unwrap_or(s).to_ascii_lowercase();
+    const ASKING: [&str; 6] = ["default", "manual", "ask", "read-only", "readonly", "read_only"];
+    // By id first: a name is the agent's to word ("Default" may well be a
+    // mode that writes unasked).
+    ASKING
+        .iter()
+        .find_map(|want| modes.iter().find(|(id, _)| key(id) == *want).map(|(id, _)| id.clone()))
+        .or_else(|| ASKING.iter().find_map(|want| modes.iter().find(|(_, name)| key(name) == *want).map(|(id, _)| id.clone())))
+}
 
 const WORDS: &str = "Plain text, every character as itself (Korean, emoji, accents, CJK). Never \\uXXXX escapes.";
 
@@ -1709,7 +1768,8 @@ mod tests {
         assert_eq!(d.step("s2").unwrap().title, "deps");
         assert!(d.step("s3").is_some());
         assert_eq!(d.steps.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s1", "s2", "s3", "s4"]);
-        assert!(!d.unsaved(), "the working plan is version 1's: saved, as v1");
+        assert!(d.unsaved(), "the working plan is v1's, but runs are given v2: it differs from what a run would get");
+        assert_eq!(d.run_version().map(|v| v.n), Some(2), "opening a version does not change what runs are given");
         assert_eq!(d.opened, Some(1));
         assert_eq!(d.saved.len(), 2, "opening a version saves nothing by itself");
         let step = d.take_step().unwrap();
@@ -1725,6 +1785,7 @@ mod tests {
         let mut d = diamond();
         d.apply(ops(json!([{ "op": "save", "note": "first" }])), &Actor::Human);
         let given = guidance(&d).unwrap().snapshot; // a run that went with v1
+        let first_words = d.step("s2").unwrap().instruction.clone();
         assert_eq!(d.opened, Some(1));
 
         d.apply(ops(json!([{ "op": "update_step", "id": "s2", "instruction": "list direct deps only" }])), &Actor::Human);
@@ -1736,6 +1797,8 @@ mod tests {
         assert_eq!(d.saved[0].note, "first", "no new note keeps the old one");
         assert!(!d.unsaved());
         assert_eq!(given["steps"][1]["title"], "deps", "the earlier run's copy is its own");
+        assert_eq!(given["steps"][1]["instruction"], json!(first_words), "every word of it: saving over v1 does not rewrite what that run was given");
+        assert!(given["steps"][1].get("x").is_none(), "but not where the card sat");
         assert_eq!(guidance(&d).unwrap().snapshot["version"], 1);
         assert!(guidance(&d).unwrap().section.contains("list direct deps only"), "the next run gets the new words");
         let r = d.apply(ops(json!([{ "op": "save", "over": 1 }])), &Actor::Human);
@@ -1746,10 +1809,21 @@ mod tests {
         assert_eq!((d.saved.len(), d.opened), (2, Some(2)));
         d.apply(ops(json!([{ "op": "open", "n": 1 }])), &Actor::Human);
         assert_eq!(d.opened, Some(1));
-        assert!(!d.unsaved(), "back at v1, which is saved");
+        assert!(d.unsaved(), "back at v1, while runs are given v2");
+        assert_eq!(d.gate(), Gate::AskUnsaved);
         d.apply(ops(json!([{ "op": "update_step", "id": "s1", "title": "fetch" }, { "op": "save", "over": 1, "note": "redo" }])), &Actor::Human);
         assert_eq!(d.saved[0].note, "redo");
         assert_eq!(d.saved[1].steps[0].title, "pull", "v2 untouched");
+        // Saved over, v1 is what runs are given now, though v2 is newer.
+        assert_eq!(d.run_version().map(|v| v.n), Some(1));
+        assert!(!d.unsaved());
+        assert_eq!(d.gate(), Gate::Run);
+        assert_eq!(guidance(&d).unwrap().snapshot["version"], 1);
+        assert!(guidance(&d).unwrap().section.contains("\"fetch\""));
+        assert_eq!(d.outline()["saved_version"], 1);
+        // A new version is the run version again.
+        d.apply(ops(json!([{ "op": "update_step", "id": "s4", "title": "notes" }, { "op": "save" }])), &Actor::Human);
+        assert_eq!(d.run_version().map(|v| v.n), Some(3));
         let r = d.apply(ops(json!([{ "op": "save", "over": 7 }])), &Actor::Human);
         assert_eq!(r[0]["ok"], false);
     }
@@ -1769,15 +1843,63 @@ mod tests {
         // A card moved is no change.
         d.apply(ops(json!([{ "op": "move", "id": "s2", "x": 5, "y": 5 }])), &Actor::Human);
         assert_eq!(run_refusal(&d, true), None);
-        // Changed since: refused, naming the last saved version.
+        // Changed since: refused, naming the version runs are given.
         d.apply(ops(json!([{ "op": "update_step", "id": "s2", "title": "dependencies" }])), &Actor::Human);
         let why = run_refusal(&d, true).unwrap();
         assert!(why.contains("v1") && why.contains("저장하지 않은 변경"), "{why}");
-        // Suggestions waiting: said too, since they hold the save back.
+        // Suggestions waiting: refused for them, as the window's Run is.
         d.apply(ops(json!([{ "op": "add_step", "title": "x", "instruction": "y" }])), &agent());
         let why = run_refusal(&d, true).unwrap();
-        assert!(why.contains("제안 1건"), "{why}");
+        assert!(why.contains("제안이 1건"), "{why}");
         assert!(run_refusal(&d, false).unwrap().contains("1 suggestion(s)"));
+    }
+
+    #[test]
+    fn a_plans_agent_may_use_its_plan_tools_and_nothing_else() {
+        assert!(is_own_tool("mcp__divixi__plan_add_step", ""));
+        assert!(is_own_tool("Tool call", r#"{"tool":"mcp__divixi__plan_update_step","id":"s1"}"#));
+        assert!(is_own_tool("plan_get", ""));
+        assert!(!is_own_tool("Write", r#"{"file_path":"/w/plan_get.txt"}"#), "a file that only mentions a tool's name");
+        assert!(!is_own_tool("Bash", "rm -rf build"));
+        assert!(!is_own_tool("mcp__divixi__plan_step", ""), "a run's tool is not the plan agent's");
+        assert!(!is_own_tool("mcp__other__plan_add_step", ""), "another server's tool of the same name");
+    }
+
+    #[test]
+    fn a_plans_agent_works_in_a_mode_that_asks() {
+        let claude = [("default", "Manual"), ("acceptEdits", "Accept edits"), ("plan", "Plan"), ("bypassPermissions", "Bypass permissions")]
+            .map(|(a, b)| (a.to_string(), b.to_string()));
+        assert_eq!(asking_mode(&claude).as_deref(), Some("default"));
+        let codex = [("read-only", "Read Only"), ("auto", "Default"), ("full-access", "Full Access")].map(|(a, b)| (a.to_string(), b.to_string()));
+        assert_eq!(asking_mode(&codex).as_deref(), Some("read-only"), "by id: a mode named Default may write unasked");
+        let named = [("m1", "Ask"), ("m2", "Full")].map(|(a, b)| (a.to_string(), b.to_string()));
+        assert_eq!(asking_mode(&named).as_deref(), Some("m1"), "by name when no id says");
+        let only_bold = [("yolo", "Yolo")].map(|(a, b)| (a.to_string(), b.to_string()));
+        assert_eq!(asking_mode(&only_bold), None);
+    }
+
+    /// The window's Run and the conductor's `run_routine` answer by one rule;
+    /// these are the cases ui/src/lib/planGraph.test.ts checks `runGate` on.
+    #[test]
+    fn the_gate_is_one_rule_for_the_window_and_the_conductor() {
+        let empty = Doc::default();
+        assert_eq!(empty.gate(), Gate::Run, "no plan");
+        let mut d = diamond();
+        assert_eq!(d.gate(), Gate::AskSave, "steps never saved");
+        d.apply(ops(json!([{ "op": "save" }])), &Actor::Human);
+        assert_eq!(d.gate(), Gate::Run, "the version runs are given");
+        // Every step taken off the working plan, not saved: v1 would still run.
+        d.apply(ops(json!([{ "op": "delete", "ids": ["s1", "s2", "s3", "s4"] }])), &Actor::Human);
+        assert!(d.steps.is_empty());
+        assert_eq!(d.gate(), Gate::AskUnsaved, "an emptied working plan is still not what runs get");
+        assert!(run_refusal(&d, true).is_some(), "so the conductor does not run v1 behind it");
+        d.journal.clear();
+        d.apply(ops(json!([{ "op": "open", "n": 1 }])), &Actor::Human);
+        assert_eq!(d.gate(), Gate::Run);
+        // A suggestion waiting settles first, whatever else.
+        d.apply(ops(json!([{ "op": "update_step", "id": "s1", "title": "from the agent" }])), &agent());
+        assert_eq!(d.gate(), Gate::Settle);
+        assert!(run_refusal(&d, true).is_some());
     }
 
     #[test]
@@ -1891,6 +2013,7 @@ mod tests {
             updated_at: 1,
             runs: 0,
             last_run: None,
+            last_run_at: None,
             plan: String::new(),
             color: String::new(),
             tags: Vec::new(),

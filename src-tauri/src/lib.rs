@@ -600,19 +600,54 @@ fn check_routine(state: &AppState, patch: &RoutinePatch) -> Result<(), String> {
 #[tauri::command]
 async fn delete_routine(app: AppHandle, id: String) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let plan = state.store.routine(&id).map_err(|e| e.to_string())?.map(|r| r.plan).unwrap_or_default();
-    // Refused before anything goes, as deleting the plan alone would be.
-    if !plan.is_empty() && state.artifacts.is_busy(&plan) {
-        return Err("its plan's agent is still responding; wait for it to finish".to_string());
+    // A run of it may be opening its agent (the phone's Run, the
+    // conductor's) between the window's check and this one.
+    if state.routines.running().await.contains(&id) {
+        return Err("it is running; wait for it to finish or stop it first".to_string());
     }
-    state.store.delete_routine(&id).map_err(|e| e.to_string())?;
-    if !plan.is_empty() {
-        if let Err(err) = remove_artifact(&app, &plan).await {
-            tracing::warn!(%err, routine = %id, %plan, "could not remove a deleted routine's plan");
-        }
+    let plan = blocking(&app, {
+        let id = id.clone();
+        move |st| st.store.routine(&id).map_err(|e| e.to_string())
+    })
+    .await?
+    .map(|r| r.plan)
+    .unwrap_or_default();
+    // The plan first: a plan is hidden from every list, so one left behind
+    // could be neither seen nor deleted. If it cannot go, the routine stays
+    // and the human can try again.
+    if !plan.is_empty() && state.store.artifact(&plan).ok().flatten().is_some() {
+        remove_artifact(&app, &plan).await?;
     }
+    blocking(&app, move |st| st.store.delete_routine(&id).map_err(|e| e.to_string())).await?;
     let _ = routine::notify(&app);
     Ok(())
+}
+
+/// Store work from an async command, off the async workers.
+async fn blocking<T: Send + 'static>(app: &AppHandle, f: impl FnOnce(&AppState) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || f(&app.state::<AppState>())).await.map_err(|e| e.to_string())?
+}
+
+/// Plans no routine names: left by a deletion or a first opening that
+/// failed part-way. Hidden from every list, they are removed at start.
+async fn sweep_orphan_plans(app: AppHandle) {
+    let found = blocking(&app, |st| {
+        let named: std::collections::HashSet<String> =
+            st.store.routines().map_err(|e| e.to_string())?.into_iter().map(|r| r.plan).filter(|p| !p.is_empty()).collect();
+        Ok(st.store.artifacts(Some(plan::KIND)).map_err(|e| e.to_string())?.into_iter().map(|a| a.id).filter(|id| !named.contains(id)).collect::<Vec<_>>())
+    })
+    .await;
+    match found {
+        Ok(orphans) => {
+            for id in orphans {
+                if let Err(err) = remove_artifact(&app, &id).await {
+                    tracing::warn!(%err, plan = %id, "could not remove a plan no routine names");
+                }
+            }
+        }
+        Err(err) => tracing::warn!(%err, "could not look for plans no routine names"),
+    }
 }
 
 /// A routine's plan, made when it has none. Returns the routine, the plan's
@@ -655,14 +690,27 @@ fn routine_plan_open(
         remember_plan_agent(&state, &agent, &config);
     }
     let body = plan::new_body(&r)?;
-    let mut info = state.store.create_artifact(plan::KIND, &r.name, &agent, &body).map_err(|e| e.to_string())?;
-    if !config.is_empty() {
-        info = state
-            .store
-            .update_artifact(&info.id, &ArtifactPatch { config: Some(config), ..Default::default() })
-            .map_err(|e| e.to_string())?;
-    }
-    let r = state.store.set_routine_plan(&r.id, &info.id).map_err(|e| e.to_string())?;
+    let info = state.store.create_artifact(plan::KIND, &r.name, &agent, &body).map_err(|e| e.to_string())?;
+    // Made, then linked: a step that fails takes the new plan back out, so
+    // no plan is left that no routine names.
+    let linked = (|| {
+        let info = if config.is_empty() {
+            info.clone()
+        } else {
+            state.store.update_artifact(&info.id, &ArtifactPatch { config: Some(config), ..Default::default() }).map_err(|e| e.to_string())?
+        };
+        let r = state.store.set_routine_plan(&r.id, &info.id).map_err(|e| e.to_string())?;
+        Ok::<_, String>((info, r))
+    })();
+    let (info, r) = match linked {
+        Ok(pair) => pair,
+        Err(err) => {
+            if let Err(gone) = state.store.delete_artifact(&info.id) {
+                tracing::warn!(err = %gone, plan = %info.id, "could not take back a plan that was not linked");
+            }
+            return Err(err);
+        }
+    };
     let doc = plan::doc(&state, &info.id)?;
     let _ = routine::notify(&app);
     Ok(serde_json::json!({ "routine": r, "plan": info, "doc": doc }))
@@ -1411,8 +1459,10 @@ fn track_root(state: &AppState, track: &str) -> Result<PathBuf, String> {
         return Ok(root);
     }
     if let Some(id) = track.strip_prefix("artifact:") {
+        // Not made here: reading a design's files does not create its
+        // folder (a write does, see `workspace_write`).
         match state.store.artifact(id).map_err(|e| e.to_string())? {
-            Some((a, _)) if a.kind == design::KIND => return artifact::workdir(state, id),
+            Some((a, _)) if a.kind == design::KIND => return Ok(state.artifacts_dir.join(id)),
             _ => return Err(format!("no design {id}")),
         }
     }
@@ -1442,6 +1492,10 @@ fn workspace_tree(
     open: Option<Vec<String>>,
 ) -> Result<(Vec<workspace::Entry>, bool), String> {
     let root = track_root(&state, &track)?;
+    // A design's folder before its first file: nothing in it yet.
+    if !root.exists() {
+        return Ok((Vec::new(), false));
+    }
     match open {
         Some(open) => workspace::tree(&root, workspace::Reach::Open(&open.into_iter().collect())),
         None => workspace::tree(&root, workspace::Reach::All),
@@ -1463,7 +1517,11 @@ fn design_extract_retry(app: AppHandle, id: String, card: String) -> Result<(), 
 /// Lines of the track's files with `query` in them (the side panel's content search).
 #[tauri::command(async)]
 fn workspace_search(state: State<'_, AppState>, track: String, query: String) -> Result<(Vec<workspace::Found>, bool), String> {
-    workspace::search(&track_root(&state, &track)?, &query)
+    let root = track_root(&state, &track)?;
+    if !root.exists() {
+        return Ok((Vec::new(), false));
+    }
+    workspace::search(&root, &query)
 }
 
 /// One file's contents for preview. `path` is relative to the folder.
@@ -1475,13 +1533,21 @@ fn workspace_read(state: State<'_, AppState>, track: String, path: String) -> Re
 /// Save a file edited in the panel; see `workspace::write`.
 #[tauri::command(async)]
 fn workspace_write(state: State<'_, AppState>, track: String, path: String, text: String, base: String, force: bool) -> Result<workspace::FileContent, String> {
-    workspace::write(&track_root(&state, &track)?, &path, &text, &base, force)
+    let root = track_root(&state, &track)?;
+    if !root.exists() {
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    }
+    workspace::write(&root, &path, &text, &base, force)
 }
 
 /// What git says has changed in the track's folder.
 #[tauri::command(async)]
 fn workspace_git_status(state: State<'_, AppState>, track: String) -> Result<workspace::GitStatus, String> {
-    workspace::status(&track_root(&state, &track)?)
+    let root = track_root(&state, &track)?;
+    if !root.exists() {
+        return Ok(workspace::GitStatus::default());
+    }
+    workspace::status(&root)
 }
 
 /// One path's diff against HEAD (all added when untracked).
@@ -2238,6 +2304,8 @@ pub fn run() {
             // Adapters still run through npx (an install detected before they
             // were kept in the adapter folder) get installed there.
             install_adapters_in_background(app.handle());
+            // Plans no routine names, from a deletion or opening that failed part-way.
+            tauri::async_runtime::spawn(sweep_orphan_plans(app.handle().clone()));
             // A server has nobody to run setup: it looks for its agents itself, once.
             #[cfg(feature = "server")]
             {

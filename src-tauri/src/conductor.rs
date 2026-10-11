@@ -1007,6 +1007,24 @@ pub fn route_permission(app: &AppHandle, track: &str, session: &str, run: &str, 
         return;
     };
     let state = app.state::<AppState>();
+    // A plan's agent asks for everything it would do (see artifact::open):
+    // its own plan tools are let through, anything else (a file written, a
+    // command run) is refused, without asking the human either way.
+    if let Some(id) = track.strip_prefix("artifact:") {
+        if state.store.artifact(id).ok().flatten().is_some_and(|(a, _)| a.kind == crate::plan::KIND) {
+            let allow = crate::plan::is_own_tool(title, input);
+            let kinds: &[&str] = if allow { &["allow_always", "allow_once"] } else { &["reject_once", "reject_always"] };
+            let option = kinds.iter().find_map(|k| options.iter().find(|o| o.kind == *k)).map(|o| o.id.clone());
+            tracing::info!(plan = %id, %title, %tool_kind, allow, "answered a plan agent's question");
+            let (app, id, request) = (app.clone(), id.to_string(), request.clone());
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = crate::artifact::answer_permission(&app, &id, &request, option.as_deref()).await {
+                    tracing::warn!(%err, plan = %id, "could not answer a plan agent's question");
+                }
+            });
+            return;
+        }
+    }
     let artifact = track.starts_with("artifact:");
     // A routine has no conductor to decide for the human, so its agent asks
     // them directly — the same way an artifact's does.

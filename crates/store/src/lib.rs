@@ -622,6 +622,10 @@ pub struct Routine {
     pub runs: u32,
     /// Its most recent run, when it has one.
     pub last_run: Option<String>,
+    /// When its most recent run started (Unix milliseconds), when it has one.
+    /// Not `updated_at`, which an edit moves too.
+    #[serde(default)]
+    pub last_run_at: Option<i64>,
     /// Its plan: the id of an artifact of kind `plan`, or empty for none.
     /// Set by opening the plan, never by a patch.
     #[serde(default)]
@@ -662,6 +666,7 @@ fn row_to_routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<Routine> {
         plan: r.get(10)?,
         color: r.get(11)?,
         tags: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
+        last_run_at: r.get(13)?,
     })
 }
 
@@ -672,7 +677,8 @@ const ROUTINE_SELECT: &str = "SELECT r.id, r.name, r.instruction, r.cwd, r.agent
                                      (SELECT COUNT(*) FROM routine_runs x WHERE x.routine = r.id),
                                      (SELECT x.id FROM routine_runs x WHERE x.routine = r.id
                                       ORDER BY x.started_at DESC LIMIT 1),
-                                     r.plan, r.color, r.tags
+                                     r.plan, r.color, r.tags,
+                                     (SELECT MAX(x.started_at) FROM routine_runs x WHERE x.routine = r.id)
                               FROM routines r";
 
 /// Where one run of a routine stands.
@@ -1249,7 +1255,8 @@ impl Store {
                 anyhow::bail!("no routine {id}");
             }
         }
-        Ok(self.routine(id)?.expect("just updated"))
+        // Deleted in between (another window, the phone): said, not a panic.
+        self.routine(id)?.ok_or_else(|| anyhow::anyhow!("no routine {id}"))
     }
 
     /// Link a routine to its plan (an artifact of kind `plan`), or unlink it
@@ -1264,7 +1271,8 @@ impl Store {
                 anyhow::bail!("no routine {id}");
             }
         }
-        Ok(self.routine(id)?.expect("just updated"))
+        // Deleted in between (another window, the phone): said, not a panic.
+        self.routine(id)?.ok_or_else(|| anyhow::anyhow!("no routine {id}"))
     }
 
     /// Remove a routine and everything its runs left behind. Unlike a
@@ -1345,14 +1353,18 @@ impl Store {
     /// changing afterwards does not rewrite what this run was asked to do.
     pub fn set_routine_run_plan(&self, id: &str, plan: &serde_json::Value) -> anyhow::Result<()> {
         let conn = self.conn.lock();
-        conn.execute("UPDATE routine_runs SET plan = ?2 WHERE id = ?1", params![id, serde_json::to_string(plan)?])?;
+        if conn.execute("UPDATE routine_runs SET plan = ?2 WHERE id = ?1", params![id, serde_json::to_string(plan)?])? == 0 {
+            anyhow::bail!("no routine run {id}");
+        }
         Ok(())
     }
 
     /// Keep what a run's agent said of each step of its plan.
     pub fn set_routine_run_steps(&self, id: &str, steps: &serde_json::Value) -> anyhow::Result<()> {
         let conn = self.conn.lock();
-        conn.execute("UPDATE routine_runs SET steps = ?2 WHERE id = ?1", params![id, serde_json::to_string(steps)?])?;
+        if conn.execute("UPDATE routine_runs SET steps = ?2 WHERE id = ?1", params![id, serde_json::to_string(steps)?])? == 0 {
+            anyhow::bail!("no routine run {id}");
+        }
         Ok(())
     }
 
@@ -2541,7 +2553,14 @@ mod tests {
 
         let run = store.begin_routine_run(&r.id, "codex", "/w", "check").unwrap();
         let read = store.routine_run(&run).unwrap().unwrap();
-        assert_eq!((read.plan, read.steps), (None, None));
+        assert_eq!((read.plan, read.steps), (None, None), "a run kept before plans (plan = '', steps = '') reads as none");
+        let ran = store.routine(&r.id).unwrap().unwrap();
+        assert_eq!(ran.last_run_at, Some(read.started_at), "its last run's time, not when it was last edited");
+        store.update_routine(&r.id, &RoutinePatch { color: Some("#7aa2f7".into()), ..RoutinePatch::default() }).unwrap();
+        assert_eq!(store.routine(&r.id).unwrap().unwrap().last_run_at, Some(read.started_at), "an edit does not move it");
+        assert!(store.set_routine_run_plan("rr-none", &serde_json::json!({})).is_err(), "no run, no silent success");
+        assert!(store.set_routine_run_steps("rr-none", &serde_json::json!([])).is_err());
+        assert!(store.update_routine("ro999", &RoutinePatch { name: Some("x".into()), ..RoutinePatch::default() }).is_err());
 
         // A run given a plan keeps it, and what its agent said of the steps.
         let given = serde_json::json!({ "version": 3, "steps": [{ "id": "s1", "title": "pull" }] });
