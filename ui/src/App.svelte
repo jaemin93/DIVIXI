@@ -67,6 +67,9 @@
   /** The window's width, for whether a list column still fits beside a side panel. */
   let windowWidth = $state(typeof window === "undefined" ? 1280 : window.innerWidth);
   const railWidth = $derived(store.railCollapsed ? 48 : store.railWidth);
+  $effect(() => {
+    store.windowWidth = windowWidth;
+  });
   /** On a desktop window, whether a list fits beside a panel `side` wide (a phone lays them over). */
   const fits = (list: number, side: number) => narrow || listFits(windowWidth, railWidth, list, side);
 
@@ -79,13 +82,13 @@
       !(narrow && store.view === "new-track") &&
       store.trackListOpen &&
       store.tracks.length > 0 &&
-      (!store.panelOpen || fits(store.trackListWidth, store.panelWidth)),
+      (!store.panelOpen || fits(store.trackListWidth, store.sideWidth(store.panelWidth))),
   );
   /** The routine list beside a routine, stepping aside when its plan's panel leaves no room. */
   const routineListShown = $derived.by(() => {
     if (!store.routineListOpen) return false;
-    if (store.planChatOpen && store.planInfo) return fits(store.routineListWidth, store.artifactChatWidth);
-    if (store.planFilesOpen) return fits(store.routineListWidth, store.panelWidth);
+    if (store.planChatOpen && store.planInfo) return fits(store.routineListWidth, store.sideWidth(store.artifactChatWidth));
+    if (store.planFilesOpen) return fits(store.routineListWidth, store.sideWidth(store.panelWidth));
     return true;
   });
 

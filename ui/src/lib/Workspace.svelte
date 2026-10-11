@@ -250,7 +250,7 @@
   </div>
 {/if}
 
-<aside style="width: {store.panelWidth}px">
+<aside style="width: {store.sideWidth(store.panelWidth)}px">
   <SplitHandle
     edge="left"
     width={store.panelWidth}

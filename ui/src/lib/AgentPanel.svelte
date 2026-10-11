@@ -42,7 +42,7 @@
 
 <aside
   class="talk"
-  style="width: {design ? store.artifactChatWidth : store.graphChatWidth}px"
+  style="width: {store.sideWidth(design ? store.artifactChatWidth : store.graphChatWidth)}px"
   aria-label={label}
 >
   {#if design}

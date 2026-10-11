@@ -34,6 +34,7 @@ import { keepsSetting } from "./layoutSettings";
 import { clampZoom, fieldFontPx, foldsOnPick, foldValue, instanceZoomKey, LIST_FOLDS, listAfterRail, parseZoom, settingOpen, WEB_RAIL_KEY, webPanelOpen, type ListFold } from "./uiMemory";
 import { pairing, type Paired } from "./pairing.svelte";
 import { workspaceTarget } from "./workspaceTarget";
+import { sideWidth } from "./crowd";
 import { openKey, parseMemory, pruneOpen, remember, treeReply, underOpen, type WsEntry as WsEntryType } from "./fileTree";
 
 export { wasStopped, errorLife, type Queued, type AppError };
@@ -1372,6 +1373,15 @@ class Store {
   setTrackListWidth(px: number, persist = false) {
     this.trackListWidth = Math.min(480, Math.max(200, Math.round(px)));
     if (persist) this.persistWidth("tracklist_width", this.trackListWidth);
+  }
+
+  /** The window's width (App keeps it), for side panels that must leave the page room. */
+  windowWidth = $state(typeof window === "undefined" ? 1280 : window.innerWidth);
+
+  /** A side panel's width as drawn on a desktop window (a phone lays panels over the page). */
+  sideWidth(px: number): number {
+    if (this.windowWidth < 640) return px;
+    return sideWidth(this.windowWidth, this.railCollapsed ? 48 : this.railWidth, px);
   }
 
   setPanelWidth(px: number, persist = false) {
