@@ -166,12 +166,8 @@ fn content(steps: &[Step]) -> Vec<Step> {
     steps.iter().map(|s| Step { x: None, y: None, ..s.clone() }).collect()
 }
 
-fn yes() -> bool {
-    true
-}
-
 /// The whole plan: the artifact's body.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Doc {
     #[serde(default)]
     pub version: u64,
@@ -188,9 +184,6 @@ pub struct Doc {
     pub next: u64,
     #[serde(default)]
     pub source: Option<Source>,
-    /// Whether a run is given the plan; off, it runs on its instruction alone.
-    #[serde(default = "yes")]
-    pub use_in_run: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<Proposal>,
     /// Saved versions, oldest first. Runs are given the last.
@@ -200,23 +193,6 @@ pub struct Doc {
     /// before; turned into an undo step when the edit is kept. Not saved.
     #[serde(skip)]
     journal: Vec<(String, Option<Step>)>,
-}
-
-impl Default for Doc {
-    fn default() -> Self {
-        Doc {
-            version: 0,
-            routine: String::new(),
-            steps: Vec::new(),
-            changes: Vec::new(),
-            next: 0,
-            source: None,
-            use_in_run: true,
-            proposal: None,
-            saved: Vec::new(),
-            journal: Vec::new(),
-        }
-    }
 }
 
 /// Who is editing.
@@ -292,8 +268,6 @@ pub enum Op {
     Move { id: String, x: f64, y: f64 },
     /// Let every step be laid out automatically again.
     AutoLayout {},
-    /// The human's: give the plan to runs, or not.
-    UseInRun { on: bool },
     /// The human's: the plan now answers to this instruction.
     Restamp { instruction: String },
     /// The human's: put the agent's proposed instruction away.
@@ -312,7 +286,6 @@ pub enum Op {
 impl Op {
     fn humans_only(&self) -> Option<&'static str> {
         match self {
-            Op::UseInRun { .. } => Some("use_in_run"),
             Op::Restamp { .. } => Some("restamp"),
             Op::DismissProposal {} => Some("dismiss_proposal"),
             Op::Save { .. } => Some("save"),
@@ -546,7 +519,6 @@ impl Doc {
             "waves": self.waves(),
             "pending_suggestions": pending,
             "issues": self.issues(),
-            "use_in_run": self.use_in_run,
             "saved_version": self.saved.last().map(|v| v.n),
             "unsaved_changes": self.unsaved(),
         });
@@ -778,10 +750,6 @@ impl Doc {
                             self.record(actor, id, before);
                         }
                         Ok(json!({ "ok": true, "unpinned": pinned }))
-                    }
-                    Op::UseInRun { on } => {
-                        self.use_in_run = on;
-                        Ok(json!({ "ok": true, "use_in_run": on }))
                     }
                     Op::Restamp { instruction } => {
                         self.source = Some(Source { instruction, at: now_ms() });
@@ -1079,9 +1047,6 @@ pub struct Guidance {
 }
 
 pub fn guidance(doc: &Doc) -> Option<Guidance> {
-    if !doc.use_in_run {
-        return None;
-    }
     let version = doc.last_saved()?;
     if version.steps.is_empty() {
         return None;
@@ -1623,12 +1588,12 @@ mod tests {
     #[test]
     fn the_humans_only_ops_are_refused_to_the_agent() {
         let mut d = diamond();
-        for op in [json!({ "op": "use_in_run", "on": false }), json!({ "op": "save" }), json!({ "op": "open", "n": 1 }), json!({ "op": "dismiss_proposal" })] {
+        for op in [json!({ "op": "save" }), json!({ "op": "open", "n": 1 }), json!({ "op": "dismiss_proposal" })] {
             let r = d.apply(ops(json!([op])), &agent());
             assert_eq!(r[0]["ok"], false, "{r:?}");
         }
-        assert!(d.use_in_run);
         assert_eq!(d.steps.len(), 4);
+        assert!(d.saved.is_empty());
     }
 
     #[test]
@@ -1808,8 +1773,10 @@ mod tests {
     #[test]
     fn an_old_or_empty_body_reads() {
         let d: Doc = serde_json::from_str("{}").unwrap();
-        assert!(d.use_in_run, "a run is given the plan unless the human turns it off");
         assert!(d.steps.is_empty());
+        // A body from before the switch was taken out still reads; the field is ignored.
+        let old: Doc = serde_json::from_str(r#"{"use_in_run": false, "steps": []}"#).unwrap();
+        assert!(old.steps.is_empty());
         let r = Routine {
             id: "ro001".into(),
             name: "deps".into(),
@@ -1860,10 +1827,14 @@ mod tests {
         assert!(g.section.contains("s1 \"fetch\"") && g.section.contains("extra"));
         assert_eq!(g.snapshot["version"], 2);
 
-        // Nothing to give: no steps, or turned off for runs.
+        // Nothing to give: no saved version, or one with no steps.
         assert!(guidance(&Doc::default()).is_none());
-        d.apply(ops(json!([{ "op": "use_in_run", "on": false }])), &Actor::Human);
-        assert!(guidance(&d).is_none());
+        let mut emptied = Doc::default();
+        emptied.saved.push(Version { n: 1, at: 1, note: String::new(), steps: Vec::new() });
+        assert!(guidance(&emptied).is_none());
+        // An old switch left off in a stored body changes nothing: the last saved version is given.
+        let old: Doc = serde_json::from_value(json!({ "use_in_run": false, "steps": [], "saved": serde_json::to_value(&d.saved).unwrap() })).unwrap();
+        assert!(guidance(&old).is_some());
     }
 
     #[test]

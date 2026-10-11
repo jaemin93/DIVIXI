@@ -74,10 +74,6 @@
     <button type="button" class="tb" onclick={() => plans.autoLayout()} title={t("plan.autoLayoutHint")}>{t("plan.autoLayout")}</button>
     <button type="button" class="tb" onclick={() => plans.undo()} title={t("plan.undo")} aria-label={t("plan.undo")}>↶</button>
     <span class="grow"></span>
-    <label class="use" title={t("plan.useInRunHint")}>
-      <input type="checkbox" checked={doc.use_in_run} onchange={(e) => plans.apply([{ op: "use_in_run", on: (e.currentTarget as HTMLInputElement).checked }])} />
-      {t("plan.useInRun")}
-    </label>
     {#if plans.unsaved}
       <span class="dirty" title={t("plan.unsavedHint")}>● {t("plan.unsavedBadge")}</span>
     {/if}
@@ -268,13 +264,6 @@
     background: var(--accbg);
   }
 
-  .use {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--txt);
-  }
 
   .dirty {
     font-size: 11.5px;

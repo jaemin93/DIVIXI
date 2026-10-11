@@ -195,8 +195,8 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
     let state = app.state::<AppState>();
     let spec = state.spec_for(&r.agent)?;
 
-    // Its plan, when it has one saved and the human did not turn it off for
-    // runs: given in the same prompt, and kept with the run.
+    // Its plan, when it has a saved version: the last one, given in the same
+    // prompt and kept with the run.
     let guided = guidance(&state, r);
     let ids: Vec<String> = guided.as_ref().map(|g| g.ids.clone()).unwrap_or_default();
     let progress: Progress = Default::default();

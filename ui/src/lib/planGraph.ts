@@ -45,7 +45,6 @@ export type PlanDoc = {
   changes: PlanChange[];
   next: number;
   source: { instruction: string; at: number } | null;
-  use_in_run: boolean;
   proposal?: { text: string; run: string | null; at: number } | null;
   /** Saved versions, oldest first; runs are given the last. */
   saved?: PlanVersion[];
@@ -67,7 +66,6 @@ export const emptyPlan = (): PlanDoc => ({
   changes: [],
   next: 0,
   source: null,
-  use_in_run: true,
   proposal: null,
   saved: [],
 });
