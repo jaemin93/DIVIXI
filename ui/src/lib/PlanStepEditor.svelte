@@ -132,10 +132,6 @@
         <option value="stop">{t("plan.step.onFailStop")}</option>
         <option value="continue">{t("plan.step.onFailContinue")}</option>
       </select>
-      <label class="ask">
-        <input type="checkbox" checked={step.approval === "ask"} onchange={(e) => void write({ approval: (e.currentTarget as HTMLInputElement).checked ? "ask" : "none" })} />
-        {t("plan.step.approval")}
-      </label>
     </div>
   </div>
 </div>
@@ -289,14 +285,6 @@
     color: var(--lab);
   }
 
-  .ask {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    margin-top: 6px;
-    font-size: 12px;
-    color: var(--txt);
-  }
 
   @media (max-width: 640px) {
     .grid {

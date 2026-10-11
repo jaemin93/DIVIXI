@@ -8,6 +8,7 @@
   import PlanView from "./PlanView.svelte";
   import PanelToggle from "./PanelToggle.svelte";
   import RunHistory from "./RunHistory.svelte";
+  import AgentPicker from "./AgentPicker.svelte";
   import { plans } from "./plan.svelte";
   import { resultGlyphs, resultsOf } from "./planGraph";
   import { untrack } from "svelte";
@@ -74,11 +75,7 @@
   const dirty = $derived(
     making ||
       (!!saved &&
-        (name.trim() !== saved.name ||
-          instruction.trim() !== saved.instruction ||
-          cwd.trim() !== saved.cwd ||
-          agent !== saved.agent ||
-          JSON.stringify(config) !== JSON.stringify(saved.config))),
+        (name.trim() !== saved.name || instruction.trim() !== saved.instruction || cwd.trim() !== saved.cwd)),
   );
 
   /** On a remote instance, its own folders in a picker the app draws. */
@@ -100,8 +97,9 @@
   async function save() {
     if (!complete) return;
     failed = "";
-    const patch = { name: name.trim(), instruction: instruction.trim(), cwd: cwd.trim(), agent, config };
-    const ok = making ? await store.createRoutine(patch) : await store.saveRoutine(saved!.id, patch);
+    // A saved routine's agent and options are changed in the head, at once.
+    const patch = { name: name.trim(), instruction: instruction.trim(), cwd: cwd.trim() };
+    const ok = making ? await store.createRoutine({ ...patch, agent, config }) : await store.saveRoutine(saved!.id, patch);
     if (!ok) failed = store.lastError;
     else filledFrom = "";
   }
@@ -187,6 +185,20 @@
             <Icon name="play" size={12} /> {t("routines.runNow")}
           </button>
         {/if}
+        <!-- What the run goes on: picked here, kept with the routine, used from the next run. -->
+        <AgentPicker
+          target={{
+            label: t("routines.runAgent"),
+            agent: saved.agent,
+            config: saved.config,
+            note: t("routines.nextRun"),
+            setAgent: (a) => void store.saveRoutine(saved.id, a === saved.agent ? { agent: a } : { agent: a, config: {} }),
+            setOption: (id, value) => {
+              const { [id]: _old, ...rest } = saved.config;
+              void store.saveRoutine(saved.id, { config: value ? { ...rest, [id]: value } : rest });
+            },
+          }}
+        />
         <!-- The right of the page: the plan's agent (the robot, once the plan is
              open) and the routine's folder as files, as beside a track. -->
         <div class="toggles">
@@ -218,6 +230,7 @@
         </div>
       </div>
 
+      {#if making}
       <label class="f">
         <span class="flab">{t("routines.agent")}</span>
         <select bind:value={agent}>
@@ -248,6 +261,7 @@
           </select>
         </label>
       {/if}
+      {/if}
     </div>
 
     <div class="block">
@@ -257,9 +271,14 @@
 
     <div class="erow">
       {#if failed}<span class="bad">{failed}</span>{/if}
-      <button class="save" disabled={!complete || !dirty} onclick={save}>
-        {making ? t("routines.create") : t("routines.save")}
-      </button>
+      {#if making}
+        <!-- A new routine is made by planning it: saved, and its first plan drafted. -->
+        <button class="save" disabled={!complete || plans.busy} title={complete ? t("plan.buttonNew") : t("plan.buttonIncomplete")} onclick={planPress}>
+          {t("plan.button")}
+        </button>
+      {:else}
+        <button class="save" disabled={!complete || !dirty} onclick={save}>{t("routines.save")}</button>
+      {/if}
     </div>
   {/snippet}
 

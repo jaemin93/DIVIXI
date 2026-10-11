@@ -59,15 +59,6 @@ const MAX_NOTE: usize = 200;
 
 // ----- the plan -----
 
-/// Whether a step waits for the human before it starts.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Approval {
-    #[default]
-    None,
-    Ask,
-}
-
 /// What the steps after a failed one do.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -102,8 +93,6 @@ pub struct Step {
     /// a routine runs its whole plan in one session (see the module note).
     #[serde(default)]
     pub agent: String,
-    #[serde(default)]
-    pub approval: Approval,
     #[serde(default)]
     pub on_fail: OnFail,
     /// Where a person put it on the graph; none is laid out automatically.
@@ -231,8 +220,6 @@ pub enum Op {
         #[serde(default)]
         agent: String,
         #[serde(default)]
-        approval: Approval,
-        #[serde(default)]
         on_fail: OnFail,
         #[serde(default)]
         x: Option<f64>,
@@ -253,8 +240,6 @@ pub enum Op {
         done_when: Option<String>,
         #[serde(default)]
         agent: Option<String>,
-        #[serde(default)]
-        approval: Option<Approval>,
         #[serde(default)]
         on_fail: Option<OnFail>,
     },
@@ -505,7 +490,7 @@ impl Doc {
                 let mut v = json!({
                     "id": s.id, "title": s.title, "instruction": s.instruction, "after": s.after,
                     "inputs": s.inputs, "outputs": s.outputs, "done_when": s.done_when,
-                    "approval": s.approval, "on_fail": s.on_fail, "by": s.by,
+                    "on_fail": s.on_fail, "by": s.by,
                 });
                 if !s.agent.is_empty() {
                     v["agent"] = json!(s.agent);
@@ -617,7 +602,7 @@ impl Doc {
                     return Err(format!("{name} is the human's to do"));
                 }
                 match op {
-                    Op::AddStep { title, instruction, after, inputs, outputs, done_when, agent, approval, on_fail, x, y } => {
+                    Op::AddStep { title, instruction, after, inputs, outputs, done_when, agent, on_fail, x, y } => {
                         if self.steps.len() >= MAX_STEPS {
                             return Err(format!("a plan holds at most {MAX_STEPS} steps"));
                         }
@@ -638,7 +623,6 @@ impl Doc {
                             outputs: check_list(&outputs, "outputs")?,
                             done_when: done_when.trim().to_string(),
                             agent: check_agent(&agent)?,
-                            approval,
                             on_fail,
                             x: x.map(|v| finite(v, "x")).transpose()?,
                             y: y.map(|v| finite(v, "y")).transpose()?,
@@ -649,7 +633,7 @@ impl Doc {
                         self.record(actor, &id, None);
                         Ok(self.wrote(&id))
                     }
-                    Op::UpdateStep { id, title, instruction, inputs, outputs, done_when, agent, approval, on_fail } => {
+                    Op::UpdateStep { id, title, instruction, inputs, outputs, done_when, agent, on_fail } => {
                         let before = self.step(&id).cloned().ok_or_else(|| format!("no step {id}"))?;
                         let mut s = before.clone();
                         if let Some(t) = title {
@@ -676,9 +660,6 @@ impl Doc {
                         }
                         if let Some(v) = agent {
                             s.agent = check_agent(&v)?;
-                        }
-                        if let Some(v) = approval {
-                            s.approval = v;
                         }
                         if let Some(v) = on_fail {
                             s.on_fail = v;
@@ -1080,9 +1061,6 @@ pub fn guidance(doc: &Doc) -> Option<Guidance> {
             if !s.done_when.is_empty() {
                 out.push_str(&format!("  done when: {}\n", s.done_when));
             }
-            if s.approval == Approval::Ask {
-                out.push_str("  ask a person before starting this step\n");
-            }
             if s.on_fail == OnFail::Continue {
                 out.push_str("  if it fails: carry on with the steps that do not depend on it\n");
             }
@@ -1090,13 +1068,13 @@ pub fn guidance(doc: &Doc) -> Option<Guidance> {
     }
     out.push_str(
         "\nAs you begin each step, call the tool `plan_step` with its id and status \"started\"; when it ends, call it again with \"done\", \"failed\" or \"skipped\".\n\
-         If a step fails, stop the steps that depend on it unless it says to carry on. A step marked \"ask a person before starting\" waits for that permission; without it, skip the step and the steps that depend on it.\n\
+         If a step fails, stop the steps that depend on it unless it says to carry on.\n\
          In the report block at the end, add a \"steps\" list with one entry for every step: {\"id\": \"s1\", \"status\": \"done\" | \"failed\" | \"skipped\", \"note\": \"one short line\"}.",
     );
     let steps: Vec<Value> = doc
         .steps
         .iter()
-        .map(|s| json!({ "id": s.id, "title": s.title, "after": s.after, "approval": s.approval, "on_fail": s.on_fail }))
+        .map(|s| json!({ "id": s.id, "title": s.title, "after": s.after, "on_fail": s.on_fail }))
         .collect();
     Some(Guidance {
         section: out,
@@ -1154,7 +1132,7 @@ pub fn preamble(lang: &str, name: &str) -> String {
             r#"당신은 DIVIXI의 계획 파트너입니다. 사람과 함께 되풀이 "{name}"의 계획을 짭니다. 되풀이는 저장해 둔 지시문을 자기 에이전트가 자기 폴더에서 혼자 실행하는 일입니다. 계획은 그 지시문을 단계로 나눈 것이고, 실행할 때 지시문과 함께 한 세션에 묶음(wave) 순서로 전달됩니다. 당신은 계획을 짜는 쪽이지 실행하는 쪽이 아닙니다.
 
 계획:
-- 단계마다 title(짧은 이름), instruction(이 단계에서 할 일, 혼자 읽혀도 통하게), after(먼저 끝나야 하는 단계 id 목록), inputs/outputs(쓰는 것과 남기는 것), done_when(끝났는지 알아보는 기준), approval(none 또는 ask: 시작 전에 사람에게 묻기), on_fail(stop 또는 continue)이 있습니다.
+- 단계마다 title(짧은 이름), instruction(이 단계에서 할 일, 혼자 읽혀도 통하게), after(먼저 끝나야 하는 단계 id 목록), inputs/outputs(쓰는 것과 남기는 것), done_when(끝났는지 알아보는 기준), on_fail(stop 또는 continue)이 있습니다.
 - 매 메시지마다 [routine] 아래 되풀이(이름, 폴더, 실행 에이전트, 지시문, 계획 이후 지시문이 바뀌었는지)와 [plan] 아래 계획 개요(단계, 묶음 waves, 대기 중인 제안, 점검 결과 issues)가 JSON으로 옵니다. 사람이 고른 단계는 selected로 옵니다.
 - 되풀이 폴더는 읽기 참고용입니다. 계획을 짜는 동안 그 폴더의 파일을 바꾸거나 명령을 실행하지 마세요.
 
@@ -1174,7 +1152,6 @@ pub fn preamble(lang: &str, name: &str) -> String {
 - 단계는 작고 확인할 수 있게 나눕니다. 한 단계에 한 가지 일.
 - 기본은 순서대로입니다. 서로 기다릴 필요가 정말 없을 때만 나란히 둡니다.
 - 마지막 단계는 결과를 확인하고 보고하는 단계로 둡니다.
-- 지우기, 배포, 밀어넣기처럼 되돌리기 어려운 단계는 approval을 ask로 둡니다.
 - 단계는 많아야 {MAX_STEPS}개입니다. 대개 3~8개면 충분합니다.
 - 사람에게 단계를 말할 때는 id와 짧은 제목을 함께 씁니다: 예) s3("보안 공지 확인").
 - 대화 답은 짧게. 계획에 쓴 것을 대화에서 되풀이하지 않습니다. 한국어로 말합니다.
@@ -1185,7 +1162,7 @@ pub fn preamble(lang: &str, name: &str) -> String {
         r#"You are DIVIXI's planning partner. With the human you work out the plan of the routine "{name}". A routine is a saved instruction its own agent runs alone, in its own folder. The plan breaks that instruction into steps; when it runs, its session is given the instruction and the plan together, wave by wave. You make the plan; you do not run it.
 
 The plan:
-- Each step has a title (short), an instruction (what to do in it, written to be read on its own), after (ids of the steps that must be done first), inputs/outputs (what it uses and leaves behind), done_when (how to tell it is done), approval (none, or ask: wait for the human before starting) and on_fail (stop or continue).
+- Each step has a title (short), an instruction (what to do in it, written to be read on its own), after (ids of the steps that must be done first), inputs/outputs (what it uses and leaves behind), done_when (how to tell it is done) and on_fail (stop or continue).
 - Every message brings, as JSON, the routine under [routine] (name, folder, the agent that runs it, its instruction, and whether the instruction changed since the plan was made) and the plan under [plan] (steps, waves, suggestions still pending, issues). Steps the human picked come as selected.
 - The routine's folder is there to read for reference. While planning, do not change files in it or run commands there.
 
@@ -1205,7 +1182,6 @@ How to plan:
 - Small steps that can be checked; one job per step.
 - In order by default. Put steps side by side only when they truly need not wait for each other.
 - Make the last step the one that checks the result and reports.
-- Mark steps that are hard to undo (deleting, deploying, pushing) with approval ask.
 - At most {MAX_STEPS} steps; three to eight is usually enough.
 - When you mention a step to the human, give its id with its title, e.g. s3 ("check advisories").
 - Keep chat replies short and do not repeat in chat what you wrote in the plan. Speak English.
@@ -1233,7 +1209,6 @@ fn step_fields(id_required: bool) -> Value {
         "outputs": { "type": "array", "items": { "type": "string" }, "description": WORDS },
         "done_when": { "type": "string", "description": WORDS },
         "agent": { "type": "string", "description": "An agent id for this step; leave out for the routine's own." },
-        "approval": { "type": "string", "enum": ["none", "ask"] },
         "on_fail": { "type": "string", "enum": ["stop", "continue"] }
     });
     if id_required {
@@ -1358,7 +1333,7 @@ pub fn tools(app: AppHandle, id: String) -> Vec<Tool> {
     vec![
         Tool::new(
             PLAN_GET,
-            "Read the plan: every step (id, title, instruction, after, inputs, outputs, done_when, approval, on_fail, who made it), the waves it runs in, the suggestions still waiting on the human, issues worth a look, and any instruction you proposed.",
+            "Read the plan: every step (id, title, instruction, after, inputs, outputs, done_when, on_fail, who made it), the waves it runs in, the suggestions still waiting on the human, issues worth a look, and any instruction you proposed.",
             json!({ "type": "object", "properties": {}, "additionalProperties": false }),
             move |_| {
                 let (app, id) = get.clone();
@@ -1774,6 +1749,13 @@ mod tests {
     fn an_old_or_empty_body_reads() {
         let d: Doc = serde_json::from_str("{}").unwrap();
         assert!(d.steps.is_empty());
+        // A step that still carries an approval (taken out) reads; the value is ignored.
+        let kept: Doc = serde_json::from_str(r#"{"steps": [{"id": "s1", "title": "t", "approval": "ask"}]}"#).unwrap();
+        assert_eq!(kept.steps[0].id, "s1");
+        assert!(!serde_json::to_string(&kept).unwrap().contains("approval"), "and is not written back");
+        let mut d2 = Doc::default();
+        let r = d2.apply(ops(json!([{ "op": "add_step", "title": "x", "instruction": "y", "approval": "ask" }])), &Actor::Human);
+        assert_eq!(r[0]["ok"], true, "an edit naming it is still taken");
         // A body from before the switch was taken out still reads; the field is ignored.
         let old: Doc = serde_json::from_str(r#"{"use_in_run": false, "steps": []}"#).unwrap();
         assert!(old.steps.is_empty());
@@ -1800,14 +1782,14 @@ mod tests {
     #[test]
     fn a_run_is_given_the_plan_wave_by_wave() {
         let mut d = diamond();
-        d.apply(ops(json!([{ "op": "update_step", "id": "s3", "approval": "ask", "on_fail": "continue" }])), &Actor::Human);
+        d.apply(ops(json!([{ "op": "update_step", "id": "s3", "on_fail": "continue" }])), &Actor::Human);
         assert!(guidance(&d).is_none(), "a plan never saved is not given to runs");
         d.apply(ops(json!([{ "op": "save", "note": "v1" }])), &Actor::Human);
         let g = guidance(&d).unwrap();
         let (w1, w2, w3) = (g.section.find("Wave 1").unwrap(), g.section.find("Wave 2 (side by side)").unwrap(), g.section.find("Wave 3").unwrap());
         assert!(w1 < w2 && w2 < w3, "{}", g.section);
         assert!(g.section.contains("- s4 \"report\" (after s2, s3)"), "{}", g.section);
-        assert!(g.section.contains("ask a person before starting this step"));
+        assert!(!g.section.contains("ask a person"), "steps no longer wait for a person");
         assert!(g.section.contains("carry on"));
         assert!(g.section.contains("\"steps\""), "the report is asked for step results");
         assert!(g.section.contains(PLAN_STEP), "and to say where it is as it goes");

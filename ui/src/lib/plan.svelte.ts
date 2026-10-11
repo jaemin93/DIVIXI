@@ -1,7 +1,7 @@
 import { invoke, listen } from "./ipc.svelte";
 import { store, artifactKey, type ArtifactInfo, type Routine } from "./store.svelte";
 import { t } from "./i18n.svelte";
-import { emptyPlan, instructionChanged, needsFirstDraft, unsaved, type LiveRun, type PlanDoc, type PlanEvent } from "./planGraph";
+import { emptyPlan, instructionChanged, needsFirstDraft, pressedRun, unsaved, type LiveRun, type PlanDoc, type PlanEvent } from "./planGraph";
 
 /** Mirrors `routine::StepProgress`: a run's agent saying where it is (status "begun": a run given a plan started). */
 type StepProgress = { routine: string; run: string; step: string; status: string; note: string };
@@ -48,21 +48,32 @@ class Plans {
     if (!routine) return;
     try {
       const got = await invoke<LiveRun | null>("routine_live", { id: routine });
-      if (this.routine === routine) this.live = got;
+      if (this.routine !== routine) return;
+      // The core registers a run once its agent is open, a moment after Run
+      // was pressed: until then, the run shown at the press stands.
+      if (!got && this.live && !this.live.run && store.routineLive(routine)) return;
+      this.live = got;
     } catch {
       // Cosmetic: the run's result still comes at its end.
     }
   }
 
+  /** Run was pressed: show the run at once, as the last saved version has it. */
+  started(routine: string) {
+    if (routine !== this.routine || !this.open) return;
+    this.resultRun = "";
+    this.live = pressedRun(this.doc);
+  }
+
   /** A run's agent said where it is in the plan. */
   progress(e: StepProgress) {
     if (e.routine !== this.routine) return;
-    if (e.status === "begun" || !this.live || this.live.run !== e.run) {
+    if (e.status === "begun" || !this.live || (this.live.run && this.live.run !== e.run)) {
       void this.loadLive();
       return;
     }
     const status = e.status as LiveRun["progress"][string]["status"];
-    this.live = { ...this.live, progress: { ...this.live.progress, [e.step]: { status, note: e.note } } };
+    this.live = { ...this.live, run: e.run, progress: { ...this.live.progress, [e.step]: { status, note: e.note } } };
     // The finished run's results are what the cards show next; read them then.
   }
 
@@ -255,6 +266,7 @@ class Plans {
 }
 
 export const plans = new Plans();
+store.routineStarted.push((id) => plans.started(id));
 
 /** Subscribe once. */
 export async function connectPlans() {

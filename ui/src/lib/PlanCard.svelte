@@ -61,7 +61,7 @@
   class:sug={!!suggestion}
   class:removed
   class:picked
-  class:waiting={run === "waiting" && told}
+  class:waiting={run === "waiting"}
   class:running={run === "running"}
   {style}
   role="button"
@@ -79,7 +79,6 @@
     <span>{step.id}</span>
     <span>{step.by === "agent" ? t("plan.by.agent") : t("plan.by.human")}</span>
     {#if step.x !== undefined}<span class="pin" title={t("plan.pinned")}>📌</span>{/if}
-    {#if step.approval === "ask"}<span class="ask" title={t("plan.step.approval")}>?</span>{/if}
     <span class="grow"></span>
     {#if run === "running"}
       <Working size={11} />
@@ -168,11 +167,6 @@
     font-size: 9px;
   }
 
-  .ask {
-    color: var(--warn);
-    border: 1px solid var(--warnln);
-    padding: 0 3px;
-  }
 
   .res {
     font-size: 12px;

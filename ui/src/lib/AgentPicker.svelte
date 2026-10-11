@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel, workerAgentOf, workerConfigOf, type Role } from "./store.svelte";
+  import { store, agentLabel, workerAgentOf, workerConfigOf, type Role, type OptionConfig } from "./store.svelte";
 
   /** In an artifact there is one agent, the artifact's. */
   const artifactMode = $derived(store.chatArtifact);
@@ -13,13 +13,28 @@
    * the chosen agent's models on the right, the track's full settings a
    * click away. Kiro Crew's agent menu, folded around our two roles.
    */
+  /**
+   * Something else to pick for than the conversation on screen (a routine's
+   * run): its agent and options, how to change them, the label and the line
+   * under the lists. Without it, the picker is the conversation's.
+   */
+  type Target = {
+    label: string;
+    agent: string;
+    config: OptionConfig;
+    note?: string;
+    setAgent: (agent: string) => void;
+    setOption: (id: string, value: string) => void;
+  };
+  let { target }: { target?: Target } = $props();
+
   let open = $state(false);
   let role = $state<Role>("conductor");
   let filter = $state("");
 
   const track = $derived(store.currentTrack);
-  const agent = $derived(store.roleAgent(role));
-  const config = $derived(store.roleConfig(role));
+  const agent = $derived(target ? target.agent : store.roleAgent(role));
+  const config = $derived(target ? target.config : store.roleConfig(role));
   const options = $derived(store.optionsOf(agent));
   const modelOption = $derived(options.find((o) => o.category === "model"));
   const modeOption = $derived(options.find((o) => o.category === "mode"));
@@ -42,6 +57,10 @@
 
   /** What the chip says: the conductor, and the workers when they differ. */
   const summary = $derived.by(() => {
+    if (target) {
+      const m = store.optionsOf(target.agent).find((o) => o.category === "model");
+      return { conductor: agentLabel(target.agent), model: m ? store.choiceName(m, store.effective(target.agent, target.config, m)) : "", workers: "" };
+    }
     const d = artifactMode ? store.currentArtifact : undefined;
     if (d) {
       const m = store.optionsOf(d.agent).find((o) => o.category === "model");
@@ -64,11 +83,14 @@
   });
 
   function pickAgent(id: string) {
-    void store.setRoleAgent(role, id);
+    if (target) target.setAgent(id);
+    else void store.setRoleAgent(role, id);
   }
 
   function pickModel(id: string) {
-    if (modelOption) void store.setRoleOption(role, modelOption.id, id);
+    if (!modelOption) return;
+    if (target) target.setOption(modelOption.id, id);
+    else void store.setRoleOption(role, modelOption.id, id);
   }
 
   function openSettings() {
@@ -80,6 +102,9 @@
 <Popover bind:open width={520}>
   {#snippet trigger()}
     <button class="chip" onclick={() => (open = !open)} title={t("picker.title")} aria-haspopup="dialog" aria-expanded={open}>
+      {#if target}
+        <span class="mono tlabel">{target.label}</span>
+      {:else}
       <!-- The conductor session: grey closed, green open, pulsing while it opens or answers. -->
       <span
         class="sess"
@@ -87,6 +112,7 @@
         style="background: {(artifactMode ? store.artifactSession.open : store.conductorState.open || store.conductorOpening === store.track) ? 'var(--ok)' : 'var(--idle)'}"
         title={(artifactMode ? store.artifactSession.open : store.conductorState.open) ? t("picker.sessionOpen") : t("picker.sessionClosed")}
       ></span>
+      {/if}
       <Icon name="bot" size={14} />
       <!-- One line, cut with an ellipsis when the column is narrow; never wrapped. -->
       <span class="label mono">
@@ -96,8 +122,10 @@
   {/snippet}
 
   <div class="head">
-    {#if artifactMode}
-      <span class="mono role on">{t("design.agentLabel")}</span>
+    {#if target}
+      <span class="mono role on">{target.label}</span>
+    {:else if artifactMode}
+      <span class="mono role on">{store.currentArtifact?.kind === "plan" ? t("plan.agentLabel") : t("design.agentLabel")}</span>
     {:else}
     <div class="roles" role="tablist">
       <button class="role mono" class:on={role === "conductor"} role="tab" aria-selected={role === "conductor"} onclick={() => (role = "conductor")}>{t("picker.conductor")}</button>
@@ -156,7 +184,9 @@
   </div>
 
   <div class="foot mono">
-    {#if artifactMode}
+    {#if target}
+      <span class="dim">{target.note ?? ""}</span>
+    {:else if artifactMode}
       <span class="dim">{store.artifactSession.open ? t("picker.sessionOpen") : t("design.sessionNext")}</span>
     {:else}
     <span class="dim">{store.conductorState.open ? t("picker.sessionOpen") : t("picker.sessionClosed")}</span>
@@ -407,5 +437,11 @@
     font-size: 10px;
     letter-spacing: 0.1em;
     padding: 0;
+  }
+
+  .tlabel {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--lab);
   }
 </style>

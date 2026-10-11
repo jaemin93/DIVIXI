@@ -12,6 +12,7 @@ import {
   instructionChanged,
   layout,
   needsFirstDraft,
+  pressedRun,
   nextRunsLimit,
   openNeedsConfirm,
   sameVersion,
@@ -35,7 +36,6 @@ const step = (id: string, after: string[] = [], more: Partial<PlanStep> = {}): P
   outputs: [],
   done_when: "",
   agent: "",
-  approval: "none",
   on_fail: "stop",
   by: "human",
   ...more,
@@ -232,14 +232,12 @@ test("a run in flight shows where its agent said it is", () => {
     [
       ["s1", "done"],
       ["s2", "running"],
-      ["s3", "waiting"],
+      ["s3", "running"],
       ["s4", "waiting"],
     ],
+    "s3 waits only for s1, which is done: under way, though not said",
   );
   assert.equal(v.told, true);
-  // Nothing said yet: the run is on, nothing more is known.
-  const quiet = runView(diamond(), { ...live, progress: {} })!;
-  assert.equal(quiet.told, false);
   // No run, or a run given no plan: nothing to show.
   assert.equal(runView(diamond(), null), null);
   assert.equal(runView(diamond(), { ...live, plan: null }), null);
@@ -281,4 +279,34 @@ test("the history menu reads more runs until a page comes back short", () => {
   assert.equal(nextRunsLimit(40, 40, 10), 50);
   assert.equal(nextRunsLimit(13, 20), null, "a short page: that is all of them");
   assert.equal(nextRunsLimit(0, 20), null);
+});
+
+test("the moment Run is pressed, the first wave shows as running", () => {
+  const saved = [{ n: 2, at: 1, note: "", steps: diamond() }];
+  const live = pressedRun({ ...emptyPlan(), steps: diamond(), saved });
+  assert.equal(live.plan!.version, 2, "the last saved version is what the run gets");
+  const v = runView(diamond(), live)!;
+  assert.equal(v.told, false);
+  assert.deepEqual(
+    [...v.states.entries()],
+    [
+      ["s1", "running"],
+      ["s2", "waiting"],
+      ["s3", "waiting"],
+      ["s4", "waiting"],
+    ],
+  );
+  // Nothing saved: the run goes without a plan, and says so.
+  assert.equal(pressedRun({ ...emptyPlan(), steps: diamond() }).plan, null);
+  assert.equal(runView(diamond(), pressedRun(emptyPlan())), null);
+});
+
+test("signals take over from the first guess, step by step", () => {
+  const live = pressedRun({ ...emptyPlan(), saved: [{ n: 1, at: 1, note: "", steps: diamond() }] });
+  const said = (progress: Record<string, { status: "started" | "done" | "failed" | "skipped"; note: string }>) =>
+    [...runView(diamond(), { ...live, progress })!.states.values()];
+  assert.deepEqual(said({ s1: { status: "started", note: "" } }), ["running", "waiting", "waiting", "waiting"]);
+  assert.deepEqual(said({ s1: { status: "done", note: "" } }), ["done", "running", "running", "waiting"], "the next wave is under way");
+  assert.deepEqual(said({ s1: { status: "done", note: "" }, s2: { status: "done", note: "" }, s3: { status: "failed", note: "x" } }), ["done", "done", "failed", "waiting"], "a failed step holds back what waits for it");
+  assert.deepEqual(said({ s1: { status: "skipped", note: "" }, s2: { status: "done", note: "" }, s3: { status: "done", note: "" } }), ["skipped", "done", "done", "running"]);
 });

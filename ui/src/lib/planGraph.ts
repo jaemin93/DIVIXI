@@ -6,7 +6,6 @@
  * tested.
  */
 
-export type Approval = "none" | "ask";
 export type OnFail = "stop" | "continue";
 
 /** Mirrors `plan::Step`. */
@@ -20,7 +19,6 @@ export type PlanStep = {
   outputs: string[];
   done_when: string;
   agent: string;
-  approval: Approval;
   on_fail: OnFail;
   /** Where a person put it; absent is laid out automatically. */
   x?: number;
@@ -217,7 +215,7 @@ export function suggestions(doc: PlanDoc): Map<string, { change: PlanChange; kin
 /** What a changed step's suggestion changed, by field, for the card to say. */
 export function changedFields(c: PlanChange): string[] {
   if (!c.before || !c.after) return [];
-  const fields: (keyof PlanStep)[] = ["title", "instruction", "after", "inputs", "outputs", "done_when", "approval", "on_fail", "agent"];
+  const fields: (keyof PlanStep)[] = ["title", "instruction", "after", "inputs", "outputs", "done_when", "on_fail", "agent"];
   return fields.filter((f) => JSON.stringify(c.before![f]) !== JSON.stringify(c.after![f]));
 }
 
@@ -324,8 +322,11 @@ export type RunState = "running" | "done" | "failed" | "skipped" | "waiting";
  * where a step is still there, its own title where not), each with where
  * the agent said it is. Edits made meanwhile wait for the next run.
  *
- * `told` is whether the agent has said anything yet: until it does, steps
- * are not dimmed as "waiting" -- all that is known is that the run is on.
+ * A step the agent has said nothing of is under way once every step it
+ * waits for is done (or skipped), and waiting before that: so the first
+ * wave shows as running the moment the run starts, before the agent says
+ * a word, and what it says (plan_step) takes over step by step. `told`
+ * says whether it has said anything yet.
  */
 export function runView(working: PlanStep[], live: LiveRun | null): { steps: PlanStep[]; states: Map<string, RunState>; told: boolean } | null {
   if (!live?.plan) return null;
@@ -334,14 +335,36 @@ export function runView(working: PlanStep[], live: LiveRun | null): { steps: Pla
     const w = byId.get(g.id);
     // The run's own order of steps (its waits), whatever the working plan says now.
     return w ? { ...w, title: w.title, after: g.after, x: undefined, y: undefined } : {
-      id: g.id, title: g.title, instruction: "", after: g.after, inputs: [], outputs: [], done_when: "", agent: "", approval: "none", on_fail: "stop", by: "",
+      id: g.id, title: g.title, instruction: "", after: g.after, inputs: [], outputs: [], done_when: "", agent: "", on_fail: "stop", by: "",
     };
   });
   const told = Object.keys(live.progress ?? {}).length > 0;
+  const said = (id: string) => live.progress?.[id]?.status;
+  const ids = new Set(steps.map((s) => s.id));
   const states = new Map<string, RunState>();
   for (const s of steps) {
-    const p = live.progress?.[s.id]?.status;
-    states.set(s.id, p === "started" ? "running" : p === "done" || p === "failed" || p === "skipped" ? p : "waiting");
+    const p = said(s.id);
+    if (p === "started") states.set(s.id, "running");
+    else if (p === "done" || p === "failed" || p === "skipped") states.set(s.id, p);
+    else {
+      const ready = s.after.filter((a) => ids.has(a)).every((a) => said(a) === "done" || said(a) === "skipped");
+      states.set(s.id, ready ? "running" : "waiting");
+    }
   }
   return { steps, states, told };
+}
+
+/**
+ * The run in flight as the window can say it the moment Run is pressed,
+ * before the core has opened the agent: the plan's last saved version
+ * (what the run will be given), or none when nothing is saved. The core's
+ * own state (routine_live) replaces it as soon as it has one.
+ */
+export function pressedRun(doc: PlanDoc): LiveRun {
+  const last = doc.saved?.at(-1);
+  return {
+    run: "",
+    plan: last && last.steps.length ? { version: last.n, steps: last.steps.map((s) => ({ id: s.id, title: s.title, after: s.after })) } : null,
+    progress: {},
+  };
 }

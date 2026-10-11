@@ -2373,10 +2373,14 @@ class Store {
     notifyRoutine(done.routine, done.run, done.status, `${done.name} — ${how}`, done.summary);
   }
 
+  /** Told the moment a routine is run, before the core answers (the plan shows its first wave). */
+  routineStarted: ((id: string) => void)[] = [];
+
   async runRoutine(id: string) {
     // Shown as running at once: the core is asked next, and its answer is
     // what keeps it that way.
     if (!this.routineRunning.includes(id)) this.routineRunning = [...this.routineRunning, id];
+    for (const told of this.routineStarted) told(id);
     try {
       await invoke("run_routine", { id });
       await this.loadRoutineRuns(id);
