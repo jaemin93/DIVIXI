@@ -333,6 +333,24 @@ fn prompt(instruction: &str, plan: Option<&str>) -> String {
     }
 }
 
+/// Why the conductor may not run this routine now (see
+/// `plan::run_refusal`), in the app's language; both when it follows the
+/// system's, so the conductor can pass on the one the human reads.
+pub fn refusal(app: &AppHandle, id: &str) -> Option<String> {
+    let state = app.state::<AppState>();
+    let r = state.store.routine(id).ok().flatten()?;
+    if r.plan.is_empty() {
+        return None;
+    }
+    let doc = crate::plan::doc(&state, &r.plan).ok()?;
+    let lang = state.store.get_meta(&format!("{}language", crate::SETTING_PREFIX)).ok().flatten().unwrap_or_default();
+    match lang.as_str() {
+        l if l.starts_with("ko") => crate::plan::run_refusal(&doc, true),
+        l if l.starts_with("en") => crate::plan::run_refusal(&doc, false),
+        _ => crate::plan::run_refusal(&doc, true).map(|ko| format!("{ko}\n{}", crate::plan::run_refusal(&doc, false).unwrap_or_default())),
+    }
+}
+
 /// The plan a run is given, if its routine has one to give. A plan that
 /// cannot be read is said in the log and the run goes on without it: the
 /// instruction alone is still the routine.

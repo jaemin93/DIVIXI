@@ -1113,6 +1113,36 @@ pub fn guidance(doc: &Doc) -> Option<Guidance> {
     })
 }
 
+/// Why a run started where no one can be asked (the conductor's
+/// `run_routine`) must not go: the routine has a plan on screen (steps on
+/// it) that a run would not get -- never saved, or changed since the last
+/// save. The words are for the conductor to pass on as they are. None when
+/// the run may go: no plan, or the working plan is the last saved one.
+pub fn run_refusal(doc: &Doc, ko: bool) -> Option<String> {
+    if doc.steps.is_empty() {
+        return None;
+    }
+    let same = doc.saved.last().is_some_and(|v| content(&v.steps) == content(&doc.steps));
+    if same {
+        return None;
+    }
+    let mut out = match (doc.saved.last(), ko) {
+        (None, true) => "계획이 저장되지 않았습니다. 되풀이 화면에서 [계획 저장]을 한 뒤 다시 실행하세요.".to_string(),
+        (None, false) => "The plan is not saved. Save it on the Routines page ([Save plan]), then run it again.".to_string(),
+        (Some(v), true) => format!("계획에 저장하지 않은 변경이 있습니다(마지막 저장본 v{}). 되풀이 화면에서 [계획 저장]을 한 뒤 다시 실행하세요.", v.n),
+        (Some(v), false) => format!("The plan has changes not saved (last saved: v{}). Save it on the Routines page ([Save plan]), then run it again.", v.n),
+    };
+    if !doc.changes.is_empty() {
+        out.push(' ');
+        out.push_str(&if ko {
+            format!("먼저 처리하지 않은 제안 {}건을 유지하거나 되돌려야 저장할 수 있습니다.", doc.changes.len())
+        } else {
+            format!("First keep or revert the {} suggestion(s) still waiting, or it cannot be saved.", doc.changes.len())
+        });
+    }
+    Some(out)
+}
+
 /// What a finished run's agent said of each step: the `steps` list of its
 /// report block, kept for the steps it was given and only in the shape
 /// asked for. None when there is no such list to keep.
@@ -1722,6 +1752,32 @@ mod tests {
         assert_eq!(d.saved[1].steps[0].title, "pull", "v2 untouched");
         let r = d.apply(ops(json!([{ "op": "save", "over": 7 }])), &Actor::Human);
         assert_eq!(r[0]["ok"], false);
+    }
+
+    #[test]
+    fn a_run_no_one_can_be_asked_about_is_refused_while_the_plan_is_not_saved() {
+        // No plan: runs.
+        assert_eq!(run_refusal(&Doc::default(), true), None);
+        // A plan never saved: refused, saying to save it.
+        let mut d = diamond();
+        let why = run_refusal(&d, true).unwrap();
+        assert!(why.contains("저장되지 않았습니다") && why.contains("[계획 저장]"), "{why}");
+        assert!(run_refusal(&d, false).unwrap().contains("not saved"));
+        // Saved: runs.
+        d.apply(ops(json!([{ "op": "save" }])), &Actor::Human);
+        assert_eq!(run_refusal(&d, true), None);
+        // A card moved is no change.
+        d.apply(ops(json!([{ "op": "move", "id": "s2", "x": 5, "y": 5 }])), &Actor::Human);
+        assert_eq!(run_refusal(&d, true), None);
+        // Changed since: refused, naming the last saved version.
+        d.apply(ops(json!([{ "op": "update_step", "id": "s2", "title": "dependencies" }])), &Actor::Human);
+        let why = run_refusal(&d, true).unwrap();
+        assert!(why.contains("v1") && why.contains("저장하지 않은 변경"), "{why}");
+        // Suggestions waiting: said too, since they hold the save back.
+        d.apply(ops(json!([{ "op": "add_step", "title": "x", "instruction": "y" }])), &agent());
+        let why = run_refusal(&d, true).unwrap();
+        assert!(why.contains("제안 1건"), "{why}");
+        assert!(run_refusal(&d, false).unwrap().contains("1 suggestion(s)"));
     }
 
     #[test]

@@ -911,7 +911,7 @@ The folder defaults to this track's and the agent to the one workers here use; s
         ),
         Tool::new(
             "run_routine",
-            "Run a saved routine now. Returns at once with the run id. It runs on its own agent in its own folder, on a session of its own that ends with the run — it is not a worker, and there is nothing of it to follow up with. What it found is NOT sent to you: the human is told on the bell and reads it on the Routines page. Say you started it and end your turn.",
+            "Run a saved routine now. Returns at once with the run id. It runs on its own agent in its own folder, on a session of its own that ends with the run — it is not a worker, and there is nothing of it to follow up with. What it found is NOT sent to you: the human is told on the bell and reads it on the Routines page. Say you started it and end your turn. A routine whose plan is not saved (or changed since it was) is refused: pass the refusal's words on to the human as they are, and do not retry.",
             json!({
                 "type": "object",
                 "properties": { "routine": { "type": "string", "description": "Routine id from list_routines." } },
@@ -921,6 +921,12 @@ The folder defaults to this track's and the agent to the one workers here use; s
                 let app = run_routine.clone();
                 async move {
                     let id = str_arg(&args, "routine")?;
+                    // No one is there to ask "save the plan first?", as the
+                    // Routines page asks: a plan on screen that the run would
+                    // not get is refused, in words to pass on.
+                    if let Some(why) = crate::routine::refusal(&app, &id) {
+                        return Err(why);
+                    }
                     crate::routine::run(app, &id).await
                 }
             },
