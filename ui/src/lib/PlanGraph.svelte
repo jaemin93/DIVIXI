@@ -88,7 +88,9 @@
         return;
       }
     }
-    if ((e.target as HTMLElement).closest("[data-step]")) return;
+    // A card is its own press; a button (the zoom's) keeps its click, which
+    // capturing the pointer for a pan would take from it.
+    if ((e.target as HTMLElement).closest("[data-step], button")) return;
     plans.pick("");
     panning = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
