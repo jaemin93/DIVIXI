@@ -40,14 +40,12 @@
   /** The routine these fields were filled from, so a reload does not stamp
    *  on what is being typed. */
   let filledFrom = $state("");
-  let armed = $state(false);
   let failed = $state("");
 
   $effect(() => {
     const key = making ? NEW_ROUTINE : (saved?.id ?? "");
     if (key === filledFrom) return;
     filledFrom = key;
-    armed = false;
     failed = "";
     if (making) {
       // A blank form still starts somewhere sensible: the agent the human
@@ -148,14 +146,6 @@
     return order.length ? resultGlyphs(order, resultsOf(run.steps)) : "";
   }
 
-  async function remove() {
-    if (!saved) return;
-    if (!armed) {
-      armed = true;
-      return;
-    }
-    await store.deleteRoutine(saved.id);
-  }
 
 </script>
 
@@ -177,9 +167,6 @@
       </div>
     {:else if saved}
       <div class="acts">
-        <button class="del" class:armed onclick={remove} onblur={() => (armed = false)}>
-          {armed ? t("routines.deleteArm") : t("routines.delete")}
-        </button>
         <button
           class="plan"
           class:on={planOn}
@@ -413,7 +400,6 @@
     opacity: 0.5;
   }
 
-  .del,
   .ghost,
   .save {
     height: 30px;
@@ -423,16 +409,11 @@
     color: var(--lab);
   }
 
-  .del:hover,
   .ghost:hover {
     color: var(--hi);
     border-color: var(--acc);
   }
 
-  .del.armed {
-    color: var(--deltx);
-    border-color: var(--deltx);
-  }
 
   .save:not(:disabled) {
     color: var(--hi);

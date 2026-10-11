@@ -10,6 +10,7 @@
   import Working from "./Working.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
+  import ArtifactMenu from "./ArtifactMenu.svelte";
 
   /**
    * Second column: every routine, newest activity first. A routine belongs
@@ -21,6 +22,22 @@
    * in the list beside it. Neither is the "real" one.
    */
   const now = Date.now();
+
+  /** The right-click menu: the one designs have (rename, tags, colour, delete), with no export. */
+  let menu = $state<{ id: string; x: number; y: number } | null>(null);
+  const menued = $derived(menu ? store.routines.find((r) => r.id === menu!.id) : undefined);
+
+  function openMenu(e: MouseEvent, id: string) {
+    e.preventDefault();
+    menu = { id, x: e.clientX, y: e.clientY };
+  }
+
+  /** Delete from the menu: "" when it is gone, else why not (the menu says it). */
+  async function remove(id: string): Promise<string> {
+    store.lastError = "";
+    await store.deleteRoutine(id);
+    return store.routines.some((r) => r.id === id) ? store.lastError || "?" : "";
+  }
 
   function last(r: { updated_at: number; runs: number }): string {
     if (!r.runs) return t("routines.never");
@@ -51,7 +68,14 @@
     {#if store.routines.length}
       {#each store.routines as r (r.id)}
         {@const live = store.routineLive(r.id)}
-        <div class="row" class:on={store.routine === r.id}>
+        <div
+          class="row"
+          class:on={store.routine === r.id}
+          class:menued={menu?.id === r.id}
+          style="border-left-color: {r.color || 'transparent'}"
+          oncontextmenu={(e) => openMenu(e, r.id)}
+          role="presentation"
+        >
           <button
             class="pick"
             onclick={() => {
@@ -64,6 +88,13 @@
               {#if live}<Working size={11} />{:else}<span class="dot"></span>{/if}
             </span>
             <span class="text">
+              {#if r.tags?.length}
+                <span class="taglist" title={r.tags.join(", ")}>
+                  {#each r.tags as tag (tag)}
+                    <span class="mono chip" style="color: {store.tagColor(tag)}">{tag}</span>
+                  {/each}
+                </span>
+              {/if}
               <span class="name">{r.name}</span>
               <span class="sub">{live ? t("routines.running") : last(r)}</span>
             </span>
@@ -81,6 +112,24 @@
     {/if}
   </div>
 </aside>
+
+{#if menu && menued}
+  {@const m = menued}
+  <ArtifactMenu
+    x={menu.x}
+    y={menu.y}
+    name={m.name}
+    color={m.color ?? ""}
+    busy={store.routineLive(m.id)}
+    busyNote={t("routines.busyNote")}
+    deleteNote={t("routines.deleteNote")}
+    onclose={() => (menu = null)}
+    onrename={async (name) => void (await store.saveRoutine(m.id, { name }))}
+    ontags={() => (store.tagDialog = m.id)}
+    oncolor={async (color) => void (await store.saveRoutine(m.id, { color }))}
+    ondelete={() => remove(m.id)}
+  />
+{/if}
 
 <style>
   aside {
@@ -114,14 +163,36 @@
     padding: 4px 0 12px;
   }
 
+  /* The bar on the left is the routine's colour, as a track's. */
   .row {
     display: flex;
     align-items: stretch;
+    border-left: 3px solid transparent;
   }
 
   .row.on,
+  .row.menued,
   .row:hover {
     background: var(--sel);
+  }
+
+  /* Tags above the name, as on a track's row: they give way first. */
+  .taglist {
+    font-size: 9px;
+    line-height: 1.3;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .chip {
+    font-size: 9px;
+    letter-spacing: 0.08em;
+  }
+
+  .chip + .chip {
+    margin-left: 8px;
   }
 
   .pick {

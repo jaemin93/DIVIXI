@@ -394,6 +394,9 @@ export type Routine = {
   last_run: string | null;
   /** Its plan: the id of an artifact of kind `plan`, or empty for none. */
   plan?: string;
+  /** `#rrggbb` for the bar beside it in its list, or empty. */
+  color?: string;
+  tags?: string[];
 };
 
 /** Where one run of a routine stands. Its own words: a worker run's `done`
@@ -2071,6 +2074,9 @@ class Store {
     for (const d of this.artifacts) {
       if (d.tags.includes(name)) await this.updateArtifact(d.id, { tags: d.tags.filter((x) => x !== name) });
     }
+    for (const r of this.routines) {
+      if (r.tags?.includes(name)) await this.saveRoutine(r.id, { tags: r.tags.filter((x) => x !== name) });
+    }
     for (const holder of this.tagHolders) await holder(name);
   }
   // ----- errors the human should see, wherever they happened -----
@@ -2381,7 +2387,7 @@ class Store {
 
   async saveRoutine(
     id: string,
-    patch: { name?: string; instruction?: string; cwd?: string; agent?: string; config?: OptionConfig },
+    patch: { name?: string; instruction?: string; cwd?: string; agent?: string; config?: OptionConfig; color?: string; tags?: string[] },
   ) {
     try {
       await invoke<Routine>("update_routine", { id, patch });

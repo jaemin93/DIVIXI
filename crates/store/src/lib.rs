@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
 /// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 22;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -257,6 +257,10 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE routines ADD COLUMN plan TEXT NOT NULL DEFAULT '';
     ALTER TABLE routine_runs ADD COLUMN plan TEXT NOT NULL DEFAULT '';
     ALTER TABLE routine_runs ADD COLUMN steps TEXT NOT NULL DEFAULT '';",
+    // 21 -> 22: a routine's colour and tags, as a track's and a design's: the
+    // bar beside it in its list and the tags shown above its name.
+    "ALTER TABLE routines ADD COLUMN color TEXT NOT NULL DEFAULT '';
+    ALTER TABLE routines ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
 ];
 
 const SCHEMA: &str = r#"
@@ -357,7 +361,10 @@ CREATE TABLE IF NOT EXISTS routines (
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL,
     -- Its plan: the id of an artifact of kind 'plan', or empty for none.
-    plan        TEXT    NOT NULL DEFAULT ''
+    plan        TEXT    NOT NULL DEFAULT '',
+    -- `#rrggbb` for the bar beside it in its list, or empty.
+    color       TEXT    NOT NULL DEFAULT '',
+    tags        TEXT    NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS routines_by_time ON routines(updated_at);
 
@@ -619,6 +626,11 @@ pub struct Routine {
     /// Set by opening the plan, never by a patch.
     #[serde(default)]
     pub plan: String,
+    /// `#rrggbb` for the bar beside it in its list, or empty.
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// What a routine change may touch; `None` keeps a field.
@@ -629,6 +641,10 @@ pub struct RoutinePatch {
     pub cwd: Option<String>,
     pub agent: Option<String>,
     pub config: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 fn row_to_routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<Routine> {
@@ -644,6 +660,8 @@ fn row_to_routine(r: &rusqlite::Row<'_>) -> rusqlite::Result<Routine> {
         runs: r.get(8)?,
         last_run: r.get(9)?,
         plan: r.get(10)?,
+        color: r.get(11)?,
+        tags: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
     })
 }
 
@@ -654,7 +672,7 @@ const ROUTINE_SELECT: &str = "SELECT r.id, r.name, r.instruction, r.cwd, r.agent
                                      (SELECT COUNT(*) FROM routine_runs x WHERE x.routine = r.id),
                                      (SELECT x.id FROM routine_runs x WHERE x.routine = r.id
                                       ORDER BY x.started_at DESC LIMIT 1),
-                                     r.plan
+                                     r.plan, r.color, r.tags
                               FROM routines r";
 
 /// Where one run of a routine stands.
@@ -1206,11 +1224,13 @@ impl Store {
     /// Change a routine's fields; `None` in the patch keeps a field.
     pub fn update_routine(&self, id: &str, patch: &RoutinePatch) -> anyhow::Result<Routine> {
         let config = patch.config.as_ref().map(serde_json::to_string).transpose()?;
+        let tags = patch.tags.as_ref().map(serde_json::to_string).transpose()?;
         {
             let conn = self.conn.lock();
             let changed = conn.execute(
                 "UPDATE routines SET name = COALESCE(?2, name), instruction = COALESCE(?3, instruction),
                  cwd = COALESCE(?4, cwd), agent = COALESCE(?5, agent), config = COALESCE(?6, config),
+                 color = COALESCE(?8, color), tags = COALESCE(?9, tags),
                  updated_at = ?7
                  WHERE id = ?1",
                 params![
@@ -1221,6 +1241,8 @@ impl Store {
                     patch.agent.as_deref().map(str::trim).filter(|v| !v.is_empty()),
                     config,
                     now_ms(),
+                    patch.color.as_deref().map(str::trim),
+                    tags,
                 ],
             )?;
             if changed == 0 {
@@ -2389,6 +2411,7 @@ mod tests {
                 cwd: Some(r"\\?\UNC\srv\share\ops".into()),
                 agent: Some("claude_code".into()),
                 config: None,
+                ..RoutinePatch::default()
             })
             .unwrap();
         assert_eq!(ro.cwd, r"\\srv\share\ops");
@@ -2425,6 +2448,7 @@ mod tests {
             cwd: Some("C:/ops".into()),
             agent: Some("claude_code".into()),
             config: None,
+            ..RoutinePatch::default()
         };
         let a = store.create_routine(&made()).unwrap();
         assert_eq!((a.id.as_str(), a.name.as_str()), ("ro001", "Dependency check"), "ids run on, names are trimmed");
@@ -2490,6 +2514,7 @@ mod tests {
                 cwd: Some("/w".into()),
                 agent: Some("codex".into()),
                 config: None,
+                ..RoutinePatch::default()
             })
             .unwrap();
         assert_eq!(r.plan, "", "a routine starts without a plan");
@@ -2503,6 +2528,16 @@ mod tests {
         assert_eq!(edited.plan, plan.id);
         assert!(store.set_routine_plan("ro999", &plan.id).is_err());
         assert_eq!(store.set_routine_plan(&r.id, "").unwrap().plan, "", "and it can be let go");
+
+        // Its colour and tags, as a track's.
+        let looked = store
+            .update_routine(&r.id, &RoutinePatch { color: Some("#46c46a".into()), tags: Some(vec!["ops".into(), "weekly".into()]), ..RoutinePatch::default() })
+            .unwrap();
+        assert_eq!((looked.color.as_str(), looked.tags.clone()), ("#46c46a", vec!["ops".to_string(), "weekly".to_string()]));
+        let kept = store.update_routine(&r.id, &RoutinePatch { name: Some("deps 3".into()), ..RoutinePatch::default() }).unwrap();
+        assert_eq!((kept.color, kept.tags.len()), ("#46c46a".to_string(), 2), "a patch without them keeps them");
+        let cleared = store.update_routine(&r.id, &RoutinePatch { color: Some(String::new()), tags: Some(vec![]), ..RoutinePatch::default() }).unwrap();
+        assert_eq!((cleared.color.as_str(), cleared.tags.len()), ("", 0));
 
         let run = store.begin_routine_run(&r.id, "codex", "/w", "check").unwrap();
         let read = store.routine_run(&run).unwrap().unwrap();
@@ -2537,6 +2572,7 @@ mod tests {
                 // is the case that broke, and nothing about it may match.
                 agent: Some("copilot".into()),
                 config: None,
+                ..RoutinePatch::default()
             })
             .unwrap();
         let rr = store.begin_routine_run(&routine.id, "copilot", "C:/repo", "look at the deps").unwrap();

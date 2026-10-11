@@ -13,8 +13,8 @@ const things = {
 };
 
 test("a tag is counted on every kind of thing that carries it", () => {
-  assert.deepEqual(tagUses("docs", things), { tracks: 2, designs: 1, documents: 1, libraries: 0, total: 4 });
-  assert.deepEqual(tagUses("q4", things), { tracks: 1, designs: 0, documents: 1, libraries: 1, total: 3 });
+  assert.deepEqual(tagUses("docs", things), { tracks: 2, designs: 1, documents: 1, libraries: 0, routines: 0, total: 4 });
+  assert.deepEqual(tagUses("q4", things), { tracks: 1, designs: 0, documents: 1, libraries: 1, routines: 0, total: 3 });
 });
 
 test("the knowledge agent's conversation is not something a person tags", () => {
@@ -28,5 +28,10 @@ test("a routine's plan is not counted as a design or a document", () => {
 });
 
 test("a tag nothing carries counts nothing", () => {
-  assert.deepEqual(tagUses("none", things), { tracks: 0, designs: 0, documents: 0, libraries: 0, total: 0 });
+  assert.deepEqual(tagUses("none", things), { tracks: 0, designs: 0, documents: 0, libraries: 0, routines: 0, total: 0 });
+});
+
+test("routines carrying a tag are counted as routines", () => {
+  const uses = tagUses("ops", { tracks: [], artifacts: [], libraries: [], routines: [{ tags: ["ops"] }, { tags: [] }, {}] });
+  assert.deepEqual(uses, { tracks: 0, designs: 0, documents: 0, libraries: 0, routines: 1, total: 1 });
 });

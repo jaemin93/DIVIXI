@@ -866,6 +866,7 @@ The folder defaults to this track's and the agent to the one workers here use; s
                             cwd: Some(folder),
                             agent: Some(agent),
                             config: None,
+                            ..Default::default()
                         })
                         .map_err(|e| e.to_string())?;
                     let _ = crate::routine::notify(&app);

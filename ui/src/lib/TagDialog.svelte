@@ -14,7 +14,7 @@
   let draft = $state("");
   let input = $state<HTMLInputElement>();
 
-  /** A track (`tr…`), an artifact (`ar…`) or a knowledge library (`lib:<id>`): each carries a name and tags. */
+  /** A track (`tr…`), a routine (`ro…`), an artifact (`ar…`) or a knowledge library (`lib:<id>`): each carries a name and tags. */
   const track = $derived.by(() => {
     const t = store.tracks.find((x) => x.id === store.tagDialog);
     if (t) return { id: t.id, name: t.name, tags: t.tags };
@@ -23,6 +23,8 @@
       const l = kb.libraries.find((x) => x.id === lib);
       return l ? { id: store.tagDialog, name: kb.libraryName(l), tags: l.tags } : undefined;
     }
+    const r = store.routines.find((x) => x.id === store.tagDialog);
+    if (r) return { id: r.id, name: r.name, tags: r.tags ?? [] };
     const d = store.artifacts.find((x) => x.id === store.tagDialog);
     return d ? { id: d.id, name: d.title, tags: d.tags } : undefined;
   });
@@ -31,6 +33,7 @@
     const lib = libraryOfTagKey(id);
     if (lib !== null) await kb.updateLibrary(lib, { tags });
     else if (store.tracks.some((x) => x.id === id)) await store.updateTrack(id, { tags });
+    else if (store.routines.some((x) => x.id === id)) await store.saveRoutine(id, { tags });
     else await store.updateArtifact(id, { tags });
   }
   const pool = $derived(store.tagPool);
@@ -89,7 +92,7 @@
         {#each pool as tag (tag.name)}
           {@const on = track.tags.includes(tag.name)}
           <!-- Everything carrying it, of every kind; by kind on hover. -->
-          {@const uses = tagUses(tag.name, { tracks: store.tracks, artifacts: store.artifacts, libraries: kb.libraries })}
+          {@const uses = tagUses(tag.name, { tracks: store.tracks, artifacts: store.artifacts, libraries: kb.libraries, routines: store.routines })}
           <div class="row" class:on>
             <button class="pickrow" role="checkbox" aria-checked={on} onclick={() => toggle(tag.name)}>
               <span class="tdot" style="background: {tag.color}"></span>
