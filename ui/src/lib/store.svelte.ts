@@ -3130,11 +3130,11 @@ class Store {
   }
 
   /** Show a worker's session: the conductor's messages and the worker's replies. */
-  async openWorkerView(name: string) {
+  openWorkerView(name: string) {
     this.openWorker = name;
     this.view = "worker";
-    // Restored runs only carry their folded text; replay them for the full turn.
-    await Promise.all(this.trackRuns.filter((r) => r.session === name && !r.loaded).map((r) => this.hydrate(r)));
+    // Restored runs come back with their folded text; the worker view replays
+    // each turn as it is drawn, so a long session does not replay in one go.
   }
 
   /** The view settings were opened from, to go back to. */

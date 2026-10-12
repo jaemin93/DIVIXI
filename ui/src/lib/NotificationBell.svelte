@@ -6,6 +6,7 @@
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
   import { whenLabel } from "./time";
+  import { REVEAL_DECISION } from "./history";
 
   /**
    * The bell at the top right: what the human has not dealt with. A
@@ -64,6 +65,9 @@
       card.scrollIntoView({ block: "center", behavior: "smooth" });
       return;
     }
+    // Not drawn: the turn that asked is above the timeline's newest page, and
+    // the timeline reaches back to it on this notice.
+    document.dispatchEvent(new CustomEvent(REVEAL_DECISION, { detail: decision }));
     if (left > 0) setTimeout(() => reveal(decision, left - 1), 100);
   }
 

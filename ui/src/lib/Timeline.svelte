@@ -8,8 +8,9 @@
   import StepGroup from "./StepGroup.svelte";
   import { isActive, shape } from "./steps";
   import { t } from "./i18n.svelte";
-  import { untrack } from "svelte";
+  import { tick, untrack } from "svelte";
   import { FOLLOWING, followed, reached, resized, scrolled, type Stick } from "./scroll";
+  import { NEAR_TOP, NO_WINDOW, REVEAL_DECISION, hasEarlier, reach, startAt, widen, type PageWindow } from "./history";
 
   // ----- sticking to the bottom -----
   //
@@ -17,7 +18,8 @@
   // in scroll.ts. The rule is the one people expect of a conversation:
   // while the view is at the bottom it follows whatever arrives, and the
   // moment it is scrolled up it holds still. Nothing else in this file
-  // touches scrollTop.
+  // touches scrollTop, bar the one place that keeps the turn being read in
+  // place while an older page lands above it (loadEarlier, below).
   //
   // What moves the content is watched with a ResizeObserver rather than by
   // listing reactive dependencies: streamed text, a tool line, a decision
@@ -62,7 +64,62 @@
 
   function onScroll() {
     if (scroller) stick = scrolled(stick, scroller);
+    maybeEarlier();
   }
+
+  // ----- paging the older turns -----
+  //
+  // Only the newest page is drawn to begin with (history.ts). Reading back
+  // toward the top adds the next page above, and the view is moved down by
+  // exactly what landed there, so the turn being read stays under the eye.
+  // The height the observer last saw is set here as well, so the growth the
+  // page made is not taken for a turn that arrived below.
+
+  let win = $state<PageWindow>(NO_WINDOW);
+  let tall = 0;
+  let loadingEarlier = false;
+
+  // The browser's scroll anchoring would also move the view when a page lands
+  // above it, and a foot it moved would read as the human moving it. So while
+  // following, the browser keeps its hands off; reading back, anchoring keeps
+  // the place for whatever grows above (a folded card opening, say).
+  $effect(() => {
+    const box = scroller;
+    if (box) box.style.overflowAnchor = stick.stuck ? "none" : "";
+  });
+
+  async function loadEarlier() {
+    const box = scroller;
+    if (!box || loadingEarlier || !hasEarlier(win, store.chatKey, conductorRuns.length)) return;
+    loadingEarlier = true;
+    // This page is placed by hand, so the browser's anchoring must not place it too.
+    box.style.overflowAnchor = "none";
+    const before = box.scrollHeight;
+    win = widen(win, store.chatKey, conductorRuns.length);
+    await tick();
+    box.scrollTop += box.scrollHeight - before;
+    box.style.overflowAnchor = stick.stuck ? "none" : "";
+    if (content) tall = content.offsetHeight;
+    loadingEarlier = false;
+  }
+
+  /** Only a view the human has read back from pages on by itself; one still following the foot does not. */
+  function maybeEarlier() {
+    if (scroller && !stick.stuck && scroller.scrollTop < NEAR_TOP) void loadEarlier();
+  }
+
+  // A notice about a decision asks for its card: when the turn that asked is
+  // above the window, the window reaches back to it (the notice retries until
+  // the card is drawn).
+  $effect(() => {
+    const show = (e: Event) => {
+      const id = (e as CustomEvent<number>).detail;
+      const at = conductorRuns.findIndex((r) => decisionsByRun.byRun[r.id]?.some((d) => d.id === id));
+      win = reach(win, store.chatKey, conductorRuns.length, at);
+    };
+    document.addEventListener(REVEAL_DECISION, show);
+    return () => document.removeEventListener(REVEAL_DECISION, show);
+  });
 
   // The human reaching back is read from their own input, not inferred from
   // the scroll event it causes: a scroll event cannot say who moved the view,
@@ -77,6 +134,8 @@
     if (!box) return;
     const pull = () => {
       stick = reached(stick, box, true);
+      // Already at the top, a wheel moves nothing and fires no scroll event.
+      maybeEarlier();
     };
 
     const wheel = (e: WheelEvent) => {
@@ -116,7 +175,7 @@
     const inner = content;
     const box = scroller;
     if (!inner || !box) return;
-    let tall = inner.offsetHeight;
+    tall = inner.offsetHeight;
     const observer = new ResizeObserver(() => {
       const grew = inner.offsetHeight > tall;
       tall = inner.offsetHeight;
@@ -191,6 +250,9 @@
    *  by a run no longer here) go at the end. */
   /** The human and the conductor, or the human and an artifact's agent. */
   const conductorRuns = $derived(store.chatRuns);
+  /** The turns drawn: the newest page and whatever has been read back to. `first` counts those above. */
+  const first = $derived(startAt(win, store.chatKey, conductorRuns.length));
+  const shownRuns = $derived(conductorRuns.slice(first));
   /** The newest report turn of each worker: its card carries the unmerged changes. */
   const latestReport = $derived.by(() => {
     const out: Record<string, string> = {};
@@ -275,7 +337,10 @@
 
       <!-- The track is the human and the conductor. Worker work is the conductor's
            to relay; workers themselves are read in their own view. -->
-      {#each conductorRuns as run (run.id)}
+      {#if first > 0}
+        <button class="earlier mono" type="button" onclick={() => void loadEarlier()}>{t("timeline.earlier", { n: first })}</button>
+      {/if}
+      {#each shownRuns as run (run.id)}
         {#if run.prompt.startsWith(REPORT_PREFIX)}
           {@const head = run.prompt.split("\n")[0]}
           {@const workerRun = /\brun=(\S+)/.exec(head)?.[1] ?? ""}
@@ -509,6 +574,25 @@
   .jarrow {
     font-size: 12px;
     color: var(--acc);
+  }
+
+  /* Older turns not drawn yet: a line at the top that asks for the next page. */
+  .earlier {
+    display: block;
+    margin: 0 auto 18px;
+    padding: 4px 12px;
+    background: transparent;
+    border: 1px solid var(--lineq);
+    color: var(--lab);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .earlier:hover {
+    color: var(--hi);
+    border-color: var(--acc);
   }
 
   .empty {
