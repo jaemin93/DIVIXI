@@ -52,7 +52,10 @@ pub fn router(ctx: Ctx) -> Router {
         // instance it could update (an older release) from one it could not
         // (a build from a working copy). An instance older than this field
         // sends neither, which is itself the answer: it is too old to say.
-        .route("/api/health", get(|| async { axum::Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "build": env!("DIVIXI_BUILD"), "release": env!("DIVIXI_RELEASE") })) }))
+        // `clocked`: its event numbers start from the clock (events.rs), so
+        // an app may ask for one again across a restart; an older instance
+        // numbers from 1 and leaves it out.
+        .route("/api/health", get(|| async { axum::Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "build": env!("DIVIXI_BUILD"), "release": env!("DIVIXI_RELEASE"), "clocked": true })) }))
         // An attachment (up to 50 MB) comes as base64 in a command.
         .route("/api/invoke/{cmd}", post(invoke).layer(axum::extract::DefaultBodyLimit::max(72 * 1024 * 1024)))
         .route("/api/events", get(events))
@@ -431,7 +434,7 @@ async fn pump(mut socket: WebSocket, hub: Arc<super::events::Hub>, since: u64) {
     let mut ping = tokio::time::interval(std::time::Duration::from_secs(30));
     ping.tick().await;
     let mut live = hub.subscribe_live();
-    let (mut rx, catch) = hub.subscribe(since);
+    let (mut rx, catch, newest) = hub.subscribe(since);
     let mut last = since;
     match catch {
         CatchUp::Reset => {
@@ -448,10 +451,28 @@ async fn pump(mut socket: WebSocket, hub: Arc<super::events::Hub>, since: u64) {
             }
         }
     }
+    // The number the device is at, when nothing above has told it: a fresh
+    // device, or one just told to reload. Otherwise one that heard no event
+    // before its link dropped would come back asking for nothing, and what
+    // happened while it was away would never be sent.
+    if last != newest {
+        last = newest;
+        if socket.send(Message::Text(format!("{{\"seq\":{newest}}}").into())).await.is_err() {
+            return;
+        }
+    }
     loop {
         tokio::select! {
             got = rx.recv() => match got {
                 Ok(f) if f.seq > last => {
+                    // Frames come one number after another (Hub::push), and
+                    // the hub skips one when it starts keeping again: the
+                    // server went off and on under this socket, which is
+                    // left open, and what happened meanwhile was not kept.
+                    if f.seq != last + 1 {
+                        let _ = socket.send(Message::Text("{\"reset\":true}".into())).await;
+                        return;
+                    }
                     last = f.seq;
                     if socket.send(Message::Text(f.text.to_string().into())).await.is_err() {
                         return;

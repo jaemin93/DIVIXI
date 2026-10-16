@@ -242,7 +242,9 @@ export const instance = $state<{ error: string }>({ error: "" });
 export async function ready(): Promise<boolean> {
   if (!instanceId) return true;
   try {
-    await tauriInvoke("remote_host_connect", { id: instanceId });
+    // Fresh: this page is about to read everything, so a new connection's
+    // events start from now, not from where this webview's last page got to.
+    await tauriInvoke("remote_host_connect", { id: instanceId, fresh: true });
     return true;
   } catch (err) {
     instance.error = String(err);

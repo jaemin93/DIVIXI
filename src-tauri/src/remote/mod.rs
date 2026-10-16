@@ -25,7 +25,6 @@ pub mod server;
 pub mod tailscale;
 
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use orchestra_store::Store;
@@ -150,7 +149,7 @@ pub async fn start(app: &AppHandle) -> Result<u16, String> {
             tracing::warn!(%err, "remote instance server stopped");
         }
     });
-    st.remote.events.on.store(true, Ordering::Relaxed);
+    st.remote.events.start();
     *running = Some(Running { port: want, all, stop });
     tracing::info!(port = want, ip, "remote instance server on");
     Ok(want)
@@ -162,7 +161,7 @@ pub async fn stop(app: &AppHandle) {
         let _ = r.stop.send(());
         tracing::info!("remote instance server off");
     }
-    st.remote.events.on.store(false, Ordering::Relaxed);
+    st.remote.events.stop();
 }
 
 /// Whether this Divixi serves at all. Two features share the one server:

@@ -164,6 +164,11 @@ pub struct Tunnels {
     gates: parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Instances with a webview, least recently shown first.
     panes: parking_lot::Mutex<Vec<String>>,
+    /// The newest event number passed on to each instance's page, kept past
+    /// its connection: a page outlives its SSH tunnel (a laptop asleep, a
+    /// network that changed), and the next tunnel's events start after it,
+    /// so the page is sent what happened while it was away.
+    since: parking_lot::Mutex<HashMap<String, u64>>,
 }
 
 impl Tunnels {
@@ -320,6 +325,10 @@ struct Health {
     /// working copy -- and empty too from an instance older than this field.
     #[serde(default)]
     release: String,
+    /// Its event numbers start from the clock, so one held across its
+    /// restart is answered with a reset. False from an older instance.
+    #[serde(default)]
+    clocked: bool,
 }
 
 /// The instance's /api/health, if it answers.
@@ -448,11 +457,20 @@ async fn live(app: &AppHandle, id: &str) -> Option<Arc<Conn>> {
 /// the start half of [`remote_line`], since the token still has to be
 /// exchanged *through* the tunnel. Until then the interface offers a button
 /// ([`super::install::remote_server_start`]).
-async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
+///
+/// `fresh`: the instance's page has just loaded and holds nothing from
+/// before, so a new connection's events start from now rather than from
+/// where an earlier page got to -- sent again, those would be shown twice.
+async fn connect(app: &AppHandle, id: &str, fresh: bool) -> Result<Arc<Conn>, String> {
     if let Some(c) = live(app, id).await {
         return Ok(c);
     }
     let tunnels = &app.state::<AppState>().tunnels;
+    // Forgotten now, before waiting: another call of the same page (its
+    // header asks for metrics as it loads) may be the one that connects.
+    if fresh {
+        tunnels.since.lock().remove(id);
+    }
     let gate = tunnels.gate(id);
     let _one = gate.lock().await;
     // Another call may have connected while this one waited.
@@ -514,7 +532,8 @@ async fn connect(app: &AppHandle, id: &str) -> Result<Arc<Conn>, String> {
         build: said.build,
         release: said.release,
     });
-    let pump = tauri::async_runtime::spawn(pump_events(app.clone(), conn.clone()));
+    let since = tunnels.since.lock().get(id).copied().unwrap_or(0);
+    let pump = tauri::async_runtime::spawn(pump_events(app.clone(), conn.clone(), since));
     *conn.events.lock() = Some(pump);
     tunnels.open.lock().await.insert(id.to_string(), conn.clone());
     Ok(conn)
@@ -555,15 +574,41 @@ async fn call(app: &AppHandle, conn: &Conn, cmd: &str, args: &Value) -> Result<V
 const PING: Duration = Duration::from_secs(10);
 /// How long the socket may stay silent (a pong is due within a ping or two).
 const SILENCE: Duration = Duration::from_secs(25);
+/// How long /api/health may take before a socket is opened again: the
+/// client's own limit is on connecting only, and a pooled connection to a
+/// machine that vanished can wait minutes.
+const ASK: Duration = Duration::from_secs(10);
 
 /// The instance's events, re-sent to the page as `instance-event`
-/// (`{id, frame}`), picking up where it left off after a drop.
-async fn pump_events(app: AppHandle, conn: Arc<Conn>) {
+/// (`{id, frame}`), from after `since` and picking up where it left off
+/// after a drop.
+async fn pump_events(app: AppHandle, conn: Arc<Conn>, mut since: u64) {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
-    let mut since = 0u64;
     let mut backoff = Duration::from_secs(1);
+    // The number came with this connection, from an earlier one.
+    let mut carried = since > 0;
     loop {
+        // Which server answers decides whether the number is asked for again
+        // ([`ask_again`]): an older one would hold back every event below a
+        // number it did not give, until it numbered past it -- for one from
+        // a clocked server it replaced under this tunnel, for ever. No answer
+        // in time, and which server is there is not known: the number is
+        // kept, and this try skipped, as a socket would most likely fail too.
+        if since > 0 {
+            match tokio::time::timeout(ASK, health(&conn.http, &conn.base)).await {
+                Ok(Some(h)) if !ask_again(since, carried, h.clocked) => since = 0,
+                Ok(Some(_)) => {}
+                _ => {
+                    if !conn.alive() {
+                        return;
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    continue;
+                }
+            }
+        }
         let url = format!("{}/api/events?since={since}", conn.base.replacen("http://", "ws://", 1));
         let Ok(mut req) = url.into_client_request() else { return };
         let access = conn.tokens.lock().access.clone();
@@ -590,8 +635,18 @@ async fn pump_events(app: AppHandle, conn: Arc<Conn>) {
                             heard = tokio::time::Instant::now();
                             let Message::Text(text) = msg else { continue };
                             let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };
+                            // Told to reload: the page starts over from what
+                            // it reads, so nothing before now is to be sent
+                            // again. A server that falls behind says so and
+                            // closes, with no number after it.
+                            if frame.get("reset").and_then(Value::as_bool) == Some(true) {
+                                since = 0;
+                                app.state::<AppState>().tunnels.since.lock().remove(&conn.host.id);
+                            }
                             if let Some(seq) = frame.get("seq").and_then(Value::as_u64) {
                                 since = seq;
+                                carried = false;
+                                app.state::<AppState>().tunnels.since.lock().insert(conn.host.id.clone(), seq);
                             }
                             let _ = app.emit("instance-event", json!({ "id": conn.host.id, "frame": frame }));
                         }
@@ -613,6 +668,14 @@ async fn pump_events(app: AppHandle, conn: Arc<Conn>) {
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(30));
     }
+}
+
+/// Whether the number held is asked of the server answering now: any, of a
+/// server numbering from the clock; of an older one, only a number it gave
+/// this connection (`carried`: from an earlier one), which is below
+/// [`super::events::CLOCKED`].
+fn ask_again(since: u64, carried: bool, clocked: bool) -> bool {
+    clocked || (!carried && since < super::events::CLOCKED)
 }
 
 /// `/@<id>/<rest>` on the preview and board schemes: an instance's file.
@@ -660,6 +723,8 @@ async fn disconnect(app: &AppHandle, id: &str) {
     if let Some(c) = conn {
         c.close(app).await;
     }
+    // Its page has closed with it.
+    app.state::<AppState>().tunnels.since.lock().remove(id);
 }
 
 // ----- a webview per instance shown -----
@@ -807,10 +872,11 @@ pub async fn remote_host_delete(app: AppHandle, id: String) -> Result<Vec<HostVi
     Ok(remote_hosts(app).await)
 }
 
-/// Connect to the instance (or keep the open connection).
+/// Connect to the instance (or keep the open connection). `fresh`: asked
+/// by the instance's own page as it loads (see [`connect`]).
 #[tauri::command]
-pub async fn remote_host_connect(app: AppHandle, id: String) -> Result<Vec<HostView>, String> {
-    connect(&app, &id).await?;
+pub async fn remote_host_connect(app: AppHandle, id: String, fresh: Option<bool>) -> Result<Vec<HostView>, String> {
+    connect(&app, &id, fresh.unwrap_or(false)).await?;
     Ok(remote_hosts(app).await)
 }
 
@@ -827,7 +893,7 @@ pub async fn instance_invoke(app: AppHandle, id: String, cmd: String, args: Valu
     if cmd.is_empty() || !cmd.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err("not a command name".into());
     }
-    let conn = connect(&app, &id).await?;
+    let conn = connect(&app, &id, false).await?;
     let out = call(&app, &conn, &cmd, &args).await?;
     // Shells opened there are ours to close when we go.
     match cmd.as_str() {
@@ -845,7 +911,7 @@ pub async fn instance_invoke(app: AppHandle, id: String, cmd: String, args: Valu
 #[tauri::command]
 pub async fn instance_save_as(app: AppHandle, id: String, track: String, path: String) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
-    let conn = connect(&app, &id).await?;
+    let conn = connect(&app, &id, false).await?;
     let enc = |s: &str| s.split('/').map(|p| p.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>()).collect::<Vec<_>>().join("/");
     let url = format!("{}/raw/{}/{}", conn.base, enc(&track), enc(&path));
     let mut renewed = false;
@@ -884,7 +950,7 @@ pub async fn instance_save_as(app: AppHandle, id: String, track: String, path: S
 #[tauri::command]
 pub async fn instance_upload(app: AppHandle, id: String, paths: Vec<String>) -> Result<Vec<String>, String> {
     use base64::Engine;
-    let conn = connect(&app, &id).await?;
+    let conn = connect(&app, &id, false).await?;
     let mut out = Vec::with_capacity(paths.len());
     for p in paths {
         let path = std::path::Path::new(&p);
@@ -927,6 +993,31 @@ pub fn close_all(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a server that says its numbers come from the clock is asked for
+    /// a number again (pump_events).
+    #[test]
+    fn an_older_server_is_not_clocked() {
+        let old: Health = serde_json::from_str(r#"{"ok":true,"version":"0.1.0","build":"abc","release":"v2026-10-06"}"#).unwrap();
+        assert!(!old.clocked);
+        let older: Health = serde_json::from_str(r#"{"ok":true}"#).unwrap();
+        assert!(!older.clocked);
+        let new: Health = serde_json::from_str(r#"{"ok":true,"build":"abc","clocked":true}"#).unwrap();
+        assert!(new.clocked);
+    }
+
+    #[test]
+    fn which_numbers_are_asked_for_again() {
+        let clock = crate::remote::events::CLOCKED + 5;
+        // A server numbering from the clock: whatever is held.
+        assert!(ask_again(clock, true, true), "carried from an earlier connection");
+        assert!(ask_again(clock, false, true));
+        assert!(ask_again(42, true, true), "from an older server it replaced: it says reset");
+        // An older server, numbering from 1.
+        assert!(ask_again(42, false, false), "its own number, after a drop: as before");
+        assert!(!ask_again(42, true, false), "from an earlier connection: it may have restarted since");
+        assert!(!ask_again(clock, false, false), "from a clocked server it has replaced");
+    }
 
     #[test]
     fn ssh_targets_and_paths_are_checked() {
