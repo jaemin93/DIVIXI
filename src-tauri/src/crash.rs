@@ -223,14 +223,21 @@ mod tests {
     ///
     /// The hook is process-wide, so the one that was there is put back
     /// before this test ends — a later test that fails has to keep printing
-    /// its failure the way it always did.
+    /// its failure the way it always did. Once installed, it is narrowed
+    /// to this thread before this one panics: a test failing on another
+    /// thread could otherwise be written here after it, and read back
+    /// below instead.
     #[test]
     fn the_hook_writes_the_panic_it_saw() {
         let logs = temp();
-        let standing = std::panic::take_hook();
+        let standing = std::sync::Arc::new(std::panic::take_hook());
         install(&logs);
+        let hook = std::panic::take_hook();
+        let (me, others) = (std::thread::current().id(), standing.clone());
+        std::panic::set_hook(Box::new(move |info| if std::thread::current().id() == me { hook(info) } else { others(info) }));
         let ours = std::panic::catch_unwind(|| panic!("a panic for the test, with ghp_0123456789abcdefghijABCDEFGHIJ0123 in it"));
-        std::panic::set_hook(standing);
+        drop(std::panic::take_hook());
+        std::panic::set_hook(std::sync::Arc::try_unwrap(standing).ok().expect("the only one left"));
         assert!(ours.is_err(), "the panic happened");
 
         let text = std::fs::read_to_string(logs.join(CURRENT)).expect("the hook made the file");

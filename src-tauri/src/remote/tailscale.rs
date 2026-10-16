@@ -1313,13 +1313,18 @@ mod tests {
         assert_eq!(combine(&[]), None);
     }
 
+    /// Nothing first, on a port that never had a listener: a listener
+    /// dropped just before the probe will not do, as on macOS a connection
+    /// made in that moment can complete, then be reset.
     #[tokio::test]
     async fn the_probe_tells_a_listener_from_nothing() {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = l.local_addr().unwrap().port();
-        assert_eq!(listening(port).await, Some(true));
-        drop(l);
+        let unused = tokio::net::TcpSocket::new_v4().unwrap();
+        unused.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = unused.local_addr().unwrap().port();
+        drop(unused);
         assert_eq!(listening(port).await, Some(false));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        assert_eq!(listening(l.local_addr().unwrap().port()).await, Some(true));
     }
 
     /// Against this machine's real daemon, read only. Ignored by default: CI
