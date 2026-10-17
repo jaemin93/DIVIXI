@@ -213,6 +213,10 @@ pub struct AgentSession {
     /// Permission questions waiting for an answer.
     pending: Pending,
     task: tokio::task::JoinHandle<()>,
+    /// The agent process, for the record: what the app keeps so that, when
+    /// it comes back from a crash, it can tell whether the agent is still
+    /// there.
+    pid: Option<u32>,
 }
 
 /// Keep the newest command list out of a batch of events.
@@ -232,6 +236,7 @@ impl AgentSession {
     /// start (auth, bad adapter) is reported here, not on the first prompt.
     pub async fn open(agent: &AgentSpec, opts: SessionOptions) -> anyhow::Result<Self> {
         let (process, transport) = process::spawn(agent)?;
+        let pid = process.pid();
         let (turn_tx, mut turn_rx) = mpsc::channel::<Turn>(1);
         let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel::<()>();
         let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<Ready>>();
@@ -432,6 +437,7 @@ impl AgentSession {
                 commands,
                 pending,
                 task,
+                pid,
             }),
             Ok(Err(err)) => {
                 task.abort();
@@ -452,6 +458,11 @@ impl AgentSession {
     /// Whether this session was brought back from an earlier one.
     pub fn resumed(&self) -> bool {
         self.resumed
+    }
+
+    /// The id of the agent process this session runs, when the OS gave one.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
     }
 
     /// Session options the agent would not take when this session opened.

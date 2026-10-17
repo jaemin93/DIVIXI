@@ -8,7 +8,7 @@ import { ROUTINE_TAGS_KEY } from "./routineFilter";
 import { nextRunsLimit, RUNS_PAGE } from "./planGraph";
 import { libraryPick } from "./libraries";
 import { download, tooLarge } from "./designFile";
-import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen } from "./notify.svelte";
+import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen, ensureDecisionNotice, keepServerNotices, notifyServer, resolveServerNotice } from "./notify.svelte";
 import { AUTO_KEY, autoFrom, autoTo } from "./updateSchedule";
 import {
   dropQueued,
@@ -67,7 +67,13 @@ export type AgentEvent =
       options: { id: string; name: string; kind: string }[];
     }
   | { kind: "finished"; stop_reason: string }
-  | { kind: "failed"; error: string };
+  | { kind: "failed"; error: string }
+  // The app's doing, not the agent's: a reboot or the app closing under
+  // the turn, the app giving up on a turn that stopped answering, and the
+  // app finding the agent still alive after it lost the turn.
+  | { kind: "interrupted"; why: string }
+  | { kind: "timed_out"; why: string }
+  | { kind: "detached"; why: string };
 
 /** Mirrors `orchestra_core::SlashCommand`: one `/name` the agent offers. */
 export type SlashCommand = { name: string; description: string; hint: string | null };
@@ -306,7 +312,40 @@ export type Segment = { kind: "text"; text: string } | { kind: "thought"; text: 
 export type TranscriptLine = { ms: number; label: string; text: string; tone: Tone };
 export type Tone = "in" | "out" | "ok" | "warn" | "dim";
 
-export type RunStatus = "connecting" | "running" | "done" | "failed";
+/**
+ * Mirrors `orchestra_core::RunStatus`. `interrupted` (the app or the
+ * machine went down under the turn) and `timed_out` (the app gave up on it)
+ * are the app's doing and can be started again with the worker's memory;
+ * `detached` is a run whose agent went on alone after the app lost it, and
+ * ends as interrupted once that process is gone.
+ */
+export type RunStatus = "connecting" | "running" | "done" | "failed" | "interrupted" | "timed_out" | "detached";
+
+/** The endings that are the app's rather than the agent's. */
+export const CUT_SHORT: RunStatus[] = ["interrupted", "timed_out"];
+
+/** Mirrors `orchestra_store::Notice`: something the human has to be told, kept until read. */
+export type ServerNotice = {
+  id: number;
+  track: string;
+  kind: string;
+  title: string;
+  body: string;
+  data: unknown;
+  created_at: number;
+  read_at: number | null;
+};
+
+/** A schedule or a watched job as the core describes it (`schedule::view`, `jobs::view`). */
+export type Watched = {
+  id: number;
+  track: string;
+  status: string;
+  line: string;
+  next_at?: number | null;
+  last_line?: string;
+  note?: string;
+};
 
 /** Context accounting from the agent's `usage` updates. */
 export type Usage = { used: number; size: number; cost?: number; currency?: string };
@@ -1932,6 +1971,90 @@ class Store {
     return this.chatArtifact ? [] : this.parkedItems.filter((p) => p.track === this.track);
   }
 
+  /**
+   * The current track's schedules and watched jobs, as the core describes
+   * them: what will wake the conductor, shown beside what waits for it.
+   * Read from the core on the track opening and on the `schedules` and
+   * `jobs` events; the list is the record's, never counted from events.
+   */
+  schedules = $state<Watched[]>([]);
+  jobs = $state<Watched[]>([]);
+
+  get chatSchedules(): Watched[] {
+    return this.chatArtifact ? [] : this.schedules.filter((s) => s.track === this.track && s.status === "active");
+  }
+
+  get chatJobs(): Watched[] {
+    return this.chatArtifact ? [] : this.jobs.filter((j) => j.track === this.track && (j.status === "running" || j.status === "stalled"));
+  }
+
+  async loadWatched(track = this.track) {
+    if (!track) return;
+    try {
+      const [schedules, jobs] = await Promise.all([invoke<Watched[]>("list_schedules", { track }), invoke<Watched[]>("list_jobs", { track })]);
+      this.schedules = [...this.schedules.filter((s) => s.track !== track), ...schedules];
+      this.jobs = [...this.jobs.filter((j) => j.track !== track), ...jobs];
+    } catch (err) {
+      tracing(err);
+    }
+  }
+
+  async cancelSchedule(id: number) {
+    try {
+      await invoke("schedule_cancel", { id });
+      await this.loadWatched();
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  async unwatchJob(id: number) {
+    try {
+      await invoke("job_unwatch", { id });
+      await this.loadWatched();
+    } catch (err) {
+      this.lastError = String(err);
+    }
+  }
+
+  /**
+   * Start a worker turn again that the app or the machine cut short, with
+   * the worker's memory. The core refuses what must not be started again
+   * (a run whose agent is still alive, one already started again) and
+   * says why.
+   */
+  async resumeRun(track: string, run: string): Promise<boolean> {
+    try {
+      await invoke("run_resume", { track, run });
+      return true;
+    } catch (err) {
+      this.lastError = String(err);
+      return false;
+    }
+  }
+
+  /**
+   * Notices the core keeps for the human (a run cut short, a job that
+   * died, a quiet track): read when a window opens, so what happened while
+   * it was away is on the bell, and whenever one arrives or is read.
+   */
+  async loadNotices() {
+    try {
+      const notices = await invoke<ServerNotice[]>("list_notices");
+      keepServerNotices(notices);
+    } catch (err) {
+      tracing(err);
+    }
+  }
+
+  takeNotice(n: ServerNotice) {
+    if (n.read_at) resolveServerNotice(n.id);
+    else {
+      const track = this.tracks.find((x) => x.id === n.track)?.name ?? "";
+      notifyServer(n, track);
+    }
+  }
+
   /** A worker's live session, if it has one. */
   workerSession(track: string, name: string): WorkerState | undefined {
     return this.workerSessions[track]?.find((w) => w.name === name);
@@ -2347,6 +2470,9 @@ class Store {
   }
 
   async openRoutine(id: string) {
+    // Opened from a notice before the routines page was ever shown: the
+    // list is read first, so the routine has something to show.
+    if (!this.routines.some((r) => r.id === id)) await this.loadRoutines();
     if (this.routine !== id) this.routineRunsLimit = RUNS_PAGE;
     this.routine = id;
     this.view = "routines";
@@ -2935,6 +3061,7 @@ class Store {
       if (this.panelOpen) void this.refreshWorkspace();
       void this.refreshConductor();
       void this.refreshWorkerSessions();
+      void this.loadWatched(id);
     }
     if (this.readyAgents.some((a) => a.kind === track.agent)) this.agent = track.agent as AgentId;
     if (!this.keeps("track")) return;
@@ -3374,9 +3501,17 @@ class Store {
         this.decisions = await invoke<Decision[]>("list_decisions", { track: null });
         // Cards answered while this webview was away leave no notice behind.
         keepOnlyOpen(this.decisions.filter((d) => d.status === "open").map((d) => d.id));
+        // And every card still open has one, even when it was asked in a
+        // session this window never saw: a question from last week that
+        // nobody answered must not be found only by scrolling back to it.
+        for (const d of this.decisions.filter((x) => x.status === "open")) {
+          const track = this.tracks.find((x) => x.id === d.track)?.name ?? "";
+          ensureDecisionNotice(d.id, t(d.permission ? "notify.permission" : "notify.decision", { track }), d.question, d.track, d.created_at);
+        }
       } catch (err) {
         this.lastError = String(err);
       }
+      void this.loadNotices();
       try {
         const [term, termHeight, artifactChat, designList, designListWidth, settingsNavWidth, routineList, routineListWidth, designChat, kbList, kbListWidth, kbLibrary, designTags, kbTags, routineTags] = await Promise.all([
           setting("terminal"),
@@ -4073,14 +4208,18 @@ class Store {
       void this.refreshRun(env.run);
     }
     if (env.event.kind === "commands" && env.session === "conductor") this.rememberCommands(env.track, env.event.commands);
-    if (env.session === ARTIFACT_SESSION && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
+    // A turn ends four ways (the agent finished, the agent failed, the app
+    // gave up on it, the app lost it); every one is the end of a turn here.
+    const over = env.event.kind === "finished" || env.event.kind === "failed" || env.event.kind === "timed_out" || env.event.kind === "interrupted";
+    const moved = env.event.kind === "started" || over;
+    if (env.session === ARTIFACT_SESSION && moved) {
       void this.refreshArtifactSession();
     }
-    if (env.session === "conductor" && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
+    if (env.session === "conductor" && moved) {
       void this.refreshConductor();
     }
     // A worker began or ended a turn: the list's dots and its menu follow.
-    if (env.session !== "conductor" && env.session !== ARTIFACT_SESSION && (env.event.kind === "started" || env.event.kind === "finished" || env.event.kind === "failed")) {
+    if (env.session !== "conductor" && env.session !== ARTIFACT_SESSION && moved) {
       void this.refreshWorkerSessions();
     }
     fold(run, env.at_ms, env.event);
@@ -4088,12 +4227,12 @@ class Store {
     // bell is only for decision cards, and the conversation shows both
     // where the human is already looking.
     // A finished run may have written files: the open panel catches up.
-    if (this.panelOpen && env.track === this.track && (env.event.kind === "finished" || env.event.kind === "failed")) {
+    if (this.panelOpen && env.track === this.track && over) {
       void this.refreshWorkspace();
     }
     // The turn is over (answered, failed, or stopped by the human): whatever
     // was typed meanwhile goes out now, in the order it was typed.
-    if (liveQueued(this.queued).length && (env.event.kind === "finished" || env.event.kind === "failed")) {
+    if (liveQueued(this.queued).length && over) {
       void this.pumpQueue();
     }
   }
@@ -4269,6 +4408,24 @@ function fold(run: Run, ms: number, ev: AgentEvent) {
       run.durationMs = ms;
       push(run, ms, "error", ev.error, "warn");
       break;
+    case "interrupted":
+      run.status = "interrupted";
+      run.error = ev.why;
+      run.durationMs = ms;
+      push(run, ms, "cut", ev.why, "warn");
+      break;
+    case "timed_out":
+      run.status = "timed_out";
+      run.error = ev.why;
+      run.durationMs = ms;
+      push(run, ms, "timeout", ev.why, "warn");
+      break;
+    case "detached":
+      // Not an end: the agent is still going, out of reach.
+      run.status = "detached";
+      run.error = ev.why;
+      push(run, ms, "detached", ev.why, "warn");
+      break;
   }
 }
 
@@ -4343,6 +4500,12 @@ export async function connectEvents() {
     listen<string>("track_deleted", (e) => void store.dropTrack(e.payload)),
     listen<{ track: string; from: string; to: string; writing: boolean }>("conductor_handoff", (e) => store.takeHandoff(e.payload)),
     listen<WaitingDelivery>("parked", (e) => store.takeParked(e.payload)),
+    // Something the core kept for the human (a run cut short, a job that
+    // died, a quiet track), or one of those read on another device.
+    listen<ServerNotice>("notice", (e) => store.takeNotice(e.payload)),
+    // A track's schedules or watched jobs moved: the list is read back.
+    listen<string>("schedules", (e) => void store.loadWatched(e.payload)),
+    listen<string>("jobs", (e) => void store.loadWatched(e.payload)),
     listen<DesignDelta>("design", (e) => store.takeDesign(e.payload)),
     listen<string>("design_extract", (e) => {
       if (e.payload === store.artifact) void store.loadExtracts(e.payload);

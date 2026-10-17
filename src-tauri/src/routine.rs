@@ -192,6 +192,22 @@ pub async fn run(app: AppHandle, id: &str) -> Result<Value, String> {
         read(&state, id)?
     };
 
+    // A run a crash cut while its agent went on: that agent may still be
+    // writing in the routine's folder, so the routine waits for it to end
+    // rather than run a second time beside it.
+    {
+        let state = app.state::<AppState>();
+        if let Ok(Some((left, pid, start))) = state.store.routine_left_running(&r.id) {
+            if crate::boot::agent_alive(pid, start) {
+                return Err(format!(
+                    "'{}' is still running from before the app went down (run {left}, its agent is process {pid}). It can run again once that process ends.",
+                    r.name
+                ));
+            }
+            let _ = state.store.set_routine_run_pid(&left, None, None);
+        }
+    }
+
     // Said in the routine's own words. Nothing here can refuse for a
     // worker's reasons, because there is no worker to be busy. The check and
     // the claim are one step, under the lock the running list is read under.
@@ -254,6 +270,10 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
             return Err(why);
         }
     };
+    // So a crash that leaves this agent running is known when the app is
+    // back (see `routine_left_running`).
+    let (pid, start) = crate::boot::identity(session.pid());
+    let _ = state.store.set_routine_run_pid(&run, pid, start);
 
     if let Some(g) = &guided {
         if let Err(err) = state.store.set_routine_run_plan(&run, &g.snapshot) {

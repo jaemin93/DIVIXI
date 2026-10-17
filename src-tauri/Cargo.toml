@@ -79,6 +79,25 @@ imagesize = "0.15"
 # Without default features it has no dependencies of its own (the defaults
 # pull in `image`).
 qrcode = { version = "0.14", default-features = false }
+# Schedules are given in the machine's own local time ("daily at 07:10"),
+# and what the app says about them is read by a person in that time: the
+# one clock in the workspace with a local offset that is sound to ask from
+# any thread (src/schedule.rs). Already in the tree through other crates.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# A watched job's "done" line is a regular expression (src/jobs.rs).
+regex = "1"
+# A worker's allowed paths are globs over the track folder (src/scope.rs).
+globset = "0.4"
+# Whether two spellings of a folder are one folder on disk, for a file
+# system that may or may not ignore case (src/scope.rs). Already in the
+# tree through other crates.
+same-file = "1"
+
+[target.'cfg(unix)'.dependencies]
+# Whether a process is still alive, by pid (`kill(pid, 0)`): what tells a
+# run the app lost from one whose agent went on alone, and a watched job
+# that ended from one still going.
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # The terminal's PATH, read from the registry as Windows keeps it (src/windows_path.rs).

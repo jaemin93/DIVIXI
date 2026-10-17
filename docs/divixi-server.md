@@ -255,7 +255,11 @@ setsid -f ~/.local/bin/divixi-server serve >/dev/null 2>&1 </dev/null   # start 
 pkill -x divixi-server                                                  # stop
 ```
 
-**Always on (optional): a systemd user service.**
+**Always on (recommended for anything that runs overnight): a systemd user service.**
+A server started with `setsid` from the app does not come back after a reboot: nothing
+starts it until the next time the app connects, and until then no schedule fires, no
+worker runs, and nothing watches anything. On one machine that was 59 hours. The unit
+below, with `enable-linger`, brings it back at boot without anyone signing in.
 
 ```bash
 mkdir -p ~/.config/systemd/user

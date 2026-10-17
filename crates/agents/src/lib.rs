@@ -407,6 +407,15 @@ async fn with_installed_claude(spec: AgentSpec, adapter: &Adapter, located: Opti
 }
 
 fn resolve_adapter(kind: AgentKind, cli: Option<&CliInfo>, adapters_dir: &Path) -> Adapter {
+    // An adapter named outright (`DIVIXI_ACP_ADAPTER`) is the one every
+    // Claude Code session runs, detection's included: the spec detection
+    // keeps is what sessions open with, so a scripted agent set there
+    // must not be replaced by the real one after the first detection.
+    if kind == AgentKind::ClaudeCode {
+        if let Some(explicit) = orchestra_acp::explicit_adapter() {
+            return Adapter::LocalScript { path: explicit.to_string_lossy().into_owned() };
+        }
+    }
     if let Some((package, script)) = npm_adapter(kind) {
         // The repo's node_modules (development), then the adapter folder, then npx.
         let found = find_local_script(script).or_else(|| installed_npm_adapter(adapters_dir, kind));

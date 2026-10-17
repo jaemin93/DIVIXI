@@ -16,6 +16,16 @@ pub type SessionName = String;
 pub type RunId = String;
 
 /// Lifecycle of a single run, as projected from its events.
+///
+/// The four ways a run can end are kept apart because they call for
+/// different things from whoever reads them. `Failed` is the agent's own
+/// doing and is over. `Interrupted` is the app's: a reboot or the app
+/// closing under a turn that was going fine, so the work may be half done
+/// and is worth starting again with its memory. `TimedOut` is the app
+/// giving up on a turn that stopped answering. `Detached` is the one case
+/// where nothing has ended: the app closed, but the agent process it had
+/// started is still alive and working on its own, so it must not be
+/// started again until it is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
@@ -25,14 +35,29 @@ pub enum RunStatus {
     Running,
     /// The turn ended normally.
     Done,
-    /// The run failed, or was interrupted by the app closing.
+    /// The run failed: the agent said so, or its session died.
     Failed,
+    /// The app closed, or the machine rebooted, while the turn was live.
+    Interrupted,
+    /// The app ended the turn because the agent stopped answering.
+    TimedOut,
+    /// The app closed under the turn, but the agent process is still alive
+    /// and cannot be reached; it ends as `Interrupted` once that process
+    /// is gone.
+    Detached,
 }
 
 impl RunStatus {
     /// Whether the run can still change.
     pub fn is_live(self) -> bool {
         matches!(self, RunStatus::Connecting | RunStatus::Running)
+    }
+
+    /// Whether the run ended without the agent finishing its turn, for a
+    /// reason of the app's rather than the agent's: it may be started
+    /// again with its memory.
+    pub fn is_cut_short(self) -> bool {
+        matches!(self, RunStatus::Interrupted | RunStatus::TimedOut)
     }
 
     /// The `snake_case` name serde uses, for storage keys and logs.
@@ -42,6 +67,9 @@ impl RunStatus {
             RunStatus::Running => "running",
             RunStatus::Done => "done",
             RunStatus::Failed => "failed",
+            RunStatus::Interrupted => "interrupted",
+            RunStatus::TimedOut => "timed_out",
+            RunStatus::Detached => "detached",
         }
     }
 
@@ -52,6 +80,9 @@ impl RunStatus {
             "running" => RunStatus::Running,
             "done" => RunStatus::Done,
             "failed" => RunStatus::Failed,
+            "interrupted" => RunStatus::Interrupted,
+            "timed_out" => RunStatus::TimedOut,
+            "detached" => RunStatus::Detached,
             _ => return None,
         })
     }
@@ -161,6 +192,24 @@ pub enum AgentEvent {
         /// Human-readable failure.
         error: String,
     },
+    /// The app closed, or the machine rebooted, while the turn was live.
+    /// Written when the app comes back, not when it went: nothing was
+    /// running to write it then.
+    Interrupted {
+        /// What happened and when, for a human: "the machine rebooted at
+        /// 23:34; the run was last seen alive at 23:31".
+        why: String,
+    },
+    /// The app ended the turn because the agent stopped answering.
+    TimedOut {
+        why: String,
+    },
+    /// The app closed under the turn but found the agent process still
+    /// alive when it came back. Not the end of the run: `Interrupted`
+    /// follows once that process is gone.
+    Detached {
+        why: String,
+    },
 }
 
 impl AgentEvent {
@@ -172,7 +221,12 @@ impl AgentEvent {
     pub fn above_membrane(&self) -> bool {
         matches!(
             self,
-            AgentEvent::Started { .. } | AgentEvent::Finished { .. } | AgentEvent::Failed { .. }
+            AgentEvent::Started { .. }
+                | AgentEvent::Finished { .. }
+                | AgentEvent::Failed { .. }
+                | AgentEvent::Interrupted { .. }
+                | AgentEvent::TimedOut { .. }
+                | AgentEvent::Detached { .. }
         )
     }
 
@@ -194,12 +248,28 @@ impl AgentEvent {
             AgentEvent::Permission { .. } => "permission",
             AgentEvent::Finished { .. } => "finished",
             AgentEvent::Failed { .. } => "failed",
+            AgentEvent::Interrupted { .. } => "interrupted",
+            AgentEvent::TimedOut { .. } => "timed_out",
+            AgentEvent::Detached { .. } => "detached",
         }
     }
 
-    /// Whether this event ends the run.
+    /// Whether this event ends the run. A detached run has not ended: its
+    /// agent is still going, out of reach.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, AgentEvent::Finished { .. } | AgentEvent::Failed { .. })
+        matches!(self, AgentEvent::Finished { .. } | AgentEvent::Failed { .. } | AgentEvent::Interrupted { .. } | AgentEvent::TimedOut { .. })
+    }
+
+    /// The status a terminal event (or a detachment) moves the run to.
+    pub fn ends_as(&self) -> Option<RunStatus> {
+        Some(match self {
+            AgentEvent::Finished { .. } => RunStatus::Done,
+            AgentEvent::Failed { .. } => RunStatus::Failed,
+            AgentEvent::Interrupted { .. } => RunStatus::Interrupted,
+            AgentEvent::TimedOut { .. } => RunStatus::TimedOut,
+            AgentEvent::Detached { .. } => RunStatus::Detached,
+            _ => return None,
+        })
     }
 
     /// Short mono label used by the inspector's transcript view.
@@ -217,6 +287,9 @@ impl AgentEvent {
             AgentEvent::Permission { .. } => "asks",
             AgentEvent::Finished { .. } => "done",
             AgentEvent::Failed { .. } => "error",
+            AgentEvent::Interrupted { .. } => "cut",
+            AgentEvent::TimedOut { .. } => "timeout",
+            AgentEvent::Detached { .. } => "detached",
         }
     }
 }
@@ -372,6 +445,9 @@ mod tests {
             },
             AgentEvent::Finished { stop_reason: "end_turn".into() },
             AgentEvent::Failed { error: "boom".into() },
+            AgentEvent::Interrupted { why: "rebooted".into() },
+            AgentEvent::TimedOut { why: "quiet".into() },
+            AgentEvent::Detached { why: "alive".into() },
         ];
         for ev in samples {
             let json = serde_json::to_value(&ev).unwrap();
@@ -381,11 +457,38 @@ mod tests {
 
     #[test]
     fn run_status_round_trips() {
-        for s in [RunStatus::Connecting, RunStatus::Running, RunStatus::Done, RunStatus::Failed] {
+        for s in [
+            RunStatus::Connecting,
+            RunStatus::Running,
+            RunStatus::Done,
+            RunStatus::Failed,
+            RunStatus::Interrupted,
+            RunStatus::TimedOut,
+            RunStatus::Detached,
+        ] {
             assert_eq!(RunStatus::parse(s.as_str()), Some(s));
             let json = serde_json::to_string(&s).unwrap();
             assert_eq!(json, format!("\"{}\"", s.as_str()));
         }
+    }
+
+    /// The ways a run ends are told apart, and a detachment is not an end.
+    #[test]
+    fn the_ways_a_run_ends_are_kept_apart() {
+        let cut = AgentEvent::Interrupted { why: "the machine rebooted".into() };
+        let late = AgentEvent::TimedOut { why: "said nothing for 20 minutes".into() };
+        let loose = AgentEvent::Detached { why: "its agent is still alive".into() };
+        assert!(cut.is_terminal() && late.is_terminal(), "both end the run");
+        assert!(!loose.is_terminal(), "a detached run is still going, out of reach");
+        assert!(cut.above_membrane() && late.above_membrane() && loose.above_membrane(), "the timeline shows all three");
+        assert_eq!(cut.ends_as(), Some(RunStatus::Interrupted));
+        assert_eq!(late.ends_as(), Some(RunStatus::TimedOut));
+        assert_eq!(loose.ends_as(), Some(RunStatus::Detached));
+        assert_eq!(AgentEvent::Message { text: "x".into() }.ends_as(), None);
+        assert!(RunStatus::Interrupted.is_cut_short() && RunStatus::TimedOut.is_cut_short());
+        assert!(!RunStatus::Failed.is_cut_short(), "a failure is the agent's own and is not started again");
+        assert!(!RunStatus::Detached.is_cut_short(), "nothing is started again while the agent is alive");
+        assert!(!RunStatus::Detached.is_live(), "but it is not a turn the app can drive either");
     }
 
     #[test]

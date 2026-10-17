@@ -160,6 +160,21 @@
     return run.status === "failed" && run.error === "stopped by the human";
   }
 
+  /** The app's endings, not the agent's: said as what they are, with the way on. */
+  const cut = (run: Run) => run.status === "interrupted" || run.status === "timed_out";
+  const cutLabel = (run: Run) => (run.status === "interrupted" ? t("worker.interrupted") : run.status === "timed_out" ? t("worker.timed_out") : t("worker.detached"));
+  const over = (run: Run) => run.status === "done" || run.status === "failed" || cut(run);
+  let resuming = $state("");
+
+  async function resume(run: Run) {
+    resuming = run.id;
+    try {
+      await store.resumeRun(run.track, run.id);
+    } finally {
+      resuming = "";
+    }
+  }
+
   function secs(ms?: number) {
     if (ms === undefined) return "";
     return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
@@ -201,11 +216,12 @@
         {/if}
 
         <!-- How the worker answered, as it happened. -->
-        <div class="turn to" class:live={run.status === "running" || run.status === "connecting"} class:failed={run.status === "failed"}>
+        <div class="turn to" class:live={run.status === "running" || run.status === "connecting"} class:failed={run.status === "failed"} class:cut={cut(run) || run.status === "detached"}>
           <div class="head">
             <span class="mlab">{t("worker.worker")}</span>
             <span class="mono meta">{run.id} · {t("worker.tools", { n: run.toolCount })}{run.durationMs !== undefined && run.durationMs !== null ? ` · ${secs(run.durationMs)}` : ""}</span>
             {#if stopped(run)}<span class="mono stopmark">{t("worker.stopped")}</span>{/if}
+            {#if cut(run) || run.status === "detached"}<span class="mono stopmark" title={run.error}>{cutLabel(run)}</span>{/if}
             {#if run.status === "running" || run.status === "connecting"}<Working />{/if}
           </div>
           {#each turn(run) as { block, active }, i (block.kind === "steps" ? `s${block.at}` : `t${i}`)}
@@ -218,13 +234,25 @@
           {#if run.segments.length === 0 && run.message.trim()}
             <div class="ctext"><Markdown source={cleanText(run.message)} /></div>
           {/if}
-          {#if run.status === "done" || run.status === "failed"}
+          {#if over(run)}
             <ReportCard run={run.id} compact />
           {/if}
-          {#if run.status === "failed" && run.error && !stopped(run)}
+          {#if (run.status === "failed" || cut(run) || run.status === "detached") && run.error && !stopped(run)}
             <p class="ctext bad">{run.error}</p>
           {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
             <p class="ctext dim">{t("worker.starting")}</p>
+          {/if}
+          {#if cut(run)}
+            <!-- The way on from a cut: the same worker, with its memory and
+                 what it had done. Nothing is started again by itself here;
+                 the core refuses what must not be (an agent still alive, a
+                 run already started again) and says why. -->
+            <div class="resume">
+              <button class="btn" type="button" onclick={() => resume(run)} disabled={resuming === run.id} title={t("worker.resumeTitle")}>
+                {resuming === run.id ? t("worker.resuming") : t("worker.resume")}
+              </button>
+              <span class="mono dim">{t("worker.resumeNote")}</span>
+            </div>
           {/if}
         </div>
       {/each}
@@ -296,6 +324,22 @@
   }
 
   /* A turn the human stopped: said once, on the turn itself. */
+  .turn.to.cut {
+    border-left: 2px solid var(--warn, #e0af68);
+  }
+
+  .resume {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+  }
+
+  .resume .dim {
+    font-size: 11px;
+    color: var(--lab);
+  }
+
   .stopmark {
     font-size: 10px;
     letter-spacing: 0.1em;

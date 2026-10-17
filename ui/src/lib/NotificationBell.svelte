@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { instanceId, switchInstance } from "./ipc.svelte";
-  import { inbox, remove, clearAll, GOTO, isDecision, isRoutine, type Notice } from "./notify.svelte";
+  import { inbox, remove, clearAll, requestRead, GOTO, READ, isDecision, isRoutine, isServer, type Notice } from "./notify.svelte";
+  import { invoke } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
@@ -71,13 +72,58 @@
     if (left > 0) setTimeout(() => reveal(decision, left - 1), 100);
   }
 
-  /** Open what a notice is about: a decision card, or a routine's run. */
+  /**
+   * A notice of a core's is read by taking it: told to that core, which
+   * takes it off every device's bell, and off this list at once. Another
+   * instance's core is reached through the webview that shows it (READ);
+   * if that webview is not open the notice comes back when it is, since it
+   * is still unread there.
+   */
+  function dismiss(n: Notice) {
+    remove(n.id);
+    if (!isServer(n)) return;
+    if (n.instance === instanceId) invoke("notice_read", { id: n.notice }).catch(() => {});
+    else if (n.instance) requestRead(n.instance, [n.notice]);
+  }
+
+  /** Every notice goes: this core's are read here, other cores' through their webviews. */
+  function clear() {
+    const byInstance = new Map<string, number[]>();
+    for (const n of inbox.items) {
+      if (!isServer(n)) continue;
+      if (n.instance === instanceId) invoke("notice_read", { id: n.notice }).catch(() => {});
+      else if (n.instance) byInstance.set(n.instance, [...(byInstance.get(n.instance) ?? []), n.notice]);
+    }
+    for (const [instance, notices] of byInstance) requestRead(instance, notices);
+    clearAll();
+  }
+
+  /** Open what a notice is about: a decision card, a routine's run, or the track a notice of the core's is about. */
   function go(n: Notice) {
     open = false;
     if (isRoutine(n)) {
       // Reading it is what deals with it, so the notice goes now.
       remove(n.id);
       void store.openRoutine(n.routine);
+      return;
+    }
+    if (isServer(n)) {
+      if (n.instance === instanceId) {
+        dismiss(n);
+        if (n.routine) void store.openRoutine(n.routine);
+        else if (n.track) void store.selectTrack(n.track);
+        return;
+      }
+      // Another Divixi's: handed to its webview through GOTO, as a decision
+      // notice is, so that it is read there (its core marks it read, which
+      // takes it off every device) and its track opens there. Not removed
+      // here: the read is what removes it, everywhere at once.
+      try {
+        localStorage.setItem(GOTO, JSON.stringify({ instance: n.instance, track: n.track, notice: n.notice, routine: n.routine, at: Date.now() }));
+      } catch {
+        // No storage: it just switches.
+      }
+      switchInstance(n.instance).catch((err) => (store.lastError = String(err)));
       return;
     }
     if (n.instance === instanceId) {
@@ -93,22 +139,30 @@
     switchInstance(n.instance).catch((err) => (store.lastError = String(err)));
   }
 
-  /** A notice opened from another webview, meant for this one. */
+  /** A notice opened from another webview, meant for this one: a decision card to reveal, or one of this core's notices to read. */
   function take(raw: string | null) {
-    let g: { instance: string | null; track: string | null; decision?: number; at: number } | null = null;
+    let g: { instance: string | null; track: string | null; decision?: number; notice?: number; routine?: string; at: number } | null = null;
     try {
       g = raw ? JSON.parse(raw) : null;
     } catch {
       return;
     }
-    if (!g || g.instance !== instanceId || Date.now() - g.at > 15_000 || !g.track) return;
+    if (!g || g.instance !== instanceId || Date.now() - g.at > 15_000) return;
     const track = g.track;
     const decision = g.decision;
+    const notice = g.notice;
     try {
       localStorage.removeItem(GOTO);
     } catch {
       // Left there; it goes stale in 15 s.
     }
+    // Read here, where its core is: that takes it off every bell.
+    if (typeof notice === "number") invoke("notice_read", { id: notice }).catch(() => {});
+    if (typeof g.routine === "string" && g.routine) {
+      void store.openRoutine(g.routine);
+      return;
+    }
+    if (!track) return;
     // A fresh webview may not have its tracks yet.
     const tryOpen = (left: number) => {
       if (store.tracks.some((x) => x.id === track)) {
@@ -120,14 +174,33 @@
     tryOpen(30);
   }
 
+  /** Notices of this core another webview asked to have read. */
+  function readAsked(raw: string | null) {
+    let r: { instance: string | null; notices: number[]; at: number } | null = null;
+    try {
+      r = raw ? JSON.parse(raw) : null;
+    } catch {
+      return;
+    }
+    if (!r || r.instance !== instanceId || Date.now() - r.at > 15_000 || !Array.isArray(r.notices)) return;
+    try {
+      localStorage.removeItem(READ);
+    } catch {
+      // Left there; it goes stale in 15 s.
+    }
+    for (const id of r.notices) if (typeof id === "number") invoke("notice_read", { id }).catch(() => {});
+  }
+
   onMount(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === GOTO) take(e.newValue);
+      if (e.key === READ) readAsked(e.newValue);
     };
     window.addEventListener("storage", onStorage);
     // Opened for a notice before this webview existed.
     try {
       take(localStorage.getItem(GOTO));
+      readAsked(localStorage.getItem(READ));
     } catch {
       // No storage.
     }
@@ -156,7 +229,7 @@
       <div class="head">
         <span class="title">{t("notify.title")}</span>
         <span class="grow"></span>
-        <button class="ib" onclick={clearAll} disabled={!inbox.items.length} title={t("notify.clear")} aria-label={t("notify.clear")}>
+        <button class="ib" onclick={clear} disabled={!inbox.items.length} title={t("notify.clear")} aria-label={t("notify.clear")}>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 9h5.6l.7-9M7 7v4.5M9 7v4.5" /></svg>
         </button>
       </div>
@@ -176,7 +249,7 @@
                   <span class="when">{whenLabel(n.at, store.now, store.lang)}</span>
                 </span>
               </button>
-              <button class="x" onclick={() => remove(n.id)} aria-label={t("notify.remove")} title={t("notify.remove")}><Icon name="close" size={10} /></button>
+              <button class="x" onclick={() => dismiss(n)} aria-label={t("notify.remove")} title={t("notify.remove")}><Icon name="close" size={10} /></button>
             </div>
           {/each}
         {:else}

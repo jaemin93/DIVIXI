@@ -143,13 +143,9 @@ impl AgentSpec {
 
     /// The adapter alone, and its entry script when it is a local one.
     fn claude_adapter() -> (Self, Option<PathBuf>) {
-        if let Some(explicit) = std::env::var_os(ADAPTER_ENV) {
-            let path = PathBuf::from(explicit);
-            if path.is_file() {
-                tracing::info!(script = %path.display(), "using adapter from {ADAPTER_ENV}");
-                return (Self::node_script(&path), Some(path));
-            }
-            tracing::warn!(path = %path.display(), "{ADAPTER_ENV} is set but is not a file");
+        if let Some(path) = explicit_adapter() {
+            tracing::info!(script = %path.display(), "using adapter from {ADAPTER_ENV}");
+            return (Self::node_script(&path), Some(path));
         }
         if let Some(script) = find_local_script(CLAUDE_ADAPTER_SCRIPT) {
             tracing::info!(script = %script.display(), "using locally installed adapter");
@@ -158,6 +154,20 @@ impl AgentSpec {
         tracing::info!(package = CLAUDE_ADAPTER, "no local adapter install; falling back to npx");
         (Self::npx(CLAUDE_ADAPTER, &[]), None)
     }
+}
+
+/// The Claude adapter script named by `DIVIXI_ACP_ADAPTER`, when the
+/// variable names a file: every Claude Code session runs it, detection
+/// included. For a scripted agent (`scripts/fake-acp-agent.mjs`) and for
+/// trying an adapter build.
+pub fn explicit_adapter() -> Option<PathBuf> {
+    let explicit = std::env::var_os(ADAPTER_ENV)?;
+    let path = PathBuf::from(explicit);
+    if path.is_file() {
+        return Some(path);
+    }
+    tracing::warn!(path = %path.display(), "{ADAPTER_ENV} is set but is not a file");
+    None
 }
 
 /// Locate a script inside a locally installed npm package.
