@@ -48,6 +48,7 @@ fn part(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Op
 fn numbered(archive: &zip::ZipArchive<std::io::Cursor<&[u8]>>, prefix: &str) -> Vec<(u32, String)> {
     let mut found: Vec<(u32, String)> = archive
         .file_names()
+        .filter_map(Result::ok)
         .filter_map(|n| n.strip_prefix(prefix)?.strip_suffix(".xml")?.parse::<u32>().ok().map(|i| (i, n.to_string())))
         .collect();
     found.sort();
