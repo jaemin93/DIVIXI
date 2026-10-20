@@ -213,9 +213,8 @@
   {@const r = rule(s, tr, locale)}
   {@const text = message(s)}
   {@const full = expanded.includes(s.id)}
-  {@const long = text.length > 90 || text.includes("\n")}
   {@const c = s.next_at != null ? at(s.next_at) : null}
-  <div class="row" class:full id="schedule-row-{s.id}">
+  <div class="row" class:full class:nostate={!late} id="schedule-row-{s.id}">
     <button class="main" type="button" aria-expanded={full} onclick={() => expand(s.id)} title={full ? t("schedules.less") : t("schedules.more")}>
       <span class="when mono" title={s.next_at != null ? whenFull(s.next_at, store.lang) : undefined}>
         {#if c}
@@ -234,17 +233,8 @@
         {#if s.note}<span class="note mono" class:warn={late === "fired-late"}>{s.note}</span>{/if}
       </span>
     </button>
-    <div class="side">
-      {#if late === "overdue"}<span class="st warn"><i class="dot"></i>{t("schedules.late")}</span>{:else if late === "fired-late"}<span class="st warn"><i class="dot"></i>{t("schedules.late")}</span>{/if}
-      <div class="acts">
-        <button class="act" type="button" onclick={() => store.cancelSchedule(s.id)} title={t("timeline.cancelSchedule")}>{t("timeline.cancelSchedule")}</button>
-        {#if long}
-          <button class="chev" type="button" aria-expanded={full} onclick={() => expand(s.id)} title={full ? t("schedules.less") : t("schedules.more")} aria-label={full ? t("schedules.less") : t("schedules.more")}>
-            <Icon name={full ? "up" : "down"} size={12} />
-          </button>
-        {/if}
-      </div>
-    </div>
+    {#if late}<div class="info"><span class="st warn"><i class="dot"></i>{t("schedules.late")}</span></div>{/if}
+    {@render acts(t("schedules.cancel"), "close", () => store.cancelSchedule(s.id), full, () => expand(s.id))}
   </div>
 {/snippet}
 
@@ -273,18 +263,33 @@
         {#if j.note && st !== "running"}<span class="note mono" class:warn={st === "died" || st === "stalled"}>{j.note}</span>{/if}
       </span>
     </button>
-    <div class="side">
+    <div class="info">
       <span class="st {tone(st)}"><i class="dot" class:pulse={st === "running"}></i>{tr(`jobs.${st}`)}</span>
       {#if moved != null}<span class="moved mono" title={t("jobs.movedTitle")}>{tr("jobs.moved", { time: at(moved).time })}</span>{/if}
-      <div class="acts">
-        {#if isOpen(j)}
-          <button class="act" type="button" onclick={() => store.unwatchJob(j.id)} title={t("timeline.jobNote")}>{t("timeline.unwatchJob")}</button>
-        {/if}
-        <button class="chev" type="button" aria-expanded={full} onclick={() => expandJob(j.id)} title={full ? t("schedules.less") : t("schedules.more")} aria-label={full ? t("schedules.less") : t("schedules.more")}>
-          <Icon name={full ? "up" : "down"} size={12} />
-        </button>
-      </div>
     </div>
+    {@render acts(isOpen(j) ? t("jobs.unwatch") : null, "eyeoff", () => store.unwatchJob(j.id), full, () => expandJob(j.id))}
+  </div>
+{/snippet}
+
+<!--
+  A row's actions, the same two slots at the same place on every row: the
+  row's own action (cancel a schedule, stop watching a job), then its
+  chevron. A row with no action (a job that is over) keeps the slot empty,
+  so every chevron lines up. Icons, each with its words as tooltip and
+  label; always shown, so no row looks different from its neighbour.
+-->
+{#snippet acts(label: string | null, icon: IconName, act: () => void, full: boolean, toggle: () => void)}
+  <div class="acts">
+    <span class="slot">
+      {#if label}
+        <button class="act" type="button" onclick={act} title={label} aria-label={label}><Icon name={icon} size={12} /></button>
+      {/if}
+    </span>
+    <span class="slot">
+      <button class="act chev" type="button" aria-expanded={full} onclick={toggle} title={full ? t("schedules.less") : t("schedules.more")} aria-label={full ? t("schedules.less") : t("schedules.more")}>
+        <Icon name={full ? "up" : "down"} size={12} />
+      </button>
+    </span>
   </div>
 {/snippet}
 
@@ -492,10 +497,12 @@
 
   /* ----- a row: time | what | state and actions ----- */
 
+  /* What it is | its state | its actions: the last two fixed widths, so
+     every row's state and buttons sit at the same place. */
   .row {
     position: relative;
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) 66px 64px;
     align-items: start;
   }
 
@@ -505,7 +512,7 @@
     grid-template-columns: 50px 1fr;
     column-gap: 12px;
     align-items: start;
-    padding: 9px 4px 9px 16px;
+    padding: 9px 8px 9px 16px;
     background: transparent;
     border: 0;
     text-align: left;
@@ -513,7 +520,6 @@
   }
 
   .main:focus-visible,
-  .chev:focus-visible,
   .act:focus-visible,
   .fbtn:focus-visible,
   .fitem:focus-visible {
@@ -606,13 +612,65 @@
     color: var(--warn);
   }
 
-  .side {
+
+  /* The state and, for a running job, when its log last moved: right-aligned in a column of their own. */
+  .info {
     display: flex;
     flex-direction: column;
     align-items: flex-end;
     gap: 5px;
-    padding: 9px 12px 9px 4px;
-    min-width: 64px;
+    padding: 10px 0 9px;
+    min-width: 0;
+  }
+
+  /* A row with no state lends its state column to its text; the actions keep theirs. */
+  .row.nostate .main {
+    grid-column: 1 / span 2;
+  }
+
+  .info {
+    grid-column: 2;
+  }
+
+  /* Two square slots, at the top right of every row. */
+  .acts {
+    grid-column: 3;
+    display: flex;
+    justify-content: flex-end;
+    gap: 4px;
+    padding: 6px 10px 0 6px;
+  }
+
+  .slot {
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+  }
+
+  /* Both buttons, the action and the chevron, alike: a square icon button,
+     quiet until pointed at. */
+  .act {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--lab);
+  }
+
+  .act:hover {
+    color: var(--hi);
+    border-color: var(--lines);
+    background: var(--card);
+  }
+
+  /* Cancelling and stopping a watch take something away: their hover says so. */
+  .act:not(.chev):hover {
+    color: var(--deltx);
+    border-color: var(--deltx);
   }
 
   /* A state: a dot and a word, in the app's own colours. */
@@ -668,42 +726,10 @@
     color: var(--lab);
   }
 
-  .acts {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
 
-  .act {
-    height: 22px;
-    padding: 0 7px;
-    background: transparent;
-    border: 1px solid transparent;
-    font-family: var(--mono);
-    font-size: 10px;
-    color: var(--lab);
-  }
 
-  .act:hover {
-    color: var(--hi);
-    border-color: var(--acc);
-  }
 
-  .chev {
-    width: 22px;
-    height: 22px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: transparent;
-    border: 0;
-    color: var(--lab);
-  }
 
-  .chev:hover {
-    color: var(--hi);
-    background: var(--sel);
-  }
 
   /* A row is a list item, as the track list's: no box, a tint under the
      pointer, a quieter tint and a hairline at the left while it is open. */
@@ -721,20 +747,4 @@
     color: var(--dim);
   }
 
-  /* The actions wait until the row is pointed at, focused or open; on a touch screen they always show. */
-  .acts {
-    opacity: 0;
-  }
-
-  .row:hover .acts,
-  .row:focus-within .acts,
-  .row.full .acts {
-    opacity: 1;
-  }
-
-  @media (hover: none) {
-    .acts {
-      opacity: 1;
-    }
-  }
 </style>
