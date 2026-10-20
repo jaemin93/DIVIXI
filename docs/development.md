@@ -33,7 +33,7 @@ ui/                Svelte 5 UI
 npm install
 npm run build                        # once, before any cargo command: see below
 npm run app                          # the app, in development mode (tauri dev)
-cargo build -p orchestra-app --features server --bin divixi-server
+cargo build -p orchestra-app --no-default-features --features server --bin divixi-server
 ```
 
 Node 22.18+, as `engines` in package.json says. Not just vite's floor:
@@ -157,7 +157,28 @@ disk: each worker checkout is a full copy of the repository.
 - **The event store.**
   - Events are appended to `events`. `runs` is their fold when a run ends, and the
     timeline reads only `runs`.
-  - A run left open by a crash is closed as failed on the next start.
+  - A run left live by a crash or a reboot is closed on the next start as
+    `interrupted`, not `failed`: the app's doing, not the agent's, and the worker can
+    be started again with its memory (`resume_run`, or the button on the run). The
+    app keeps `boot_id` and a heartbeat (`alive_at`, every 20 s) in `meta`, so it can
+    say whether the machine rebooted and when the run was last known alive
+    (`src-tauri/src/boot.rs`). A run whose agent process is still alive goes
+    `detached` and is watched until that process ends. `timed_out` is the app giving
+    up on a turn that stopped answering.
   - The database is `divixi.db` in the data folder, and `DIVIXI_DB` overrides it.
+  - `divixi-server store downgrade 22` takes a store back to the schema an older
+    build opens (runs that ended the new ways read as failed there); the newer build
+    migrates it forward again.
+- **What outlives a session** (`schedules`, `jobs`, `notices` in the store). A
+  conductor's "check again at 07:10" is a `schedule` fired by the app, not by the
+  agent's own session (which closes when idle). A worker's `nohup` process is a
+  watched `job`. What a person has to be told without a conversation to say it in
+  (a run cut short, a job that died, a track quiet for hours with open work) is a
+  `notice`, kept until read, shown on the bell of every device.
+- **A scripted agent for checking the app without a model.**
+  `DIVIXI_ACP_ADAPTER=$PWD/scripts/fake-acp-agent.mjs` makes every Claude Code
+  session run `scripts/fake-acp-agent.mjs`, which does what a ```` ```fake ```` block in
+  its prompt says (say, run a command, call a divixi tool, sleep). Restarts, kills and
+  schedules can be tried end to end in seconds and for free.
 - **Text chunks from agents are sent in 40 ms frames**, to the webview and to the store
   alike.

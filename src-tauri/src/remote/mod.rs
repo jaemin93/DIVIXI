@@ -20,6 +20,7 @@ pub mod events;
 pub mod github;
 pub mod peer;
 pub mod install;
+pub mod libs;
 pub(crate) mod phone_cli;
 pub mod server;
 pub mod tailscale;

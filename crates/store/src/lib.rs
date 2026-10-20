@@ -25,8 +25,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 /// Bump when `SCHEMA` changes in a way that needs a migration, and add the
-/// step to [`migrate`].
-const SCHEMA_VERSION: i64 = 22;
+/// step to [`migrate`]. A step that an older build must be able to undo
+/// (so a database can go back to it) gets its inverse in [`DOWNGRADES`].
+const SCHEMA_VERSION: i64 = 23;
 
 /// Migration steps, applied in order from the stored version to
 /// [`SCHEMA_VERSION`]. Step `i` upgrades from version `i + 1` to `i + 2`.
@@ -261,6 +262,94 @@ const MIGRATIONS: &[&str] = &[
     // bar beside it in its list and the tags shown above its name.
     "ALTER TABLE routines ADD COLUMN color TEXT NOT NULL DEFAULT '';
     ALTER TABLE routines ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
+    // 22 -> 23: what survives the app going away. A run keeps the id of the
+    // agent process behind it (so a run the app lost can be told from one
+    // whose agent is still alive) and whether it is safe to run again by
+    // itself. Three tables that outlive sessions: notices for the bell,
+    // schedules a conductor set, and background jobs being watched.
+    // `DOWNGRADES[0]` is the way back.
+    "ALTER TABLE runs ADD COLUMN pid INTEGER;
+    ALTER TABLE runs ADD COLUMN pid_start INTEGER;
+    ALTER TABLE runs ADD COLUMN repeatable INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE routine_runs ADD COLUMN pid INTEGER;
+    ALTER TABLE routine_runs ADD COLUMN pid_start INTEGER;
+    CREATE TABLE IF NOT EXISTS notices (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        track      TEXT    NOT NULL DEFAULT '',
+        kind       TEXT    NOT NULL,
+        title      TEXT    NOT NULL,
+        body       TEXT    NOT NULL DEFAULT '',
+        data       TEXT    NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        read_at    INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS notices_open ON notices(read_at, created_at);
+    CREATE TABLE IF NOT EXISTS schedules (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        track      TEXT    NOT NULL,
+        kind       TEXT    NOT NULL,
+        spec       TEXT    NOT NULL DEFAULT '{}',
+        message    TEXT    NOT NULL,
+        next_at    INTEGER,
+        last_at    INTEGER,
+        fired      INTEGER NOT NULL DEFAULT 0,
+        status     TEXT    NOT NULL DEFAULT 'active',
+        note       TEXT    NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        created_in TEXT,
+        seen       INTEGER,
+        seen_sum   INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS schedules_due ON schedules(status, next_at);
+    CREATE TABLE IF NOT EXISTS jobs (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        track         TEXT    NOT NULL,
+        worker        TEXT    NOT NULL DEFAULT '',
+        what          TEXT    NOT NULL DEFAULT '',
+        pid           INTEGER,
+        pid_start     INTEGER,
+        log           TEXT    NOT NULL DEFAULT '',
+        done_pattern  TEXT    NOT NULL DEFAULT '',
+        stall_minutes INTEGER NOT NULL DEFAULT 30,
+        status        TEXT    NOT NULL DEFAULT 'running',
+        boot          TEXT    NOT NULL DEFAULT '',
+        registered_at INTEGER NOT NULL,
+        changed_at    INTEGER NOT NULL,
+        ended_at      INTEGER,
+        read_bytes    INTEGER NOT NULL DEFAULT 0,
+        read_sum      INTEGER,
+        last_line     TEXT    NOT NULL DEFAULT '',
+        note          TEXT    NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS jobs_by_track ON jobs(track, status);",
+];
+
+/// The way back from a schema version to the one before it, newest first:
+/// `DOWNGRADES[0]` takes [`SCHEMA_VERSION`] to `SCHEMA_VERSION - 1`. Only
+/// steps an older build may need to be handed a database from have one;
+/// [`Store::downgrade`] refuses a version with no way back.
+///
+/// Going back loses what the newer shape kept and nothing else. Runs that
+/// ended in a way the older build does not know (`interrupted`,
+/// `timed_out`, `detached`) read as failed there, with the same words in
+/// `error`, and the events that moved them are rewritten the same way --
+/// an older build cannot read an event of a kind it does not know, and one
+/// such event would keep it from opening the whole run.
+const DOWNGRADES: &[&str] = &[
+    // 23 -> 22
+    "UPDATE runs SET status = 'failed' WHERE status IN ('interrupted', 'timed_out', 'detached');
+    UPDATE events SET kind = 'failed',
+                      payload = json_set(json_remove(payload, '$.why'), '$.kind', 'failed', '$.error', COALESCE(json_extract(payload, '$.why'), ''))
+      WHERE kind IN ('interrupted', 'timed_out', 'detached');
+    ALTER TABLE runs DROP COLUMN pid;
+    ALTER TABLE runs DROP COLUMN pid_start;
+    ALTER TABLE runs DROP COLUMN repeatable;
+    ALTER TABLE routine_runs DROP COLUMN pid;
+    ALTER TABLE routine_runs DROP COLUMN pid_start;
+    DROP TABLE IF EXISTS notices;
+    DROP TABLE IF EXISTS schedules;
+    DROP TABLE IF EXISTS jobs;
+    DELETE FROM meta WHERE key IN ('boot_id', 'alive_at', 'comeback_pending') OR key LIKE 'notes:%' OR key LIKE 'quiet:%' OR key LIKE 'worker_scope:%' OR key LIKE 'resumed:%';",
 ];
 
 const SCHEMA: &str = r#"
@@ -303,10 +392,104 @@ CREATE TABLE IF NOT EXISTS runs (
     output      TEXT    NOT NULL DEFAULT '',
     plan        TEXT    NOT NULL DEFAULT '[]',
     tool_count  INTEGER NOT NULL DEFAULT 0,
-    agent       TEXT    NOT NULL DEFAULT 'claude_code'
+    agent       TEXT    NOT NULL DEFAULT 'claude_code',
+    -- The agent process behind the run, while the app had one: what tells
+    -- a run the app lost from one whose agent is still alive. With when
+    -- that process started (as the OS counts it), so a number given to
+    -- another process later is not taken for it.
+    pid         INTEGER,
+    pid_start   INTEGER,
+    -- Safe to run again by itself after an interruption (the conductor
+    -- said so): a check that only reads, a report that only writes its own
+    -- file. Default no: a turn that writes to a repository or a database
+    -- is started again by a person, or not at all.
+    repeatable  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS runs_by_track ON runs(track, n);
+
+-- What the human has to be told and has not read yet, kept here so it
+-- survives the app closing and reaches whichever device opens next. The
+-- bell shows these beside the open decision cards.
+CREATE TABLE IF NOT EXISTS notices (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    track      TEXT    NOT NULL DEFAULT '',
+    -- `interrupted`, `job`, `stall`, `schedule`: what the bell draws it as.
+    kind       TEXT    NOT NULL,
+    title      TEXT    NOT NULL,
+    body       TEXT    NOT NULL DEFAULT '',
+    -- Anything the screen needs to open the right thing (JSON).
+    data       TEXT    NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    read_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS notices_open ON notices(read_at, created_at);
+
+-- A conductor's schedules: when to wake it, with what. In the record so a
+-- reboot does not lose them -- a schedule an agent keeps inside its own
+-- session goes with that session, which is what this replaces.
+CREATE TABLE IF NOT EXISTS schedules (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    track      TEXT    NOT NULL,
+    -- `at`, `every`, `daily`, `weekly`, `file`, `process`.
+    kind       TEXT    NOT NULL,
+    -- The schedule as it was given (JSON), see src-tauri/src/schedule.rs.
+    spec       TEXT    NOT NULL DEFAULT '{}',
+    -- What the conductor is told when it fires.
+    message    TEXT    NOT NULL,
+    -- Unix milliseconds of the next firing; null for a condition that is
+    -- looked at rather than waited for, and for one that is over.
+    next_at    INTEGER,
+    last_at    INTEGER,
+    fired      INTEGER NOT NULL DEFAULT 0,
+    -- `active`, `done`, `cancelled`.
+    status     TEXT    NOT NULL DEFAULT 'active',
+    note       TEXT    NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    -- The conductor run that set it, when known.
+    created_in TEXT,
+    -- For a `file` schedule: how many bytes of the file have been looked
+    -- at, so nothing written is skipped and a restart goes on from there.
+    -- Null before the first look.
+    seen       INTEGER,
+    -- A fingerprint of the bytes just before `seen`, so a file replaced by
+    -- one already longer than that is read again from its start.
+    seen_sum   INTEGER
+);
+CREATE INDEX IF NOT EXISTS schedules_due ON schedules(status, next_at);
+
+-- A background process somebody started and nobody would otherwise watch:
+-- its pid, its log, what its last line looks like when it is done. The app
+-- looks at each every so often and wakes the conductor when one ends,
+-- dies or goes quiet.
+CREATE TABLE IF NOT EXISTS jobs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    track         TEXT    NOT NULL,
+    worker        TEXT    NOT NULL DEFAULT '',
+    what          TEXT    NOT NULL DEFAULT '',
+    pid           INTEGER,
+    -- When that process started, as the OS counts it: a number given to
+    -- another process later is not taken for it.
+    pid_start     INTEGER,
+    log           TEXT    NOT NULL DEFAULT '',
+    -- A regular expression that, matched in the log, means it finished.
+    done_pattern  TEXT    NOT NULL DEFAULT '',
+    stall_minutes INTEGER NOT NULL DEFAULT 30,
+    -- `running`, `stalled`, `done`, `died`, `lost`.
+    status        TEXT    NOT NULL DEFAULT 'running',
+    -- The boot the process belongs to: a different one means it is gone.
+    boot          TEXT    NOT NULL DEFAULT '',
+    registered_at INTEGER NOT NULL,
+    changed_at    INTEGER NOT NULL,
+    ended_at      INTEGER,
+    read_bytes    INTEGER NOT NULL DEFAULT 0,
+    -- A fingerprint of the bytes just before `read_bytes`, so a log
+    -- replaced by one already longer than that is read again from its start.
+    read_sum      INTEGER,
+    last_line     TEXT    NOT NULL DEFAULT '',
+    note          TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS jobs_by_track ON jobs(track, status);
 
 CREATE TABLE IF NOT EXISTS events (
     seq     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -392,7 +575,12 @@ CREATE TABLE IF NOT EXISTS routine_runs (
     -- The plan it was given, as it read then (JSON); empty for none.
     plan        TEXT    NOT NULL DEFAULT '',
     -- What its agent said of each step of that plan (JSON); empty for none.
-    steps       TEXT    NOT NULL DEFAULT ''
+    steps       TEXT    NOT NULL DEFAULT '',
+    -- Its agent's process while it runs, and when that process started.
+    -- Cleared when the run ends, and kept past a crash only while that
+    -- agent is still alive: the routine does not run again beside it.
+    pid         INTEGER,
+    pid_start   INTEGER
 );
 CREATE INDEX IF NOT EXISTS routine_runs_by_routine ON routine_runs(routine, started_at);
 
@@ -404,7 +592,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS runs_fts USING fts5(
 );
 "#;
 
-/// Error text recorded on runs that were live when the app last closed.
+/// Error text recorded on runs that were live when the app last closed,
+/// when nothing more is known about how it closed. The app usually knows
+/// more (a reboot, a crash, when the run was last seen alive) and says so
+/// through [`Store::close_live_runs`] instead.
 pub const INTERRUPTED: &str = "interrupted: the app closed while the run was live";
 
 /// Meta key holding the highest run number ever handed out (see [`Store::begin_run`]).
@@ -428,6 +619,10 @@ pub struct RunSummary {
     pub status: RunStatus,
     /// Unix milliseconds.
     pub started_at: i64,
+    /// Unix milliseconds, once the run ended. For a run the app lost, when
+    /// it was last known to be alive, not when the app came back.
+    #[serde(default)]
+    pub ended_at: Option<i64>,
     /// Set once the run ended.
     pub duration_ms: Option<u64>,
     pub session_id: Option<String>,
@@ -438,6 +633,15 @@ pub struct RunSummary {
     /// The last plan the agent published.
     pub plan: Vec<String>,
     pub tool_count: u32,
+    /// The agent process behind the run, while the app had one.
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// When that process started, as the OS counts it, when known.
+    #[serde(default)]
+    pub pid_start: Option<u64>,
+    /// Safe to run again by itself after an interruption.
+    #[serde(default)]
+    pub repeatable: bool,
 }
 
 /// One choice a decision offers.
@@ -555,6 +759,306 @@ fn row_to_decision(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decision> {
         decided_at: r.get(13)?,
         permission: r.get::<_, Option<String>>(14)?.and_then(|p| serde_json::from_str(&p).ok()),
     })
+}
+
+/// Something the human has to be told, kept until they have read it. The
+/// bell shows these; a decision card is not one of them (it is its own
+/// row, and it is answered rather than read).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Notice {
+    pub id: i64,
+    /// The track it is about; empty when it is about the app.
+    pub track: String,
+    /// `interrupted`, `job`, `stall`, `schedule`, …: what the bell draws it as.
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    /// What the screen needs to open the right thing, per kind.
+    pub data: serde_json::Value,
+    /// Unix milliseconds.
+    pub created_at: i64,
+    pub read_at: Option<i64>,
+}
+
+/// What a new notice carries.
+#[derive(Debug, Clone, Default)]
+pub struct NewNotice {
+    pub track: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub data: serde_json::Value,
+}
+
+const NOTICE_SELECT: &str = "SELECT id, track, kind, title, body, data, created_at, read_at FROM notices";
+
+fn row_to_notice(r: &rusqlite::Row<'_>) -> rusqlite::Result<Notice> {
+    let data: String = r.get(5)?;
+    Ok(Notice {
+        id: r.get(0)?,
+        track: r.get(1)?,
+        kind: r.get(2)?,
+        title: r.get(3)?,
+        body: r.get(4)?,
+        data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null),
+        created_at: r.get(6)?,
+        read_at: r.get(7)?,
+    })
+}
+
+/// Where a schedule stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleStatus {
+    /// Waiting for its time or its condition.
+    Active,
+    /// Fired for the last time.
+    Done,
+    /// Taken back before it fired.
+    Cancelled,
+}
+
+impl ScheduleStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScheduleStatus::Active => "active",
+            ScheduleStatus::Done => "done",
+            ScheduleStatus::Cancelled => "cancelled",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "active" => ScheduleStatus::Active,
+            "cancelled" => ScheduleStatus::Cancelled,
+            _ => ScheduleStatus::Done,
+        }
+    }
+}
+
+/// A time, a repetition or a condition on which a track's conductor is
+/// woken with a message. Kept here so it outlives every session and the
+/// machine's uptime; what the kinds and specs mean is the app's
+/// (src-tauri/src/schedule.rs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Schedule {
+    pub id: i64,
+    pub track: String,
+    pub kind: String,
+    pub spec: serde_json::Value,
+    pub message: String,
+    /// Unix milliseconds of the next firing; `None` for a condition that
+    /// is looked at rather than waited for, and once it is over.
+    pub next_at: Option<i64>,
+    pub last_at: Option<i64>,
+    pub fired: u32,
+    pub status: ScheduleStatus,
+    /// What happened to it last, for a human: "ran 3 h late: the machine
+    /// was off".
+    pub note: String,
+    pub created_at: i64,
+    /// The conductor run that set it, when known.
+    pub created_in: Option<String>,
+    /// For a `file` schedule, how many bytes of the file were looked at;
+    /// none before the first look.
+    pub seen: Option<u64>,
+    /// A fingerprint of the bytes just before `seen` (see `Job::read_sum`).
+    pub seen_sum: Option<i64>,
+}
+
+/// What a new schedule carries.
+#[derive(Debug, Clone, Default)]
+pub struct NewSchedule {
+    pub track: String,
+    pub kind: String,
+    pub spec: serde_json::Value,
+    pub message: String,
+    pub next_at: Option<i64>,
+    pub created_in: Option<String>,
+}
+
+const SCHEDULE_SELECT: &str = "SELECT id, track, kind, spec, message, next_at, last_at, fired, status, note, created_at, created_in, seen, seen_sum FROM schedules";
+
+fn row_to_schedule(r: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
+    let spec: String = r.get(3)?;
+    let status: String = r.get(8)?;
+    Ok(Schedule {
+        id: r.get(0)?,
+        track: r.get(1)?,
+        kind: r.get(2)?,
+        spec: serde_json::from_str(&spec).unwrap_or(serde_json::Value::Null),
+        message: r.get(4)?,
+        next_at: r.get(5)?,
+        last_at: r.get(6)?,
+        fired: r.get::<_, i64>(7)? as u32,
+        status: ScheduleStatus::parse(&status),
+        note: r.get(9)?,
+        created_at: r.get(10)?,
+        created_in: r.get(11)?,
+        seen: r.get::<_, Option<i64>>(12)?.map(|n| n.max(0) as u64),
+        seen_sum: r.get(13)?,
+    })
+}
+
+/// Where a watched background job stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatus {
+    /// The process is alive and its log moves.
+    Running,
+    /// Alive, but its log has not moved for longer than it was given.
+    Stalled,
+    /// Its log said it finished.
+    Done,
+    /// The process is gone without its log saying it finished.
+    Died,
+    /// The app can no longer tell: the log is unreadable, or the platform
+    /// cannot ask whether a process is alive.
+    Lost,
+}
+
+impl JobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JobStatus::Running => "running",
+            JobStatus::Stalled => "stalled",
+            JobStatus::Done => "done",
+            JobStatus::Died => "died",
+            JobStatus::Lost => "lost",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s {
+            "running" => JobStatus::Running,
+            "stalled" => JobStatus::Stalled,
+            "done" => JobStatus::Done,
+            "died" => JobStatus::Died,
+            _ => JobStatus::Lost,
+        }
+    }
+
+    /// Whether the app still looks at it.
+    pub fn is_open(self) -> bool {
+        matches!(self, JobStatus::Running | JobStatus::Stalled)
+    }
+}
+
+/// A background process registered to be watched: by a worker that
+/// started a two-hour collection with `nohup` and ended its turn, or by the
+/// conductor on its behalf.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Job {
+    pub id: i64,
+    pub track: String,
+    /// The worker that owns it; empty for the conductor's own.
+    pub worker: String,
+    /// What it is, in the registrant's words.
+    pub what: String,
+    pub pid: Option<u32>,
+    /// When that process started, when known.
+    pub pid_start: Option<u64>,
+    /// The log file it writes, if any.
+    pub log: String,
+    /// A regular expression that, matched in the log, means it finished.
+    pub done_pattern: String,
+    /// Minutes the log may stay still before it is reported stalled.
+    pub stall_minutes: u32,
+    pub status: JobStatus,
+    /// The boot its process belongs to.
+    pub boot: String,
+    pub registered_at: i64,
+    /// When its log (or its state) last moved.
+    pub changed_at: i64,
+    pub ended_at: Option<i64>,
+    /// How much of the log has been read, so the rest is read next time.
+    pub read_bytes: u64,
+    /// A fingerprint of the bytes just before `read_bytes`: when they read
+    /// otherwise, the log was replaced and is read from its start.
+    pub read_sum: Option<i64>,
+    pub last_line: String,
+    /// What happened to it, for a human.
+    pub note: String,
+}
+
+/// What a new job carries.
+#[derive(Debug, Clone, Default)]
+pub struct NewJob {
+    pub track: String,
+    pub worker: String,
+    pub what: String,
+    pub pid: Option<u32>,
+    /// When that process started (see `RunSummary::pid_start`).
+    pub pid_start: Option<u64>,
+    pub log: String,
+    pub done_pattern: String,
+    pub stall_minutes: u32,
+    pub boot: String,
+}
+
+const JOB_SELECT: &str = "SELECT id, track, worker, what, pid, log, done_pattern, stall_minutes, status, boot,
+                                 registered_at, changed_at, ended_at, read_bytes, last_line, note, read_sum, pid_start
+                          FROM jobs";
+
+fn row_to_job(r: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
+    let status: String = r.get(8)?;
+    Ok(Job {
+        id: r.get(0)?,
+        track: r.get(1)?,
+        worker: r.get(2)?,
+        what: r.get(3)?,
+        pid: r.get::<_, Option<i64>>(4)?.and_then(|p| u32::try_from(p).ok()),
+        log: r.get(5)?,
+        done_pattern: r.get(6)?,
+        stall_minutes: r.get::<_, i64>(7)? as u32,
+        status: JobStatus::parse(&status),
+        boot: r.get(9)?,
+        registered_at: r.get(10)?,
+        changed_at: r.get(11)?,
+        ended_at: r.get(12)?,
+        read_bytes: r.get::<_, i64>(13)? as u64,
+        last_line: r.get(14)?,
+        note: r.get(15)?,
+        read_sum: r.get(16)?,
+        pid_start: r.get::<_, Option<i64>>(17)?.map(|t| t as u64),
+    })
+}
+
+/// How the app found its live runs when it came back: why they are not
+/// live any more, when they were last known to be, and how to tell whether
+/// an agent process is still there.
+pub struct Interruption<'a> {
+    /// For a human: what happened and when ("the machine rebooted at
+    /// 23:34; last seen alive at 23:31").
+    pub why: String,
+    /// Unix milliseconds the app was last known alive, when known. That is
+    /// the run's end as far as anyone can tell -- not the moment the app
+    /// came back and noticed, which may be days later.
+    pub at: Option<i64>,
+    /// Whether the agent process with this id (and, when kept, this start
+    /// time) is still alive. A run whose agent is goes `detached` rather
+    /// than `interrupted`: it is not over, and must not be started again
+    /// until that process is gone.
+    pub alive: &'a dyn Fn(u32, Option<u64>) -> bool,
+}
+
+/// A run [`Store::close_live_runs`] dealt with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClosedRun {
+    pub run: RunSummary,
+    /// Its agent was still alive, so it went `detached` rather than
+    /// `interrupted`.
+    pub detached: bool,
+}
+
+/// A run of a routine that a comeback closed as failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosedRoutineRun {
+    pub run: String,
+    pub routine: String,
+    /// Its agent's pid when that agent was still alive: the routine waits
+    /// for it before it runs again.
+    pub left: Option<u32>,
 }
 
 /// An artifact: something the human keeps beside tracks and can attach to
@@ -940,12 +1444,22 @@ pub struct Store {
 impl Store {
     /// Open or create the database at `path`.
     ///
-    /// Runs left live by a previous process are closed out as failed with
-    /// [`INTERRUPTED`], so the timeline never shows a run that is running in
-    /// a process that no longer exists.
+    /// Runs left live by a previous process are closed out as interrupted
+    /// with [`INTERRUPTED`], so the timeline never shows a run that is
+    /// running in a process that no longer exists. An app that knows more
+    /// about how it went (a reboot, when it was last alive, whether the
+    /// agents are still there) opens with [`Store::open_keeping_live`] and
+    /// closes them itself with [`Store::close_live_runs`].
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
         Self::init(conn, true)
+    }
+
+    /// Open or create the database at `path`, leaving runs a previous
+    /// process left live as they are, for the caller to close with
+    /// [`Store::close_live_runs`] once it knows what became of them.
+    pub fn open_keeping_live(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        Self::init(Connection::open(path)?, false)
     }
 
     /// Open the database beside a process that may already have it open
@@ -961,6 +1475,19 @@ impl Store {
     /// An in-memory store, for tests and `DIVISI_DB=:memory:`.
     pub fn in_memory() -> anyhow::Result<Self> {
         Self::init(Connection::open_in_memory()?, true)
+    }
+
+    /// One `meta` value out of a database file, touching nothing else: no
+    /// migration, no closing of runs. For a command that has to look
+    /// before it decides whether to open the store at all (a downgrade
+    /// must not bring the database forward first).
+    pub fn peek_meta(path: impl AsRef<Path>, key: &str) -> anyhow::Result<Option<String>> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let has_meta: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'", [], |r| r.get::<_, i64>(0))? > 0;
+        if !has_meta {
+            return Ok(None);
+        }
+        Ok(conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0)).optional()?)
     }
 
     fn init(mut conn: Connection, close_interrupted: bool) -> anyhow::Result<Self> {
@@ -995,10 +1522,44 @@ impl Store {
 
         let store = Self { conn: Mutex::new(conn) };
         if close_interrupted {
-            store.close_interrupted_runs()?;
-            store.close_interrupted_routine_runs()?;
+            store.close_live_runs(&Interruption { why: INTERRUPTED.to_string(), at: None, alive: &|_, _| false })?;
         }
         Ok(store)
+    }
+
+    /// Take a database back to an earlier schema, for an older build to
+    /// open. Refused when the version has no way back ([`DOWNGRADES`]),
+    /// and when the database is not newer than asked. Each step and its
+    /// version bump commit together, as going forward does.
+    pub fn downgrade(path: impl AsRef<Path>, to: i64) -> anyhow::Result<i64> {
+        let mut conn = Connection::open(path)?;
+        let from: i64 = conn
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get::<_, String>(0))
+            .optional()?
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("no schema version: not a divixi store"))?;
+        if to >= from {
+            anyhow::bail!("the store is at schema version {from}, which is not newer than {to}");
+        }
+        if from > SCHEMA_VERSION {
+            anyhow::bail!("the store is at schema version {from}, newer than this build knows ({SCHEMA_VERSION})");
+        }
+        // Every step must have a way back before the first is taken, or a
+        // refusal half-way would leave the database at a version nobody asked for.
+        for v in (to + 1..=from).rev() {
+            if DOWNGRADES.get((SCHEMA_VERSION - v) as usize).is_none() {
+                anyhow::bail!("no way back from schema version {v}");
+            }
+        }
+        for v in (to + 1..=from).rev() {
+            let step = DOWNGRADES[(SCHEMA_VERSION - v) as usize];
+            tracing::info!(from = v, to = v - 1, "taking the event store back");
+            let tx = conn.transaction()?;
+            tx.execute_batch(step)?;
+            tx.execute("UPDATE meta SET value = ?1 WHERE key = 'schema_version'", params![(v - 1).to_string()])?;
+            tx.commit()?;
+        }
+        Ok(to)
     }
 
     /// Read a free-form setting.
@@ -1010,6 +1571,14 @@ impl Store {
     }
 
     /// Remove a free-form setting.
+    /// Set a key only if it is not set yet, in one step: whether this call
+    /// set it. What two callers racing for the same thing use to tell
+    /// which of them has it.
+    pub fn claim_meta(&self, key: &str, value: &str) -> anyhow::Result<bool> {
+        let changed = self.conn.lock().execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?1, ?2)", params![key, value])?;
+        Ok(changed == 1)
+    }
+
     pub fn delete_meta(&self, key: &str) -> anyhow::Result<()> {
         self.conn.lock().execute("DELETE FROM meta WHERE key = ?1", params![key])?;
         Ok(())
@@ -1026,20 +1595,81 @@ impl Store {
         Ok(())
     }
 
-    fn close_interrupted_runs(&self) -> anyhow::Result<()> {
-        let live: Vec<(RunId, u64)> = {
-            let conn = self.conn.lock();
-            let mut stmt = conn.prepare(
-                "SELECT r.id, COALESCE((SELECT MAX(at_ms) FROM events e WHERE e.run_id = r.id), 0)
-                 FROM runs r WHERE r.status IN ('connecting', 'running') ORDER BY r.n",
+    /// Runs a previous process left live (`connecting`, `running`) or
+    /// detached, oldest first, with the run-relative time of the last event
+    /// each saw.
+    fn live_runs_with_last_event(&self) -> anyhow::Result<Vec<(RunSummary, u64)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&format!(
+            "{RUN_SELECT} WHERE status IN ('connecting', 'running', 'detached') ORDER BY n"
+        ))?;
+        let runs: Vec<RunSummary> = stmt.query_map([], row_to_summary)?.collect::<Result<_, _>>()?;
+        let mut out = Vec::with_capacity(runs.len());
+        for run in runs {
+            let at_ms: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(at_ms), 0) FROM events WHERE run_id = ?1",
+                params![run.id],
+                |r| r.get(0),
             )?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?;
-            rows.collect::<Result<_, _>>()?
-        };
-        for (run, at_ms) in live {
-            tracing::warn!(%run, "closing run left live by a previous process");
-            self.append(&run, at_ms, &AgentEvent::Failed { error: INTERRUPTED.to_string() })?;
+            out.push((run, at_ms.max(0) as u64));
         }
+        Ok(out)
+    }
+
+    /// Close the runs a previous process left live, now that the app knows
+    /// what became of them: `interrupted` with `how.why`, ended when the app
+    /// was last seen alive (`how.at`) -- or `detached` for a run whose agent
+    /// process `how.alive` still finds, which is not over and is watched
+    /// until it is. A run already detached from an earlier comeback is
+    /// looked at the same way: still alive, it stays as it is (and is not
+    /// returned); gone, it ends as interrupted like the rest. Routine runs
+    /// left live are closed as failed with the same words. Returns what was
+    /// done, for the app to tell people.
+    pub fn close_live_runs(&self, how: &Interruption<'_>) -> anyhow::Result<Vec<ClosedRun>> {
+        Ok(self.close_live_runs_and_routines(how)?.0)
+    }
+
+    /// [`Store::close_live_runs`], with the routine runs it closed as well,
+    /// so a person can be told of those too.
+    pub fn close_live_runs_and_routines(&self, how: &Interruption<'_>) -> anyhow::Result<(Vec<ClosedRun>, Vec<ClosedRoutineRun>)> {
+        let mut out = Vec::new();
+        for (run, at_ms) in self.live_runs_with_last_event()? {
+            let detached = run.pid.is_some_and(|pid| (how.alive)(pid, run.pid_start));
+            if detached && run.status == RunStatus::Detached {
+                continue;
+            }
+            if detached {
+                tracing::warn!(run = %run.id, pid = ?run.pid, "a run the app lost still has its agent alive; watching it");
+                self.append(&run.id, at_ms, &AgentEvent::Detached { why: how.why.clone() })?;
+            } else {
+                tracing::warn!(run = %run.id, "closing run left live by a previous process");
+                self.append_ending_at(&run.id, at_ms, &AgentEvent::Interrupted { why: how.why.clone() }, how.at)?;
+            }
+            let run = self.run(&run.id)?.unwrap_or(run);
+            out.push(ClosedRun { run, detached });
+        }
+        let routines = self.close_interrupted_routine_runs(how)?;
+        Ok((out, routines))
+    }
+
+    /// Runs whose agent went on alone after the app lost them, oldest first.
+    pub fn detached_runs(&self) -> anyhow::Result<Vec<RunSummary>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&format!("{RUN_SELECT} WHERE status = 'detached' ORDER BY n"))?;
+        let rows = stmt.query_map([], row_to_summary)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The agent process behind a run, once the app has one, and when it
+    /// started.
+    pub fn set_run_pid(&self, run: &str, pid: Option<u32>, started: Option<u64>) -> anyhow::Result<()> {
+        self.conn.lock().execute("UPDATE runs SET pid = ?2, pid_start = ?3 WHERE id = ?1", params![run, pid.map(i64::from), started.map(|t| t as i64)])?;
+        Ok(())
+    }
+
+    /// Whether a run may be started again by itself after an interruption.
+    pub fn set_run_repeatable(&self, run: &str, repeatable: bool) -> anyhow::Result<()> {
+        self.conn.lock().execute("UPDATE runs SET repeatable = ?2 WHERE id = ?1", params![run, repeatable as i64])?;
         Ok(())
     }
 
@@ -1337,7 +1967,7 @@ impl Store {
         let report = report.map(serde_json::to_string).transpose()?.unwrap_or_default();
         let conn = self.conn.lock();
         conn.execute(
-            "UPDATE routine_runs SET status = ?2, ended_at = ?3, output = ?4, error = ?5, tools = ?6, report = ?7
+            "UPDATE routine_runs SET status = ?2, ended_at = ?3, output = ?4, error = ?5, tools = ?6, report = ?7, pid = NULL, pid_start = NULL
              WHERE id = ?1",
             params![id, status.as_str(), now_ms(), output, error, tools, report],
         )?;
@@ -1369,15 +1999,62 @@ impl Store {
     }
 
     /// Close runs of routines that were live when the app last closed, as
-    /// [`Store::close_interrupted_runs`] does for a track's.
-    fn close_interrupted_routine_runs(&self) -> anyhow::Result<()> {
+    /// [`Store::close_live_runs`] does for a track's: failed, with the same
+    /// words, ended when the app was last seen alive. A run whose agent is
+    /// still alive keeps its pid, so the routine is not started again beside
+    /// it ([`Store::routine_left_running`]); a pid kept that way from an
+    /// earlier comeback is let go once its agent has gone.
+    fn close_interrupted_routine_runs(&self, how: &Interruption<'_>) -> anyhow::Result<Vec<ClosedRoutineRun>> {
         let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE routine_runs SET status = 'failed', ended_at = COALESCE(ended_at, started_at), error = ?1
-             WHERE status = 'running'",
-            params![INTERRUPTED],
-        )?;
+        type Row = (String, Option<i64>, Option<i64>);
+        let read = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Row> { Ok((r.get(0)?, r.get(1)?, r.get(2)?)) };
+        let lives = |pid: Option<i64>, start: Option<i64>| pid.is_some_and(|p| (how.alive)(p as u32, start.map(|t| t as u64)));
+        let kept: Vec<Row> = conn
+            .prepare("SELECT id, pid, pid_start FROM routine_runs WHERE pid IS NOT NULL AND status <> 'running'")?
+            .query_map([], read)?
+            .collect::<Result<_, _>>()?;
+        for (id, pid, start) in kept {
+            if !lives(pid, start) {
+                conn.execute("UPDATE routine_runs SET pid = NULL, pid_start = NULL WHERE id = ?1", params![id])?;
+            }
+        }
+        let live: Vec<(String, Option<i64>, Option<i64>, String)> = conn
+            .prepare("SELECT id, pid, pid_start, routine FROM routine_runs WHERE status = 'running'")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<_, _>>()?;
+        let mut closed = Vec::new();
+        for (id, pid, start, routine) in live {
+            let still = lives(pid, start);
+            conn.execute(
+                "UPDATE routine_runs SET status = 'failed', ended_at = COALESCE(ended_at, MAX(started_at, COALESCE(?2, started_at))), error = ?1,
+                        pid = CASE WHEN ?4 THEN pid END, pid_start = CASE WHEN ?4 THEN pid_start END
+                 WHERE id = ?3",
+                params![how.why, how.at, id, still],
+            )?;
+            closed.push(ClosedRoutineRun { run: id, routine, left: if still { pid.map(|p| p as u32) } else { None } });
+        }
+        Ok(closed)
+    }
+
+    /// Keep the process a routine's run is running in, and when it started.
+    pub fn set_routine_run_pid(&self, id: &str, pid: Option<u32>, started: Option<u64>) -> anyhow::Result<()> {
+        self.conn.lock().execute("UPDATE routine_runs SET pid = ?2, pid_start = ?3 WHERE id = ?1", params![id, pid, started.map(|t| t as i64)])?;
         Ok(())
+    }
+
+    /// A run of this routine that a crash cut while its agent went on,
+    /// with that agent's pid and start, if there is one: the caller asks
+    /// whether it is alive still before starting the routine again.
+    pub fn routine_left_running(&self, routine: &str) -> anyhow::Result<Option<(String, u32, Option<u64>)>> {
+        let conn = self.conn.lock();
+        let row = conn
+            .query_row(
+                "SELECT id, pid, pid_start FROM routine_runs WHERE routine = ?1 AND pid IS NOT NULL AND status <> 'running' ORDER BY started_at DESC LIMIT 1",
+                params![routine],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(id, pid, start)| (id, pid as u32, start.map(|t| t as u64))))
     }
 
     /// One track by id.
@@ -1446,8 +2123,16 @@ impl Store {
         tx.execute("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE track = ?1)", params![id])?;
         tx.execute("DELETE FROM runs WHERE track = ?1", params![id])?;
         tx.execute("DELETE FROM decisions WHERE track = ?1", params![id])?;
+        // What outlived its sessions does not outlive its track: a schedule
+        // left behind would go on waking a conductor that has nothing to
+        // conduct, a watched job would be reported to it, a notice would
+        // point at a track that is gone.
+        tx.execute("DELETE FROM schedules WHERE track = ?1", params![id])?;
+        tx.execute("DELETE FROM jobs WHERE track = ?1", params![id])?;
+        tx.execute("DELETE FROM notices WHERE track = ?1", params![id])?;
         tx.execute(
-            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%' OR key LIKE 'worktree:' || ?1 || '/%' OR key LIKE 'worker_dir:' || ?1 || '/%' OR key = 'handoff:' || ?1",
+            "DELETE FROM meta WHERE key LIKE 'conductor_session:' || ?1 || ':%' OR key LIKE 'worker_session:' || ?1 || '/%' OR key LIKE 'worktree:' || ?1 || '/%' OR key LIKE 'worker_dir:' || ?1 || '/%' OR key = 'handoff:' || ?1
+                 OR key = 'notes:' || ?1 OR key = 'quiet:' || ?1 OR key LIKE 'worker_scope:' || ?1 || '/%' OR key = 'parked:' || ?1",
             params![id],
         )?;
         let changed = tx.execute("DELETE FROM tracks WHERE id = ?1", params![id])?;
@@ -1493,7 +2178,7 @@ impl Store {
             params![track, worker],
         )?;
         let gone = tx.execute("DELETE FROM runs WHERE track = ?1 AND session = ?2", params![track, worker])?;
-        tx.execute("DELETE FROM meta WHERE key = 'worker_session:' || ?1 || '/' || ?2", params![track, worker])?;
+        tx.execute("DELETE FROM meta WHERE key = 'worker_session:' || ?1 || '/' || ?2 OR key = 'worker_scope:' || ?1 || '/' || ?2", params![track, worker])?;
         tx.commit()?;
         Ok(gone as u32)
     }
@@ -1535,6 +2220,13 @@ impl Store {
     /// Returns the event's sequence number. Appending to a run that already
     /// ended is allowed (the log stays truthful) but does not reopen it.
     pub fn append(&self, run: &str, at_ms: u64, event: &AgentEvent) -> anyhow::Result<i64> {
+        self.append_ending_at(run, at_ms, event, None)
+    }
+
+    /// [`Store::append`], with the moment a terminal event ends the run
+    /// given rather than taken from the clock: a run the app lost ended
+    /// when the app was last seen alive, not when it came back and noticed.
+    fn append_ending_at(&self, run: &str, at_ms: u64, event: &AgentEvent, ended_at: Option<i64>) -> anyhow::Result<i64> {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
 
@@ -1545,6 +2237,19 @@ impl Store {
         )?;
         let seq = tx.last_insert_rowid();
 
+        // When the run ended, and how long it ran. Given an end, the
+        // length is measured to it; otherwise it is the time of the event.
+        // A given end is never before the start: the app's last sign of
+        // life can predate a run that began just after it, and a run that
+        // ended before it began would be read as having never run.
+        let (ended, duration): (i64, i64) = match ended_at {
+            Some(end) => {
+                let started: i64 = tx.query_row("SELECT started_at FROM runs WHERE id = ?1", params![run], |r| r.get(0)).optional()?.unwrap_or(end);
+                let end = end.max(started);
+                (end, end - started)
+            }
+            None => (now_ms(), at_ms as i64),
+        };
         match event {
             AgentEvent::Started { session_id, .. } => {
                 tx.execute(
@@ -1555,22 +2260,34 @@ impl Store {
             AgentEvent::Finished { stop_reason } => {
                 let changed = tx.execute(
                     "UPDATE runs SET status = ?2, stop_reason = ?3, ended_at = ?4, duration_ms = ?5
-                     WHERE id = ?1 AND status IN ('connecting', 'running')",
-                    params![run, RunStatus::Done.as_str(), stop_reason, now_ms(), at_ms as i64],
+                     WHERE id = ?1 AND status IN ('connecting', 'running', 'detached')",
+                    params![run, RunStatus::Done.as_str(), stop_reason, ended, duration],
                 )?;
                 if changed > 0 {
                     fold(&tx, run)?;
                 }
             }
-            AgentEvent::Failed { error } => {
+            // The three ways a turn ends without finishing, each its own
+            // status with its reason in `error`; a detached run ends too,
+            // once its agent is gone.
+            AgentEvent::Failed { error: why } | AgentEvent::Interrupted { why } | AgentEvent::TimedOut { why } => {
+                let status = event.ends_as().unwrap_or(RunStatus::Failed);
                 let changed = tx.execute(
                     "UPDATE runs SET status = ?2, error = ?3, ended_at = ?4, duration_ms = ?5
-                     WHERE id = ?1 AND status IN ('connecting', 'running')",
-                    params![run, RunStatus::Failed.as_str(), error, now_ms(), at_ms as i64],
+                     WHERE id = ?1 AND status IN ('connecting', 'running', 'detached')",
+                    params![run, status.as_str(), why, ended, duration],
                 )?;
                 if changed > 0 {
                     fold(&tx, run)?;
                 }
+            }
+            // Not an end: the agent is still going, out of reach. No fold
+            // (there is nothing final to index) and no end time.
+            AgentEvent::Detached { why } => {
+                tx.execute(
+                    "UPDATE runs SET status = ?2, error = ?3 WHERE id = ?1 AND status IN ('connecting', 'running')",
+                    params![run, RunStatus::Detached.as_str(), why],
+                )?;
             }
             _ => {}
         }
@@ -1790,6 +2507,235 @@ impl Store {
         let rows = stmt.query_map(params![expr], |r| Ok(SearchHit { run: r.get(0)?, snippet: r.get(1)? }))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+
+    // ── Notices ──
+
+    /// Keep something the human has to be told. It stays until read.
+    pub fn add_notice(&self, new: &NewNotice) -> anyhow::Result<Notice> {
+        if new.title.trim().is_empty() {
+            anyhow::bail!("a notice needs a title");
+        }
+        let id = {
+            let conn = self.conn.lock();
+            conn.execute(
+                "INSERT INTO notices(track, kind, title, body, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![new.track, new.kind, new.title.trim(), new.body.trim(), serde_json::to_string(&new.data)?, now_ms()],
+            )?;
+            conn.last_insert_rowid()
+        };
+        self.notice(id)?.ok_or_else(|| anyhow::anyhow!("notice {id} vanished"))
+    }
+
+    pub fn notice(&self, id: i64) -> anyhow::Result<Option<Notice>> {
+        let conn = self.conn.lock();
+        Ok(conn.query_row(&format!("{NOTICE_SELECT} WHERE id = ?1"), params![id], row_to_notice).optional()?)
+    }
+
+    /// Notices not read yet, newest first.
+    pub fn unread_notices(&self) -> anyhow::Result<Vec<Notice>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&format!("{NOTICE_SELECT} WHERE read_at IS NULL ORDER BY created_at DESC, id DESC"))?;
+        let rows = stmt.query_map([], row_to_notice)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The human has read it. Reading twice is nothing.
+    pub fn read_notice(&self, id: i64) -> anyhow::Result<Notice> {
+        self.conn.lock().execute("UPDATE notices SET read_at = COALESCE(read_at, ?2) WHERE id = ?1", params![id, now_ms()])?;
+        self.notice(id)?.ok_or_else(|| anyhow::anyhow!("no notice {id}"))
+    }
+
+    /// Whether an unread notice of this kind is up for a track already, so
+    /// the same thing is not said twice while nobody has read it once.
+    pub fn has_unread_notice(&self, track: &str, kind: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM notices WHERE track = ?1 AND kind = ?2 AND read_at IS NULL",
+            params![track, kind],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    // ── Schedules ──
+
+    pub fn create_schedule(&self, new: &NewSchedule) -> anyhow::Result<Schedule> {
+        if new.message.trim().is_empty() {
+            anyhow::bail!("a schedule needs a message for the conductor");
+        }
+        let id = {
+            let conn = self.conn.lock();
+            conn.execute(
+                "INSERT INTO schedules(track, kind, spec, message, next_at, created_at, created_in) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![new.track, new.kind, serde_json::to_string(&new.spec)?, new.message.trim(), new.next_at, now_ms(), new.created_in],
+            )?;
+            conn.last_insert_rowid()
+        };
+        self.schedule(id)?.ok_or_else(|| anyhow::anyhow!("schedule {id} vanished"))
+    }
+
+    pub fn schedule(&self, id: i64) -> anyhow::Result<Option<Schedule>> {
+        let conn = self.conn.lock();
+        Ok(conn.query_row(&format!("{SCHEDULE_SELECT} WHERE id = ?1"), params![id], row_to_schedule).optional()?)
+    }
+
+    /// A track's schedules, or every track's; the active ones only, or all
+    /// of them. Oldest first.
+    pub fn schedules(&self, track: Option<&str>, active_only: bool) -> anyhow::Result<Vec<Schedule>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&format!(
+            "{SCHEDULE_SELECT} WHERE (?1 IS NULL OR track = ?1) AND (?2 = 0 OR status = 'active') ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(params![track, active_only as i64], row_to_schedule)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Active schedules whose time has come, oldest first. Conditions
+    /// (no `next_at`) are not here: the app looks at those itself.
+    pub fn due_schedules(&self, now: i64) -> anyhow::Result<Vec<Schedule>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&format!(
+            "{SCHEDULE_SELECT} WHERE status = 'active' AND next_at IS NOT NULL AND next_at <= ?1 ORDER BY next_at, id"
+        ))?;
+        let rows = stmt.query_map(params![now], row_to_schedule)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// It fired: count it, note what happened, and set the next time -- or
+    /// none, which is the end of it.
+    pub fn schedule_fired(&self, id: i64, next_at: Option<i64>, note: &str) -> anyhow::Result<Schedule> {
+        let status = if next_at.is_some() { ScheduleStatus::Active } else { ScheduleStatus::Done };
+        let changed = self.conn.lock().execute(
+            "UPDATE schedules SET fired = fired + 1, last_at = ?2, next_at = ?3, status = ?4, note = ?5 WHERE id = ?1 AND status = 'active'",
+            params![id, now_ms(), next_at, status.as_str(), note.trim()],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("schedule {id} is not active");
+        }
+        self.schedule(id)?.ok_or_else(|| anyhow::anyhow!("schedule {id} vanished"))
+    }
+
+    /// Move an active schedule's next time without counting a firing (it
+    /// was pushed past quiet hours, say), with a note saying why.
+    pub fn schedule_moved(&self, id: i64, next_at: i64, note: &str) -> anyhow::Result<Schedule> {
+        let changed = self.conn.lock().execute(
+            "UPDATE schedules SET next_at = ?2, note = ?3 WHERE id = ?1 AND status = 'active'",
+            params![id, next_at, note.trim()],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("schedule {id} is not active");
+        }
+        self.schedule(id)?.ok_or_else(|| anyhow::anyhow!("schedule {id} vanished"))
+    }
+
+    /// How far into its file a `file` schedule has looked, with a
+    /// fingerprint of the bytes just before that point.
+    pub fn schedule_seen(&self, id: i64, seen: u64, sum: Option<i64>) -> anyhow::Result<()> {
+        self.conn.lock().execute("UPDATE schedules SET seen = ?2, seen_sum = ?3 WHERE id = ?1 AND status = 'active'", params![id, seen as i64, sum])?;
+        Ok(())
+    }
+
+    /// An active schedule is over without a firing (its `until` passed
+    /// while it was held back), with a note saying so.
+    pub fn end_schedule(&self, id: i64, note: &str) -> anyhow::Result<Schedule> {
+        let changed = self.conn.lock().execute(
+            "UPDATE schedules SET status = 'done', next_at = NULL, note = ?2 WHERE id = ?1 AND status = 'active'",
+            params![id, note.trim()],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("schedule {id} is not active");
+        }
+        self.schedule(id)?.ok_or_else(|| anyhow::anyhow!("schedule {id} vanished"))
+    }
+
+    pub fn cancel_schedule(&self, id: i64) -> anyhow::Result<Schedule> {
+        let changed = self.conn.lock().execute(
+            "UPDATE schedules SET status = 'cancelled', next_at = NULL WHERE id = ?1 AND status = 'active'",
+            params![id],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("schedule {id} is not active");
+        }
+        self.schedule(id)?.ok_or_else(|| anyhow::anyhow!("schedule {id} vanished"))
+    }
+
+    // ── Jobs ──
+
+    pub fn add_job(&self, new: &NewJob) -> anyhow::Result<Job> {
+        if new.pid.is_none() && new.log.trim().is_empty() {
+            anyhow::bail!("a job needs a pid or a log file to watch");
+        }
+        let id = {
+            let conn = self.conn.lock();
+            let now = now_ms();
+            conn.execute(
+                "INSERT INTO jobs(track, worker, what, pid, log, done_pattern, stall_minutes, boot, registered_at, changed_at, pid_start)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)",
+                params![
+                    new.track,
+                    new.worker,
+                    new.what.trim(),
+                    new.pid.map(i64::from),
+                    new.log.trim(),
+                    new.done_pattern.trim(),
+                    i64::from(new.stall_minutes.max(1)),
+                    new.boot,
+                    now,
+                    new.pid_start.map(|t| t as i64)
+                ],
+            )?;
+            conn.last_insert_rowid()
+        };
+        self.job(id)?.ok_or_else(|| anyhow::anyhow!("job {id} vanished"))
+    }
+
+    pub fn job(&self, id: i64) -> anyhow::Result<Option<Job>> {
+        let conn = self.conn.lock();
+        Ok(conn.query_row(&format!("{JOB_SELECT} WHERE id = ?1"), params![id], row_to_job).optional()?)
+    }
+
+    /// A track's jobs, or every track's; the ones still watched only, or
+    /// all of them. Oldest first.
+    pub fn jobs(&self, track: Option<&str>, open_only: bool) -> anyhow::Result<Vec<Job>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&format!(
+            "{JOB_SELECT} WHERE (?1 IS NULL OR track = ?1) AND (?2 = 0 OR status IN ('running', 'stalled')) ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(params![track, open_only as i64], row_to_job)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The log moved (or did not): how far it has been read and its last
+    /// line; `moved` is what resets the stall clock.
+    pub fn job_progress(&self, id: i64, read_bytes: u64, read_sum: Option<i64>, last_line: &str, moved: bool) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        if moved {
+            conn.execute(
+                "UPDATE jobs SET read_bytes = ?2, read_sum = ?5, last_line = ?3, changed_at = ?4, status = CASE WHEN status = 'stalled' THEN 'running' ELSE status END WHERE id = ?1",
+                params![id, read_bytes as i64, last_line, now_ms(), read_sum],
+            )?;
+        } else {
+            conn.execute("UPDATE jobs SET read_bytes = ?2, read_sum = ?4, last_line = ?3 WHERE id = ?1", params![id, read_bytes as i64, last_line, read_sum])?;
+        }
+        Ok(())
+    }
+
+    /// Where an open job stands now, with what happened in a human's
+    /// words. An end sets the end time. A job that is over already (it
+    /// ended, or somebody stopped watching it while a look was under way)
+    /// is left as it is and this is an error: the first ending stands, and
+    /// nobody is told of a job they stopped watching.
+    pub fn set_job_status(&self, id: i64, status: JobStatus, note: &str) -> anyhow::Result<Job> {
+        let ended = (!status.is_open()).then(now_ms);
+        let changed = self.conn.lock().execute(
+            "UPDATE jobs SET status = ?2, note = ?3, ended_at = COALESCE(ended_at, ?4), changed_at = ?5 WHERE id = ?1 AND status IN ('running', 'stalled')",
+            params![id, status.as_str(), note.trim(), ended, now_ms()],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("job {id} is not being watched (it has ended, or nobody watches it any more)");
+        }
+        self.job(id)?.ok_or_else(|| anyhow::anyhow!("job {id} vanished"))
+    }
 }
 
 /// Upgrade an existing database from `from` to [`SCHEMA_VERSION`]. Each
@@ -1881,7 +2827,7 @@ fn fts_query(query: &str) -> Option<String> {
 
 /// Columns of a run summary, in the order `row_to_summary` reads them.
 const RUN_SELECT: &str = "SELECT id, session, prompt, cwd, status, started_at, duration_ms, session_id,
-                                 stop_reason, error, output, plan, tool_count, agent, track
+                                 stop_reason, error, output, plan, tool_count, agent, track, ended_at, pid, repeatable, pid_start
                           FROM runs";
 
 /// Columns of a track, in the order `row_to_track` reads them.
@@ -1956,6 +2902,10 @@ fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<RunSummary> {
         output: r.get(10)?,
         plan: serde_json::from_str(&plan).unwrap_or_default(),
         tool_count: r.get::<_, i64>(12)? as u32,
+        ended_at: r.get(15)?,
+        pid: r.get::<_, Option<i64>>(16)?.and_then(|p| u32::try_from(p).ok()),
+        repeatable: r.get::<_, i64>(17)? != 0,
+        pid_start: r.get::<_, Option<i64>>(18)?.map(|t| t as u64),
     })
 }
 
@@ -1986,6 +2936,8 @@ mod tests {
                 .execute_batch(
                     "ALTER TABLE tracks DROP COLUMN worker_folder;
                      ALTER TABLE tracks DROP COLUMN worker_choice;
+                     ALTER TABLE runs DROP COLUMN pid; ALTER TABLE runs DROP COLUMN pid_start; ALTER TABLE runs DROP COLUMN repeatable;
+                     DROP TABLE notices; DROP TABLE schedules; DROP TABLE jobs;
                      DROP TABLE routines;",
                 )
                 .unwrap();
@@ -2291,6 +3243,8 @@ mod tests {
                 "DROP TABLE routines;
                  DROP TABLE routine_runs;
                  ALTER TABLE tracks DROP COLUMN worker_choice;
+                 ALTER TABLE runs DROP COLUMN pid; ALTER TABLE runs DROP COLUMN pid_start; ALTER TABLE runs DROP COLUMN repeatable;
+                 DROP TABLE notices; DROP TABLE schedules; DROP TABLE jobs;
                  INSERT INTO meta(key, value) VALUES ('schema_version', '15');",
             )
             .unwrap();
@@ -2365,6 +3319,7 @@ mod tests {
             // Routines came at v16, and the replace above took their `track`
             // column with the runs one; the migrations make the table.
             conn.execute("DROP TABLE routines", []).unwrap();
+            conn.execute_batch("ALTER TABLE runs DROP COLUMN pid; ALTER TABLE runs DROP COLUMN pid_start; ALTER TABLE runs DROP COLUMN repeatable; DROP TABLE notices; DROP TABLE schedules; DROP TABLE jobs;").unwrap();
             conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')", []).unwrap();
             conn.execute(
                 "INSERT INTO runs(n, id, lane, prompt, cwd, status, started_at) VALUES (1, 't001', 'conductor', 'old', 'C:/old', 'done', 5)",
@@ -2448,6 +3403,55 @@ mod tests {
             .unwrap();
         assert_eq!(apart.effective_worker_agent(), "codex");
         assert!(apart.effective_worker_config().is_empty(), "a worker set apart keeps its own options");
+    }
+
+    /// A crash that leaves a routine's agent running keeps its pid on the
+    /// run, so the routine is not started again beside it; once that agent
+    /// has gone (or the machine rebooted) the pid is let go. A run that
+    /// ends the ordinary way keeps none.
+    #[test]
+    fn a_routine_left_running_by_a_crash_is_known() {
+        let store = Store::in_memory().unwrap();
+        let r = store
+            .create_routine(&RoutinePatch { name: Some("check".into()), instruction: Some("look".into()), cwd: Some("/ops".into()), agent: Some("claude_code".into()), ..RoutinePatch::default() })
+            .unwrap();
+        let done = store.begin_routine_run(&r.id, "claude_code", "/ops", "look").unwrap();
+        store.set_routine_run_pid(&done, Some(4242), None).unwrap();
+        store.end_routine_run(&done, RoutineStatus::Done, "ok", "", 0, None).unwrap();
+        assert_eq!(store.routine_left_running(&r.id).unwrap(), None, "an ended run keeps no pid");
+
+        let cut = store.begin_routine_run(&r.id, "claude_code", "/ops", "look").unwrap();
+        store.set_routine_run_pid(&cut, Some(4343), None).unwrap();
+        let gone = store.begin_routine_run(&r.id, "claude_code", "/ops", "look").unwrap();
+        store.set_routine_run_pid(&gone, Some(4444), None).unwrap();
+        let alive = |pid: u32, _: Option<u64>| pid == 4343;
+        let (_, routines) = store.close_live_runs_and_routines(&Interruption { why: "the app went down".into(), at: None, alive: &alive }).unwrap();
+        assert_eq!(
+            routines,
+            vec![
+                ClosedRoutineRun { run: cut.clone(), routine: r.id.clone(), left: Some(4343) },
+                ClosedRoutineRun { run: gone.clone(), routine: r.id.clone(), left: None },
+            ],
+            "each cut run is said, with the agent left running when there is one"
+        );
+        let run = store.routine_run(&cut).unwrap().unwrap();
+        assert_eq!((run.status, run.error.as_str()), (RoutineStatus::Failed, "the app went down"));
+        assert_eq!(store.routine_left_running(&r.id).unwrap(), Some((cut.clone(), 4343, None)), "its agent is alive: kept");
+
+        // The next comeback finds it gone: let go.
+        let nobody = |_: u32, _: Option<u64>| false;
+        store.close_live_runs(&Interruption { why: "again".into(), at: None, alive: &nobody }).unwrap();
+        assert_eq!(store.routine_left_running(&r.id).unwrap(), None);
+    }
+
+    #[test]
+    fn a_meta_key_is_claimed_once() {
+        let store = Store::in_memory().unwrap();
+        assert!(store.claim_meta("resumed:t006", "starting").unwrap());
+        assert!(!store.claim_meta("resumed:t006", "starting").unwrap(), "the second caller does not have it");
+        assert_eq!(store.get_meta("resumed:t006").unwrap().as_deref(), Some("starting"), "and changed nothing");
+        store.delete_meta("resumed:t006").unwrap();
+        assert!(store.claim_meta("resumed:t006", "starting").unwrap(), "let go, it can be claimed again");
     }
 
     #[test]
@@ -2700,6 +3704,8 @@ mod tests {
                  ALTER TABLE decisions DROP COLUMN permission;
                  ALTER TABLE tracks DROP COLUMN worker_folder;
                  ALTER TABLE tracks DROP COLUMN worker_choice;
+                 ALTER TABLE runs DROP COLUMN pid; ALTER TABLE runs DROP COLUMN pid_start; ALTER TABLE runs DROP COLUMN repeatable;
+                 DROP TABLE notices; DROP TABLE schedules; DROP TABLE jobs;
                  DROP TABLE artifacts;
                  DROP TABLE routines;
                  CREATE TABLE drafts (id TEXT PRIMARY KEY, title TEXT NOT NULL, agent TEXT NOT NULL,
@@ -2858,13 +3864,322 @@ mod tests {
 
         let store = Store::open(&path).unwrap();
         let s = store.run(&run).unwrap().unwrap();
-        assert_eq!(s.status, RunStatus::Failed);
+        assert_eq!(s.status, RunStatus::Interrupted, "the app's doing, not the agent's: not a failure");
         assert_eq!(s.error.as_deref(), Some(INTERRUPTED));
         assert_eq!(s.output, "half");
         assert_eq!(s.duration_ms, Some(8), "closed at the last event's time");
+        assert!(s.ended_at.is_some());
         let last = store.events(&run).unwrap().pop().unwrap();
-        assert_eq!(last.event.kind(), "failed");
+        assert_eq!(last.event.kind(), "interrupted");
 
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The app that comes back knows more than "it closed": when it was
+    /// last alive, what happened, and whether each run's agent is still
+    /// there. A run whose agent is alive is not over; one whose agent is
+    /// gone ended when the app was last seen, not when it noticed.
+    #[test]
+    fn live_runs_are_closed_with_what_the_app_knows() {
+        let dir = std::env::temp_dir().join(format!("orchestra-store-knows-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let _ = std::fs::remove_file(&path);
+
+        let (gone, alive, started) = {
+            let store = Store::open(&path).unwrap();
+            let gone = store.begin_run(TR, "review-core", "claude_code", "patch the repo", ".").unwrap();
+            store.append(&gone, 7, &AgentEvent::Started { session_id: "s".into(), cwd: ".".into() }).unwrap();
+            store.set_run_pid(&gone, Some(4242), None).unwrap();
+            let alive = store.begin_run(TR, "review-data", "claude_code", "collect", ".").unwrap();
+            store.append(&alive, 7, &AgentEvent::Started { session_id: "s2".into(), cwd: ".".into() }).unwrap();
+            store.set_run_pid(&alive, Some(4343), None).unwrap();
+            store.set_run_repeatable(&alive, true).unwrap();
+            let started = store.run(&gone).unwrap().unwrap().started_at;
+            (gone, alive, started)
+        };
+
+        let store = Store::open_keeping_live(&path).unwrap();
+        assert_eq!(store.run(&gone).unwrap().unwrap().status, RunStatus::Running, "kept live until the app says");
+        let seen = started + 90_000;
+        let closed = store
+            .close_live_runs(&Interruption { why: "the machine rebooted at 23:34".into(), at: Some(seen), alive: &|pid, _| pid == 4343 })
+            .unwrap();
+        assert_eq!(closed.len(), 2);
+        let (g, a) = (&closed[0], &closed[1]);
+        assert_eq!((g.run.id.as_str(), g.detached), (gone.as_str(), false));
+        assert_eq!(g.run.status, RunStatus::Interrupted);
+        assert_eq!(g.run.error.as_deref(), Some("the machine rebooted at 23:34"));
+        assert_eq!(g.run.ended_at, Some(seen), "ended when the app was last seen alive");
+        assert_eq!(g.run.duration_ms, Some(90_000), "and ran that long, not until the app noticed");
+        assert_eq!((a.run.id.as_str(), a.detached), (alive.as_str(), true));
+        assert_eq!(a.run.status, RunStatus::Detached, "its agent is still going");
+        assert_eq!(a.run.ended_at, None, "so it has not ended");
+        assert!(a.run.repeatable && a.run.pid == Some(4343));
+        assert_eq!(store.detached_runs().unwrap().len(), 1);
+
+        // The agent goes, and the run ends as interrupted, from where it was.
+        store.append(&alive, 60_000, &AgentEvent::Interrupted { why: "its agent ended at 23:40".into() }).unwrap();
+        let a = store.run(&alive).unwrap().unwrap();
+        assert_eq!(a.status, RunStatus::Interrupted);
+        assert_eq!(a.duration_ms, Some(60_000));
+        assert!(store.detached_runs().unwrap().is_empty());
+        // A run that is over does not come up again.
+        assert!(store.close_live_runs(&Interruption { why: "again".into(), at: None, alive: &|_, _| false }).unwrap().is_empty());
+
+        // A run detached on one comeback and still detached on the next: left
+        // alone while its agent lives, ended like the rest once it does not
+        // (after a reboot the app says nothing lives).
+        let loose = store.begin_run(TR, "review-web", "claude_code", "screen", ".").unwrap();
+        store.append(&loose, 7, &AgentEvent::Started { session_id: "s3".into(), cwd: ".".into() }).unwrap();
+        store.set_run_pid(&loose, Some(4444), None).unwrap();
+        let first = store.close_live_runs(&Interruption { why: "crashed".into(), at: None, alive: &|_, _| true }).unwrap();
+        assert_eq!((first.len(), first[0].detached), (1, true));
+        assert!(store.close_live_runs(&Interruption { why: "crashed again".into(), at: None, alive: &|_, _| true }).unwrap().is_empty(), "still alive: nothing to say twice");
+        assert_eq!(store.run(&loose).unwrap().unwrap().status, RunStatus::Detached);
+        let ended = store.close_live_runs(&Interruption { why: "the machine rebooted".into(), at: None, alive: &|_, _| false }).unwrap();
+        assert_eq!((ended.len(), ended[0].detached), (1, false));
+        assert_eq!(ended[0].run.status, RunStatus::Interrupted);
+        assert_eq!(ended[0].run.error.as_deref(), Some("the machine rebooted"));
+        assert_eq!(store.events(&loose).unwrap().iter().filter(|e| e.event.kind() == "detached").count(), 1, "detached once, however many comebacks");
+
+        // A run that began after the app's last sign of life: it did not
+        // end before it began.
+        let late = store.begin_run(TR, "review-ops", "claude_code", "doc", ".").unwrap();
+        let began = store.run(&late).unwrap().unwrap().started_at;
+        let closed = store.close_live_runs(&Interruption { why: "crashed".into(), at: Some(began - 15_000), alive: &|_, _| false }).unwrap();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].run.ended_at, Some(began), "clamped to its start");
+        assert_eq!(closed[0].run.duration_ms, Some(0));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A turn the app gave up on is `timed_out`, with the reason where a
+    /// failure's would be, and the fold happens as for any end.
+    #[test]
+    fn a_timed_out_turn_is_its_own_ending() {
+        let store = Store::in_memory().unwrap();
+        let run = store.begin_run(TR, "solo", "claude_code", "p", ".").unwrap();
+        store.append(&run, 1, &AgentEvent::Message { text: "partial".into() }).unwrap();
+        store.append(&run, 2, &AgentEvent::TimedOut { why: "said nothing for 20 minutes".into() }).unwrap();
+        let s = store.run(&run).unwrap().unwrap();
+        assert_eq!(s.status, RunStatus::TimedOut);
+        assert_eq!(s.error.as_deref(), Some("said nothing for 20 minutes"));
+        assert_eq!(s.output, "partial", "folded");
+        assert_eq!(store.search("partial").unwrap().len(), 1, "and indexed");
+        // Over: a later ending does not change it.
+        store.append(&run, 3, &AgentEvent::Failed { error: "late".into() }).unwrap();
+        assert_eq!(store.run(&run).unwrap().unwrap().status, RunStatus::TimedOut);
+    }
+
+    /// A notice stays until read; reading it twice is nothing.
+    #[test]
+    fn notices_are_kept_until_read() {
+        let store = Store::in_memory().unwrap();
+        assert!(store.add_notice(&NewNotice { title: "  ".into(), ..Default::default() }).is_err());
+        let n = store
+            .add_notice(&NewNotice { track: TR.into(), kind: "interrupted".into(), title: "2 runs cut".into(), body: "t564".into(), data: serde_json::json!({ "runs": ["t564"] }) })
+            .unwrap();
+        assert!(store.has_unread_notice(TR, "interrupted").unwrap());
+        assert!(!store.has_unread_notice(TR, "stall").unwrap());
+        let later = store.add_notice(&NewNotice { track: "".into(), kind: "stall".into(), title: "quiet".into(), ..Default::default() }).unwrap();
+        let unread = store.unread_notices().unwrap();
+        assert_eq!(unread.iter().map(|x| x.id).collect::<Vec<_>>(), vec![later.id, n.id], "newest first");
+        assert_eq!(unread[1].data["runs"][0], "t564");
+        let read = store.read_notice(n.id).unwrap();
+        assert!(read.read_at.is_some());
+        let again = store.read_notice(n.id).unwrap();
+        assert_eq!(again.read_at, read.read_at, "the first reading stands");
+        assert_eq!(store.unread_notices().unwrap().len(), 1);
+        assert!(!store.has_unread_notice(TR, "interrupted").unwrap());
+        assert!(store.read_notice(999).is_err());
+    }
+
+    /// A schedule is due by its time, counts its firings, moves on to its
+    /// next time or ends, and can be taken back.
+    #[test]
+    fn schedules_fire_move_on_and_end() {
+        let store = Store::in_memory().unwrap();
+        assert!(store.create_schedule(&NewSchedule { track: TR.into(), kind: "at".into(), message: " ".into(), ..Default::default() }).is_err());
+        let once = store
+            .create_schedule(&NewSchedule { track: TR.into(), kind: "at".into(), spec: serde_json::json!({ "at": 1000 }), message: "check the build".into(), next_at: Some(1000), created_in: Some("t001".into()) })
+            .unwrap();
+        let daily = store
+            .create_schedule(&NewSchedule { track: TR.into(), kind: "daily".into(), spec: serde_json::json!({ "daily": "07:10" }), message: "collect".into(), next_at: Some(5000), created_in: None })
+            .unwrap();
+        let watch = store
+            .create_schedule(&NewSchedule { track: "tr002".into(), kind: "file".into(), spec: serde_json::json!({ "file": "/tmp/x.log", "contains": "DONE" }), message: "read it".into(), next_at: None, created_in: None })
+            .unwrap();
+        assert_eq!(once.status, ScheduleStatus::Active);
+        assert_eq!(store.due_schedules(999).unwrap().len(), 0);
+        assert_eq!(store.due_schedules(1000).unwrap().iter().map(|s| s.id).collect::<Vec<_>>(), vec![once.id]);
+        assert_eq!(store.due_schedules(9000).unwrap().len(), 2, "a condition is never due by time");
+        assert_eq!(store.schedules(Some(TR), true).unwrap().len(), 2);
+        assert_eq!(store.schedules(None, true).unwrap().len(), 3);
+
+        let fired = store.schedule_fired(once.id, None, "ran 3 h late: the machine was off").unwrap();
+        assert_eq!((fired.status, fired.fired, fired.next_at), (ScheduleStatus::Done, 1, None));
+        assert!(fired.last_at.is_some());
+        assert_eq!(fired.note, "ran 3 h late: the machine was off");
+        assert!(store.schedule_fired(once.id, None, "").is_err(), "over is over");
+
+        let moved = store.schedule_moved(daily.id, 7000, "pushed past quiet hours").unwrap();
+        assert_eq!((moved.next_at, moved.fired), (Some(7000), 0), "moved, not fired");
+        let again = store.schedule_fired(daily.id, Some(91_400_000), "").unwrap();
+        assert_eq!((again.status, again.fired, again.next_at), (ScheduleStatus::Active, 1, Some(91_400_000)));
+
+        // How far a watched file was read, kept so a restart goes on from there.
+        assert_eq!(store.schedule(watch.id).unwrap().unwrap().seen, None, "nothing looked at yet");
+        store.schedule_seen(watch.id, 4096, Some(-5)).unwrap();
+        let seen = store.schedule(watch.id).unwrap().unwrap();
+        assert_eq!((seen.seen, seen.seen_sum), (Some(4096), Some(-5)));
+        let gone = store.cancel_schedule(watch.id).unwrap();
+        assert_eq!((gone.status, gone.next_at), (ScheduleStatus::Cancelled, None));
+        assert!(store.cancel_schedule(watch.id).is_err());
+        assert_eq!(store.schedules(None, true).unwrap().len(), 1);
+        assert_eq!(store.schedules(None, false).unwrap().len(), 3, "the record keeps what is over");
+        // Over without firing: its time ran out while it was held back.
+        let over = store.end_schedule(daily.id, "its until passed inside quiet hours").unwrap();
+        assert_eq!((over.status, over.next_at, over.fired), (ScheduleStatus::Done, None, 1), "the earlier firing still counts");
+        assert_eq!(over.note, "its until passed inside quiet hours");
+        assert!(store.end_schedule(daily.id, "").is_err());
+        assert!(store.schedules(None, true).unwrap().is_empty());
+    }
+
+    /// A job is watched while it runs or stalls, its log position and last
+    /// line move with it, and an end sets its end time once.
+    #[test]
+    fn jobs_are_watched_until_they_end() {
+        let store = Store::in_memory().unwrap();
+        assert!(store.add_job(&NewJob { track: TR.into(), ..Default::default() }).is_err(), "nothing to watch");
+        let job = store
+            .add_job(&NewJob { track: TR.into(), worker: "review-data".into(), what: "weekly collection".into(), pid: Some(777), pid_start: Some(9), log: "/tmp/w.log".into(), done_pattern: "^done$".into(), stall_minutes: 0, boot: "b1".into() })
+            .unwrap();
+        assert_eq!((job.status, job.stall_minutes, job.read_bytes), (JobStatus::Running, 1, 0), "at least a minute");
+        assert_eq!(store.jobs(Some(TR), true).unwrap().len(), 1);
+
+        store.job_progress(job.id, 120, Some(7), "step 3", true).unwrap();
+        let moved = store.job(job.id).unwrap().unwrap();
+        assert_eq!((moved.read_bytes, moved.last_line.as_str()), (120, "step 3"));
+        assert!(moved.changed_at >= job.changed_at);
+
+        let stalled = store.set_job_status(job.id, JobStatus::Stalled, "no new line for 30 minutes").unwrap();
+        assert_eq!((stalled.status, stalled.ended_at), (JobStatus::Stalled, None), "still watched");
+        assert_eq!(store.jobs(None, true).unwrap().len(), 1);
+        // The log moves again: back to running by itself.
+        store.job_progress(job.id, 200, Some(8), "step 4", true).unwrap();
+        assert_eq!(store.job(job.id).unwrap().unwrap().status, JobStatus::Running);
+
+        let done = store.set_job_status(job.id, JobStatus::Done, "the log said done").unwrap();
+        assert!(done.ended_at.is_some() && !done.status.is_open());
+        assert!(store.jobs(None, true).unwrap().is_empty());
+        assert_eq!(store.jobs(None, false).unwrap().len(), 1);
+        let ended = done.ended_at;
+        assert!(store.set_job_status(job.id, JobStatus::Died, "").is_err(), "the first end stands");
+        assert!(store.set_job_status(job.id, JobStatus::Lost, "").is_err(), "nor is an ended job unwatched");
+        assert_eq!(store.job(job.id).unwrap().unwrap().ended_at, ended);
+        // Unwatched while a look was under way: the look's ending loses.
+        let racing = store.add_job(&NewJob { track: TR.into(), worker: "review-data".into(), pid: Some(778), ..Default::default() }).unwrap();
+        store.set_job_status(racing.id, JobStatus::Lost, "no longer watched").unwrap();
+        assert!(store.set_job_status(racing.id, JobStatus::Died, "the process ended").is_err());
+        assert_eq!(store.job(racing.id).unwrap().unwrap().status, JobStatus::Lost);
+        assert!(store.set_job_status(999, JobStatus::Done, "").is_err());
+    }
+
+    /// Deleting a track takes its schedules, watched jobs and notices with
+    /// it, and the notes, quiet hours and scopes kept for it in `meta`;
+    /// another track's stay. Deleting a worker takes its scope.
+    #[test]
+    fn deleting_a_track_takes_what_outlived_its_sessions() {
+        let store = Store::in_memory().unwrap();
+        let a = store.create_track(&new_track("a", "", "/a", "claude_code")).unwrap();
+        let b = store.create_track(&new_track("b", "", "/b", "claude_code")).unwrap();
+        for t in [&a.id, &b.id] {
+            store.create_schedule(&NewSchedule { track: t.clone(), kind: "daily".into(), spec: serde_json::json!({ "daily": "07:10" }), message: "m".into(), next_at: Some(1), created_in: None }).unwrap();
+            store.add_job(&NewJob { track: t.clone(), worker: "w".into(), pid: Some(1), ..Default::default() }).unwrap();
+            store.add_notice(&NewNotice { track: t.clone(), kind: "stall".into(), title: "quiet".into(), ..Default::default() }).unwrap();
+            for key in ["notes:", "quiet:", "parked:"] {
+                store.set_meta(&format!("{key}{t}"), "[]").unwrap();
+            }
+            store.set_meta(&format!("worker_scope:{t}/w"), "[\"apps/**\"]").unwrap();
+        }
+        store.delete_track(&a.id).unwrap();
+        assert!(store.schedules(Some(&a.id), false).unwrap().is_empty());
+        assert!(store.jobs(Some(&a.id), false).unwrap().is_empty());
+        assert!(store.unread_notices().unwrap().iter().all(|n| n.track == b.id));
+        for key in ["notes:", "quiet:", "parked:"] {
+            assert_eq!(store.get_meta(&format!("{key}{}", a.id)).unwrap(), None, "{key}");
+            assert!(store.get_meta(&format!("{key}{}", b.id)).unwrap().is_some(), "{key} of the other track stays");
+        }
+        assert_eq!(store.get_meta(&format!("worker_scope:{}/w", a.id)).unwrap(), None);
+        assert_eq!(store.schedules(Some(&b.id), false).unwrap().len(), 1, "the other track's stay");
+        assert_eq!(store.jobs(Some(&b.id), false).unwrap().len(), 1);
+        // A worker's scope goes with its record.
+        store.begin_run(&b.id, "w", "claude_code", "p", "/b").unwrap();
+        store.delete_worker(&b.id, "w").unwrap();
+        assert_eq!(store.get_meta(&format!("worker_scope:{}/w", b.id)).unwrap(), None);
+    }
+
+    /// The way back: a database taken to the version before reads in an
+    /// older build (runs that ended the new ways read as failed there, and
+    /// so do their events), and comes forward again whole.
+    #[test]
+    fn a_database_can_go_back_a_version_and_forward_again() {
+        let dir = std::env::temp_dir().join(format!("orchestra-store-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let (cut, fine) = {
+            let store = Store::open(&path).unwrap();
+            let cut = store.begin_run(TR, "solo", "claude_code", "p", ".").unwrap();
+            store.append(&cut, 1, &AgentEvent::Message { text: "half".into() }).unwrap();
+            store.append(&cut, 2, &AgentEvent::Interrupted { why: "rebooted".into() }).unwrap();
+            let fine = store.begin_run(TR, "solo", "claude_code", "q", ".").unwrap();
+            store.append(&fine, 1, &AgentEvent::Finished { stop_reason: "end_turn".into() }).unwrap();
+            store.add_notice(&NewNotice { kind: "stall".into(), title: "x".into(), ..Default::default() }).unwrap();
+            store.set_meta("boot_id", "b1").unwrap();
+            (cut, fine)
+        };
+
+        assert!(Store::downgrade(&path, SCHEMA_VERSION).is_err(), "not newer than asked");
+        assert!(Store::downgrade(&path, 21).is_err(), "no way back that far");
+        // A look that changes nothing, from a file nobody has open.
+        assert_eq!(Store::peek_meta(&path, "boot_id").unwrap().as_deref(), Some("b1"));
+        assert_eq!(Store::peek_meta(&path, "nothing").unwrap(), None);
+        assert_eq!(Store::peek_meta(&path, "schema_version").unwrap().as_deref(), Some(SCHEMA_VERSION.to_string().as_str()));
+        assert_eq!(Store::downgrade(&path, 22).unwrap(), 22);
+        assert_eq!(Store::peek_meta(&path, "schema_version").unwrap().as_deref(), Some("22"), "a peek does not bring it forward");
+        {
+            let conn = Connection::open(&path).unwrap();
+            let version: String = conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap();
+            assert_eq!(version, "22");
+            let tables: Vec<String> = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('notices', 'schedules', 'jobs')")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert!(tables.is_empty(), "{tables:?}");
+            let columns: Vec<String> = conn.prepare("PRAGMA table_info(runs)").unwrap().query_map([], |r| r.get(1)).unwrap().collect::<Result<_, _>>().unwrap();
+            assert!(!columns.contains(&"pid".to_string()) && !columns.contains(&"repeatable".to_string()), "{columns:?}");
+            let (status, error): (String, String) = conn.query_row("SELECT status, error FROM runs WHERE id = ?1", params![cut], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            assert_eq!((status.as_str(), error.as_str()), ("failed", "rebooted"), "reads as a failure with the same words");
+            let (kind, payload): (String, String) = conn.query_row("SELECT kind, payload FROM events WHERE run_id = ?1 ORDER BY seq DESC LIMIT 1", params![cut], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            assert_eq!(kind, "failed");
+            assert_eq!(serde_json::from_str::<AgentEvent>(&payload).unwrap(), AgentEvent::Failed { error: "rebooted".into() }, "an older build can read the event");
+            assert!(conn.query_row("SELECT value FROM meta WHERE key = 'boot_id'", [], |r| r.get::<_, String>(0)).optional().unwrap().is_none());
+        }
+
+        // Forward again: migrated to this build's shape, nothing else lost.
+        let store = Store::open(&path).unwrap();
+        let fresh = Store::in_memory().unwrap();
+        assert_eq!(shape(&store.conn.lock()), shape(&fresh.conn.lock()));
+        assert_eq!(store.run(&fine).unwrap().unwrap().status, RunStatus::Done);
+        assert_eq!(store.run(&cut).unwrap().unwrap().status, RunStatus::Failed, "what went back stays a failure; the words say why");
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

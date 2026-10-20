@@ -208,7 +208,7 @@ async fn open(app: &AppHandle, a: &ArtifactInfo) -> Result<(Arc<AgentSession>, b
         state.artifacts.sessions.lock().await.insert(
             a.id.clone(),
             Agent {
-                live: Live { agent: a.agent.clone(), config: a.config.clone(), cwd: String::new(), session: session.clone(), turns, running: None, used: Instant::now() },
+                live: Live { agent: a.agent.clone(), config: a.config.clone(), cwd: String::new(), session: session.clone(), turns, running: None, used: Instant::now(), _mcp: None, grant: None },
                 fingerprint: wanted,
                 used: Instant::now(),
                 _mcp: mcp,
@@ -285,6 +285,9 @@ pub async fn turn(
             .store
             .begin_run(&run_key(&id), SESSION, &a.agent, &with_attachments(&text, &attached), &cwd.display().to_string())
             .map_err(|e| e.to_string())?;
+        // A crash that leaves this agent running shows it as detached.
+        let (pid, start) = crate::boot::identity(session.pid());
+        let _ = state.store.set_run_pid(&run, pid, start);
         // Counted only now it goes out: a turn that failed before this
         // point leaves the next one still the first (with the preamble).
         if let Some(s) = state.artifacts.sessions.lock().await.get_mut(&id) {

@@ -39,6 +39,13 @@ pub const ALLOWED: &[&str] = &[
     "list_decisions",
     "answer_decision",
     "dismiss_decision",
+    // what outlives a session: the bell's notices, schedules, watched jobs,
+    // quiet hours (reading; the rest is the owner's)
+    "list_notices",
+    "notice_read",
+    "list_schedules",
+    "list_jobs",
+    "quiet_hours",
     // worker reports and changes
     "worker_report",
     "worker_changes",
@@ -116,6 +123,12 @@ const OWNER_ALLOWED: &[&str] = &[
     "update_track",
     "delete_track",
     "worker_delete",
+    // starting a cut turn again, taking a schedule or a job back, the hours
+    // nothing starts in: the track's work, so the owner's
+    "run_resume",
+    "schedule_cancel",
+    "job_unwatch",
+    "quiet_hours_set",
     "detect_agents",
     "download_agent",
     "workspace_write",

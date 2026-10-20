@@ -640,13 +640,19 @@ jobs:
         # job -- `outputs.tag`, not the title, and never workflow-wide.
         env:
           DIVIXI_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-        run: cargo build --release -p orchestra-app --features server --bin divixi-server
+        run: cargo build --release -p orchestra-app --no-default-features --features server --bin divixi-server
 
       # The binary that gets uploaded, run the way a server runs it: no
       # checkout, no dist/ beside it. The release of 2026-10-08 answered
       # "no such thing" to every page (#77), and nothing before here noticed.
       - name: divixi-server serves its embedded UI
         run: scripts/check-server-ui.sh target/release/divixi-server
+
+      # The app names a package for each library the server lacks, from the
+      # lists in src-tauri/src/remote/libs.rs: they must cover what this
+      # binary links.
+      - name: libs.rs names every library divixi-server links
+        run: scripts/check-server-libs.sh target/release/divixi-server
 
       - name: Stage the binary
         run: |

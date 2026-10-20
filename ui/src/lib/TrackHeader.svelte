@@ -1,12 +1,13 @@
 <script lang="ts">
   import { store, agentLabel, type Track } from "./store.svelte";
   import PanelToggle from "./PanelToggle.svelte";
+  import SchedulePopover from "./SchedulePopover.svelte";
   import { t } from "./i18n.svelte";
 
   /**
    * The track's name, intent and tags. Editing, tagging and deleting live
-   * in the track list's context menu; the controls here are the panel and
-   * the fold.
+   * in the track list's context menu; the controls here are the panel, the
+   * fold and, while the track has any, its schedules.
    *
    * Folded, the header is one line — name and the first line of the intent,
    * cut with an ellipsis — so a long brief does not eat the conversation.
@@ -24,9 +25,9 @@
     store.setHeaderFolded(track.id, !folded);
   }
 
-  /** Anywhere on the header folds it, except the controls sitting on it. */
+  /** Anywhere on the header folds it, except the controls sitting on it and the popover opened from one. */
   function onHeaderClick(e: MouseEvent) {
-    if ((e.target as HTMLElement | null)?.closest("button")) return;
+    if ((e.target as HTMLElement | null)?.closest("button, [role='dialog']")) return;
     // Reading the name by selecting it is not a click on the header.
     if (window.getSelection()?.toString()) return;
     toggle();
@@ -63,6 +64,7 @@
     >
       {folded ? "▸" : "▾"}
     </button>
+    <SchedulePopover />
     <PanelToggle on={store.panelOpen} title={t("ws.toggle")} onclick={() => store.setPanel(!store.panelOpen)} />
   </div>
 

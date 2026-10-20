@@ -134,9 +134,10 @@ jobs:
 
       # divixi-server is what actually gets deployed to a Linux box, and it
       # compiles the whole crate against Tauri's mock runtime, so it breaks
-      # independently of the app.
+      # independently of the app. Without the default `desktop` feature: no
+      # webview, so on Linux it does not link WebKitGTK.
       - name: Build divixi-server
-        run: cargo build -p orchestra-app --features server --bin divixi-server
+        run: cargo build -p orchestra-app --no-default-features --features server --bin divixi-server
 
       # The phone gets its UI from divixi-server, out of the binary itself.
       # A build that leaves it out still serves it here, from this checkout's
@@ -147,6 +148,15 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: scripts/check-server-ui.sh target/debug/divixi-server 7489
+
+      # When the server will not start on a machine, the app names the
+      # package for each missing library from the lists in
+      # src-tauri/src/remote/libs.rs. A library the binary links that those
+      # lists do not name would get no package.
+      - name: libs.rs names every library divixi-server links
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/check-server-libs.sh target/debug/divixi-server
 
       # Divixi starts a remote instance over SSH with `setsid`, which exists on
       # Linux and not on macOS (remote_line() in src-tauri/src/remote/client.rs).

@@ -1,3 +1,4 @@
+import { routineOf } from "./noticeTarget";
 import { inTauri, instanceId, instanceName } from "./ipc.svelte";
 
 /**
@@ -47,16 +48,38 @@ export type Notice = {
       /** How it ended, for the icon and the wording. */
       status: string;
     }
+  | {
+      /**
+       * A notice the core keeps in its record until read (a run cut short
+       * by a restart, a background job that died, a track where nothing
+       * has run for hours). It is the core's, so it reaches every device
+       * and survives this PC's storage going; reading it here tells the
+       * core (`notice_read`), and that takes it off every bell.
+       */
+      kind: "server";
+      notice: number;
+      /** What the core calls it: `interrupted`, `job`, `stall`, … */
+      what: string;
+      /** The routine it is about, for a routine's run cut short: opening the notice opens it. */
+      routine?: string;
+    }
 );
 
 /** Narrowing helpers, so a caller never reads a field of the other kind. */
 export const isDecision = (n: Notice): n is Notice & { kind: "decision"; decision: number } => n.kind === "decision";
 export const isRoutine = (n: Notice): n is Notice & { kind: "routine"; routine: string; run: string; status: string } =>
   n.kind === "routine";
+export const isServer = (n: Notice): n is Notice & { kind: "server"; notice: number; what: string; routine?: string } => n.kind === "server";
 
 const INBOX = "divixi.inbox";
 /** A notice to open in another webview: `{instance, track, decision, at}`. */
 export const GOTO = "divixi.goto";
+/**
+ * Notices of another Divixi's core to mark read there, from the webview
+ * that shows it: `{instance, notices: number[], at}`. Only that core can
+ * take them off every device; this PC's list is only a mirror of it.
+ */
+export const READ = "divixi.read";
 const KEEP = 200;
 
 /**
@@ -74,6 +97,7 @@ function clean(items: unknown): Notice[] {
       const n = x as Notice;
       if (n.kind === "decision") return typeof n.decision === "number";
       if (n.kind === "routine") return typeof n.routine === "string" && typeof n.run === "string";
+      if (n.kind === "server") return typeof n.notice === "number";
       return false;
     });
 }
@@ -105,6 +129,21 @@ function change(f: (items: Notice[]) => Notice[]) {
 
 export const remove = (id: string) => change((xs) => xs.filter((x) => x.id !== id));
 export const clearAll = () => change(() => []);
+
+/**
+ * Ask the webview of another instance to mark its core's notices read.
+ * It answers through the `storage` event; if it is not open, nothing is
+ * marked, and the notices come back when that instance is next shown --
+ * which is right: they are still unread at their core.
+ */
+export function requestRead(instance: string, notices: number[]) {
+  if (!notices.length) return;
+  try {
+    localStorage.setItem(READ, JSON.stringify({ instance, notices, at: Date.now() }));
+  } catch {
+    // No storage: nothing to hand over.
+  }
+}
 
 // Another webview of the app changed it.
 if (typeof window !== "undefined") {
@@ -157,6 +196,51 @@ export function notifyRoutine(routine: string, run: string, status: string, titl
       ...rest,
     ];
   });
+}
+
+/**
+ * A card that is open has a notice, whether or not this window saw it
+ * open: one asked in a session that is gone, or on a day this PC's
+ * storage was cleared, is still waiting on the human. Dated when it was
+ * asked, so it sorts where it belongs rather than as news.
+ */
+export function ensureDecisionNotice(decision: number, title: string, body: string, track: string | null, at: number) {
+  if (!inTauri) return;
+  body = clip(body.trim(), 400);
+  change((xs) => {
+    if (xs.some((x) => isDecision(x) && x.decision === decision && x.instance === instanceId)) return xs;
+    const item: Notice = { id: newId(), kind: "decision", decision, title, body, at, instance: instanceId, instanceName, track };
+    return [...xs, item].sort((a, b) => b.at - a.at);
+  });
+}
+
+/** One of the core's notices, from a `notice` event or the list read on opening. */
+export function notifyServer(n: { id: number; track: string; kind: string; title: string; body: string; data?: unknown; created_at: number }, trackName: string) {
+  if (!inTauri) return;
+  const title = trackName && !n.title.includes(trackName) ? `${n.title} · ${trackName}` : n.title;
+  const body = clip(n.body.trim(), 400);
+  const routine = routineOf(n.data);
+  change((xs) => {
+    if (xs.some((x) => isServer(x) && x.notice === n.id && x.instance === instanceId)) return xs;
+    const item: Notice = { id: newId(), kind: "server", notice: n.id, what: n.kind, title, body, at: n.created_at, instance: instanceId, instanceName, track: n.track || null, ...(routine ? { routine } : {}) };
+    return [item, ...xs].sort((a, b) => b.at - a.at);
+  });
+}
+
+/**
+ * Only these of the core's notices are unread: the rest were read
+ * elsewhere, and any of them this window does not have yet goes on.
+ */
+export function keepServerNotices(unread: { id: number; track: string; kind: string; title: string; body: string; data?: unknown; created_at: number }[]) {
+  if (!inTauri) return;
+  const live = new Set(unread.map((n) => n.id));
+  change((xs) => xs.filter((x) => !isServer(x) || x.instance !== instanceId || live.has(x.notice)));
+  for (const n of unread) notifyServer(n, "");
+}
+
+/** The core's notice was read (here or on another device). */
+export function resolveServerNotice(id: number) {
+  change((xs) => xs.filter((x) => !(isServer(x) && x.instance === instanceId && x.notice === id)));
 }
 
 /** Those cards are answered or dismissed: their notices are done. */

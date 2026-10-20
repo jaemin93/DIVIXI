@@ -386,7 +386,7 @@
             <!-- Restored from the store: only the folded text survives. -->
             <div class="ctext"><Markdown source={cleanText(run.message)} /></div>
           {/if}
-          {#if run.status === "failed" && run.error}
+          {#if (run.status === "failed" || run.status === "interrupted" || run.status === "timed_out" || run.status === "detached") && run.error}
             <p class="ctext bad">{run.error}</p>
           {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
             <p class="ctext dim">{t("timeline.thinking")}</p>
@@ -606,6 +606,8 @@
   }
 
   .psend {
+    flex-shrink: 0;
+    white-space: nowrap;
     padding: 2px 8px;
     background: transparent;
     border: 1px solid var(--lineq);

@@ -25,6 +25,8 @@ use tauri::{Emitter, Manager, State};
 pub type Rt = tauri::Wry;
 #[cfg(feature = "server")]
 pub type Rt = tauri::test::MockRuntime;
+#[cfg(not(any(feature = "desktop", feature = "server")))]
+compile_error!("build with the `desktop` feature (the default) or with `server`");
 /// The app, as every part of it holds it.
 pub type AppHandle = tauri::AppHandle<Rt>;
 use tauri_plugin_dialog::DialogExt;
@@ -32,11 +34,14 @@ use tauri_plugin_dialog::DialogExt;
 /// `DIVIXI_LOG`, for `divixi-server -v` to set before anything logs.
 pub use logging::LEVEL_ENV;
 
+mod boot;
 mod conductor;
 mod crash;
 mod diagnostics;
 mod embed;
 mod extract;
+mod guard;
+mod jobs;
 pub mod artifact;
 pub mod design;
 mod design_file;
@@ -46,7 +51,11 @@ mod mask;
 mod metrics;
 mod plan;
 mod preview;
+mod quiet;
 mod routine;
+mod schedule;
+mod scope;
+mod stall;
 #[cfg(all(target_os = "macos", not(feature = "server")))]
 mod shell_path;
 mod terminal;
@@ -98,6 +107,124 @@ fn instance_data_dir(default: PathBuf) -> PathBuf {
 
 /// Store key holding the last agent detection result (JSON).
 const AGENTS_META: &str = "agents";
+
+/// Now, in Unix milliseconds.
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
+}
+
+/// A moment as a person reads it here: `10-13 23:34`, in the machine's
+/// local time (the year is dropped; what these say is days or hours ago).
+pub(crate) fn when(ms: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_millis_opt(ms).single().map(|t| t.format("%m-%d %H:%M").to_string()).unwrap_or_else(|| ms.to_string())
+}
+
+/// Whether the interface speaks Korean, as the conductor decides it:
+/// everything but English chosen outright.
+pub(crate) fn ko(app: &AppHandle) -> bool {
+    app.state::<AppState>().store.get_meta(&format!("{SETTING_PREFIX}language")).ok().flatten().as_deref() != Some("en")
+}
+
+/// Something the human has to be told: kept in the record until read, and
+/// sent to every window and device as a `notice` event for the bell.
+pub(crate) fn add_notice(app: &AppHandle, track: &str, kind: &str, title: &str, body: &str, data: serde_json::Value) -> Option<orchestra_store::Notice> {
+    let state = app.state::<AppState>();
+    match state.store.add_notice(&orchestra_store::NewNotice { track: track.to_string(), kind: kind.to_string(), title: title.to_string(), body: body.to_string(), data }) {
+        Ok(n) => {
+            tracing::info!(%track, kind, %title, "notice");
+            let _ = app.emit("notice", &n);
+            Some(n)
+        }
+        Err(err) => {
+            tracing::warn!(%err, kind, %title, "could not keep a notice");
+            None
+        }
+    }
+}
+
+/// Notices not read yet, newest first: what the bell shows when a window
+/// or a device opens.
+#[tauri::command(async)]
+fn list_notices(state: State<'_, AppState>) -> Result<Vec<orchestra_store::Notice>, String> {
+    state.store.unread_notices().map_err(|e| e.to_string())
+}
+
+/// The human read a notice. Told to every window and device, so it leaves
+/// every bell.
+#[tauri::command(async)]
+fn notice_read(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<orchestra_store::Notice, String> {
+    let n = state.store.read_notice(id).map_err(|e| e.to_string())?;
+    let _ = app.emit("notice", &n);
+    Ok(n)
+}
+
+/// A track's schedules: the active ones, and the ones over recently.
+#[tauri::command(async)]
+fn list_schedules(app: AppHandle, state: State<'_, AppState>, track: String) -> Result<Vec<serde_json::Value>, String> {
+    let ko = ko(&app);
+    let all = state.store.schedules(Some(&track), false).map_err(|e| e.to_string())?;
+    Ok(all.iter().rev().take(30).map(|s| schedule::view(s, ko)).collect())
+}
+
+#[tauri::command(async)]
+fn schedule_cancel(app: AppHandle, id: i64) -> Result<serde_json::Value, String> {
+    let s = schedule::cancel(&app, id)?;
+    Ok(schedule::view(&s, ko(&app)))
+}
+
+/// A track's watched jobs, and the ones over recently.
+#[tauri::command(async)]
+fn list_jobs(app: AppHandle, state: State<'_, AppState>, track: String) -> Result<Vec<serde_json::Value>, String> {
+    let ko = ko(&app);
+    let all = state.store.jobs(Some(&track), false).map_err(|e| e.to_string())?;
+    Ok(all.iter().rev().take(30).map(|j| jobs::view(j, ko)).collect())
+}
+
+#[tauri::command(async)]
+fn job_unwatch(app: AppHandle, id: i64) -> Result<serde_json::Value, String> {
+    let j = jobs::unwatch(&app, id)?;
+    Ok(jobs::view(&j, ko(&app)))
+}
+
+/// Start a worker turn again that was cut short, with its memory (the
+/// button on such a run). Returns what the conductor's tool would.
+#[tauri::command]
+async fn run_resume(app: AppHandle, track: String, run: String) -> Result<serde_json::Value, String> {
+    conductor::resume_run(app, track, run, false).await
+}
+
+/// A track's quiet hours, and setting them.
+#[tauri::command(async)]
+fn quiet_hours(state: State<'_, AppState>, track: String) -> Vec<quiet::Window> {
+    quiet::get(&state, &track)
+}
+
+#[tauri::command(async)]
+fn quiet_hours_set(state: State<'_, AppState>, track: String, windows: Vec<quiet::Window>) -> Result<Vec<quiet::Window>, String> {
+    quiet::set(&state, &track, &windows)
+}
+
+/// `divixi-server store downgrade <version>`: take the store back to an
+/// earlier schema for an older build to open. Refused while a server has
+/// it open, since that server would be writing the newer shape.
+pub fn store_downgrade(version: Option<&str>) -> anyhow::Result<String> {
+    let to: i64 = version.and_then(|v| v.trim().parse().ok()).ok_or_else(|| anyhow::anyhow!("say which schema version to go back to, e.g. 22"))?;
+    let data_dir = data_dir_offline()?;
+    let path = db_path(&data_dir)?;
+    if !path.is_file() {
+        anyhow::bail!("no store at {}", path.display());
+    }
+    // A live server would write the newer shape into the older one. Looked
+    // at without opening the store: opening would migrate it forward
+    // before the downgrade had decided anything.
+    let alive = Store::peek_meta(&path, boot::ALIVE_KEY)?.and_then(|v| v.trim().parse::<i64>().ok()).unwrap_or(0);
+    if now_ms() - alive < 60_000 {
+        anyhow::bail!("a divixi-server has this store open (alive {} s ago): stop it first", (now_ms() - alive) / 1000);
+    }
+    let got = Store::downgrade(&path, to)?;
+    Ok(format!("{} is at schema version {got} now; an older build can open it, and this one brings it forward again", path.display()))
+}
 
 /// Process-wide state.
 pub struct AppState {
@@ -1860,7 +1987,7 @@ fn open_store(data_dir: &std::path::Path) -> anyhow::Result<(Store, String)> {
         }
         let path = PathBuf::from(explicit);
         tracing::info!(path = %path.display(), "opening event store");
-        return Ok((Store::open(&path)?, path.display().to_string()));
+        return Ok((Store::open_keeping_live(&path)?, path.display().to_string()));
     }
 
     let path = data_dir.join("divixi.db");
@@ -1883,7 +2010,9 @@ fn open_store(data_dir: &std::path::Path) -> anyhow::Result<(Store, String)> {
         }
     }
     tracing::info!(path = %path.display(), "opening event store");
-    Ok((Store::open(&path)?, path.display().to_string()))
+    // Runs a previous process left live are closed once the app knows
+    // what became of them (src/boot.rs), not here.
+    Ok((Store::open_keeping_live(&path)?, path.display().to_string()))
 }
 
 /// Entry point shared by the desktop binary.
@@ -2132,6 +2261,15 @@ pub fn run() {
             term_close,
             answer_decision,
             dismiss_decision,
+            list_notices,
+            notice_read,
+            list_schedules,
+            schedule_cancel,
+            list_jobs,
+            job_unwatch,
+            run_resume,
+            quiet_hours,
+            quiet_hours_set,
             search_runs,
             agent_statuses,
             detect_agents,
@@ -2267,6 +2405,37 @@ pub fn run() {
                 tunnels: remote::client::Tunnels::default(),
                 github: remote::github::Pending::default(),
             });
+            // What the last run of the app left live, now that this one can
+            // tell a reboot from a crash and when it was last alive: closed
+            // for what it is, and the people who need to know told, once
+            // the agents have been looked for.
+            let pending = {
+                let state = app.state::<AppState>();
+                let ko = state.store.get_meta(&format!("{SETTING_PREFIX}language")).ok().flatten().as_deref() != Some("en");
+                let comeback = boot::come_back(&state, ko);
+                // Kept before the wait below: a start that goes down again
+                // in it still has this to tell next time.
+                boot::keep_pending(&state.store, comeback)
+            };
+            boot::start_heartbeat(app.handle().clone());
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // Agents detected, adapters found: a conductor can open.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    jobs::after_restart(&handle).await;
+                    if pending.is_empty() {
+                        boot::watch_detached(handle.clone());
+                    } else {
+                        boot::tell(handle, pending).await;
+                    }
+                });
+            }
+            // Schedules fire, jobs are watched, and quiet tracks ring, for
+            // as long as the app runs.
+            schedule::start(app.handle().clone());
+            jobs::start(app.handle().clone());
+            stall::start(app.handle().clone());
             // Artifact agents nobody has talked to for an hour are closed.
             artifact::sweep_idle(app.handle().clone());
             // Conductors and workers nobody has used for a while are closed too.

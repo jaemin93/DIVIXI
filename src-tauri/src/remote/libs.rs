@@ -1,0 +1,358 @@
+//! The shared libraries divixi-server needs from the machine it runs on.
+//!
+//! The release binary is the app on Tauri's mock runtime (the `server`
+//! feature), built without the webview (no `desktop` feature). Tauri still
+//! links GTK 3 on Linux whichever runtime runs: the binary's ELF `NEEDED`
+//! entries name `libgtk-3.so.0`, `libgdk-3.so.0`, `libgdk_pixbuf-2.0.so.0`
+//! and GLib. Nothing of it is used without a window, but the loader does
+//! not know that: on a headless box without them the binary never reaches
+//! `main`, and all there is to see is the loader's one line on stderr:
+//!
+//! ```text
+//! divixi-server: error while loading shared libraries: libgtk-3.so.0: cannot open shared object file: No such file or directory
+//! ```
+//!
+//! Builds up to v2026-10-20 were built with the webview and linked
+//! WebKitGTK as well ([`WEBVIEW`]).
+//!
+//! Installing system packages needs root, which the app does not ask for.
+//! So what is done here is finding out which libraries are missing (`ldd`,
+//! and the loader's own line when the binary is run) and naming the package
+//! and the one command that puts them there.
+
+use serde::Serialize;
+
+/// The machine's package manager, as far as its command names say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Pm {
+    Apt,
+    Dnf,
+    Pacman,
+}
+
+impl Pm {
+    /// What the probe's `pm=` line said: the first of these found on PATH.
+    pub fn parse(s: &str) -> Option<Pm> {
+        match s.trim() {
+            "apt" | "apt-get" => Some(Pm::Apt),
+            "dnf" | "yum" => Some(Pm::Dnf),
+            "pacman" => Some(Pm::Pacman),
+            _ => None,
+        }
+    }
+
+    fn install(self, packages: &[&str]) -> String {
+        let list = packages.join(" ");
+        match self {
+            Pm::Apt => format!("sudo apt install -y {list}"),
+            Pm::Dnf => format!("sudo dnf install -y {list}"),
+            Pm::Pacman => format!("sudo pacman -S --needed {list}"),
+        }
+    }
+}
+
+/// A package, by the name each package manager gives it.
+struct Pkg {
+    apt: &'static str,
+    dnf: &'static str,
+    pacman: &'static str,
+}
+
+impl Pkg {
+    fn name(&self, pm: Pm) -> &'static str {
+        match pm {
+            Pm::Apt => self.apt,
+            Pm::Dnf => self.dnf,
+            Pm::Pacman => self.pacman,
+        }
+    }
+}
+
+/// GTK 3's runtime package. It depends on everything in [`GUI`], so it is
+/// the one package to name when any of them is missing: installing it alone
+/// made the release binary start on clean Ubuntu 24.04, Debian 12, Fedora 44
+/// and Arch containers. On Ubuntu 24.04 apt installs `libgtk-3-0t64` for it.
+const GTK: Pkg = Pkg { apt: "libgtk-3-0", dnf: "gtk3", pacman: "gtk3" };
+
+/// The release binary's `NEEDED` libraries that come with [`GTK`].
+///
+/// CI fails when the binary links a library that neither this list nor
+/// [`OTHER`] names (scripts/check-server-libs.sh, which reads both from
+/// this file: keep each a `const` whose sonames are quoted strings).
+const GUI: &[&str] = &[
+    "libgtk-3.so.0",
+    "libgdk-3.so.0",
+    "libgdk_pixbuf-2.0.so.0",
+    "libglib-2.0.so.0",
+    "libgobject-2.0.so.0",
+    "libgio-2.0.so.0",
+];
+
+/// WebKitGTK's runtime package, which brings GTK 3 as well.
+const WEBKIT: Pkg = Pkg { apt: "libwebkit2gtk-4.1-0", dnf: "webkit2gtk4.1", pacman: "webkit2gtk-4.1" };
+
+/// What builds up to v2026-10-20 linked beyond [`GUI`], from [`WEBKIT`]: an
+/// older server already on a machine may still ask for them. Not accepted
+/// by the CI check, so a build that links them again fails there.
+const WEBVIEW: &[&str] = &["libwebkit2gtk-4.1.so.0", "libjavascriptcoregtk-4.1.so.0", "libsoup-3.0.so.0"];
+
+/// The rest of `NEEDED` beyond glibc, each with its own package.
+const OTHER: &[(&str, Pkg)] = &[("libgcc_s.so.1", Pkg { apt: "libgcc-s1", dnf: "libgcc", pacman: "gcc-libs" })];
+
+/// The library a line of `ldd` or of the loader names as missing.
+///
+/// `ldd` says `\tlibwebkit2gtk-4.1.so.0 => not found`; the loader says
+/// `<path>: error while loading shared libraries: <soname>: cannot open
+/// shared object file: …`. Neither is translated (they come from ld.so,
+/// which has no message catalogue), so the words can be matched.
+pub fn soname(line: &str) -> Option<String> {
+    const LOADER: &str = "error while loading shared libraries: ";
+    let name = if let Some(at) = line.find(LOADER) {
+        let rest = &line[at + LOADER.len()..];
+        rest.split(':').next().unwrap_or_default()
+    } else if let Some((name, rest)) = line.split_once("=>") {
+        if rest.trim() != "not found" {
+            return None;
+        }
+        name
+    } else {
+        return None;
+    };
+    let name = name.trim();
+    (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| name.to_string())
+}
+
+/// Every library the lines name as missing, once each, in the order seen.
+pub fn missing<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in lines.into_iter().filter_map(soname) {
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// What is missing there, and what to run to put it there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Libs {
+    /// The sonames, as the loader names them.
+    pub missing: Vec<String>,
+    /// The packages that have them, for the machine's package manager.
+    /// Empty when that manager is not known.
+    pub packages: Vec<String>,
+    /// The one line to run there. `None` when the package manager, or every
+    /// library, is one this does not know.
+    pub command: Option<String>,
+}
+
+impl Libs {
+    pub fn new(missing: Vec<String>, pm: Option<Pm>) -> Libs {
+        let mut packages: Vec<&str> = Vec::new();
+        if let Some(pm) = pm {
+            if missing.iter().any(|m| WEBVIEW.contains(&m.as_str())) {
+                packages.push(WEBKIT.name(pm));
+            } else if missing.iter().any(|m| GUI.contains(&m.as_str())) {
+                packages.push(GTK.name(pm));
+            }
+            for (_, pkg) in OTHER.iter().filter(|(soname, _)| missing.iter().any(|m| m == soname)) {
+                packages.push(pkg.name(pm));
+            }
+        }
+        let command = match pm {
+            Some(pm) if !packages.is_empty() => Some(pm.install(&packages)),
+            _ => None,
+        };
+        Libs { missing, packages: packages.into_iter().map(String::from).collect(), command }
+    }
+
+    /// The same, as one line for an error string or a log.
+    pub fn message(&self) -> String {
+        let what = self.missing.join(", ");
+        match &self.command {
+            Some(cmd) => format!("divixi-server cannot start on that machine: {what} is missing. Run this there, then try again: {cmd}"),
+            None => format!("divixi-server cannot start on that machine: {what} is missing. Install the package that has it (docs/divixi-server.md), then try again"),
+        }
+    }
+}
+
+/// Shell lines that print `lib=<line>` for every line of `ldd` or of the
+/// loader that names a missing library of the file in `var` (a shell
+/// variable, such as `"$b"`).
+///
+/// `help` is run as well as `ldd`, because `ldd` may not be there and the
+/// loader's own line is what decides whether the binary starts. With
+/// everything in place it prints its usage, which goes nowhere.
+pub fn script(var: &str) -> String {
+    format!(
+        r#"if command -v ldd >/dev/null 2>&1; then LC_ALL=C ldd {var} 2>&1 | grep 'not found' | sed 's/^/lib=/'; fi
+LC_ALL=C {var} help 2>&1 >/dev/null </dev/null | grep 'error while loading shared libraries' | sed 's/^/lib=/'
+"#
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The loader's line, as glibc prints it for a release binary.
+    const LOADER: &str = "/home/u/.divixi/server/current/divixi-server: error while loading shared libraries: libwebkit2gtk-4.1.so.0: cannot open shared object file: No such file or directory";
+
+    #[test]
+    fn the_loader_line_names_the_library() {
+        assert_eq!(soname(LOADER).as_deref(), Some("libwebkit2gtk-4.1.so.0"));
+        // A path with spaces and colons before it does not confuse it.
+        let odd = "/home/my user/a:b/divixi-server: error while loading shared libraries: libgtk-3.so.0: cannot open shared object file: No such file or directory";
+        assert_eq!(soname(odd).as_deref(), Some("libgtk-3.so.0"));
+    }
+
+    #[test]
+    fn ldd_lines_name_only_what_is_not_found() {
+        assert_eq!(soname("\tlibwebkit2gtk-4.1.so.0 => not found").as_deref(), Some("libwebkit2gtk-4.1.so.0"));
+        assert_eq!(soname("\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f0000000000)"), None);
+        assert_eq!(soname("\tlinux-vdso.so.1 (0x00007ffd00000000)"), None);
+        assert_eq!(soname("\t/lib64/ld-linux-x86-64.so.2 (0x00007f0000000000)"), None);
+        assert_eq!(soname(""), None);
+        assert_eq!(soname("not a dynamic executable"), None);
+    }
+
+    #[test]
+    fn the_probe_lines_come_back_once_each() {
+        let out = [
+            "\tlibgdk-3.so.0 => not found",
+            "\tlibwebkit2gtk-4.1.so.0 => not found",
+            "\tlibgtk-3.so.0 => not found",
+            LOADER,
+        ];
+        assert_eq!(missing(out), ["libgdk-3.so.0", "libwebkit2gtk-4.1.so.0", "libgtk-3.so.0"]);
+        assert!(missing(["\tlibc.so.6 => /lib/libc.so.6 (0x0)"]).is_empty());
+    }
+
+    #[test]
+    fn gtk_missing_is_one_package_to_install() {
+        // A fresh Ubuntu server: ldd lists GTK and what comes with it.
+        let gone = missing(["\tlibgdk-3.so.0 => not found", "\tlibgtk-3.so.0 => not found", "\tlibgdk_pixbuf-2.0.so.0 => not found"]);
+        let l = Libs::new(gone.clone(), Some(Pm::Apt));
+        assert_eq!(l.packages, ["libgtk-3-0"]);
+        assert_eq!(l.command.as_deref(), Some("sudo apt install -y libgtk-3-0"));
+        assert_eq!(l.missing, gone);
+        assert_eq!(Libs::new(gone.clone(), Some(Pm::Dnf)).command.as_deref(), Some("sudo dnf install -y gtk3"));
+        assert_eq!(Libs::new(gone, Some(Pm::Pacman)).command.as_deref(), Some("sudo pacman -S --needed gtk3"));
+    }
+
+    #[test]
+    fn any_gui_library_names_the_gtk_package() {
+        let l = Libs::new(vec!["libgdk-3.so.0".into()], Some(Pm::Apt));
+        assert_eq!(l.packages, ["libgtk-3-0"]);
+        let l = Libs::new(vec!["libglib-2.0.so.0".into(), "libgcc_s.so.1".into()], Some(Pm::Dnf));
+        assert_eq!(l.command.as_deref(), Some("sudo dnf install -y gtk3 libgcc"));
+    }
+
+    #[test]
+    fn an_older_server_missing_webkit_gets_the_webkit_package() {
+        // WebKitGTK brings GTK too, so it is the one package, not both.
+        let l = Libs::new(vec!["libgdk-3.so.0".into(), "libwebkit2gtk-4.1.so.0".into()], Some(Pm::Apt));
+        assert_eq!(l.packages, ["libwebkit2gtk-4.1-0"]);
+        let l = Libs::new(vec!["libsoup-3.0.so.0".into()], Some(Pm::Pacman));
+        assert_eq!(l.command.as_deref(), Some("sudo pacman -S --needed webkit2gtk-4.1"));
+    }
+
+    /// What clean containers printed for a release build without the webview
+    /// (2026-10-20), as `ldd ./divixi-server` and `./divixi-server help`.
+    /// Debian 12 printed the Ubuntu lines; Arch printed the Fedora ones.
+    const UBUNTU_24_04_LDD: &str = "	libgobject-2.0.so.0 => not found
+	libgtk-3.so.0 => not found
+	libgdk-3.so.0 => not found
+	libgdk_pixbuf-2.0.so.0 => not found
+	libgio-2.0.so.0 => not found
+	libglib-2.0.so.0 => not found
+";
+    const UBUNTU_24_04_LOADER: &str = "./divixi-server: error while loading shared libraries: libgobject-2.0.so.0: cannot open shared object file: No such file or directory";
+    const FEDORA_44_LDD: &str = "	libgtk-3.so.0 => not found
+	libgdk-3.so.0 => not found
+	libgdk_pixbuf-2.0.so.0 => not found
+";
+    const FEDORA_44_LOADER: &str = "./divixi-server: error while loading shared libraries: libgtk-3.so.0: cannot open shared object file: No such file or directory";
+
+    #[test]
+    fn real_container_output_names_the_libraries_and_the_command_that_fixed_it() {
+        let ubuntu = missing(UBUNTU_24_04_LDD.lines().chain([UBUNTU_24_04_LOADER]));
+        assert_eq!(ubuntu, ["libgobject-2.0.so.0", "libgtk-3.so.0", "libgdk-3.so.0", "libgdk_pixbuf-2.0.so.0", "libgio-2.0.so.0", "libglib-2.0.so.0"]);
+        // The commands that made `./divixi-server help` print its usage there.
+        assert_eq!(Libs::new(ubuntu, Some(Pm::Apt)).command.as_deref(), Some("sudo apt install -y libgtk-3-0"));
+        let fedora = missing(FEDORA_44_LDD.lines().chain([FEDORA_44_LOADER]));
+        assert_eq!(fedora, ["libgtk-3.so.0", "libgdk-3.so.0", "libgdk_pixbuf-2.0.so.0"]);
+        assert_eq!(Libs::new(fedora.clone(), Some(Pm::Dnf)).command.as_deref(), Some("sudo dnf install -y gtk3"));
+        assert_eq!(Libs::new(fedora, Some(Pm::Pacman)).command.as_deref(), Some("sudo pacman -S --needed gtk3"));
+        // No ldd: the loader's one line still gets the whole fix.
+        assert_eq!(Libs::new(missing([UBUNTU_24_04_LOADER]), Some(Pm::Apt)).command.as_deref(), Some("sudo apt install -y libgtk-3-0"));
+    }
+
+    /// The same for the release binary of v2026-10-20, which was built with
+    /// the webview and linked WebKitGTK.
+    const OLDER_UBUNTU_LDD: &str = "	libgdk-3.so.0 => not found
+	libgdk_pixbuf-2.0.so.0 => not found
+	libgobject-2.0.so.0 => not found
+	libglib-2.0.so.0 => not found
+	libwebkit2gtk-4.1.so.0 => not found
+	libgtk-3.so.0 => not found
+	libgio-2.0.so.0 => not found
+";
+    const OLDER_FEDORA_LDD: &str = "	libgdk-3.so.0 => not found
+	libgdk_pixbuf-2.0.so.0 => not found
+	libwebkit2gtk-4.1.so.0 => not found
+	libgtk-3.so.0 => not found
+";
+    const OLDER_LOADER: &str = "./divixi-server: error while loading shared libraries: libgdk-3.so.0: cannot open shared object file: No such file or directory";
+
+    #[test]
+    fn real_container_output_of_an_older_server_names_the_webkit_package() {
+        let ubuntu = missing(OLDER_UBUNTU_LDD.lines().chain([OLDER_LOADER]));
+        assert_eq!(Libs::new(ubuntu, Some(Pm::Apt)).command.as_deref(), Some("sudo apt install -y libwebkit2gtk-4.1-0"));
+        let fedora = missing(OLDER_FEDORA_LDD.lines());
+        assert_eq!(Libs::new(fedora.clone(), Some(Pm::Dnf)).command.as_deref(), Some("sudo dnf install -y webkit2gtk4.1"));
+        assert_eq!(Libs::new(fedora, Some(Pm::Pacman)).command.as_deref(), Some("sudo pacman -S --needed webkit2gtk-4.1"));
+        // No ldd: the loader names GDK only, so GTK is what can be named;
+        // the next try names WebKit.
+        assert_eq!(Libs::new(missing([OLDER_LOADER]), Some(Pm::Apt)).command.as_deref(), Some("sudo apt install -y libgtk-3-0"));
+    }
+
+    #[test]
+    fn an_unknown_manager_or_library_gives_no_command() {
+        let l = Libs::new(vec!["libwebkit2gtk-4.1.so.0".into()], None);
+        assert!(l.packages.is_empty());
+        assert_eq!(l.command, None);
+        assert!(l.message().contains("libwebkit2gtk-4.1.so.0 is missing"));
+        assert!(l.message().contains("docs/divixi-server.md"));
+        let l = Libs::new(vec!["libsomething.so.9".into()], Some(Pm::Apt));
+        assert_eq!(l.command, None);
+        assert_eq!(l.missing, ["libsomething.so.9"]);
+    }
+
+    #[test]
+    fn the_message_carries_the_command() {
+        let l = Libs::new(vec!["libgtk-3.so.0".into()], Some(Pm::Apt));
+        assert_eq!(
+            l.message(),
+            "divixi-server cannot start on that machine: libgtk-3.so.0 is missing. Run this there, then try again: sudo apt install -y libgtk-3-0"
+        );
+    }
+
+    #[test]
+    fn package_managers_are_read_from_their_command_names() {
+        assert_eq!(Pm::parse("apt-get"), Some(Pm::Apt));
+        assert_eq!(Pm::parse("yum"), Some(Pm::Dnf));
+        assert_eq!(Pm::parse("pacman\n"), Some(Pm::Pacman));
+        assert_eq!(Pm::parse("zypper"), None);
+        assert_eq!(Pm::parse(""), None);
+    }
+
+    #[test]
+    fn the_script_reads_the_variable_it_is_given() {
+        let s = script("\"$b\"");
+        assert!(s.contains("ldd \"$b\""));
+        assert!(s.contains("\"$b\" help"));
+        assert!(s.lines().all(|l| l.contains("sed 's/^/lib=/'")));
+    }
+}

@@ -15,12 +15,15 @@
 앱이 divixi-server를 알아서 설치하고 업데이트합니다. 에디터의 원격 확장이 하는 것과 같습니다:
 Rust도, Node도 필요 없고, 그 머신에서 아무것도 빌드하지 않습니다. 릴리즈 바이너리를 받아 옵니다.
 
-그 머신에 아직 필요할 수 있는 것은 하나, 그 바이너리가 쓰는 WebKitGTK 런타임입니다(1절). 새로 설치한
-Ubuntu에는 없고 앱은 시스템 패키지를 설치하지 않으니, 그 머신에서 한 번 해 두세요:
+그 머신에 아직 필요할 수 있는 것은 하나, 그 바이너리가 쓰는 GTK 3 런타임입니다(1절). 새로 설치한
+Ubuntu 서버에는 없고 앱은 시스템 패키지를 설치하지 않으니, 그 머신에서 한 번 해 두세요:
 
 ```bash
-sudo apt install -y libwebkit2gtk-4.1-0
+sudo apt install -y libgtk-3-0
 ```
+
+빠져 있으면 앱이 알려 줍니다. 인스턴스 카드에 없는 라이브러리와 그 머신에 맞는 명령(apt, dnf, pacman)이
+나옵니다. 앱이 직접 `sudo`를 실행하지는 않습니다. 그 명령을 그 머신에서 실행한 뒤 **원격 서버 확인**을 누르세요.
 
 앱의 **설정 › 원격 인스턴스**에 있는 인스턴스 카드가 그 머신에서 무엇을 찾았는지 알려 주고,
 인스턴스에 연결하지 못했을 때 나오는 화면도 같은 것을 보여 줍니다. 무엇을 쓰기 전에 먼저 묻습니다 —
@@ -52,15 +55,27 @@ sudo apt install -y libwebkit2gtk-4.1-0
 ## 1. 준비물
 
 **시스템 패키지(빌드용).** 서버 빌드도 Tauri를 컴파일하므로 Tauri의 Linux 빌드 패키지가 필요합니다. 화면(X,
-Wayland)은 필요 없습니다. 실행 파일은 실행할 때 GTK 3와 WebKitGTK를 씁니다. 아래 빌드 패키지가 둘 다 깔아
-주므로 빌드한 머신에서는 그대로 돌아갑니다. 다른 곳에서 빌드한 바이너리만 돌리는 머신에는 런타임 패키지가
-필요하고, GTK 3·JavaScriptCore·libsoup도 함께 설치됩니다:
+Wayland)은 필요 없습니다. 서버는 웹뷰 없이 빌드되므로 실행할 때 GTK 3는 쓰지만 WebKitGTK는 쓰지 않습니다.
+아래 빌드 패키지가 GTK 3를 깔아 주므로 빌드한 머신에서는 그대로 돌아갑니다. 다른 곳에서 빌드한 바이너리만
+돌리는 머신에는 GTK 3 런타임 패키지가 필요하고(앱이 설치하는 릴리즈 바이너리도 여기에 해당), GDK-Pixbuf·GLib도
+함께 설치됩니다:
 
 ```bash
-sudo apt install -y libwebkit2gtk-4.1-0
+# Debian, Ubuntu (24.04에서는 libgtk-3-0t64가 설치됨)
+sudo apt install -y libgtk-3-0
+# Fedora
+sudo dnf install -y gtk3
+# Arch
+sudo pacman -S --needed gtk3
 ```
 
-없으면 서버가 `error while loading shared libraries: libwebkit2gtk-4.1.so.0`를 내고 바로 멈춥니다.
+릴리즈 바이너리는 `libgtk-3.so.0`, `libgdk-3.so.0`, `libgdk_pixbuf-2.0.so.0`, GLib(`libglib-2.0.so.0`,
+`libgobject-2.0.so.0`, `libgio-2.0.so.0`)에 링크되어 있고, glibc 2.34 이상이 필요합니다. 창을 그리지는 않지만
+로더는 이것들을 찾습니다. 없으면 서버가 `error while loading shared libraries: libgtk-3.so.0`(또는 위의 다른 이름)를
+내고 바로 멈춥니다. v2026-10-20까지의 릴리즈는 WebKitGTK에도 링크되어 있어 `libwebkit2gtk-4.1-0`(Fedora
+`webkit2gtk4.1`, Arch `webkit2gtk-4.1`)이 필요합니다.
+
+빌드에는 아래의 WebKitGTK 개발 패키지가 여전히 필요합니다. 웹뷰를 빼도 Tauri가 그것을 두고 컴파일합니다.
 
 ```bash
 sudo apt update
@@ -134,7 +149,7 @@ git clone https://github.com/jaemin93/divixi ~/divixi-src
 cd ~/divixi-src
 npm ci                 # UI 의존성
 npm run build          # UI (실행 파일 안에 들어감)
-cargo build --release -p orchestra-app --features server --bin divixi-server
+cargo build --release -p orchestra-app --no-default-features --features server --bin divixi-server
 install -Dm755 target/release/divixi-server ~/.local/bin/divixi-server
 ```
 
@@ -231,6 +246,9 @@ pkill -x divixi-server                                                  # 끄기
 ```
 
 **항상 켜 두기(선택): systemd 사용자 서비스.**
+`setsid`로 띄운 서버는 재부팅 뒤 다시 뜨지 않고, 연결만으로도 켜지지 않습니다(4절 A). 누가 **서버 시작**을
+누를 때까지 예약은 울리지 않고, 작업자는 돌지 않고, 아무것도 지켜보지 않습니다. 한 머신에서는 59시간이
+그렇게 지나갔습니다. 아래 unit과 `enable-linger`면 아무도 로그인하지 않아도 부팅 때 다시 켜집니다.
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -240,6 +258,7 @@ Description=DIVIXI server (remote instance)
 After=network-online.target
 
 [Service]
+# 앱이 설치했다면(0절): ExecStart=%h/.divixi/server/current/divixi-server serve
 ExecStart=%h/.local/bin/divixi-server serve
 # 에이전트 CLI와 node가 있는 곳 (nvm이면 그 bin도 넣으세요)
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
@@ -293,7 +312,8 @@ Rust 코드 기준이라, 화면만 바뀐 앱 업데이트에서는 뜨지 않�
 | `ssh ended … Permission denied` | 암호 없이 들어가지는지(키, ssh-agent) |
 | `divixi-server token gave no link` | 경로가 맞는지(`~/.local/bin/divixi-server`), 실행 권한이 있는지 |
 | `did not answer through the tunnel` | 대개 서버가 꺼져 있습니다. 그 인스턴스 카드의 **서버 시작**을 누르세요. 그래도 안 뜨면 직접 돌려 보기: `~/.local/bin/divixi-server serve` (로그가 보임) |
-| **서버 시작**이나 설치 뒤에도 서버가 떠 있지 않음 | 바이너리를 직접 돌려 이유 보기: `~/.divixi/server/current/divixi-server help` (또는 직접 설치한 경로). `error while loading shared libraries: libwebkit2gtk-4.1.so.0`이면 WebKitGTK 런타임이 없는 것: `sudo apt install -y libwebkit2gtk-4.1-0` (1절) |
+| **서버 시작**이나 설치 뒤에도 서버가 떠 있지 않음 | 바이너리를 직접 돌려 이유 보기: `~/.divixi/server/current/divixi-server help` (또는 직접 설치한 경로). `error while loading shared libraries: libgtk-3.so.0`(또는 `libgdk-3.so.0`, `libgobject-2.0.so.0`)이면 GTK 3 런타임이 없는 것: `sudo apt install -y libgtk-3-0` (1절) |
+| "그 머신에 라이브러리가 없어 divixi-server가 실행되지 않습니다: …" | 나열된 라이브러리가 그 머신에 없습니다. 화면에 나온 명령을 그 머신에서 실행한 뒤 다시 확인하세요(1절) |
 | 에이전트가 "설치 안 됨" | 서버 쪽 PATH. 인스턴스 설정의 "원격 PATH"나 systemd의 `Environment=PATH`에 CLI·node 경로 추가 |
 | 직접 주소가 "no owner yet" | 서버에서 `divixi-server owner <GitHub 아이디>` |
 | `divixi-server phone on`이 `sudo … tailscale serve …` 줄을 출력함 | 이 기기에서는 serve를 바꾸는 데 root가 필요함: 그 줄을 실행하고 `phone on`을 다시 (4C절) |

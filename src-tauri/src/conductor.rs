@@ -41,7 +41,7 @@ use tauri::{Emitter, Manager};
 use crate::AppHandle;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::{pump, worktree, AppState};
+use crate::{guard, jobs, pump, quiet, schedule, scope, worktree, AppState};
 
 /// The worker name conductor turns are recorded under.
 pub const CONDUCTOR_SESSION: &str = "conductor";
@@ -165,6 +165,16 @@ pub struct Live {
     pub running: Option<String>,
     /// When a turn last started or ended: an idle session is closed after a while.
     pub used: std::time::Instant,
+    /// A worker's own tools (`watch_job`), served for as long as its
+    /// session is open and dropped with it. A conductor's server is its
+    /// [`Conductor`]'s.
+    pub _mcp: Option<McpServer>,
+    /// What the conductor granted this worker's questions ahead of time.
+    /// Kept on the session on purpose: a grant "for the session" is for
+    /// this one, and goes with it however the session ends -- closed by
+    /// hand, tidied, timed out, reopened elsewhere -- without any site
+    /// that closes a session having to remember to take it back.
+    pub grant: Option<Grant>,
 }
 
 /// A track's conductor: its session and the MCP server that is its hands.
@@ -222,6 +232,28 @@ pub struct Sessions {
     /// with no record at all. So the name is held here for the length of
     /// the delete and [`start_worker_turn`] refuses it.
     deleting: parking_lot::Mutex<HashSet<String>>,
+}
+
+/// A standing answer the conductor gave for a worker's questions: read-only
+/// commands answered without asking, for the run named or for as long as
+/// the session it is kept on ([`Live::grant`]) is open. Never written to
+/// the store: a grant outliving the app would outlive the conductor's
+/// reason for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grant {
+    /// Commands that only read are allowed without asking.
+    pub read_only: bool,
+    /// The run it holds for; `None` holds while the session is open.
+    pub run: Option<String>,
+}
+
+impl Grant {
+    /// Whether this grant answers a question about `command` asked in
+    /// `run`: yes when the command only reads and the grant holds for
+    /// this run (or the session).
+    pub fn covers(&self, run: &str, command: &str) -> bool {
+        self.read_only && self.run.as_deref().is_none_or(|r| r == run) && guard::read_only(command)
+    }
 }
 
 impl Sessions {
@@ -496,6 +528,8 @@ fn preamble(lang: &str, track: &TrackInfo, agents: &str) -> String {
 - 사람은 작업자와 직접 이야기하지 않습니다. 작업자가 무언가를 해도 되는지 물으면 `{PERMISSION_PREFIX}`로 시작하는 메시지로 당신에게 옵니다. 사람의 지시와 맡긴 일의 범위 안이면 당신이 직접 골라 `answer_worker`로 답합니다(허용할 때는 보통 이번만 허용). 되돌리기 어렵거나 맡긴 범위를 벗어나거나 사람이 정해야 할 일이면 `request_decision`으로 사람에게 묻고, 답이 오면 그대로 `answer_worker`로 전합니다. 작업자는 답을 받을 때까지 기다리므로 미루지 않습니다.
 - 사람이 앞으로도 여러 번 하게 될 일이라고 말하면("되풀이로 만들자", "다음에도 이렇게", "매번 이 작업을") `save_routine`으로 저장합니다. 당신이 하는 일은 **지시문을 쓰는 것**입니다. 되풀이는 작업자가 아니라 **자기 에이전트로 자기 폴더에서 혼자 도는 것**이라, 작업자 세션도 이 대화도 함께 넘어가지 않습니다. 그러니 방금 작업자에게 준 말을 그대로 옮기지 말고, **이 대화 없이 몇 주 뒤에 읽어도 뜻이 통하도록 다시 씁니다** — "아까 그 파일", "앞서 말한 대로"를 빼고 파일 경로와 명령과 기준을 그대로 적고, 무엇이 좋은 답인지도 적습니다. 폴더와 에이전트는 비워 두면 이 트랙의 것을 씁니다. 저장한 뒤 이름과 함께 어디서 무엇으로 돌게 되는지, 그 셋 다 사이드바의 되풀이에서 사람이 바꿀 수 있다는 것을 한 문장으로 알립니다. 같은 일을 두 번 적지 않도록 `list_routines`로 먼저 봅니다. 지금 돌리려면 `run_routine`입니다.
 - 사람이 고른 문서가 모인 지식 라이브러리가 있습니다. 사람이 "우리가 아는 것", 자기 문서·노트, 이름으로 특정 문서를 언급하거나, 맡기려는 일이 라이브러리가 다루는 주제에 닿으면 `knowledge_search`로 찾습니다(무엇이 있는지는 `knowledge_list_sources`). 일반적인 코딩 질문이나 작업 폴더만 봐도 되는 일에는 부르지 않습니다. 작업자는 라이브러리를 볼 수 없으므로, 작업자에게 필요한 내용은 핵심 사실과 읽을 파일 경로를 task에 직접 담아 넘깁니다. 라이브러리에서 가져온 내용은 출처(파일)를 밝힙니다.
+- **당신의 세션은 쉬면 닫히고, 앱은 재시작되고, 기계는 재부팅됩니다.** 세션 안에서 거는 예약(cron)은 그때 같이 사라지니 쓰지 않습니다. "나중에 다시 확인"은 모두 `schedule`로 겁니다(시각·간격·매일·매주·파일에 글귀가 생기면·프로세스가 끝나면). 때가 되면 `[schedule]`로 시작하는 메시지가 오고, 세션이 닫혀 있었으면 앱이 엽니다. 작업자가 nohup 등으로 띄운 긴 프로세스는 작업자가 `watch_job`으로 등록하고(당신도 할 수 있습니다), 끝남·죽음·멈춤이 `[job]` 메시지로 옵니다. 앱이 끊긴 채 꺼졌다 켜지면 `[divixi-restart]` 메시지가 무엇이 끊겼는지 알립니다: 끊긴 작업자 턴(status interrupted·timed_out)은 `resume_run`으로 같은 기억을 갖고 이어서 돌릴 수 있고, 두 번 돌면 안 되는 일은 먼저 사람에게 묻습니다. 되풀이해도 안전한 일은 `spawn_worker`/`ask_worker`에 safe_to_repeat=true 를 주면 재시작 뒤 자동으로 다시 돕니다. 열린 결정 카드는 세션을 넘어 남으니 `list_decisions`로 보고 같은 질문을 다시 올리지 않습니다. `[divixi]`로 시작하는 블록은 앱이 그동안 있었던 일(작업자 세션이 쉬어 닫힘, 열린 카드)을 알리는 것입니다.
+- 작업자가 자기 폴더 밖 특정 경로(예: apps/web)를 고치는 일을 맡으면 `spawn_worker`의 scope(또는 `set_worker_scope`)로 그 경로를 허용합니다; 그러면 그 안의 편집은 보고에 경고로 붙지 않습니다. 작업자가 읽기만 하는 명령마다 허락을 물어 중요한 질문이 묻히면 `grant_worker(scope="read_only")`로 읽기 명령을 미리 허락합니다. 사람이 "이 시간에는 아무것도 돌리지 말라"고 하면 `set_quiet_hours`로 트랙에 적어 둡니다: 그 시간대에 작업자 턴은 거부되거나 경고와 함께 시작하고, 예약은 끝난 뒤로 밀립니다.
 - 한국어로 말합니다. 짧게, 명확하게.
 {agents}
 작업 디렉터리는 {cwd} 입니다. {folders}
@@ -536,6 +570,8 @@ Rules:
 - The human does not talk to workers. When a worker asks whether it may do something, the question reaches you as a message starting with `{PERMISSION_PREFIX}`. If it is within the human's instructions and the task you gave, choose yourself and answer with `answer_worker` (usually allow once). If it is hard to undo, outside the task, or the human's call, ask them with `request_decision` and pass their answer on with `answer_worker`. The worker waits until answered, so do not leave it.
 - When the human says a job is one they will want again ("make this a routine", "we will do this every release", "save this for next time"), save it with `save_routine`. Your part is the WORDS. A routine is not a worker: it runs **on its own agent, in its own folder**, and neither a worker session nor this conversation goes with it. So do not copy the task you just gave a worker — **rewrite it to stand alone, read weeks from now with none of this around it**: drop "the file we just looked at" and "as before", name the paths, the commands and the standards outright, and say what a good answer looks like. Leaving the folder and the agent out takes this track's. Afterwards say in one sentence what you saved, where and on what it will run, and that all three are theirs to change under Routines in the sidebar. Read `list_routines` first so the same job is not written down twice. To run a saved one now, use `run_routine`.
 - There is a knowledge library of documents the human chose. When the human asks what we know about something, refers to their docs or notes or to a document by name, or when work you are about to delegate touches a topic the library covers, search it with `knowledge_search` (`knowledge_list_sources` shows what is there). Do not call it for general coding questions or what the working folder answers. Workers cannot see the library: put what they need from it (the key facts and the file paths to read) into their task. Name the file when you use something from the library.
+- **Your session closes when idle, the app restarts, and the machine reboots.** Anything you schedule inside your own session (a cron) goes with it, so do not. Every "check again later" goes through `schedule` (a time, a span, daily, weekly, a file saying something, a process ending): when it fires a message starting with `[schedule]` reaches you, and your session is opened if it was closed. A long process a worker started with nohup is registered by the worker with `watch_job` (you can too), and its end, death or stall reaches you as a `[job]` message. When the app comes back after going down mid-work, a `[divixi-restart]` message says what was cut: a worker turn cut short (status interrupted or timed_out) can be carried on with its memory by `resume_run`; work that must not run twice is put to the human first. Give `spawn_worker`/`ask_worker` safe_to_repeat=true for a turn that is harmless to run twice, and it is started again by itself after a restart. Open decision cards outlive your session: read `list_decisions` rather than asking the same question again. A block starting with `[divixi]` is the app telling you what happened meanwhile (a worker session closed as idle, cards still open).
+- When a worker's job is a particular path outside its own folder (apps/web, say), allow it with `scope` on `spawn_worker` (or `set_worker_scope`); edits there are then not flagged in its reports. When a worker asks before every command that only reads and the questions bury the one that matters, `grant_worker(scope="read_only")` answers those for you. When the human says nothing should run at certain hours, write them on the track with `set_quiet_hours`: a worker turn in them is refused or starts with a warning, and a schedule due then is moved past them.
 - Speak English. Short and clear.
 {agents}
 The working directory is {cwd}. {folders}
@@ -570,7 +606,8 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
     let save_routine = (app.clone(), track.clone());
     let list_routines = app.clone();
     let run_routine = app.clone();
-    let decide = (app, track);
+    let decide = (app.clone(), track.clone());
+    let durable = (app, track);
 
     let mut tools = vec![
         Tool::new(
@@ -586,7 +623,9 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                     "kind": { "type": "string", "description": "What kind of work this is, in the human's language: research, implementation, review, docs, … Always give it on a track where the human picks the agent: it is what they judge the choice on." },
                     "why": { "type": "string", "description": "Why that agent or model suits this kind of work, one or two sentences in the human's language. Give it whenever you name an agent. Say what about the task calls for it, not that one agent is better than another." },
                     "decided": { "type": "integer", "description": "The number of the card the human answered in their own words, when you are opening the worker with what those words meant. Only use an id the app gave you for this worker; it works once." },
-                    "fresh": { "type": "boolean", "description": "Start over without the closed worker's earlier conversation. Default false." }
+                    "fresh": { "type": "boolean", "description": "Start over without the closed worker's earlier conversation. Default false." },
+                    "scope": { "type": "array", "items": { "type": "string" }, "description": "Paths of the track folder this worker may write under besides its own folder, as globs relative to the track folder (e.g. [\"apps/web/**\"]). Edits there are its own and not flagged as outside its folder. Kept for the worker's later turns; set_worker_scope changes it." },
+                    "safe_to_repeat": { "type": "boolean", "description": "True when running this turn twice would do no harm (it only reads, or only rewrites its own output). If the app or the machine goes down mid-turn, such a turn is started again by itself when the app comes back; any other waits for you or the human. Default false." }
                 },
                 "required": ["name", "task"]
             }),
@@ -603,7 +642,11 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                         decided: args.get("decided").and_then(Value::as_i64),
                     };
                     let fresh = args.get("fresh").and_then(Value::as_bool).unwrap_or(false);
-                    start_worker_turn(app, track, name, task, ask, true, fresh).await
+                    let turn = TurnFlags {
+                        repeatable: args.get("safe_to_repeat").and_then(Value::as_bool).unwrap_or(false),
+                        scope: args.get("scope").and_then(Value::as_array).map(|l| l.iter().filter_map(Value::as_str).map(str::to_owned).collect()),
+                    };
+                    start_worker_turn(app, track, name, task, ask, true, fresh, turn).await
                 }
             },
         ),
@@ -614,7 +657,8 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Worker name given to spawn_worker." },
-                    "message": { "type": "string" }
+                    "message": { "type": "string" },
+                    "safe_to_repeat": { "type": "boolean", "description": "True when running this turn twice would do no harm; see spawn_worker. Default false." }
                 },
                 "required": ["name", "message"]
             }),
@@ -623,7 +667,8 @@ pub fn tools(app: AppHandle, track: String) -> Vec<Tool> {
                 async move {
                     let name = str_arg(&args, "name")?;
                     let message = str_arg(&args, "message")?;
-                    start_worker_turn(app, track, name, message, Ask::default(), false, false).await
+                    let turn = TurnFlags { repeatable: args.get("safe_to_repeat").and_then(Value::as_bool).unwrap_or(false), scope: None };
+                    start_worker_turn(app, track, name, message, Ask::default(), false, false, turn).await
                 }
             },
         ),
@@ -967,9 +1012,324 @@ The folder defaults to this track's and the agent to the one workers here use; s
             },
         ),
     ];
+    // What outlives a session: schedules, watched jobs, decisions to read
+    // back, runs to start again, and the rules around a worker.
+    tools.extend(durable_tools(durable.0, durable.1));
     // The library: the same two tools the knowledge graph's conversation has.
     tools.extend(crate::knowledge::library_tools(library));
     tools
+}
+
+/// What the conductor asked for a worker turn beyond its words.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TurnFlags {
+    /// Safe to run again by itself after an interruption.
+    pub repeatable: bool,
+    /// Paths the worker may write under besides its own folder, when the
+    /// call set them; `None` leaves the worker's scope as it is.
+    pub scope: Option<Vec<String>>,
+}
+
+/// The tools for what has to survive a session, a restart or a reboot.
+/// See each description; the preamble says when to reach for them.
+fn durable_tools(app: AppHandle, track: String) -> Vec<Tool> {
+    let pairs = |n: usize| -> Vec<(AppHandle, String)> { (0..n).map(|_| (app.clone(), track.clone())).collect() };
+    let mut p = pairs(12).into_iter();
+    let mut next = move || p.next().expect("enough pairs");
+    let (decisions, set_schedule, list_schedules, cancel_schedule) = (next(), next(), next(), next());
+    let (watch, list_jobs, unwatch, resume) = (next(), next(), next(), next());
+    let (set_scope, grant, quiet_get, quiet_set) = (next(), next(), next(), next());
+    vec![
+        Tool::new(
+            "list_decisions",
+            "The decision cards of this track: every open one (waiting on the human, with how long it has waited), and the most recent answered ones. Read it when you open or when you wonder what the human still owes an answer to: a card survives your session, and a question you asked last week may still be open.",
+            json!({ "type": "object", "properties": { "recent": { "type": "integer", "description": "How many answered or dismissed cards to include, newest first. Default 5." } }, "additionalProperties": false }),
+            move |args| {
+                let (app, track) = decisions.clone();
+                async move {
+                    let recent = args.get("recent").and_then(Value::as_u64).unwrap_or(5) as usize;
+                    let state = app.state::<AppState>();
+                    let all = state.store.decisions(Some(&track)).map_err(|e| e.to_string())?;
+                    let now = crate::now_ms();
+                    let card = |d: &Decision| {
+                        json!({
+                            "id": d.id,
+                            "status": d.status,
+                            "question": d.question,
+                            "options": d.options.iter().map(|o| o.label.clone()).collect::<Vec<_>>(),
+                            "answer": d.answer,
+                            "note": d.note,
+                            "asked_at": crate::when(d.created_at),
+                            "waiting_hours": if d.status == DecisionStatus::Open { Some((now - d.created_at) / 3_600_000) } else { None },
+                            "decided_at": d.decided_at.map(crate::when),
+                            "permission": d.permission.is_some(),
+                        })
+                    };
+                    let open: Vec<Value> = all.iter().filter(|d| d.status == DecisionStatus::Open).map(card).collect();
+                    let answered: Vec<Value> = all.iter().rev().filter(|d| d.status != DecisionStatus::Open).take(recent).map(card).collect();
+                    Ok(json!({
+                        "open": open,
+                        "recent": answered,
+                        "note": if open.is_empty() { "Nothing waits on the human." } else { "Open cards wait on the human. Do not ask the same question again with request_decision; if one is stale, say so to the human and let them answer or skip it." },
+                    }))
+                }
+            },
+        ),
+        Tool::new(
+            "schedule",
+            "Have the app wake you later with a message: at a time, after a span, every so often, daily or weekly at a time, when a file says something, or when a process ends. Kept by the app, so it survives your session closing, the app restarting and the machine rebooting -- unlike anything you schedule inside your own session, which goes when the session does. When it fires, a message starting with [schedule] reaches you (your session is opened if it was closed), carrying the `message` you give here. One that comes due while the app is off fires once when it is back and says it is late. Use it for every \"check again at …\" and \"wake me when …\".",
+            json!({
+                "type": "object",
+                "properties": {
+                    "when": {
+                        "type": "object",
+                        "description": "One of: {\"at\": \"2026-10-17 07:30\"} (local time, or RFC 3339 with an offset), {\"in\": \"30m\"} (s/m/h/d), {\"every\": \"2h\"} (optionally \"until\": a time), {\"daily\": \"07:10\"}, {\"weekly\": \"sun 03:20\"}, {\"file\": \"/abs/path.log\", \"contains\": \"DONE\"} (or \"pattern\": a regular expression), {\"pid\": 12345} (fires when that process ends)."
+                    },
+                    "message": { "type": "string", "description": "What you want to be told when it fires: what to do and why, written to be read with none of this conversation around it." }
+                },
+                "required": ["when", "message"]
+            }),
+            move |args| {
+                let (app, track) = set_schedule.clone();
+                async move {
+                    let when = args.get("when").cloned().unwrap_or(Value::Null);
+                    let message = str_arg(&args, "message")?;
+                    let run = conductor_run(&app.state::<AppState>(), &track).await;
+                    let s = schedule::create(&app, &track, &when, &message, run)?;
+                    let ko = crate::ko(&app);
+                    Ok(json!({
+                        "schedule": s.id,
+                        "next_at": s.next_at.map(crate::when),
+                        "line": schedule::describe(&s, ko),
+                        "note": "Set. Tell the human in one sentence when you will look again, and end your turn: the app wakes you. list_schedules shows it; cancel_schedule takes it back.",
+                    }))
+                }
+            },
+        ),
+        Tool::new(
+            "list_schedules",
+            "Every schedule of this track that is still to fire, with its next time, and the ones that fired or were cancelled recently.",
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            move |_args| {
+                let (app, track) = list_schedules.clone();
+                async move {
+                    let state = app.state::<AppState>();
+                    let ko = crate::ko(&app);
+                    let all = state.store.schedules(Some(&track), false).map_err(|e| e.to_string())?;
+                    let (active, over): (Vec<_>, Vec<_>) = all.iter().partition(|s| s.status == orchestra_store::ScheduleStatus::Active);
+                    Ok(json!({
+                        "active": active.iter().map(|s| schedule::view(s, ko)).collect::<Vec<_>>(),
+                        "over": over.iter().rev().take(10).map(|s| schedule::view(s, ko)).collect::<Vec<_>>(),
+                    }))
+                }
+            },
+        ),
+        Tool::new(
+            "cancel_schedule",
+            "Take back a schedule that has not fired (or a repeating one, so it fires no more).",
+            json!({ "type": "object", "properties": { "schedule": { "type": "integer" } }, "required": ["schedule"] }),
+            move |args| {
+                let (app, track) = cancel_schedule.clone();
+                async move {
+                    let id = args.get("schedule").and_then(Value::as_i64).ok_or("missing argument: schedule")?;
+                    let state = app.state::<AppState>();
+                    let s = state.store.schedule(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no schedule {id}"))?;
+                    if s.track != track {
+                        return Err(format!("schedule {id} is not this track's"));
+                    }
+                    let s = schedule::cancel(&app, id)?;
+                    Ok(json!({ "schedule": s.id, "status": s.status }))
+                }
+            },
+        ),
+        Tool::new(
+            "watch_job",
+            &format!("Have the app watch a background process somebody started (a worker's `nohup` collection, a long build) and wake you when it ends, dies or goes quiet. Give its pid, its log file, or both, and if you can a `done_pattern`: a regular expression the log's finishing line matches. You are told with a message starting with [job]: done (the pattern matched), died (the process ended without it), stalled (the log did not move for `stall_minutes`, default {}), and moving again. After a reboot every watched job is reported dead with the last line its log holds. Workers have this tool too and should register what they start; use this when one did not.", jobs::DEFAULT_STALL_MINUTES),
+            json!({
+                "type": "object",
+                "properties": {
+                    "worker": { "type": "string", "description": "The worker that owns it, when one does." },
+                    "what": { "type": "string", "description": "What it is, in a few words." },
+                    "pid": { "type": "integer" },
+                    "log": { "type": "string", "description": "Absolute path of the log it writes." },
+                    "done_pattern": { "type": "string", "description": "A regular expression matching the line the log ends with when the work is done, e.g. \"^(done|끝)$\"." },
+                    "stall_minutes": { "type": "integer" }
+                }
+            }),
+            move |args| {
+                let (app, track) = watch.clone();
+                async move {
+                    let worker = args.get("worker").and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string();
+                    let j = jobs::watch(&app, &track, &worker, &args)?;
+                    Ok(json!({ "job": j.id, "line": jobs::describe(&j, crate::ko(&app)), "note": "Watched. Say in one sentence what will be reported and end your turn; the app wakes you." }))
+                }
+            },
+        ),
+        Tool::new(
+            "list_jobs",
+            "The background jobs the app is watching for this track, and the ones that ended recently, each with its last log line.",
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            move |_args| {
+                let (app, track) = list_jobs.clone();
+                async move {
+                    let state = app.state::<AppState>();
+                    let ko = crate::ko(&app);
+                    let all = state.store.jobs(Some(&track), false).map_err(|e| e.to_string())?;
+                    let (open, over): (Vec<_>, Vec<_>) = all.iter().partition(|j| j.status.is_open());
+                    Ok(json!({
+                        "watched": open.iter().map(|j| jobs::view(j, ko)).collect::<Vec<_>>(),
+                        "over": over.iter().rev().take(10).map(|j| jobs::view(j, ko)).collect::<Vec<_>>(),
+                    }))
+                }
+            },
+        ),
+        Tool::new(
+            "unwatch_job",
+            "Stop watching a job (it is left running).",
+            json!({ "type": "object", "properties": { "job": { "type": "integer" } }, "required": ["job"] }),
+            move |args| {
+                let (app, track) = unwatch.clone();
+                async move {
+                    let id = args.get("job").and_then(Value::as_i64).ok_or("missing argument: job")?;
+                    let state = app.state::<AppState>();
+                    let j = state.store.job(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no job {id}"))?;
+                    if j.track != track {
+                        return Err(format!("job {id} is not this track's"));
+                    }
+                    let j = jobs::unwatch(&app, id)?;
+                    Ok(json!({ "job": j.id, "status": j.status }))
+                }
+            },
+        ),
+        Tool::new(
+            "resume_run",
+            "Start a worker turn again that was cut short by the app or the machine going down (status interrupted or timed_out), on the same worker with its memory. The worker is handed what it had said and the tool calls it had made before the cut, and told to carry on without repeating writes it already made. Returns at once with the new run; the report reaches you as usual. Never for a run whose agent is still alive (detached), and never by itself for work that must not run twice: ask the human first then.",
+            json!({ "type": "object", "properties": { "run": { "type": "string", "description": "The run that was cut, e.g. t564." } }, "required": ["run"] }),
+            move |args| {
+                let (app, track) = resume.clone();
+                async move {
+                    let run = str_arg(&args, "run")?;
+                    resume_run(app, track, run, false).await
+                }
+            },
+        ),
+        Tool::new(
+            "set_worker_scope",
+            "Say which paths of the track folder a worker may write under besides its own folder, as globs relative to the track folder (e.g. [\"apps/web/**\", \"docs/*.md\"]). Edits there are its own; only edits outside both are flagged in its reports. An empty list takes the scope away. The worker is told on its next turn.",
+            json!({ "type": "object", "properties": { "name": { "type": "string" }, "scope": { "type": "array", "items": { "type": "string" } } }, "required": ["name", "scope"] }),
+            move |args| {
+                let (app, track) = set_scope.clone();
+                async move {
+                    let name = str_arg(&args, "name")?;
+                    let globs: Vec<String> = args.get("scope").and_then(Value::as_array).map(|l| l.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default();
+                    let state = app.state::<AppState>();
+                    let kept = scope::set(&state, &track, &name, &globs)?;
+                    Ok(json!({ "worker": name, "scope": kept }))
+                }
+            },
+        ),
+        Tool::new(
+            "grant_worker",
+            &format!("Answer a worker's permission questions ahead of time, within a limit: with scope \"read_only\", a command that only reads (ls, cat, grep, rg, find without -exec, …; nothing redirected, nothing in-place; git and the package managers are not covered, since the repository's settings can make them run a program) is allowed without a {PERMISSION_PREFIX} message. Anything that writes still comes to you. The grant holds for the worker's run in flight (until \"run\", the default) or for as long as its session is open (\"session\"); it never outlives the app. Use it when a worker asks about every `cat` and the questions bury the one that matters."),
+            json!({
+                "type": "object",
+                "properties": {
+                    "worker": { "type": "string" },
+                    "scope": { "type": "string", "enum": ["read_only", "none"], "description": "read_only, or none to take a grant back." },
+                    "until": { "type": "string", "enum": ["run", "session"], "description": "Default run." }
+                },
+                "required": ["worker", "scope"]
+            }),
+            move |args| {
+                let (app, track) = grant.clone();
+                async move {
+                    let worker = str_arg(&args, "worker")?;
+                    let what = str_arg(&args, "scope")?;
+                    let until = args.get("until").and_then(Value::as_str).unwrap_or("run");
+                    let state = app.state::<AppState>();
+                    // On the open session, so the grant goes when it does.
+                    let mut workers = state.sessions.workers.lock().await;
+                    let live = workers.get_mut(&worker_key(&track, &worker)).ok_or_else(|| format!("worker {worker} has no open session; a grant is for an open session, so open it (spawn_worker or ask_worker) first"))?;
+                    if what == "none" {
+                        live.grant = None;
+                        return Ok(json!({ "worker": worker, "scope": "none" }));
+                    }
+                    if what != "read_only" {
+                        return Err("scope is read_only or none".to_string());
+                    }
+                    let run = match until {
+                        "session" => None,
+                        _ => Some(live.running.clone().ok_or_else(|| format!("worker {worker} has no run in flight; use until=\"session\", or grant it once it is working"))?),
+                    };
+                    live.grant = Some(Grant { read_only: true, run: run.clone() });
+                    tracing::info!(%track, %worker, run = ?run, "granted read-only commands");
+                    Ok(json!({ "worker": worker, "scope": "read_only", "until": run.map(|r| format!("run {r}")).unwrap_or_else(|| "session".into()) }))
+                }
+            },
+        ),
+        Tool::new(
+            "quiet_hours",
+            "The hours in which this track does not start work (a weekly collection, a daily job, a no-deploy window), as the human set them. A worker turn that would start inside a blocking window is refused and says until when; one inside a warning window starts with a warning. A schedule due inside a window is moved to its end.",
+            json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            move |_args| {
+                let (app, track) = quiet_get.clone();
+                async move {
+                    let state = app.state::<AppState>();
+                    let windows = quiet::get(&state, &track);
+                    let now = crate::now_ms();
+                    let active = quiet::active(&windows, now).map(|(w, end)| json!({ "window": w.line(), "ends": crate::when(end) }));
+                    Ok(json!({ "windows": windows, "lines": windows.iter().map(quiet::Window::line).collect::<Vec<_>>(), "active_now": active }))
+                }
+            },
+        ),
+        Tool::new(
+            "set_quiet_hours",
+            "Replace this track's quiet hours. Each window: days (\"daily\", \"weekdays\", \"weekend\", or days like \"sun\" or \"mon,wed\"), from and to as HH:MM in the machine's local time (to at or before from runs past midnight), a label, and mode \"block\" (refuse to start a worker turn) or \"warn\" (start it, but say so). An empty list clears them. Use it when the human tells you when nothing should run.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "windows": { "type": "array", "items": { "type": "object", "properties": { "days": { "type": "string" }, "from": { "type": "string" }, "to": { "type": "string" }, "label": { "type": "string" }, "mode": { "type": "string", "enum": ["block", "warn"] } }, "required": ["from", "to"] } }
+                },
+                "required": ["windows"]
+            }),
+            move |args| {
+                let (app, track) = quiet_set.clone();
+                async move {
+                    let windows: Vec<quiet::Window> = serde_json::from_value(args.get("windows").cloned().unwrap_or(json!([]))).map_err(|e| format!("windows: {e}"))?;
+                    let state = app.state::<AppState>();
+                    let kept = quiet::set(&state, &track, &windows)?;
+                    Ok(json!({ "windows": kept, "lines": kept.iter().map(quiet::Window::line).collect::<Vec<_>>() }))
+                }
+            },
+        ),
+    ]
+}
+
+/// The tools a worker's session gets: one, to register what it started
+/// in the background so the app watches it (see `jobs`). Everything else
+/// a worker says goes through its report.
+pub(crate) fn worker_tools(app: AppHandle, track: String, worker: String) -> Vec<Tool> {
+    vec![Tool::new(
+        "watch_job",
+        &format!("You started a background process (with nohup, setsid, &) that outlives this turn: register it here so the app watches it and the conductor is told when it ends, dies or goes quiet (no new log line for stall_minutes, default {}). Give its pid, the absolute path of the log it writes, or both, and a done_pattern: a regular expression the log's finishing line matches. Then say in your report that you registered it. Keep the log and anything the process needs outside /tmp: /tmp does not survive a reboot.", jobs::DEFAULT_STALL_MINUTES),
+        json!({
+            "type": "object",
+            "properties": {
+                "what": { "type": "string", "description": "What it is, in a few words." },
+                "pid": { "type": "integer" },
+                "log": { "type": "string", "description": "Absolute path of the log it writes." },
+                "done_pattern": { "type": "string" },
+                "stall_minutes": { "type": "integer" }
+            }
+        }),
+        move |args| {
+            let (app, track, worker) = (app.clone(), track.clone(), worker.clone());
+            async move {
+                let j = jobs::watch(&app, &track, &worker, &args)?;
+                Ok(json!({ "job": j.id, "line": jobs::describe(&j, false), "note": "Watched. Mention it in your report." }))
+            }
+        },
+    )]
 }
 
 pub(crate) fn str_arg(args: &Value, key: &str) -> Result<String, String> {
@@ -1043,6 +1403,13 @@ pub fn route_permission(app: &AppHandle, track: &str, session: &str, run: &str, 
         if !input.is_empty() {
             context = format!("{context}\n{input}");
         }
+        // What it would write and what in it is known to go wrong, read
+        // off the command so the human does not have to.
+        let root = state.store.track(track).ok().flatten().map(|t| t.cwd).unwrap_or_default();
+        let look = guard::look(title, tool_kind, input, std::path::Path::new(&root), ko).lines(ko);
+        if !look.is_empty() {
+            context = format!("{context}\n{}", look.trim_end());
+        }
         let choices: Vec<DecisionOption> = options
             .iter()
             .map(|o| DecisionOption { label: o.name.clone(), detail: String::new(), id: o.id.clone() })
@@ -1074,18 +1441,50 @@ pub fn route_permission(app: &AppHandle, track: &str, session: &str, run: &str, 
         }
         return;
     }
-    // A worker's: to the conductor, which answers with answer_worker.
+    // A worker's: answered by a standing grant on its open session when
+    // one covers it (a command that only reads, in a run the conductor said
+    // so for) -- else to the conductor, which answers with answer_worker,
+    // with what the command would write and what in it is known to go
+    // wrong read off for it.
+    let command = guard::command_of(title, input);
+    let allow = (tool_kind == "execute")
+        .then(|| options.iter().find(|o| o.kind == "allow_once").or_else(|| options.iter().find(|o| o.kind == "allow_always")).map(|o| o.id.clone()))
+        .flatten();
+    let ko = state.store.get_meta("setting:language").ok().flatten().as_deref() != Some("en");
+    let root = state.store.track(track).ok().flatten().map(|t| t.cwd).unwrap_or_default();
+    let look = guard::look(title, tool_kind, input, std::path::Path::new(&root), ko);
     let list: Vec<String> = options.iter().map(|o| format!("- {}: {} ({})", o.id, o.name, o.kind)).collect();
     let mut text = format!("{PERMISSION_PREFIX} worker={session} request={request}\nwants to: {title} ({tool_kind})");
     if !input.is_empty() {
         text.push_str(&format!("\ninput: {input}"));
     }
+    let lines = look.lines(ko);
+    if !lines.is_empty() {
+        text.push_str(&format!("\n{}", lines.trim_end()));
+    }
     text.push_str(&format!(
-        "\noptions:\n{}\n\nAnswer with answer_worker(worker=\"{session}\", request=\"{request}\", option=...). Decide yourself unless it is the human's call; then ask with request_decision and pass their choice on.",
+        "\noptions:\n{}\n\nAnswer with answer_worker(worker=\"{session}\", request=\"{request}\", option=...). Decide yourself unless it is the human's call; then ask with request_decision and pass their choice on. If this worker keeps asking about commands that only read, grant_worker(worker=\"{session}\", scope=\"read_only\") answers those for you.",
         list.join("\n")
     ));
-    let (app, track, worker, request) = (app.clone(), track.to_string(), session.to_string(), request.clone());
+    let (app, track, worker, request, run) = (app.clone(), track.to_string(), session.to_string(), request.clone(), run.to_string());
     tauri::async_runtime::spawn(async move {
+        // The grant lives on the open session, so it is read there: a
+        // session closed or reopened since the grant has none.
+        let granted = {
+            let st = app.state::<AppState>();
+            let workers = st.sessions.workers.lock().await;
+            match (workers.get(&worker_key(&track, &worker)), &allow) {
+                (Some(live), Some(option)) if live.grant.as_ref().is_some_and(|g| g.covers(&run, &command)) => Some((live.session.clone(), option.clone())),
+                _ => None,
+            }
+        };
+        if let Some((session, option)) = granted {
+            tracing::info!(%track, %worker, %run, %command, "a read-only command allowed under the conductor's grant");
+            if let Err(err) = session.answer_permission(&request, Some(&option)) {
+                tracing::warn!(%err, %worker, "could not answer under the grant");
+            }
+            return;
+        }
         let hand = Hand {
             track: track.clone(),
             text,
@@ -1267,20 +1666,22 @@ pub async fn answer_decision(
 }
 
 /// One thing to hand a track's conductor as a turn.
-struct Hand {
-    track: String,
-    text: String,
-    /// May start a closed conductor. A worker report does not.
-    open: bool,
+pub(crate) struct Hand {
+    pub track: String,
+    pub text: String,
+    /// May start a closed conductor. A worker report does not; a schedule
+    /// firing, a job ending and a restart summary do -- waking the
+    /// conductor is what they are for.
+    pub open: bool,
     /// What it is, for the log and for the human.
-    what: String,
+    pub what: String,
     /// Kept and handed on later when it cannot go through now, instead of
     /// being dropped. False only for a question whose asker is told
     /// straight after that nobody answered it.
-    keep: bool,
+    pub keep: bool,
     /// The worker and run behind it, when it is a report.
-    worker: Option<String>,
-    run: Option<String>,
+    pub worker: Option<String>,
+    pub run: Option<String>,
 }
 
 /// Run a hand's text as a conductor turn once the conductor is free. The
@@ -1288,7 +1689,7 @@ struct Hand {
 /// trusting an earlier free check that another turn may have overtaken.
 /// Returns whether the turn started; a `keep` hand that did not start is
 /// parked (see [`park`]) and never lost.
-async fn deliver(app: AppHandle, hand: Hand) -> bool {
+pub(crate) async fn deliver(app: AppHandle, hand: Hand) -> bool {
     let Hand { track, text, open, what, keep, worker, run } = hand;
     let deadline = std::time::Instant::now() + REPORT_WAIT;
     let lang = {
@@ -1298,6 +1699,9 @@ async fn deliver(app: AppHandle, hand: Hand) -> bool {
     let why = loop {
         if !open && !app.state::<AppState>().sessions.conductors.lock().await.contains_key(&track) {
             break "the conductor session is closed".to_string();
+        }
+        if let Some(r) = detached_conductor(&app.state::<AppState>().store, &track) {
+            break format!("the conductor's turn {} is still running on its own (pid {}) since the app went down; no second conductor is started beside it", r.id, r.pid.unwrap_or(0));
         }
         match conductor_turn(app.clone(), track.clone(), text.clone(), None, lang.clone(), Vec::new()).await {
             Ok(_) => return true,
@@ -1317,6 +1721,37 @@ async fn deliver(app: AppHandle, hand: Hand) -> bool {
         tracing::warn!(%track, %what, %why, "could not hand this to the conductor");
     }
     false
+}
+
+/// What `resumed:<run>` holds while the new turn is being started.
+const RESUME_CLAIM: &str = "starting";
+
+/// Put a hand in the track's waiting list under a stable id, unless one
+/// with that id waits there already. For a turn that must neither be lost
+/// to a crash before it reaches the conductor nor sent twice by a replay
+/// (a restart summary): kept first, handed on by `flush_parked` after.
+pub(crate) async fn park_once(app: &AppHandle, id: &str, hand: Hand) {
+    let Hand { track, text, open, what, worker, run, .. } = hand;
+    let _one = PARKED.lock().await;
+    let state = app.state::<AppState>();
+    let mut list = parked_list(&state.store, &track);
+    if list.iter().any(|p| p.id == id) {
+        return;
+    }
+    list.push(Parked { id: id.to_string(), text, open, what: what.clone(), worker: worker.clone(), run: run.clone(), at: now_ms(), why: "waiting to be handed on".to_string(), tries: 0 });
+    fold_old(&mut list);
+    keep_parked(&state.store, &track, &list);
+    let _ = app.emit("parked", Waiting { track: track.clone(), pending: list.len(), added: Some(what), worker, run, why: "waiting to be handed on".to_string() });
+}
+
+/// The track's conductor turn that a crash left running on its own, if
+/// any. While its agent is alive the app starts no other conductor for the
+/// track by itself (a schedule, a job, a restart summary wait, parked), so
+/// two conductors never act at once; the human can still talk to it, and
+/// sees the turn marked detached. When that agent ends, the run is closed
+/// and what waited is handed on.
+pub(crate) fn detached_conductor(store: &orchestra_store::Store, track: &str) -> Option<RunSummary> {
+    store.detached_runs().ok()?.into_iter().find(|r| r.track == track && r.session == CONDUCTOR_SESSION)
 }
 
 /// A turn the conductor could not take, kept in the record until it can.
@@ -1542,7 +1977,7 @@ pub fn flush_parked(app: AppHandle, track: String) -> std::pin::Pin<Box<dyn std:
         };
         let lang = {
             let st = app.state::<AppState>();
-            if st.sessions.is_busy(&track) {
+            if st.sessions.is_busy(&track) || detached_conductor(&st.store, &track).is_some() {
                 return;
             }
             // A report still does not open a closed conductor; it waits for
@@ -1786,6 +2221,8 @@ async fn worker_list(state: &AppState, track: &str) -> Vec<Value> {
                 "last_at": info.last_at,
                 "resumable": live.is_none() && kept.is_some(),
                 "idle_minutes": live.filter(|l| l.running.is_none()).map(|l| l.used.elapsed().as_secs() / 60),
+                "scope": scope::get(state, track, &info.name),
+                "grant": live.and_then(|l| l.grant.as_ref()).map(|g| json!({ "read_only": g.read_only, "run": g.run })),
             })
         })
         .collect();
@@ -1877,6 +2314,25 @@ fn track_info(state: &AppState, track: &str) -> Result<TrackInfo, String> {
         .ok_or_else(|| format!("no track {track}"))
 }
 
+/// A worker turn against the track's quiet hours, now: refused in a
+/// blocking window (saying until when), let through with a line to say in
+/// a warning one, let through quietly outside them. Asked when the turn is
+/// asked for and again when a proposal card settles, since a window can
+/// begin while the card waits.
+fn quiet_check(app: &AppHandle, track: &str) -> Result<Option<String>, String> {
+    let state = app.state::<AppState>();
+    let ko = crate::ko(app);
+    match quiet::active(&quiet::get(&state, track), crate::now_ms()) {
+        Some((w, end)) if w.blocks() => Err(if ko {
+            format!("지금은 이 트랙의 금지 시간대입니다 ({}): {} 기다렸다가 시작하거나, schedule 로 그 뒤에 걸어 두세요.", w.line(), quiet::until(end, true))
+        } else {
+            format!("this track is in quiet hours now ({}): wait {} to start it, or set a schedule for after.", w.line(), quiet::until(end, false))
+        }),
+        Some((w, end)) => Ok(Some(if ko { format!("금지 시간대({}) 안에 시작했습니다; {} 끝납니다.", w.line(), quiet::until(end, true)) } else { format!("started inside quiet hours ({}); they end {}.", w.line(), quiet::until(end, false)) })),
+        None => Ok(None),
+    }
+}
+
 /// Give a worker a turn and return at once.
 ///
 /// On a track whose worker choice is `propose`, **every** worker opened here
@@ -1888,6 +2344,7 @@ fn track_info(state: &AppState, track: &str) -> Result<TrackInfo, String> {
 ///
 /// The conductor's `agent`/`model`/`why` are a suggestion on that card, not
 /// a condition for it. The call still returns at once either way.
+#[allow(clippy::too_many_arguments)]
 async fn start_worker_turn(
     app: AppHandle,
     track: String,
@@ -1896,9 +2353,17 @@ async fn start_worker_turn(
     ask: Ask,
     open: bool,
     fresh: bool,
+    flags: TurnFlags,
 ) -> Result<Value, String> {
     if name == CONDUCTOR_SESSION {
         return Err("that name is reserved".to_string());
+    }
+    // The track's quiet hours: a blocking window refuses the turn and says
+    // until when; a warning one lets it start and says so in the answer.
+    let quiet_warning = quiet_check(&app, &track)?;
+    if let Some(globs) = &flags.scope {
+        let state = app.state::<AppState>();
+        scope::set(&state, &track, &name, globs)?;
     }
     let (chosen, ignored) = {
         let state = app.state::<AppState>();
@@ -1943,15 +2408,122 @@ async fn start_worker_turn(
             // asked for; the body below says so rather than a card.
             let live = state.sessions.workers.lock().await.contains_key(&worker_key(&track, &name));
             if !live {
-                return propose_worker(&app, &track, &name, &text, &ask, suggestion, fresh).await;
+                return propose_worker(&app, &track, &name, &text, &ask, suggestion, fresh, flags.repeatable).await;
             }
             (None, None)
         }
     };
-    let mut result = run_worker_turn(app, track, name, text, chosen, open, fresh).await?;
+    let mut result = run_worker_turn(app, track, name, text, chosen, open, fresh, flags.repeatable).await?;
     if let Some(note) = ignored {
         result["ignored"] = Value::String(note);
     }
+    if let Some(w) = quiet_warning {
+        result["warning"] = Value::String(w);
+    }
+    Ok(result)
+}
+
+/// Start a worker turn again that the app or the machine cut short, on the
+/// same worker with its memory, handing it what it had done. Never a turn
+/// that is over in any other way, never one whose agent is still alive,
+/// and never twice: the record says which run carried it on.
+///
+/// `auto` is the comeback starting a turn the conductor marked safe to
+/// repeat; a person's or the conductor's call comes with `false`. The
+/// worker is told either way.
+pub(crate) async fn resume_run(app: AppHandle, track: String, run: String, auto: bool) -> Result<Value, String> {
+    let (worker, text, repeatable) = {
+        let state = app.state::<AppState>();
+        let ko = crate::ko(&app);
+        let s = state.store.run(&run).map_err(|e| e.to_string())?.ok_or_else(|| format!("no run {run}"))?;
+        if s.track != track {
+            return Err(format!("run {run} is not this track's"));
+        }
+        if s.session == CONDUCTOR_SESSION {
+            return Err(format!("{run} is a conductor turn; the human carries the conversation on, not resume_run"));
+        }
+        match s.status {
+            RunStatus::Interrupted | RunStatus::TimedOut => {}
+            RunStatus::Detached => return Err(format!("{run}'s agent (pid {}) is still alive and working on its own; wait for it to end (you will be told) before starting it again", s.pid.unwrap_or(0))),
+            RunStatus::Connecting | RunStatus::Running => return Err(format!("{run} is still running")),
+            RunStatus::Done => return Err(format!("{run} finished by itself; send the worker a follow-up with ask_worker instead")),
+            RunStatus::Failed => return Err(format!("{run} failed on the agent's side ({}); that is not a cut to resume from. Ask the worker again with ask_worker if the work still needs doing", s.error.unwrap_or_default())),
+        }
+        // Claimed before the new turn starts, in one step, so two starts
+        // (a button and a restart, or a replay after a crash) never both
+        // go: `starting` until the new run exists, then its id.
+        if !state.store.claim_meta(&format!("resumed:{run}"), RESUME_CLAIM).map_err(|e| e.to_string())? {
+            let already = state.store.get_meta(&format!("resumed:{run}")).ok().flatten().unwrap_or_default();
+            return Err(if already == RESUME_CLAIM {
+                format!("{run} is being started again already, or was when the app went down; look at worker {}'s runs before starting it again", s.session)
+            } else {
+                format!("{run} was started again already, as {already}")
+            });
+        }
+        // What it had done by the cut: the end of what it said, and the
+        // last few tool calls, from the record.
+        let said: String = {
+            let out = s.output.trim();
+            let keep = 600;
+            if out.chars().count() > keep {
+                format!("…{}", out.chars().rev().take(keep).collect::<Vec<_>>().into_iter().rev().collect::<String>())
+            } else {
+                out.to_string()
+            }
+        };
+        let mut tools: Vec<(String, String, String)> = Vec::new();
+        for e in state.store.events(&run).unwrap_or_default() {
+            match e.event {
+                AgentEvent::ToolCall { id, title, status, .. } => tools.push((id, title, status)),
+                AgentEvent::ToolUpdate { id, status, title, .. } => {
+                    if let Some(t) = tools.iter_mut().find(|t| t.0 == id) {
+                        if !title.is_empty() {
+                            t.1 = title;
+                        }
+                        if !status.is_empty() {
+                            t.2 = status;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let last_tools: Vec<String> = tools.iter().rev().take(6).map(|(_, t, st)| format!("{t} ({st})")).collect::<Vec<_>>().into_iter().rev().collect();
+        let why = s.error.clone().unwrap_or_default();
+        let started = crate::when(s.started_at);
+        let seen = s.ended_at.map(crate::when).unwrap_or_default();
+        let text = if ko {
+            format!(
+                "[resumed] 이 턴(run {run}, {started} 시작, 마지막 확인 {seen})은 끊겼습니다: {why}\n끊기기 전까지 한 일 — 마지막 출력: {}\n마지막 도구 호출: {}\n\n이어서 하세요. 이미 만든 변경은 먼저 파일과 저장소 상태를 확인하고 같은 쓰기를 반복하지 마세요. 되풀이하면 안 되는 일(운영 DB·저장소에 쓰기)이 이미 됐는지 모르겠으면 하지 말고 보고의 questions 에 적으세요. 원래 지시:\n\n---\n\n{}",
+                if said.is_empty() { "(없음)".to_string() } else { format!("\"{said}\"") },
+                if last_tools.is_empty() { "(없음)".to_string() } else { last_tools.join(", ") },
+                s.prompt
+            )
+        } else {
+            format!(
+                "[resumed] This turn (run {run}, started {started}, last seen {seen}) was cut short: {why}\nWhat it had done by then — last output: {}\nLast tool calls: {}\n\nCarry on from there. Check the files and the repository before repeating any write you already made. If you cannot tell whether something that must not run twice (a write to a production database or a repository) already happened, do not do it; put it in your report under questions. The original task:\n\n---\n\n{}",
+                if said.is_empty() { "(none)".to_string() } else { format!("\"{said}\"") },
+                if last_tools.is_empty() { "(none)".to_string() } else { last_tools.join(", ") },
+                s.prompt
+            )
+        };
+        (s.session, text, s.repeatable)
+    };
+    tracing::info!(%track, %run, %worker, auto, "starting a cut turn again");
+    let flags = TurnFlags { repeatable, scope: None };
+    let mut result = match start_worker_turn(app.clone(), track.clone(), worker, text, Ask::default(), false, false, flags).await {
+        Ok(r) => r,
+        Err(err) => {
+            // It did not start: the claim goes, so it can be tried again.
+            let _ = app.state::<AppState>().store.delete_meta(&format!("resumed:{run}"));
+            return Err(err);
+        }
+    };
+    if let Some(new) = result.get("run").and_then(Value::as_str) {
+        let _ = app.state::<AppState>().store.set_meta(&format!("resumed:{run}"), new);
+    }
+    result["resumed_from"] = Value::String(run);
+    result["auto"] = Value::Bool(auto);
     Ok(result)
 }
 
@@ -1972,6 +2544,7 @@ fn is_proposal(d: &Decision) -> bool {
 /// Put the conductor's proposal to the human and hold the worker back until
 /// they answer, or until [`PROPOSAL_WAIT`] runs out and the track's own
 /// choice is used instead.
+#[allow(clippy::too_many_arguments)]
 async fn propose_worker(
     app: &AppHandle,
     track: &str,
@@ -1980,6 +2553,7 @@ async fn propose_worker(
     ask: &Ask,
     suggestion: Option<(String, BTreeMap<String, String>)>,
     fresh: bool,
+    repeatable: bool,
 ) -> Result<Value, String> {
     let (decision, ours, minutes, choices) = {
         let state = app.state::<AppState>();
@@ -2117,7 +2691,26 @@ async fn propose_worker(
             }
             let chosen = picked.and_then(|i| settings.get(i).cloned()).unwrap_or(fallback);
             tracing::info!(track = %track_t, worker = %name_t, agent = %chosen.0, answered = picked.is_some(), "worker proposal settled");
-            let outcome = run_worker_turn(app_t.clone(), track_t.clone(), name_t.clone(), text_t, Some(chosen), true, fresh).await;
+            // Quiet hours may have begun while the card waited: then it does
+            // not start now, and the conductor is told what was chosen.
+            if let Err(why) = quiet_check(&app_t, &track_t) {
+                let hand = Hand {
+                    track: track_t.clone(),
+                    text: format!(
+                        "Worker {name_t} was not opened: the card about its agent was settled ({}) inside the track's quiet hours. {why} Open it with spawn_worker(name=\"{name_t}\", agent=\"{}\", …) once they are over -- a schedule can wake you then -- and tell the human it waits.",
+                        if picked.is_some() { "answered" } else { "no answer in time" },
+                        chosen.0
+                    ),
+                    open: false,
+                    what: format!("proposal for {name_t} held by quiet hours"),
+                    keep: true,
+                    worker: None,
+                    run: None,
+                };
+                deliver(app_t, hand).await;
+                return;
+            }
+            let outcome = run_worker_turn(app_t.clone(), track_t.clone(), name_t.clone(), text_t, Some(chosen), true, fresh, repeatable).await;
             if let Err(err) = outcome {
                 // The conductor ended its turn when the card went up, so a
                 // failure here reaches nobody unless it is handed back.
@@ -2216,6 +2809,7 @@ fn clip_task(text: &str) -> String {
 /// unless `fresh` says to forget. `chosen` is an agent and its options
 /// settled on already — the track's, or what the human approved on a card;
 /// `None` leaves it to the worker's own record, then the track.
+#[allow(clippy::too_many_arguments)]
 async fn run_worker_turn(
     app: AppHandle,
     track: String,
@@ -2224,6 +2818,7 @@ async fn run_worker_turn(
     chosen: Option<(String, BTreeMap<String, String>)>,
     open: bool,
     fresh: bool,
+    repeatable: bool,
 ) -> Result<Value, String> {
     let (agent, settled) = match chosen {
         Some((a, c)) => (Some(a), Some(c)),
@@ -2289,6 +2884,11 @@ async fn run_worker_turn(
                 // Claimed under the lock the busy check was made under, so
                 // two parallel asks cannot both pass it.
                 let run = state.store.begin_run(&track, &name, &live.agent, &text, &worker_cwd).map_err(|e| e.to_string())?;
+                let (pid, start) = crate::boot::identity(live.session.pid());
+                let _ = state.store.set_run_pid(&run, pid, start);
+                if repeatable {
+                    let _ = state.store.set_run_repeatable(&run, true);
+                }
                 live.turns += 1;
                 live.running = Some(run.clone());
                 live.used = std::time::Instant::now();
@@ -2370,6 +2970,20 @@ async fn run_worker_turn(
                 }
             }
             let _opening = Opening(&state.sessions.opening, key.clone());
+            // The worker's own tools, on a server that lives with its
+            // session. Opening without them when the server will not start
+            // is better than no worker: the tool is a convenience.
+            let mut opts = opts;
+            let mcp = match McpServer::start("divixi", worker_tools(app.clone(), track.clone(), name.clone())).await {
+                Ok(server) => {
+                    opts.mcp_servers = vec![McpHttp { name: "divixi".to_string(), url: server.url(), headers: vec![server.auth_header()] }];
+                    Some(server)
+                }
+                Err(err) => {
+                    tracing::warn!(%track, worker = %name, %err, "the worker's tools did not start; opening it without them");
+                    None
+                }
+            };
             tracing::info!(%track, worker = %name, agent = %agent_id, resume = ?opts.resume, "opening worker session");
             let session = Arc::new(AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?);
             let resumed = session.resumed();
@@ -2402,6 +3016,11 @@ async fn run_worker_turn(
                 None
             };
             let run = state.store.begin_run(&track, &name, &agent_id, &text, &worker_cwd).map_err(|e| e.to_string())?;
+            let (pid, start) = crate::boot::identity(session.pid());
+            let _ = state.store.set_run_pid(&run, pid, start);
+            if repeatable {
+                let _ = state.store.set_run_repeatable(&run, true);
+            }
             state.sessions.workers.lock().await.insert(
                 key.clone(),
                 Live {
@@ -2412,6 +3031,8 @@ async fn run_worker_turn(
                     turns,
                     running: Some(run.clone()),
                     used: std::time::Instant::now(),
+                    _mcp: mcp,
+                    grant: None,
                 },
             );
             (agent_id, config, turns, session, resumed, note, run)
@@ -2431,7 +3052,11 @@ async fn run_worker_turn(
         model: model.clone(),
         refused: refused.clone(),
     });
-    let task = format!("{text}\n\n---\n{}\n\n{}", place.for_worker, report::instructions());
+    // Where else it may write, and who else is on the track: said with the
+    // folder line, every turn, so a reopened worker knows too.
+    let scope_told = scope::told(&scope::get(&state, &track, &name), &info.cwd);
+    let siblings = sibling_note(&state, &track, &name);
+    let task = format!("{text}\n\n---\n{}{scope_told}{siblings}\n\n{}", place.for_worker, report::instructions());
     let task = match handoff_for_worker {
         Some(h) => format!("{h}\n\n---\n\n{task}"),
         None => task,
@@ -2449,6 +3074,8 @@ async fn run_worker_turn(
                 let again = app.state::<AppState>().store.begin_run(&track_t, &name_t, &agent_t, &again_text, &cwd_t);
                 match again {
                     Ok(again) => {
+                        let (pid, start) = crate::boot::identity(session.pid());
+                        let _ = app.state::<AppState>().store.set_run_pid(&again, pid, start);
                         hand_running(&app, &track_t, &name_t, &current, Some(again.clone())).await;
                         current = again.clone();
                         drive_worker_turn(&app, &track_t, &name_t, &again, &session, again_text, &cwd_t).await;
@@ -2462,7 +3089,7 @@ async fn run_worker_turn(
             }
         }
         hand_running(&app, &track_t, &name_t, &current, None).await;
-        let report = finish_report(&app, &run_t, (current != run_t).then_some(current.as_str()), outcome, &cwd_t, ran_on);
+        let report = finish_report(&app, &track_t, &name_t, &run_t, (current != run_t).then_some(current.as_str()), outcome, &cwd_t, ran_on);
         report_to_conductor(app, track_t, name_t, run_t, report).await;
     });
 
@@ -2619,11 +3246,12 @@ async fn drive_worker_turn(app: &AppHandle, track: &str, name: &str, run: &str, 
         Err(why) => {
             // Stuck; a cancel may not reach an agent that has stopped
             // answering, so the session ends and the worker reopens (with
-            // its memory) on its next task.
+            // its memory) on its next task. The app's doing, so the run
+            // says timed out rather than failed: it may be started again.
             tracing::warn!(%track, worker = %name, %run, %why, "ending a stuck worker turn");
             session.cancel();
             session.kill();
-            let _ = tx.send(AgentEvent::Failed { error: format!("{why}; its session was ended") });
+            let _ = tx.send(AgentEvent::TimedOut { why: format!("{why}; its session was ended") });
             let st = app.state::<AppState>();
             let mut workers = st.sessions.workers.lock().await;
             if workers.get(&worker_key(track, name)).is_some_and(|l| std::ptr::eq(Arc::as_ptr(&l.session), session)) {
@@ -2726,8 +3354,11 @@ const STOPPED_BY_HUMAN: &str = "the human stopped this worker mid-turn";
 
 /// The report as kept: the worker's, or one made from its reply; with the
 /// files the app saw its edit tools touch. Stored for the timeline's card.
+#[allow(clippy::too_many_arguments)]
 fn finish_report(
     app: &AppHandle,
+    track: &str,
+    worker: &str,
     run: &str,
     reminder: Option<&str>,
     outcome: Result<Report, String>,
@@ -2744,7 +3375,7 @@ fn finish_report(
     });
     // A worker told to do no more work in the reminder may still have.
     for r in std::iter::once(run).chain(reminder) {
-        let (inside, outside) = edits_seen(&state, r, cwd);
+        let (inside, outside) = edits_seen(&state, track, worker, r, cwd);
         for p in inside {
             if !report.edits_seen.contains(&p) {
                 report.edits_seen.push(p);
@@ -2780,9 +3411,12 @@ pub fn stored_report(state: &AppState, run: &str) -> Option<Report> {
 }
 
 /// Files a run's edit, delete and move tool calls touched: inside the
-/// working folder (relative to it), and outside it.
-fn edits_seen(state: &AppState, run: &str, cwd: &str) -> (Vec<String>, Vec<String>) {
+/// working folder (relative to it) or the worker's scope (relative to the
+/// track folder), and outside both.
+fn edits_seen(state: &AppState, track: &str, worker: &str, run: &str, cwd: &str) -> (Vec<String>, Vec<String>) {
     let root = cwd.replace('\\', "/").trim_end_matches('/').to_string() + "/";
+    let globs = scope::get(state, track, worker);
+    let track_dir = state.store.track(track).ok().flatten().map(|t| t.cwd).unwrap_or_default();
     let mut seen: Vec<String> = Vec::new();
     let mut outside: Vec<String> = Vec::new();
     // Calls that change files; their updates may name the files later.
@@ -2810,6 +3444,12 @@ fn edits_seen(state: &AppState, run: &str, cwd: &str) -> (Vec<String>, Vec<Strin
                 if !seen.contains(&p) {
                     seen.push(p);
                 }
+            } else if let Some(rel) = scope::allows(&globs, &track_dir, &p) {
+                // Inside the scope the worker was given: its own, named
+                // from the track folder.
+                if !seen.contains(&rel) {
+                    seen.push(rel);
+                }
             } else if !outside.contains(&p) {
                 outside.push(p);
             }
@@ -2818,6 +3458,29 @@ fn edits_seen(state: &AppState, run: &str, cwd: &str) -> (Vec<String>, Vec<Strin
     seen.truncate(50);
     outside.truncate(50);
     (seen, outside)
+}
+
+/// What a worker is told about the other workers on its track: their
+/// names, and that it cannot reach them itself. A worker that wanted to
+/// tell another one something looked for it among the machine's sessions,
+/// found a name it did not recognise, and gave up; now it knows the names
+/// and the one way through, which is its report.
+fn sibling_note(state: &AppState, track: &str, worker: &str) -> String {
+    let others: Vec<String> = state
+        .store
+        .sessions(track)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.name)
+        .filter(|n| n != CONDUCTOR_SESSION && n != worker)
+        .collect();
+    if others.is_empty() {
+        return String::new();
+    }
+    format!(
+        " Other workers on this track: {}. You cannot message them, and they cannot message you: anything for another worker (or for the human) goes in your report, under questions or next, and the conductor passes it on.",
+        others.join(", ")
+    )
 }
 
 /// Whether a relative path leaves the folder it is relative to ("../x", "a/../../x").
@@ -3055,11 +3718,16 @@ async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_tur
                     turns: if resumed { 1 } else { 0 },
                     running: None,
                     used: std::time::Instant::now(),
+                    _mcp: None,
+                    grant: None,
                 },
                 fingerprint: wanted,
                 _mcp: mcp,
             },
         );
+        // Cards a session that is gone left open: said on the first turn.
+        let ko = st.store.get_meta("setting:language").ok().flatten().as_deref() != Some("en");
+        note_open_decisions(&st.store, track, ko);
     }
     let mut guard = st.sessions.conductors.lock().await;
     // Closed meanwhile (the track was deleted or moved): nothing to talk to.
@@ -3567,9 +4235,98 @@ pub fn sweep_idle(app: AppHandle) {
             for key in idle {
                 tracing::info!(worker = %key, minutes, "closing an idle worker session");
                 workers.remove(&key);
+                // The conductor hears of it on its next turn, in a line,
+                // rather than waiting on a worker it believes is open.
+                if let Some((track, worker)) = key.split_once('/') {
+                    let ko = state.store.get_meta("setting:language").ok().flatten().as_deref() != Some("en");
+                    push_note(
+                        &state.store,
+                        track,
+                        &if ko {
+                            format!("작업자 {worker}의 세션이 {minutes}분 쉬어 닫혔습니다 (기억은 남아 있어 같은 이름으로 부르면 이어집니다).")
+                        } else {
+                            format!("worker {worker}'s session was closed after {minutes} idle minutes (its memory stays; calling it by name reopens it).")
+                        },
+                    );
+                }
             }
         }
     });
+}
+
+fn notes_key(track: &str) -> String {
+    format!("notes:{track}")
+}
+
+/// Keep a line for a track's conductor to read at the start of its next
+/// turn: something that happened while it was not in a turn and is not
+/// worth a turn of its own (a worker session closed as idle, cards still
+/// open when it reopened).
+pub(crate) fn push_note(store: &orchestra_store::Store, track: &str, text: &str) {
+    let mut notes: Vec<String> = store.get_meta(&notes_key(track)).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    if notes.iter().any(|n| n == text) {
+        return;
+    }
+    notes.push(text.to_string());
+    if notes.len() > 20 {
+        notes.remove(0);
+    }
+    if let Err(err) = store.set_meta(&notes_key(track), &serde_json::to_string(&notes).unwrap_or_default()) {
+        tracing::warn!(%track, %err, "could not keep a note for the conductor");
+    }
+}
+
+/// The notes waiting for a track's conductor, taken (read once), as the
+/// lines of a `[divixi]` block.
+fn take_notes(store: &orchestra_store::Store, track: &str) -> Option<String> {
+    let notes: Vec<String> = store.get_meta(&notes_key(track)).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    if notes.is_empty() {
+        return None;
+    }
+    let _ = store.delete_meta(&notes_key(track));
+    Some(notes.iter().map(|n| format!("- {n}")).collect::<Vec<_>>().join("\n"))
+}
+
+/// A note about the cards still open, for a conductor whose session has
+/// just been (re)opened: a question asked in a session that is gone may
+/// still be waiting, and the conductor would otherwise ask it again.
+fn note_open_decisions(store: &orchestra_store::Store, track: &str, ko: bool) {
+    let open: Vec<Decision> = store
+        .decisions(Some(track))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|d| d.status == DecisionStatus::Open && d.permission.is_none() && !is_proposal(d))
+        .collect();
+    if open.is_empty() {
+        return;
+    }
+    let now = crate::now_ms();
+    let lines: Vec<String> = open
+        .iter()
+        .map(|d| {
+            let waited = now - d.created_at;
+            let span = match (waited >= 3_600_000, ko) {
+                (true, true) => format!("{}시간째", waited / 3_600_000),
+                (true, false) => format!("{} h", waited / 3_600_000),
+                (false, true) => format!("{}분째", waited / 60_000),
+                (false, false) => format!("{} min", waited / 60_000),
+            };
+            if ko {
+                format!("#{} ({}, {span} 답 없음): {}", d.id, crate::when(d.created_at), d.question)
+            } else {
+                format!("#{} ({}, unanswered for {span}): {}", d.id, crate::when(d.created_at), d.question)
+            }
+        })
+        .collect();
+    push_note(
+        store,
+        track,
+        &if ko {
+            format!("사람에게 답을 기다리는 결정 카드가 {}개 있습니다 (list_decisions): {}. 같은 질문을 다시 올리지 말고, 낡은 카드면 사람에게 말하세요.", open.len(), lines.join(" · "))
+        } else {
+            format!("{} decision card(s) still wait on the human (list_decisions): {}. Do not ask them again; if one is stale, say so to the human.", open.len(), lines.join(" · "))
+        },
+    );
 }
 
 /// Minutes a session may sit unused before it is closed, when not set.
@@ -3632,6 +4389,10 @@ pub async fn conductor_turn(
             .store
             .begin_run(&track, CONDUCTOR_SESSION, &agent, &prompt, &info.cwd)
             .map_err(|e| e.to_string())?;
+        // So a crash that leaves this agent running is seen as such (see
+        // `detached_conductor`) rather than taken for its end.
+        let (pid, start) = crate::boot::identity(session.pid());
+        let _ = st.store.set_run_pid(&run, pid, start);
         // Tools called during the turn (decisions) hang off this run.
         if let Some(c) = st.sessions.conductors.lock().await.get_mut(&track) {
             c.live.running = Some(run.clone());
@@ -3654,6 +4415,16 @@ pub async fn conductor_turn(
             Some(said) => format!(
                 "[divixi] {} would not take an option this session was opened with, so you are NOT running on what the human chose: {said}. Tell them this before anything else, then answer as usual.\n\n---\n\n{text}",
                 info.agent
+            ),
+            None => text,
+        };
+        // What happened while the conductor was not in a turn, in lines.
+        // In the language the notes were written in: Korean unless the
+        // interface says English outright (as `crate::ko` reads it).
+        let text = match take_notes(&st.store, &track) {
+            Some(notes) => format!(
+                "[divixi] {}\n{notes}\n\n---\n\n{text}",
+                if lang.starts_with("en") { "Meanwhile:" } else { "그동안 있었던 일:" }
             ),
             None => text,
         };
@@ -3898,6 +4669,10 @@ mod report_tests {
             output: String::new(),
             plan: Vec::new(),
             tool_count: 40,
+            ended_at: None,
+            pid: None,
+            pid_start: None,
+            repeatable: false,
         }
     }
 
@@ -4066,6 +4841,25 @@ mod pulse_tests {
 #[cfg(test)]
 mod parked_tests {
     use super::*;
+
+    /// A conductor turn whose agent outlived a crash holds back what the
+    /// app would start by itself on that track, and only that track.
+    #[test]
+    fn a_detached_conductor_is_not_doubled() {
+        let store = orchestra_store::Store::in_memory().unwrap();
+        let conductor = store.begin_run("tr001", CONDUCTOR_SESSION, "claude_code", "go on", ".").unwrap();
+        store.set_run_pid(&conductor, Some(std::process::id()), None).unwrap();
+        let worker = store.begin_run("tr001", "review-core", "claude_code", "patch", ".").unwrap();
+        store.set_run_pid(&worker, Some(std::process::id()), None).unwrap();
+        let other = store.begin_run("tr002", CONDUCTOR_SESSION, "claude_code", "go on", ".").unwrap();
+        assert!(detached_conductor(&store, "tr001").is_none(), "running, not detached");
+        let alive = |_: u32, _: Option<u64>| true;
+        store.close_live_runs(&orchestra_store::Interruption { why: "the app went down".into(), at: None, alive: &alive }).unwrap();
+        assert_eq!(detached_conductor(&store, "tr001").map(|r| r.id), Some(conductor.clone()), "its agent is alive: held");
+        assert!(detached_conductor(&store, "tr002").is_none(), "no pid kept, so taken for ended: {other}");
+        store.append(&conductor, 1, &AgentEvent::Interrupted { why: "its agent ended".into() }).unwrap();
+        assert!(detached_conductor(&store, "tr001").is_none(), "ended: nothing held");
+    }
 
     #[test]
     fn what_the_conductor_could_not_take_is_kept_in_order_and_cleared() {
@@ -4250,6 +5044,81 @@ mod folder_tests {
         assert!(super::climbs_out("a/../../x"));
         assert!(!super::climbs_out("a/../b.md"));
         assert!(!super::climbs_out("./notes/x.md"));
+    }
+}
+
+#[cfg(test)]
+mod notes_tests {
+    use super::*;
+
+    /// What happened while the conductor was not in a turn is kept as
+    /// lines, said once on its next turn, and not said twice.
+    #[test]
+    fn notes_wait_for_the_next_turn_and_are_read_once() {
+        let store = orchestra_store::Store::in_memory().unwrap();
+        assert_eq!(take_notes(&store, "tr001"), None);
+        push_note(&store, "tr001", "worker a's session was closed");
+        push_note(&store, "tr001", "worker a's session was closed");
+        push_note(&store, "tr001", "worker b's session was closed");
+        push_note(&store, "tr002", "elsewhere");
+        assert_eq!(take_notes(&store, "tr001").as_deref(), Some("- worker a's session was closed\n- worker b's session was closed"), "the same line once");
+        assert_eq!(take_notes(&store, "tr001"), None, "taken");
+        assert_eq!(take_notes(&store, "tr002").as_deref(), Some("- elsewhere"), "each track its own");
+        for i in 0..25 {
+            push_note(&store, "tr003", &format!("line {i}"));
+        }
+        let kept = take_notes(&store, "tr003").unwrap();
+        assert!(!kept.contains("line 4\n") && kept.contains("line 24"), "the newest twenty: {kept}");
+    }
+
+    /// A reopened conductor is told of the cards still waiting on the human
+    /// -- the ones it could ask again -- and of nothing that is not one.
+    #[test]
+    fn a_reopened_conductor_is_told_of_open_cards() {
+        let store = orchestra_store::Store::in_memory().unwrap();
+        note_open_decisions(&store, "tr001", false);
+        assert_eq!(take_notes(&store, "tr001"), None, "nothing open, nothing said");
+        let opt = |l: &str| DecisionOption { label: l.into(), detail: String::new(), id: String::new() };
+        let asked = store
+            .open_decision(&NewDecision { track: "tr001".into(), question: "Collect the 323 companies?".into(), options: vec![opt("yes"), opt("no")], allow_other: true, ..Default::default() })
+            .unwrap();
+        let answered = store
+            .open_decision(&NewDecision { track: "tr001".into(), question: "Merge?".into(), options: vec![opt("yes"), opt("no")], allow_other: true, ..Default::default() })
+            .unwrap();
+        store.answer_decision(answered.id, Some(0), None, "").unwrap();
+        // A permission card is the agent's, answered where it is asked, and
+        // a proposal card is a spawn's; neither is the conductor's to ask again.
+        store
+            .open_decision(&NewDecision { track: "tr001".into(), question: "may I".into(), options: vec![opt("allow"), opt("refuse")], permission: Some(PermissionAsk { session: "conductor".into(), request: "p1".into() }), ..Default::default() })
+            .unwrap();
+        note_open_decisions(&store, "tr001", false);
+        let note = take_notes(&store, "tr001").unwrap();
+        assert!(note.contains("1 decision card(s) still wait") && note.contains(&format!("#{}", asked.id)), "{note}");
+        assert!(!note.contains("Merge?") && !note.contains("may I"), "{note}");
+        note_open_decisions(&store, "tr001", true);
+        assert!(take_notes(&store, "tr001").unwrap().contains("답을 기다리는 결정 카드가 1개"));
+    }
+}
+
+#[cfg(test)]
+mod grant_tests {
+    use super::*;
+
+    /// A grant answers what only reads, for the run it was given for, and
+    /// nothing else: a write still comes as a question. (That it goes
+    /// with its session is not a test: it is where it is kept, on
+    /// [`Live`], and nothing else holds one.)
+    #[test]
+    fn a_grant_covers_read_only_commands_in_its_run() {
+        let for_run = Grant { read_only: true, run: Some("t001".into()) };
+        assert!(for_run.covers("t001", "ls -la && cat a.rs"));
+        assert!(!for_run.covers("t001", "git status"), "git runs what the repository's config names");
+        assert!(!for_run.covers("t001", "rm -rf out"), "a write still asks");
+        assert!(!for_run.covers("t001", "awk 'BEGIN { system(\"rm x\") }'"), "a language is not a read");
+        assert!(!for_run.covers("t002", "ls"), "another run");
+        let for_session = Grant { read_only: true, run: None };
+        assert!(for_session.covers("t009", "ls"), "for the session: any run");
+        assert!(!Grant { read_only: false, run: None }.covers("t009", "ls"), "granting nothing covers nothing");
     }
 }
 

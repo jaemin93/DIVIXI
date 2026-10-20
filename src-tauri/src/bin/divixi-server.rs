@@ -1,4 +1,5 @@
-//! Divixi with no window, for a server (built with `--features server`).
+//! Divixi with no window, for a server (built with
+//! `--no-default-features --features server`: no webview, see Cargo.toml).
 //!
 //!   divixi-server                 run: the app on Tauri's mock runtime, a remote
 //!                                 instance on port 7488 (the remote.port setting)
@@ -18,7 +19,7 @@
 //! the level it is logging at and where the log file is — both go to stdout
 //! as well as to that file, so a service manager keeps them too.
 
-const USAGE: &str = "usage: divixi-server [-v|-vv] [serve | token | owner <github-login>|--none | listen all|local | phone status|on|off|link]";
+const USAGE: &str = "usage: divixi-server [-v|-vv] [serve | token | owner <github-login>|--none | listen all|local | phone status|on|off|link | store downgrade <schema-version>]";
 
 fn done(r: anyhow::Result<String>, what: &str) {
     match r {
@@ -74,6 +75,14 @@ fn main() {
         Some("owner") => done(orchestra_app::set_owner(args.get(1).map(String::as_str)), "divixi-server owner"),
         Some("listen") => done(orchestra_app::set_listen(args.get(1).map(String::as_str)), "divixi-server listen"),
         Some("phone") => done(orchestra_app::phone(&args[1..]), "divixi-server phone"),
+        // The way back to an older build: its schema, for it to open.
+        Some("store") => match args.get(1).map(String::as_str) {
+            Some("downgrade") => done(orchestra_app::store_downgrade(args.get(2).map(String::as_str)), "divixi-server store downgrade"),
+            _ => {
+                eprintln!("divixi-server store: downgrade <schema-version>\n{USAGE}");
+                std::process::exit(2);
+            }
+        },
         Some("-h" | "--help" | "help") => println!("{USAGE}"),
         Some(other) => {
             eprintln!("divixi-server: unknown command {other:?}\n{USAGE}");

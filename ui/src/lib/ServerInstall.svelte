@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke, onServerInstall, type ServerInstall } from "./ipc.svelte";
+  import { invoke, onServerInstall, type MissingLibs, type ServerInstall } from "./ipc.svelte";
   import { t, type Key } from "./i18n.svelte";
 
   /**
@@ -47,7 +47,8 @@
     | { kind: "unmanaged"; target: string; source: Source; size: number; running: boolean }
     | { kind: "managed"; exec_start: string; want: string }
     | { kind: "no_target"; detail: string }
-    | { kind: "no_shell" };
+    | { kind: "no_shell" }
+    | ({ kind: "libraries" } & MissingLibs);
   type Found = Check & { muted: boolean };
 
   let found = $state<Found | null>(null);
@@ -162,6 +163,18 @@ ${String(err)}`;
   });
 </script>
 
+{#snippet libsNote(l: MissingLibs)}
+  <!-- The binary cannot start there: the loader wants libraries the machine
+       lacks. Installing them needs root, so the command is shown, not run. -->
+  <p class="say warn">{t("srv.libs", { libs: l.missing.join(", ") })}</p>
+  {#if l.command}
+    <p class="note">{t("srv.libsRun")}</p>
+    <pre class="mono cmd">{l.command}</pre>
+  {:else}
+    <p class="note">{t("srv.libsDocs")}</p>
+  {/if}
+{/snippet}
+
 <div class="si">
   {#if progress}
     <!-- Underway, or just finished: the phases, in order, with the reason
@@ -188,7 +201,10 @@ ${String(err)}`;
         <span class="fill" class:idle={!progress.total} style:width={progress.total ? `${Math.min(100, (progress.received / progress.total) * 100)}%` : "100%"}></span>
       </div>
     {/if}
-    {#if progress.phase === "failed"}
+    {#if progress.phase === "failed" && progress.libs}
+      {@render libsNote(progress.libs)}
+      <div class="acts"><button class="btn sm" onclick={again}>{t("srv.check")}</button></div>
+    {:else if progress.phase === "failed"}
       <p class="note">{t("srv.failedAt", { phase: t(AT[progress.at ?? "installing"]) })}</p>
       {#if progress.error}<pre class="mono why">{progress.error}</pre>{/if}
       <div class="acts"><button class="btn sm" onclick={start}>{t("srv.retry")}</button></div>
@@ -263,6 +279,9 @@ ${String(err)}`;
   {:else if found.kind === "no_target"}
     <p class="note">{t("srv.noTarget", { why: found.detail })}</p>
     <div class="acts"><button class="btn sm" onclick={look}>{t("srv.retry")}</button></div>
+  {:else if found.kind === "libraries"}
+    {@render libsNote(found)}
+    <div class="acts"><button class="btn sm" onclick={look}>{t("srv.check")}</button></div>
   {:else if found.kind === "no_shell"}
     <p class="note">{t("srv.noShell")}</p>
     <p class="note mono">{t("srv.manual")}</p>
@@ -343,6 +362,20 @@ ${String(err)}`;
     color: var(--deltx);
     white-space: pre-wrap;
     /* The remote's own words, selectable: they go into an issue as they are. */
+    user-select: text;
+  }
+
+  /* The command to run there, selectable as it is. */
+  .cmd {
+    max-width: 100%;
+    margin: 0;
+    padding: 4px 8px;
+    font-size: 11px;
+    line-height: 1.55;
+    color: var(--txt);
+    background: var(--inp);
+    border: 1px solid var(--lineq);
+    white-space: pre-wrap;
     user-select: text;
   }
 
