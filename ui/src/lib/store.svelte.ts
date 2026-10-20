@@ -351,6 +351,15 @@ export type Watched = {
   spec?: Record<string, unknown> | null;
   message?: string;
   last_at?: number | null;
+  /** A job's: who registered it (empty for the conductor), what it watches, and when it was registered, last moved and ended. */
+  worker?: string;
+  what?: string;
+  pid?: number | null;
+  log?: string;
+  done_pattern?: string;
+  registered_at?: number;
+  changed_at?: number;
+  ended_at?: number | null;
 };
 
 /** Context accounting from the agent's `usage` updates. */
@@ -2022,14 +2031,18 @@ class Store {
   }
 
   /**
-   * Every track's schedules, for the schedules popover's other tracks.
-   * Read when it opens; the `schedules` event keeps each track's after.
+   * Every track's schedules and jobs, for the popover's other tracks. Read
+   * when it opens; the `schedules` and `jobs` events keep each track's after.
    */
-  async loadAllSchedules() {
+  async loadAllWatched() {
     const others = this.tracks.map((x) => x.id).filter((id) => id !== this.track);
-    const lists = await Promise.all(others.map((track) => invoke<Watched[]>("list_schedules", { track }).catch((err) => (tracing(err), null))));
-    const read = others.filter((_, i) => lists[i]);
-    this.schedules = [...this.schedules.filter((s) => !read.includes(s.track)), ...lists.flatMap((l) => l ?? [])];
+    const read = async (cmd: string) => {
+      const lists = await Promise.all(others.map((track) => invoke<Watched[]>(cmd, { track }).catch((err) => (tracing(err), null))));
+      return { tracks: others.filter((_, i) => lists[i]), items: lists.flatMap((l) => l ?? []) };
+    };
+    const [schedules, jobs] = await Promise.all([read("list_schedules"), read("list_jobs")]);
+    this.schedules = [...this.schedules.filter((s) => !schedules.tracks.includes(s.track)), ...schedules.items];
+    this.jobs = [...this.jobs.filter((j) => !jobs.tracks.includes(j.track)), ...jobs.items];
   }
 
   async cancelSchedule(id: number) {
@@ -2043,9 +2056,10 @@ class Store {
   }
 
   async unwatchJob(id: number) {
+    const track = this.jobs.find((j) => j.id === id)?.track ?? this.track;
     try {
       await invoke("job_unwatch", { id });
-      await this.loadWatched();
+      await this.loadWatched(track);
     } catch (err) {
       this.lastError = String(err);
     }

@@ -6,19 +6,26 @@
   import { t } from "./i18n.svelte";
   import { whenFull } from "./time";
   import { isCondition, lateness, message, nextLabel, rule, upcoming } from "./scheduleList";
+  import { forPopover, isOpen, jobState, lastMoved, watches, when } from "./jobList";
 
   /**
-   * The track's schedules, one row each, beside the panel toggle at the top
-   * right: what will wake the conductor and when, soonest first. Shown only
-   * while the track has one. Other tracks' follow under their own heading,
-   * read when the popover opens.
+   * The track's schedules and background jobs, one row each, beside the
+   * panel toggle at the top right: what will wake the conductor and when,
+   * soonest first, then what the app is watching for it (running ones
+   * first, then the ones that ended in the last day). Shown only while the
+   * track has one or the other. Other tracks' follow under their own
+   * heading, read when the popover opens; the `schedules` and `jobs` events
+   * keep every list live after that.
    *
    * A row brings its line in the conversation on screen, and that line's
    * [Show] opens this on its row, expanded (`store.showSchedule`). Cancel
-   * is here only.
+   * is here only. A job's row opens the worker that registered it; it is
+   * stopped being watched here or on its line in the conversation.
    */
   let open = $state(false);
   let expanded = $state<number[]>([]);
+  /** Expanded job rows: their own ids, which may be a schedule's too. */
+  let jobsExpanded = $state<number[]>([]);
 
   const narrowQuery = typeof matchMedia === "function" ? matchMedia("(max-width: 640px)") : null;
   let narrow = $state(narrowQuery?.matches ?? false);
@@ -30,12 +37,16 @@
   });
 
   const here = $derived(upcoming(store.schedules.filter((s) => s.track === store.track)));
+  const hereJobs = $derived(forPopover(store.jobs.filter((j) => j.track === store.track), store.now));
+  /** What the count on the button says: what is still to come or still running. */
+  const live = $derived(here.length + hereJobs.filter(isOpen).length);
   const others = $derived.by(() => {
-    const out: { track: string; name: string; items: Watched[] }[] = [];
+    const out: { track: string; name: string; items: Watched[]; jobs: Watched[] }[] = [];
     for (const tr of store.tracks) {
       if (tr.id === store.track) continue;
       const items = upcoming(store.schedules.filter((s) => s.track === tr.id));
-      if (items.length) out.push({ track: tr.id, name: tr.name, items });
+      const jobs = forPopover(store.jobs.filter((j) => j.track === tr.id), store.now);
+      if (items.length || jobs.length) out.push({ track: tr.id, name: tr.name, items, jobs });
     }
     return out;
   });
@@ -44,12 +55,30 @@
 
   function toggle() {
     open = !open;
-    if (open) void store.loadAllSchedules();
+    if (open) void store.loadAllWatched();
   }
 
   function expand(id: number) {
     expanded = expanded.includes(id) ? expanded.filter((x) => x !== id) : [...expanded, id];
   }
+
+  function expandJob(id: number) {
+    jobsExpanded = jobsExpanded.includes(id) ? jobsExpanded.filter((x) => x !== id) : [...jobsExpanded, id];
+  }
+
+  /** Whether a job's row leads anywhere: to the worker that registered it, or to the track of a conductor's own on another track. */
+  function jobGoes(j: Watched): boolean {
+    return !!j.worker || j.track !== store.track;
+  }
+
+  async function openJob(j: Watched) {
+    open = false;
+    if (j.track !== store.track) await store.selectTrack(j.track);
+    if (j.worker) store.openWorkerView(j.worker);
+  }
+
+  /** A time as a row shows it: `21:40` today, else `10-19 21:40`. */
+  const at = (ms: number) => nextLabel(ms, store.now, tr);
 
   /** The schedule's line in the conversation, on screen and lit for a moment. A track just opened draws its timeline over the next frames. */
   function reveal(id: number, left = 20) {
@@ -70,7 +99,7 @@
       if (!expanded.includes(focus.id)) expanded = [...expanded, focus.id];
       if (!open) {
         open = true;
-        void store.loadAllSchedules();
+        void store.loadAllWatched();
       }
       bringRow(focus.id);
     });
@@ -98,33 +127,83 @@
   }
 </script>
 
-{#if here.length}
-  <Popover bind:open align="right" width={narrow ? 10_000 : 380} label={t("schedules.title")}>
+{#if here.length || hereJobs.length}
+  <Popover bind:open align="right" width={narrow ? 10_000 : 380} label={t("schedules.titleBoth")}>
     {#snippet trigger()}
-      <button class="tog" class:on={open} type="button" title={t("schedules.title")} aria-label={t("schedules.title")} aria-haspopup="dialog" aria-expanded={open} onclick={toggle}>
+      <button class="tog" class:on={open} type="button" title={t("schedules.titleBoth")} aria-label={t("schedules.titleBoth")} aria-haspopup="dialog" aria-expanded={open} onclick={toggle}>
         <Icon name="clock" size={14} />
-        <span class="n mono" aria-hidden="true">{here.length}</span>
+        {#if live}<span class="n mono" aria-hidden="true">{live}</span>{/if}
       </button>
     {/snippet}
 
     <div class="head">
-      <span class="title">{t("schedules.title")}</span>
+      <span class="title">{t("schedules.titleBoth")}</span>
     </div>
     {#if others.length}<div class="mlab-sm group">{t("schedules.here")}</div>{/if}
-    {#each here as s (s.id)}
-      {@render item(s)}
-    {/each}
+    {@render block(here, hereJobs, false)}
     {#if others.length}
       <div class="mlab-sm group">{t("schedules.others")}</div>
       {#each others as g (g.track)}
         <div class="tname" title={g.name}>{g.name}</div>
-        {#each g.items as s (s.id)}
-          {@render item(s)}
-        {/each}
+        {@render block(g.items, g.jobs, true)}
       {/each}
     {/if}
   </Popover>
 {/if}
+
+<!-- One track's schedules, then its jobs, each kind named when it has rows. -->
+{#snippet block(items: Watched[], jobs: Watched[], other: boolean)}
+  {#if items.length}
+    <div class="kind" class:sub={other}>{t("schedules.title")}</div>
+    {#each items as s (s.id)}
+      {@render item(s)}
+    {/each}
+  {/if}
+  {#if jobs.length}
+    <div class="kind" class:sub={other}>{t("jobs.title")}</div>
+    {#each jobs as j (j.id)}
+      {@render jobItem(j)}
+    {/each}
+  {/if}
+{/snippet}
+
+{#snippet jobItem(j: Watched)}
+  {@const st = jobState(j)}
+  {@const since = when(j)}
+  {@const moved = lastMoved(j)}
+  {@const full = jobsExpanded.includes(j.id)}
+  {@const goes = jobGoes(j)}
+  {@const details = [j.what, j.pid ? `pid ${j.pid}` : "", j.log ? tr("jobs.log", { path: j.log }) : "", j.done_pattern ? tr("jobs.donePattern", { p: j.done_pattern }) : ""].filter(Boolean).join("\n")}
+  <div class="row" id="job-row-{j.id}">
+    <button class="main" type="button" disabled={!goes} onclick={() => openJob(j)} title={goes ? (j.worker ? t("jobs.openWorker") : t("schedules.openTrack")) : undefined}>
+      <span class="top mono">
+        <span class="id">#{j.id}</span>
+        <span class="who">{j.worker || t("jobs.conductor")}</span>
+        <span class="state {st}">{tr(`jobs.${st}`)}</span>
+        {#if since != null}<span title={whenFull(since, store.lang)}>{isOpen(j) ? tr("jobs.since", { time: at(since) }) : at(since)}</span>{/if}
+        {#if moved != null}<span title={t("jobs.movedTitle")}>· {tr("jobs.moved", { time: at(moved) })}</span>{/if}
+      </span>
+      {#if full}
+        <span class="msg full">{details}</span>
+        {#if j.last_line}<span class="note mono full">{tr("jobs.lastLine", { line: j.last_line })}</span>{/if}
+      {:else}
+        <span class="msg one" title={details}>{watches(j)}</span>
+        <!-- An ending's note quotes the line that finished it: not said twice. -->
+        {#if j.last_line && !j.note?.includes(j.last_line)}<span class="note mono one" title={j.last_line}>{j.last_line}</span>{/if}
+      {/if}
+      <!-- The core keeps a stall's note when the log moves again: a running job's would be stale. -->
+      {#if j.note && st !== "running"}<span class="note mono" class:warn={st === "died" || st === "stalled"}>{j.note}</span>{/if}
+    </button>
+    <div class="side">
+      {#if isOpen(j)}
+        <button class="cancel mono" type="button" onclick={() => store.unwatchJob(j.id)} title={t("timeline.jobNote")}>{t("timeline.unwatchJob")}</button>
+      {/if}
+      <button class="more" type="button" aria-expanded={full} onclick={() => expandJob(j.id)} title={full ? t("schedules.less") : t("schedules.more")} aria-label={full ? t("schedules.less") : t("schedules.more")}>
+        {full ? "▴" : "▾"}
+      </button>
+    </div>
+  </div>
+{/snippet}
 
 {#snippet item(s: Watched)}
   {@const late = lateness(s, store.now)}
@@ -211,6 +290,60 @@
 
   .group {
     padding: 10px 16px 6px;
+  }
+
+  /* Which kind the rows under it are; tighter under another track's name. */
+  .kind {
+    flex-shrink: 0;
+    padding: 8px 16px 4px;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.12em;
+    color: var(--lab);
+  }
+
+  .kind.sub {
+    padding-top: 2px;
+  }
+
+  .who {
+    color: var(--txt);
+  }
+
+  .state {
+    border: 1px solid currentColor;
+    padding: 0 4px;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    color: var(--lab);
+  }
+
+  /* The app's "running" green, as on the track list's dots. */
+  .state.running {
+    color: var(--oktx);
+  }
+
+  .state.stalled,
+  .state.died {
+    color: var(--warn);
+  }
+
+  /* One line each: what it watches, its log's last line. */
+  .one {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .note.full {
+    white-space: pre-wrap;
+  }
+
+  /* A conductor's own job on this track leads nowhere: a row, not a control. */
+  .main:disabled {
+    cursor: default;
+    opacity: 1;
   }
 
   .tname {
