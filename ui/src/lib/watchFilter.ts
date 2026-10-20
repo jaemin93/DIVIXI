@@ -49,9 +49,6 @@ export function isFiltered(f: WatchFilter): boolean {
   return f.kind !== DEFAULT_WATCH_FILTER.kind || f.order !== DEFAULT_WATCH_FILTER.order;
 }
 
-/** A row the conversation asked to see (`store.watchFocus`): shown whatever the filter hides. */
-export type Focus = { kind: "schedule" | "job"; id: number } | null;
-
 /** The active schedules, in the filter's order. */
 export function orderSchedules<T extends ScheduleRow>(list: T[], order: WatchOrder): T[] {
   const sign = order === "newest" ? 1 : -1;
@@ -71,17 +68,11 @@ export function orderJobs<T extends JobRow>(list: T[], now: number, order: Watch
   return [...open, ...ended];
 }
 
-/**
- * What one track's part of the popover shows: each kind the filter keeps,
- * in its order -- and the row the conversation asked for, whatever the
- * filter, so [Show] never opens on nothing. The kept filter is not changed.
- */
-export function visible<S extends ScheduleRow, J extends JobRow>(schedules: S[], jobs: J[], now: number, f: WatchFilter, focus: Focus = null): { schedules: S[]; jobs: J[] } {
-  const s = orderSchedules(schedules, f.order);
-  const j = orderJobs(jobs, now, f.order);
+/** What one track's part of the popover shows: each kind the filter keeps, in its order. */
+export function visible<S extends ScheduleRow, J extends JobRow>(schedules: S[], jobs: J[], now: number, f: WatchFilter): { schedules: S[]; jobs: J[] } {
   return {
-    schedules: f.kind === "jobs" ? s.filter((x) => focus?.kind === "schedule" && focus.id === x.id) : s,
-    jobs: f.kind === "schedules" ? j.filter((x) => focus?.kind === "job" && focus.id === x.id) : j,
+    schedules: f.kind === "jobs" ? [] : orderSchedules(schedules, f.order),
+    jobs: f.kind === "schedules" ? [] : orderJobs(jobs, now, f.order),
   };
 }
 

@@ -10,7 +10,6 @@ import { libraryPick } from "./libraries";
 import { download, tooLarge } from "./designFile";
 import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen, ensureDecisionNotice, keepServerNotices, notifyServer, resolveServerNotice } from "./notify.svelte";
 import { AUTO_KEY, autoFrom, autoTo } from "./updateSchedule";
-import { inConversation, justEnded } from "./scheduleList";
 import { DEFAULT_WATCH_FILTER, parseWatchFilter, WATCH_FILTER_KEY, WEB_WATCH_FILTER_KEY, type WatchFilter } from "./watchFilter";
 import {
   dropQueued,
@@ -1988,27 +1987,14 @@ class Store {
   }
 
   /**
-   * The current track's schedules and watched jobs, as the core describes
-   * them: what will wake the conductor, shown beside what waits for it.
-   * Read from the core on the track opening and on the `schedules` and
-   * `jobs` events; the list is the record's, never counted from events.
+   * Every track's schedules and watched jobs that have been read, as the
+   * core describes them: what will wake the conductor, for the schedules
+   * popover (SchedulePopover.svelte). Read from the core on a track
+   * opening, on the popover opening and on the `schedules` and `jobs`
+   * events; the list is the record's, never counted from events.
    */
   schedules = $state<Watched[]>([]);
   jobs = $state<Watched[]>([]);
-  /**
-   * Schedules seen active in this window that have since fired for the last
-   * time or been cancelled: their line in the conversation stays, saying so,
-   * instead of vanishing. Not kept: a reload starts from the active ones.
-   */
-  schedulesEnded = $state<number[]>([]);
-  /** A schedule or a job the popover is asked to show, expanded (`showSchedule`, `showJob`); `at` makes asking twice count. */
-  watchFocus = $state<{ kind: "schedule" | "job"; id: number; at: number } | null>(null);
-
-  /** The conversation's schedule lines: the active ones, soonest first, then the ones just over. */
-  get chatSchedules(): Watched[] {
-    return this.chatArtifact ? [] : inConversation(this.schedules.filter((s) => s.track === this.track), this.schedulesEnded);
-  }
-
   /**
    * What the schedules popover shows and in which order. Kept like the
    * track list's filter: this PC's window in its setting, a browser (a
@@ -2024,26 +2010,10 @@ class Store {
     invoke("set_setting", { key: WATCH_FILTER_KEY, value }).catch((err) => (this.lastError = String(err)));
   }
 
-  /** Open the schedules popover on one schedule (the conversation line's [Show]). */
-  showSchedule(id: number) {
-    this.watchFocus = { kind: "schedule", id, at: Date.now() };
-  }
-
-  /** Open the schedules popover on one job (the conversation line's [Show]). */
-  showJob(id: number) {
-    this.watchFocus = { kind: "job", id, at: Date.now() };
-  }
-
-  get chatJobs(): Watched[] {
-    return this.chatArtifact ? [] : this.jobs.filter((j) => j.track === this.track && (j.status === "running" || j.status === "stalled"));
-  }
-
   async loadWatched(track = this.track) {
     if (!track) return;
     try {
       const [schedules, jobs] = await Promise.all([invoke<Watched[]>("list_schedules", { track }), invoke<Watched[]>("list_jobs", { track })]);
-      const ended = justEnded(this.schedules.filter((s) => s.track === track), schedules);
-      if (ended.length) this.schedulesEnded = [...this.schedulesEnded, ...ended];
       this.schedules = [...this.schedules.filter((s) => s.track !== track), ...schedules];
       this.jobs = [...this.jobs.filter((j) => j.track !== track), ...jobs];
     } catch (err) {

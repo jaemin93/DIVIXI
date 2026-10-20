@@ -50,15 +50,6 @@ test("each kind the filter keeps, in its order", () => {
   assert.deepEqual([onlyJobs.schedules.map((s) => s.id), onlyJobs.jobs.map((j) => j.id)], [[], [3, 1, 4, 2]]);
 });
 
-test("the row the conversation asked for is shown whatever the filter, and only that one", () => {
-  const v = visible(schedules, jobs, NOW, { kind: "schedules", order: "newest" }, { kind: "job", id: 4 });
-  assert.deepEqual(v.jobs.map((j) => j.id), [4]);
-  const w = visible(schedules, jobs, NOW, { kind: "jobs", order: "newest" }, { kind: "schedule", id: 6 });
-  assert.deepEqual(w.schedules.map((s) => s.id), [6]);
-  // A schedule's focus does not pull in a job with the same number.
-  assert.deepEqual(visible(schedules, jobs, NOW, { kind: "schedules", order: "newest" }, { kind: "schedule", id: 1 }).jobs, []);
-});
-
 test("a kept filter is read back field by field; anything else is the default", () => {
   assert.deepEqual(parseWatchFilter('{"kind":"jobs","order":"oldest"}'), { kind: "jobs", order: "oldest" });
   assert.deepEqual(parseWatchFilter('{"kind":"tasks","order":"oldest"}'), { kind: "all", order: "oldest" });

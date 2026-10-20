@@ -1,7 +1,6 @@
 /**
- * What the schedules popover (SchedulePopover.svelte) and the schedule lines
- * in the conversation (Timeline.svelte) say about each schedule, kept out of
- * the components so it runs under `node --test`.
+ * What the schedules popover (SchedulePopover.svelte) says about each
+ * schedule, kept out of the component so it runs under `node --test`.
  *
  * The core sends a schedule as `schedule::view` builds it
  * (src-tauri/src/schedule.rs): its kind, its spec as the record keeps it,
@@ -34,22 +33,6 @@ const two = (n: number) => String(n).padStart(2, "0");
 export function stamp(ms: number): string {
   const d = new Date(ms);
   return `${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
-}
-
-function sameDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-}
-
-/** When it fires next: `08:31` today, `tomorrow 08:31`, else `10-23 08:31`. */
-export function nextLabel(ms: number, now: number, tr: Tr): string {
-  const d = new Date(ms);
-  const n = new Date(now);
-  const time = `${two(d.getHours())}:${two(d.getMinutes())}`;
-  if (sameDay(d, n)) return time;
-  const tomorrow = new Date(n);
-  tomorrow.setDate(n.getDate() + 1);
-  if (sameDay(d, tomorrow)) return tr("schedules.tomorrow", { time });
-  return stamp(ms);
 }
 
 /** A span in seconds the way the core reads one back (`2h`, `30m`, `1d`), in the interface's words. */
@@ -133,55 +116,9 @@ export function upcoming<T extends ScheduleRow>(list: T[]): T[] {
   return list.filter((s) => s.status === "active").sort(soonest);
 }
 
-/**
- * The schedules the conversation has a line for: the active ones, soonest
- * first, then the ones in `ended` (seen active, since done or cancelled),
- * so a schedule that fires for the last time or is cancelled says so where
- * it was instead of vanishing.
- */
-export function inConversation<T extends ScheduleRow>(list: T[], ended: number[]): T[] {
-  const over = list.filter((s) => s.status !== "active" && ended.includes(s.id)).sort((a, b) => a.id - b.id);
-  return [...upcoming(list), ...over];
-}
-
-/** Ids active in `before` and not in `after`: the schedules that just ended. */
-export function justEnded(before: ScheduleRow[], after: ScheduleRow[]): number[] {
-  const was = new Set(before.filter((s) => s.status === "active").map((s) => s.id));
-  return after.filter((s) => s.status !== "active" && was.has(s.id)).map((s) => s.id);
-}
-
 /** The instruction, as the core keeps it; the line's tail when an older core sent no message. */
 export function message(s: ScheduleRow): string {
   if (s.message) return s.message;
   const at = s.line.indexOf(": ");
   return at >= 0 ? s.line.slice(at + 2) : s.line;
-}
-
-/** The first line with something on it. */
-export function firstLine(text: string): string {
-  return text.split("\n").find((l) => l.trim())?.trim() ?? "";
-}
-
-/** How a schedule stands, for its line in the conversation. */
-export type LineState = "done" | "cancelled" | "late";
-
-/**
- * One line in the conversation: `#8 10-21 08:31 · daily 08:31 · <the
- * instruction's first line>`, and what to mark on it. A condition has its
- * rule where a time would be; one that is over has the time it last fired.
- */
-export function lineOf(s: ScheduleRow, now: number, tr: Tr, locale: string): { when: string; rule: string | null; states: LineState[]; text: string } {
-  const r = rule(s, tr, locale);
-  const timed = !isCondition(s);
-  const at = s.next_at ?? s.last_at ?? null;
-  const states: LineState[] = [];
-  if (s.status === "done") states.push("done");
-  if (s.status === "cancelled") states.push("cancelled");
-  if (lateness(s, now)) states.push("late");
-  return {
-    when: timed ? (at != null ? stamp(at) : "") : (r ?? ""),
-    rule: timed ? r : null,
-    states,
-    text: firstLine(message(s)),
-  };
 }

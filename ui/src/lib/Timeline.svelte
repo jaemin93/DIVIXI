@@ -12,8 +12,6 @@
   import { FOLLOWING, followed, reached, resized, scrolled, type Stick } from "./scroll";
   import { REVEAL_DECISION } from "./history";
   import { createPager } from "./pager.svelte";
-  import { lineOf, message } from "./scheduleList";
-  import { jobLine } from "./jobList";
 
   // ----- sticking to the bottom -----
   //
@@ -32,9 +30,6 @@
   // all of them. A dependency list only ever sees the ones it was told
   // about, and this conversation grows down several paths that have
   // nothing to do with each other.
-
-  /** `t` for keys made up at run time (scheduleList.ts builds its words from them). */
-  const tr = (key: string, vars?: Record<string, string | number>) => t(key as Parameters<typeof t>[0], vars);
 
   let scroller = $state<HTMLDivElement>();
   let content = $state<HTMLDivElement>();
@@ -448,60 +443,6 @@
            message is easy to miss. Polite, and only additions — nothing has
            failed here, and a report going in is not worth interrupting for.
            Same shape as the error stack (ErrorToasts.svelte). -->
-      <!-- What will wake the conductor on its own: the track's schedules
-           and the background jobs being watched. The record's, read back
-           on each change. A schedule is one line, its instruction cut to
-           its first; [Show] opens it in the schedules popover, which is
-           where it is cancelled. One that just ended stays, saying so. A
-           running or stalled job is one line too, and the popover is where
-           it stops being watched; one that ended leaves. -->
-      {#if store.chatSchedules.length || store.chatJobs.length}
-        <div class="watched">
-          {#each store.chatSchedules as s (`s${s.id}`)}
-            {@const l = lineOf(s, store.now, tr, store.lang === "ko" ? "ko-KR" : "en-US")}
-            {@const over = s.status !== "active"}
-            <div class="sys mono pline sline" class:over id="schedule-{s.id}">
-              <span class="dot" aria-hidden="true" title={t("timeline.scheduleNote")}></span>
-              <span class="stext" title={s.note ? `${message(s)}
-
-${s.note}` : message(s)}>
-                {t("timeline.schedule")} · #{s.id}{l.when ? ` ${l.when}` : ""}{l.rule ? ` · ${l.rule}` : ""} · {l.text}
-              </span>
-              {#each l.states as st (st)}
-                <span class="smark" class:warn={st === "late"}>{tr(`schedules.${st}`)}</span>
-              {/each}
-              {#if !over}
-                <!-- Not handed on: the popover closes on a click outside it, and this is one. -->
-                <button
-                  class="psend mono"
-                  type="button"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    store.showSchedule(s.id);
-                  }}
-                  title={t("timeline.showScheduleTitle")}>{t("timeline.showSchedule")}</button
-                >
-              {/if}
-            </div>
-          {/each}
-          {#each store.chatJobs as j (`j${j.id}`)}
-            {@const l = jobLine(j)}
-            <div class="sys mono pline sline" id="job-{j.id}">
-              <span class="dot" class:pulse={l.state === "running"} aria-hidden="true" title={t("timeline.jobNote")}></span>
-              <span class="stext" title={j.line}>{t("timeline.job")} · #{j.id} {j.worker || t("jobs.conductor")} · <span class="jstate {l.state}">{tr(`jobs.${l.state}`)}</span> · {l.text}</span>
-              <button
-                class="psend mono"
-                type="button"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  store.showJob(j.id);
-                }}
-                title={t("timeline.showJobTitle")}>{t("timeline.showSchedule")}</button
-              >
-            </div>
-          {/each}
-        </div>
-      {/if}
       <div class="parked" class:empty={waiting.length === 0} role="status" aria-live="polite" aria-atomic="false" aria-relevant="additions">
         <!-- Keyed on the core's id. `what` is a human sentence and not
            unique by construction, and Svelte throws on a duplicate key
@@ -650,13 +591,6 @@ ${s.note}` : message(s)}>
     display: none;
   }
 
-  .watched {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin: 6px 0 0;
-  }
-
   .pline {
     display: flex;
     align-items: center;
@@ -669,44 +603,6 @@ ${s.note}` : message(s)}>
     flex-shrink: 0;
     border-radius: 50%;
     background: var(--warn);
-  }
-
-  /* A schedule's line: one, however long its instruction. */
-  .sline .stext {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .sline.over {
-    opacity: 0.6;
-  }
-
-  .sline.over .dot {
-    background: var(--lab);
-  }
-
-  .smark {
-    flex-shrink: 0;
-    border: 1px solid currentColor;
-    padding: 0 4px;
-    font-size: 9px;
-    letter-spacing: 0.08em;
-  }
-
-  .smark.warn {
-    color: var(--warn);
-  }
-
-  /* A job's state on its line, in the popover's colours. */
-  .jstate.running {
-    color: var(--oktx);
-  }
-
-  .jstate.stalled {
-    color: var(--warn);
   }
 
   .psend {

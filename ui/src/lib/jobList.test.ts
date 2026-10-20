@@ -2,7 +2,7 @@
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { forPopover, isOpen, jobLine, jobState, lastMoved, RECENT_MS, watches, when, type JobRow } from "./jobList.ts";
+import { forPopover, isOpen, jobState, lastMoved, RECENT_MS, watches, when, type JobRow } from "./jobList.ts";
 
 const NOW = new Date(2026, 9, 20, 21, 0).getTime();
 const MIN = 60_000;
@@ -39,11 +39,6 @@ test("what it watches, in one line", () => {
   assert.equal(watches(job(1, { what: "nightly collection", pid: 4321, log: "C:\\data\\run\\collect.log" })), "nightly collection · pid 4321 · collect.log");
   assert.equal(watches(job(2, { pid: 99 })), "pid 99");
   assert.equal(watches(job(3, { log: "/srv/logs/build.log" })), "build.log");
-});
-
-test("a line: its state, and its own words' first line, else what it watches", () => {
-  assert.deepEqual(jobLine(job(1, { what: "nightly collection\nthen the summary", pid: 4321 })), { state: "running", text: "nightly collection" });
-  assert.deepEqual(jobLine(job(2, { status: "stalled", what: "  ", pid: 99, log: "/srv/run/index.log" })), { state: "stalled", text: "pid 99 · index.log" });
 });
 
 test("since when it runs, or when it ended", () => {

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { untrack } from "svelte";
   import { store, type Watched } from "./store.svelte";
   import Popover from "./Popover.svelte";
   import Icon, { type IconName } from "./Icon.svelte";
@@ -7,7 +6,7 @@
   import { whenFull } from "./time";
   import { isCondition, lateness, message, rule } from "./scheduleList";
   import { isOpen, jobState, lastMoved, watches, when, type JobState } from "./jobList";
-  import { clock, isFiltered, visible, type Focus, type WatchKind, type WatchOrder } from "./watchFilter";
+  import { clock, isFiltered, visible, type WatchKind, type WatchOrder } from "./watchFilter";
 
   /**
    * The track's schedules and background jobs, one row each, beside the
@@ -23,11 +22,12 @@
    * and orders them (`watchFilter.ts`); it is remembered like the track
    * list's.
    *
-   * A row brings its line in the conversation on screen, and that line's
-   * [Show] opens this on its row, expanded (`store.showSchedule`,
-   * `store.showJob`) -- shown even when the filter would hide it. Cancel and
-   * stopping a job's watch are here only. A job that ended, or another
-   * track's, opens the worker that registered it.
+   * The conversation shows none of this: it is all here. A schedule's row
+   * opens and closes on a click; a job's opens the worker that registered
+   * it (the track first, for another track's), and its chevron opens the
+   * row. A conductor's own job on this track has no worker to open, so its
+   * row opens instead. Cancelling a schedule and stopping a job's watch are
+   * here.
    */
   let open = $state(false);
   let expanded = $state<number[]>([]);
@@ -35,8 +35,6 @@
   let jobsExpanded = $state<number[]>([]);
   let menuOpen = $state(false);
   let menuBox = $state<HTMLDivElement>();
-  /** The row [Show] asked for while the popover is open: kept in view whatever the filter. */
-  let focus = $state<Focus>(null);
 
   const narrowQuery = typeof matchMedia === "function" ? matchMedia("(max-width: 640px)") : null;
   let narrow = $state(narrowQuery?.matches ?? false);
@@ -48,10 +46,7 @@
   });
 
   $effect(() => {
-    if (!open) {
-      focus = null;
-      menuOpen = false;
-    }
+    if (!open) menuOpen = false;
   });
 
   const filter = $derived(store.watchFilter);
@@ -59,7 +54,7 @@
   /** Everything this track has, unfiltered: whether the button shows, and its count. */
   const all = $derived(visible(mine(store.schedules, store.track), mine(store.jobs, store.track), store.now, { kind: "all", order: "newest" }));
   const live = $derived(all.schedules.length + all.jobs.filter(isOpen).length);
-  const here = $derived(visible(mine(store.schedules, store.track), mine(store.jobs, store.track), store.now, filter, focus));
+  const here = $derived(visible(mine(store.schedules, store.track), mine(store.jobs, store.track), store.now, filter));
   const others = $derived.by(() => {
     const out: { track: string; name: string; schedules: Watched[]; jobs: Watched[] }[] = [];
     for (const x of store.tracks) {
@@ -89,75 +84,19 @@
     jobsExpanded = jobsExpanded.includes(id) ? jobsExpanded.filter((x) => x !== id) : [...jobsExpanded, id];
   }
 
-  /** A job of this track that the conversation has a line for: only open ones have one. */
-  function hasLine(j: Watched): boolean {
-    return isOpen(j) && j.track === store.track;
-  }
-
-  /** Whether a job's row leads anywhere: to its line, to the worker that registered it, or to the track of a conductor's own on another track. */
+  /** Whether a job's row leads anywhere: to the worker that registered it, or to the track of a conductor's own on another track. */
   function jobGoes(j: Watched): boolean {
-    return hasLine(j) || !!j.worker || j.track !== store.track;
+    return !!j.worker || j.track !== store.track;
   }
 
   async function openJob(j: Watched) {
-    if (hasLine(j)) {
-      reveal(`job-${j.id}`);
+    if (!jobGoes(j)) {
+      expandJob(j.id);
       return;
     }
     open = false;
     if (j.track !== store.track) await store.selectTrack(j.track);
     if (j.worker) store.openWorkerView(j.worker);
-  }
-
-  /** A line in the conversation (`schedule-8`, `job-3`), on screen and lit for a moment. A track just opened draws its timeline over the next frames. */
-  function reveal(id: string, left = 20) {
-    const el = document.getElementById(id);
-    if (!el) {
-      if (left > 0) setTimeout(() => reveal(id, left - 1), 100);
-      return;
-    }
-    el.scrollIntoView({ block: "center", behavior: "smooth" });
-    el.animate([{ backgroundColor: "var(--sel)" }, { backgroundColor: "transparent" }], { duration: 1400, easing: "ease-out" });
-  }
-
-  // Asked from the conversation: opened on that row, expanded, in view --
-  // and shown even if the filter would hide it (`focus`), until it closes.
-  $effect(() => {
-    const asked = store.watchFocus;
-    if (!asked) return;
-    untrack(() => {
-      if (asked.kind === "job") {
-        if (!jobsExpanded.includes(asked.id)) jobsExpanded = [...jobsExpanded, asked.id];
-      } else if (!expanded.includes(asked.id)) expanded = [...expanded, asked.id];
-      if (!open) {
-        open = true;
-        void store.loadAllWatched();
-      }
-      focus = { kind: asked.kind, id: asked.id };
-      menuOpen = false;
-      bringRow(`${asked.kind}-row-${asked.id}`);
-    });
-  });
-
-  /** A row scrolled to the middle of the panel and lit for a moment, once the panel has its height. */
-  function bringRow(id: string, left = 20) {
-    const row = document.getElementById(id);
-    const panel = row?.closest<HTMLElement>("[role=dialog]");
-    if (!row || !panel || !panel.style.maxHeight) {
-      if (left > 0) setTimeout(() => bringRow(id, left - 1), 50);
-      return;
-    }
-    panel.scrollTop = Math.max(0, row.offsetTop - (panel.clientHeight - row.offsetHeight) / 2);
-    row.animate([{ backgroundColor: "var(--sel)" }, { backgroundColor: "transparent" }], { duration: 1400, easing: "ease-out" });
-  }
-
-  function go(s: Watched) {
-    if (s.track === store.track) {
-      reveal(`schedule-${s.id}`);
-      return;
-    }
-    open = false;
-    void store.selectTrack(s.track).then(() => reveal(`schedule-${s.id}`));
   }
 
   function setKind(kind: WatchKind) {
@@ -277,7 +216,7 @@
   {@const long = text.length > 90 || text.includes("\n")}
   {@const c = s.next_at != null ? at(s.next_at) : null}
   <div class="row" class:full id="schedule-row-{s.id}">
-    <button class="main" type="button" onclick={() => go(s)} title={s.track === store.track ? t("schedules.show") : t("schedules.openTrack")}>
+    <button class="main" type="button" aria-expanded={full} onclick={() => expand(s.id)} title={full ? t("schedules.less") : t("schedules.more")}>
       <span class="when mono" title={s.next_at != null ? whenFull(s.next_at, store.lang) : undefined}>
         {#if c}
           <span class="t" class:late={late === "overdue"}>{c.time}</span>{#if c.day}<span class="d">{c.day}</span>{/if}
@@ -318,7 +257,7 @@
   {@const c = since != null ? at(since) : null}
   {@const details = [j.what, j.pid ? `pid ${j.pid}` : "", j.log ? tr("jobs.log", { path: j.log }) : "", j.done_pattern ? tr("jobs.donePattern", { p: j.done_pattern }) : ""].filter(Boolean).join("\n")}
   <div class="row" class:full class:over={!isOpen(j)} id="job-row-{j.id}">
-    <button class="main" type="button" disabled={!goes} onclick={() => openJob(j)} title={!goes ? undefined : hasLine(j) ? t("schedules.show") : j.worker ? t("jobs.openWorker") : t("schedules.openTrack")}>
+    <button class="main" type="button" aria-expanded={goes ? undefined : full} onclick={() => openJob(j)} title={!goes ? (full ? t("schedules.less") : t("schedules.more")) : j.worker ? t("jobs.openWorker") : t("schedules.openTrack")}>
       <span class="when mono" title={since != null ? whenFull(since, store.lang) : undefined}>
         {#if c}<span class="t">{c.time}</span><span class="d">{c.day || (isOpen(j) ? t("jobs.startedShort") : t("jobs.endedShort"))}</span>{/if}
       </span>
@@ -571,11 +510,6 @@
     border: 0;
     text-align: left;
     color: var(--dim);
-  }
-
-  .main:disabled {
-    cursor: default;
-    opacity: 1;
   }
 
   .main:focus-visible,
