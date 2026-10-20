@@ -77,11 +77,12 @@ export function when(j: JobRow): number | null {
 }
 
 /**
- * When its log last moved, for an open job that has a log and has moved
+ * When its log last moved, for a running job that has a log and has moved
  * since it was registered: the closest the record has to "last seen
  * working". The app looks every half minute but keeps no time of the look.
+ * Not for a stalled one: `changed_at` is then when it was found stalled.
  */
 export function lastMoved(j: JobRow): number | null {
-  if (!isOpen(j) || !j.log || j.changed_at == null || j.changed_at === j.registered_at) return null;
+  if (j.status !== "running" || !j.log || j.changed_at == null || j.changed_at === j.registered_at) return null;
   return j.changed_at;
 }

@@ -46,9 +46,11 @@ test("since when it runs, or when it ended", () => {
   assert.equal(when(job(2, { status: "died", ended_at: NOW - MIN })), NOW - MIN);
 });
 
-test("the log's last move, only for an open job with a log that has moved", () => {
+test("the log's last move, only for a running job with a log that has moved", () => {
   assert.equal(lastMoved(job(1, { log: "/x.log", changed_at: NOW - MIN })), NOW - MIN);
   assert.equal(lastMoved(job(2, { log: "/x.log" })), null);
   assert.equal(lastMoved(job(3, { changed_at: NOW - MIN })), null);
   assert.equal(lastMoved(job(4, { status: "done", log: "/x.log", changed_at: NOW - MIN })), null);
+  // Stalled: the record's time is when it was found stalled, not a move.
+  assert.equal(lastMoved(job(5, { status: "stalled", log: "/x.log", changed_at: NOW - MIN })), null);
 });
