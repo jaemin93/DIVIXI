@@ -11,6 +11,7 @@ import { download, tooLarge } from "./designFile";
 import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen, ensureDecisionNotice, keepServerNotices, notifyServer, resolveServerNotice } from "./notify.svelte";
 import { AUTO_KEY, autoFrom, autoTo } from "./updateSchedule";
 import { inConversation, justEnded } from "./scheduleList";
+import { DEFAULT_WATCH_FILTER, parseWatchFilter, WATCH_FILTER_KEY, WEB_WATCH_FILTER_KEY, type WatchFilter } from "./watchFilter";
 import {
   dropQueued,
   liveQueued,
@@ -2008,6 +2009,21 @@ class Store {
     return this.chatArtifact ? [] : inConversation(this.schedules.filter((s) => s.track === this.track), this.schedulesEnded);
   }
 
+  /**
+   * What the schedules popover shows and in which order. Kept like the
+   * track list's filter: this PC's window in its setting, a browser (a
+   * phone, another PC's page) in its own storage.
+   */
+  watchFilter = $state<WatchFilter>({ ...DEFAULT_WATCH_FILTER });
+
+  setWatchFilter(patch: Partial<WatchFilter>) {
+    this.watchFilter = { ...this.watchFilter, ...patch };
+    const value = JSON.stringify(this.watchFilter);
+    if (overWeb) return writeLocal(WEB_WATCH_FILTER_KEY, value);
+    if (!this.keeps(WATCH_FILTER_KEY)) return;
+    invoke("set_setting", { key: WATCH_FILTER_KEY, value }).catch((err) => (this.lastError = String(err)));
+  }
+
   /** Open the schedules popover on one schedule (the conversation line's [Show]). */
   showSchedule(id: number) {
     this.watchFocus = { kind: "schedule", id, at: Date.now() };
@@ -3491,6 +3507,7 @@ class Store {
         setting("tags"),
         ...AGENT_IDS.map((id) => setting(`commands:${id}`)),
       ]);
+      this.watchFilter = parseWatchFilter(overWeb ? readLocal(WEB_WATCH_FILTER_KEY) : await setting(WATCH_FILTER_KEY).catch(() => null));
       try {
         const saved = await setting("tracks_filter");
         if (saved) this.trackFilter = { ...DEFAULT_TRACK_FILTER, ...(JSON.parse(saved) as Partial<TrackFilter>) };

@@ -2,31 +2,41 @@
   import { untrack } from "svelte";
   import { store, type Watched } from "./store.svelte";
   import Popover from "./Popover.svelte";
-  import Icon from "./Icon.svelte";
+  import Icon, { type IconName } from "./Icon.svelte";
   import { t } from "./i18n.svelte";
   import { whenFull } from "./time";
-  import { isCondition, lateness, message, nextLabel, rule, upcoming } from "./scheduleList";
-  import { forPopover, isOpen, jobState, lastMoved, watches, when } from "./jobList";
+  import { isCondition, lateness, message, rule } from "./scheduleList";
+  import { isOpen, jobState, lastMoved, watches, when, type JobState } from "./jobList";
+  import { clock, isFiltered, visible, type Focus, type WatchKind, type WatchOrder } from "./watchFilter";
 
   /**
    * The track's schedules and background jobs, one row each, beside the
    * panel toggle at the top right: what will wake the conductor and when,
-   * soonest first, then what the app is watching for it (running ones
-   * first, then the ones that ended in the last day). Shown only while the
-   * track has one or the other. Other tracks' follow under their own
-   * heading, read when the popover opens; the `schedules` and `jobs` events
-   * keep every list live after that.
+   * then what the app is watching for it. Shown only while the track has
+   * one or the other. Other tracks' follow under their own names, read when
+   * the popover opens; the `schedules` and `jobs` events keep every list
+   * live after that.
+   *
+   * A row's time and state sit in columns of their own, its kind in an
+   * icon (a clock, a loop for a repetition, an eye for a condition, a
+   * terminal for a job). The filter at the top right keeps one kind or both
+   * and orders them (`watchFilter.ts`); it is remembered like the track
+   * list's.
    *
    * A row brings its line in the conversation on screen, and that line's
-   * [Show] opens this on its row, expanded (`store.showSchedule`). Cancel
-   * is here only. Jobs the same way (`store.showJob`), and they are stopped
-   * being watched here only. A running job's row brings its line on screen;
-   * one that ended, or another track's, opens the worker that registered it.
+   * [Show] opens this on its row, expanded (`store.showSchedule`,
+   * `store.showJob`) -- shown even when the filter would hide it. Cancel and
+   * stopping a job's watch are here only. A job that ended, or another
+   * track's, opens the worker that registered it.
    */
   let open = $state(false);
   let expanded = $state<number[]>([]);
   /** Expanded job rows: their own ids, which may be a schedule's too. */
   let jobsExpanded = $state<number[]>([]);
+  let menuOpen = $state(false);
+  let menuBox = $state<HTMLDivElement>();
+  /** The row [Show] asked for while the popover is open: kept in view whatever the filter. */
+  let focus = $state<Focus>(null);
 
   const narrowQuery = typeof matchMedia === "function" ? matchMedia("(max-width: 640px)") : null;
   let narrow = $state(narrowQuery?.matches ?? false);
@@ -37,22 +47,34 @@
     return () => narrowQuery.removeEventListener("change", on);
   });
 
-  const here = $derived(upcoming(store.schedules.filter((s) => s.track === store.track)));
-  const hereJobs = $derived(forPopover(store.jobs.filter((j) => j.track === store.track), store.now));
-  /** What the count on the button says: what is still to come or still running. */
-  const live = $derived(here.length + hereJobs.filter(isOpen).length);
+  $effect(() => {
+    if (!open) {
+      focus = null;
+      menuOpen = false;
+    }
+  });
+
+  const filter = $derived(store.watchFilter);
+  const mine = (list: Watched[], track: string) => list.filter((x) => x.track === track);
+  /** Everything this track has, unfiltered: whether the button shows, and its count. */
+  const all = $derived(visible(mine(store.schedules, store.track), mine(store.jobs, store.track), store.now, { kind: "all", order: "newest" }));
+  const live = $derived(all.schedules.length + all.jobs.filter(isOpen).length);
+  const here = $derived(visible(mine(store.schedules, store.track), mine(store.jobs, store.track), store.now, filter, focus));
   const others = $derived.by(() => {
-    const out: { track: string; name: string; items: Watched[]; jobs: Watched[] }[] = [];
-    for (const tr of store.tracks) {
-      if (tr.id === store.track) continue;
-      const items = upcoming(store.schedules.filter((s) => s.track === tr.id));
-      const jobs = forPopover(store.jobs.filter((j) => j.track === tr.id), store.now);
-      if (items.length || jobs.length) out.push({ track: tr.id, name: tr.name, items, jobs });
+    const out: { track: string; name: string; schedules: Watched[]; jobs: Watched[] }[] = [];
+    for (const x of store.tracks) {
+      if (x.id === store.track) continue;
+      const v = visible(mine(store.schedules, x.id), mine(store.jobs, x.id), store.now, filter);
+      if (v.schedules.length || v.jobs.length) out.push({ track: x.id, name: x.name, ...v });
     }
     return out;
   });
+  const nothing = $derived(!here.schedules.length && !here.jobs.length && !others.length);
+  /** Kind headings only when both kinds are on: with one, the filter already says which. */
+  const headings = $derived(filter.kind === "all");
   const locale = $derived(store.lang === "ko" ? "ko-KR" : "en-US");
   const tr = (key: string, vars?: Record<string, string | number>) => t(key as Parameters<typeof t>[0], vars);
+  const at = (ms: number) => clock(ms, store.now, tr);
 
   function toggle() {
     open = !open;
@@ -87,9 +109,6 @@
     if (j.worker) store.openWorkerView(j.worker);
   }
 
-  /** A time as a row shows it: `21:40` today, else `10-19 21:40`. */
-  const at = (ms: number) => nextLabel(ms, store.now, tr);
-
   /** A line in the conversation (`schedule-8`, `job-3`), on screen and lit for a moment. A track just opened draws its timeline over the next frames. */
   function reveal(id: string, left = 20) {
     const el = document.getElementById(id);
@@ -101,19 +120,22 @@
     el.animate([{ backgroundColor: "var(--sel)" }, { backgroundColor: "transparent" }], { duration: 1400, easing: "ease-out" });
   }
 
-  // Asked from the conversation: opened on that row, expanded, in view.
+  // Asked from the conversation: opened on that row, expanded, in view --
+  // and shown even if the filter would hide it (`focus`), until it closes.
   $effect(() => {
-    const focus = store.watchFocus;
-    if (!focus) return;
+    const asked = store.watchFocus;
+    if (!asked) return;
     untrack(() => {
-      if (focus.kind === "job") {
-        if (!jobsExpanded.includes(focus.id)) jobsExpanded = [...jobsExpanded, focus.id];
-      } else if (!expanded.includes(focus.id)) expanded = [...expanded, focus.id];
+      if (asked.kind === "job") {
+        if (!jobsExpanded.includes(asked.id)) jobsExpanded = [...jobsExpanded, asked.id];
+      } else if (!expanded.includes(asked.id)) expanded = [...expanded, asked.id];
       if (!open) {
         open = true;
         void store.loadAllWatched();
       }
-      bringRow(`${focus.kind}-row-${focus.id}`);
+      focus = { kind: asked.kind, id: asked.id };
+      menuOpen = false;
+      bringRow(`${asked.kind}-row-${asked.id}`);
     });
   });
 
@@ -137,10 +159,45 @@
     open = false;
     void store.selectTrack(s.track).then(() => reveal(`schedule-${s.id}`));
   }
+
+  function setKind(kind: WatchKind) {
+    store.setWatchFilter({ kind });
+  }
+
+  function setOrder(order: WatchOrder) {
+    store.setWatchFilter({ order });
+  }
+
+  /** A click in the panel outside the filter menu closes the menu, not the panel. */
+  function onPanelClick(e: MouseEvent) {
+    if (menuOpen && menuBox && !e.composedPath().includes(menuBox)) menuOpen = false;
+  }
+
+  /** A schedule's kind icon: a loop for a repetition, an eye for a condition, else a clock. */
+  function scheduleIcon(s: Watched): IconName {
+    if (isCondition(s)) return "eye";
+    return s.kind === "at" || !s.kind ? "clock" : "routines";
+  }
+
+  /** A job's state, as its dot and word show it. */
+  function tone(st: JobState): string {
+    return st === "running" ? "ok" : st === "stalled" ? "warn" : st === "died" ? "bad" : "quiet";
+  }
+
+  const kinds: [WatchKind, string][] = $derived([
+    ["all", t("schedules.kindAll")],
+    ["schedules", t("schedules.title")],
+    ["jobs", t("jobs.title")],
+  ]);
+  const orders: [WatchOrder, string][] = $derived([
+    ["newest", t("schedules.newest")],
+    ["oldest", t("schedules.oldest")],
+  ]);
+  const filterLabel = $derived(isFiltered(filter) ? `${t("schedules.filter")} · ${t("tracks.filterOn")}` : t("schedules.filter"));
 </script>
 
-{#if here.length || hereJobs.length}
-  <Popover bind:open align="right" width={narrow ? 10_000 : 380} label={t("schedules.titleBoth")}>
+{#if all.schedules.length || all.jobs.length}
+  <Popover bind:open align="right" width={narrow ? 10_000 : 400} label={t("schedules.titleBoth")}>
     {#snippet trigger()}
       <button class="tog" class:on={open} type="button" title={t("schedules.titleBoth")} aria-label={t("schedules.titleBoth")} aria-haspopup="dialog" aria-expanded={open} onclick={toggle}>
         <Icon name="clock" size={14} />
@@ -148,73 +205,68 @@
       </button>
     {/snippet}
 
-    <div class="head">
-      <span class="title">{t("schedules.titleBoth")}</span>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="wp" class:menu={menuOpen} onclick={onPanelClick}>
+      <div class="hd">
+        <span class="title">{t("schedules.titleBoth")}</span>
+        <span class="grow"></span>
+        <div class="fwrap" bind:this={menuBox}>
+          <button class="fbtn" class:on={menuOpen} class:set={isFiltered(filter)} type="button" onclick={() => (menuOpen = !menuOpen)} title={filterLabel} aria-label={filterLabel} aria-haspopup="menu" aria-expanded={menuOpen}>
+            <Icon name="filter" size={13} />
+          </button>
+          {#if menuOpen}
+            <!-- The track list's filter menu (ListSearch): a choice that is on has the accent bar, bold text and a ✓. -->
+            <div class="fmenu" role="menu" aria-label={t("schedules.filter")}>
+              <div class="mlab-sm fhead">{t("schedules.kindTitle")}</div>
+              {#each kinds as [id, label] (id)}
+                <button class="fitem" class:on={filter.kind === id} role="menuitemradio" aria-checked={filter.kind === id} onclick={() => setKind(id)}>
+                  {#if id === "schedules"}<Icon name="clock" size={12} />{:else if id === "jobs"}<Icon name="terminal" size={12} />{:else}<span class="iconpad"></span>{/if}
+                  <span>{label}</span>
+                  <span class="grow"></span>{#if filter.kind === id}<span class="mono check" aria-hidden="true">✓</span>{/if}
+                </button>
+              {/each}
+              <div class="rule"></div>
+              <div class="mlab-sm fhead">{t("schedules.orderTitle")}</div>
+              {#each orders as [id, label] (id)}
+                <button class="fitem" class:on={filter.order === id} role="menuitemradio" aria-checked={filter.order === id} onclick={() => setOrder(id)}>
+                  <span class="iconpad"></span>
+                  <span>{label}</span>
+                  <span class="grow"></span>{#if filter.order === id}<span class="mono check" aria-hidden="true">✓</span>{/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </div>
+
+      {@render block(here.schedules, here.jobs, headings)}
+      {#if others.length}
+        <div class="others mlab-sm">{t("schedules.others")}</div>
+        {#each others as g (g.track)}
+          <div class="tname" title={g.name}>{g.name}</div>
+          {@render block(g.schedules, g.jobs, false)}
+        {/each}
+      {/if}
+      {#if nothing}<div class="empty">{t("schedules.none")}</div>{/if}
     </div>
-    {#if others.length}<div class="mlab-sm group">{t("schedules.here")}</div>{/if}
-    {@render block(here, hereJobs, false)}
-    {#if others.length}
-      <div class="mlab-sm group">{t("schedules.others")}</div>
-      {#each others as g (g.track)}
-        <div class="tname" title={g.name}>{g.name}</div>
-        {@render block(g.items, g.jobs, true)}
-      {/each}
-    {/if}
   </Popover>
 {/if}
 
-<!-- One track's schedules, then its jobs, each kind named when it has rows. -->
-{#snippet block(items: Watched[], jobs: Watched[], other: boolean)}
+<!-- One track's schedules, then its jobs; each kind named only when both are on. -->
+{#snippet block(items: Watched[], jobs: Watched[], named: boolean)}
   {#if items.length}
-    <div class="kind" class:sub={other}>{t("schedules.title")}</div>
+    {#if named}<div class="kind"><Icon name="clock" size={12} /><span>{t("schedules.title")}</span><span class="mono cnt">{items.length}</span></div>{/if}
     {#each items as s (s.id)}
       {@render item(s)}
     {/each}
   {/if}
   {#if jobs.length}
-    <div class="kind" class:sub={other}>{t("jobs.title")}</div>
+    {#if named}<div class="kind"><Icon name="terminal" size={12} /><span>{t("jobs.title")}</span><span class="mono cnt">{jobs.length}</span></div>{/if}
     {#each jobs as j (j.id)}
       {@render jobItem(j)}
     {/each}
   {/if}
-{/snippet}
-
-{#snippet jobItem(j: Watched)}
-  {@const st = jobState(j)}
-  {@const since = when(j)}
-  {@const moved = lastMoved(j)}
-  {@const full = jobsExpanded.includes(j.id)}
-  {@const goes = jobGoes(j)}
-  {@const details = [j.what, j.pid ? `pid ${j.pid}` : "", j.log ? tr("jobs.log", { path: j.log }) : "", j.done_pattern ? tr("jobs.donePattern", { p: j.done_pattern }) : ""].filter(Boolean).join("\n")}
-  <div class="row" id="job-row-{j.id}">
-    <button class="main" type="button" disabled={!goes} onclick={() => openJob(j)} title={!goes ? undefined : hasLine(j) ? t("schedules.show") : j.worker ? t("jobs.openWorker") : t("schedules.openTrack")}>
-      <span class="top mono">
-        <span class="id">#{j.id}</span>
-        <span class="who">{j.worker || t("jobs.conductor")}</span>
-        <span class="state {st}">{tr(`jobs.${st}`)}</span>
-        {#if since != null}<span title={whenFull(since, store.lang)}>{isOpen(j) ? tr("jobs.since", { time: at(since) }) : at(since)}</span>{/if}
-        {#if moved != null}<span title={t("jobs.movedTitle")}>· {tr("jobs.moved", { time: at(moved) })}</span>{/if}
-      </span>
-      {#if full}
-        <span class="msg full">{details}</span>
-        {#if j.last_line}<span class="note mono full">{tr("jobs.lastLine", { line: j.last_line })}</span>{/if}
-      {:else}
-        <span class="msg one" title={details}>{watches(j)}</span>
-        <!-- An ending's note quotes the line that finished it: not said twice. -->
-        {#if j.last_line && !j.note?.includes(j.last_line)}<span class="note mono one" title={j.last_line}>{j.last_line}</span>{/if}
-      {/if}
-      <!-- The core keeps a stall's note when the log moves again: a running job's would be stale. -->
-      {#if j.note && st !== "running"}<span class="note mono" class:warn={st === "died" || st === "stalled"}>{j.note}</span>{/if}
-    </button>
-    <div class="side">
-      {#if isOpen(j)}
-        <button class="cancel mono" type="button" onclick={() => store.unwatchJob(j.id)} title={t("timeline.jobNote")}>{t("timeline.unwatchJob")}</button>
-      {/if}
-      <button class="more" type="button" aria-expanded={full} onclick={() => expandJob(j.id)} title={full ? t("schedules.less") : t("schedules.more")} aria-label={full ? t("schedules.less") : t("schedules.more")}>
-        {full ? "▴" : "▾"}
-      </button>
-    </div>
-  </div>
 {/snippet}
 
 {#snippet item(s: Watched)}
@@ -223,29 +275,76 @@
   {@const text = message(s)}
   {@const full = expanded.includes(s.id)}
   {@const long = text.length > 90 || text.includes("\n")}
-  <div class="row" id="schedule-row-{s.id}">
+  {@const c = s.next_at != null ? at(s.next_at) : null}
+  <div class="row" class:full id="schedule-row-{s.id}">
     <button class="main" type="button" onclick={() => go(s)} title={s.track === store.track ? t("schedules.show") : t("schedules.openTrack")}>
-      <span class="top mono">
-        <span class="id">#{s.id}</span>
-        {#if s.next_at != null}
-          <span class="when" class:late={late === "overdue"} title={whenFull(s.next_at, store.lang)}>{nextLabel(s.next_at, store.now, tr)}</span>
-          {#if r}<span class="rule">· {r}</span>{/if}
-        {:else if isCondition(s) && r}
-          <span class="when cond">{r}</span>
+      <span class="when mono" title={s.next_at != null ? whenFull(s.next_at, store.lang) : undefined}>
+        {#if c}
+          <span class="t" class:late={late === "overdue"}>{c.time}</span>{#if c.day}<span class="d">{c.day}</span>{/if}
+        {:else}
+          <span class="d">{t("schedules.condition")}</span>
         {/if}
-        <!-- A firing that came late says so in its note, below; the tag is for one still waiting. -->
-        {#if late === "overdue"}<span class="tag">{t("schedules.late")}</span>{/if}
       </span>
-      <span class="msg" class:full title={full ? undefined : text}>{text}</span>
-      {#if s.note}<span class="note mono" class:warn={late === "fired-late"}>{s.note}</span>{/if}
+      <span class="body">
+        <span class="ttl" class:clamp={!full}>{text}</span>
+        <span class="meta mono">
+          <Icon name={scheduleIcon(s)} size={11} />
+          <span class="mtext">{r ?? t("schedules.once")}</span>
+          <span class="id">#{s.id}</span>
+        </span>
+        {#if s.note}<span class="note mono" class:warn={late === "fired-late"}>{s.note}</span>{/if}
+      </span>
     </button>
     <div class="side">
-      <button class="cancel mono" type="button" onclick={() => store.cancelSchedule(s.id)} title={t("timeline.cancelSchedule")}>{t("timeline.cancelSchedule")}</button>
-      {#if long}
-        <button class="more" type="button" aria-expanded={full} onclick={() => expand(s.id)} title={full ? t("schedules.less") : t("schedules.more")} aria-label={full ? t("schedules.less") : t("schedules.more")}>
-          {full ? "▴" : "▾"}
+      {#if late === "overdue"}<span class="st warn"><i class="dot"></i>{t("schedules.late")}</span>{:else if late === "fired-late"}<span class="st warn"><i class="dot"></i>{t("schedules.late")}</span>{/if}
+      <div class="acts">
+        <button class="act" type="button" onclick={() => store.cancelSchedule(s.id)} title={t("timeline.cancelSchedule")}>{t("timeline.cancelSchedule")}</button>
+        {#if long}
+          <button class="chev" type="button" aria-expanded={full} onclick={() => expand(s.id)} title={full ? t("schedules.less") : t("schedules.more")} aria-label={full ? t("schedules.less") : t("schedules.more")}>
+            <Icon name={full ? "up" : "down"} size={12} />
+          </button>
+        {/if}
+      </div>
+    </div>
+  </div>
+{/snippet}
+
+{#snippet jobItem(j: Watched)}
+  {@const st = jobState(j)}
+  {@const since = when(j)}
+  {@const moved = lastMoved(j)}
+  {@const full = jobsExpanded.includes(j.id)}
+  {@const goes = jobGoes(j)}
+  {@const c = since != null ? at(since) : null}
+  {@const details = [j.what, j.pid ? `pid ${j.pid}` : "", j.log ? tr("jobs.log", { path: j.log }) : "", j.done_pattern ? tr("jobs.donePattern", { p: j.done_pattern }) : ""].filter(Boolean).join("\n")}
+  <div class="row" class:full class:over={!isOpen(j)} id="job-row-{j.id}">
+    <button class="main" type="button" disabled={!goes} onclick={() => openJob(j)} title={!goes ? undefined : hasLine(j) ? t("schedules.show") : j.worker ? t("jobs.openWorker") : t("schedules.openTrack")}>
+      <span class="when mono" title={since != null ? whenFull(since, store.lang) : undefined}>
+        {#if c}<span class="t">{c.time}</span><span class="d">{c.day || (isOpen(j) ? t("jobs.startedShort") : t("jobs.endedShort"))}</span>{/if}
+      </span>
+      <span class="body">
+        <span class="ttl" class:clamp={!full}>{full ? details : j.what || watches(j)}</span>
+        <span class="meta mono">
+          <Icon name="terminal" size={11} />
+          <span class="mtext">{[j.worker || t("jobs.conductor"), !full && j.what && watches(j) !== j.what ? watches(j).replace(`${j.what} · `, "") : ""].filter(Boolean).join(" · ")}</span>
+          <span class="id">#{j.id}</span>
+        </span>
+        {#if j.last_line && (full || !j.note?.includes(j.last_line))}<span class="note mono" class:one={!full}>{full ? tr("jobs.lastLine", { line: j.last_line }) : j.last_line}</span>{/if}
+        <!-- The core keeps a stall's note when the log moves again: a running job's would be stale. -->
+        {#if j.note && st !== "running"}<span class="note mono" class:warn={st === "died" || st === "stalled"}>{j.note}</span>{/if}
+      </span>
+    </button>
+    <div class="side">
+      <span class="st {tone(st)}"><i class="dot" class:pulse={st === "running"}></i>{tr(`jobs.${st}`)}</span>
+      {#if moved != null}<span class="moved mono" title={t("jobs.movedTitle")}>{tr("jobs.moved", { time: at(moved).time })}</span>{/if}
+      <div class="acts">
+        {#if isOpen(j)}
+          <button class="act" type="button" onclick={() => store.unwatchJob(j.id)} title={t("timeline.jobNote")}>{t("timeline.unwatchJob")}</button>
+        {/if}
+        <button class="chev" type="button" aria-expanded={full} onclick={() => expandJob(j.id)} title={full ? t("schedules.less") : t("schedules.more")} aria-label={full ? t("schedules.less") : t("schedules.more")}>
+          <Icon name={full ? "up" : "down"} size={12} />
         </button>
-      {/if}
+      </div>
     </div>
   </div>
 {/snippet}
@@ -281,109 +380,192 @@
     line-height: 1;
   }
 
-  /* The panel is a flex column that scrolls: what is in it keeps its height. */
-  .head,
-  .group,
-  .tname,
-  .row {
+  /* Its full height, not the panel's: the panel scrolls, and the sticky head
+     is held inside this box, so a box cut to the panel would let it go. */
+  .wp {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 6px;
+  }
+
+  /* Room for the filter menu when the list is short. */
+  .wp.menu {
+    min-height: 270px;
+  }
+
+  .wp > * {
     flex-shrink: 0;
   }
 
-  .head {
+  /* The head stays at the top while the list scrolls under it. */
+  .hd {
+    position: sticky;
+    top: 0;
+    z-index: 2;
     display: flex;
     align-items: center;
-    padding: 12px 16px 8px;
+    gap: 8px;
+    height: 44px;
+    padding: 0 10px 0 16px;
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
   }
 
   .title {
-    font-size: 14px;
+    font-size: 13px;
+    font-weight: 500;
     color: var(--hi);
   }
 
-  .group {
-    padding: 10px 16px 6px;
+  .grow {
+    flex: 1;
   }
 
-  /* Which kind the rows under it are; tighter under another track's name. */
-  .kind {
-    flex-shrink: 0;
-    padding: 8px 16px 4px;
-    font-family: var(--mono);
-    font-size: 9.5px;
-    letter-spacing: 0.12em;
-    color: var(--lab);
+  .fwrap {
+    position: relative;
   }
 
-  .kind.sub {
-    padding-top: 2px;
-  }
-
-  .who {
-    color: var(--txt);
-  }
-
-  .state {
-    border: 1px solid currentColor;
-    padding: 0 4px;
-    font-size: 9px;
-    letter-spacing: 0.08em;
-    color: var(--lab);
-  }
-
-  /* The app's "running" green, as on the track list's dots. */
-  .state.running {
-    color: var(--oktx);
-  }
-
-  .state.stalled,
-  .state.died {
-    color: var(--warn);
-  }
-
-  /* One line each: what it watches, its log's last line. */
-  .one {
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .note.full {
-    white-space: pre-wrap;
-  }
-
-  /* A conductor's own job on this track leads nowhere: a row, not a control. */
-  .main:disabled {
-    cursor: default;
-    opacity: 1;
-  }
-
-  .tname {
-    padding: 6px 16px 4px;
-    font-size: 11.5px;
-    color: var(--txt);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .row {
+  /* The track list's filter button (ListSearch), a size down. */
+  .fbtn {
+    width: 28px;
+    height: 28px;
     display: flex;
-    align-items: flex-start;
-    border-top: 1px solid var(--lineq);
-    cursor: default;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--lab);
   }
 
-  .row:hover {
+  .fbtn:hover,
+  .fbtn.on {
+    color: var(--hi);
+    border-color: var(--acc);
+  }
+
+  .fbtn.set {
+    color: var(--hi);
+    background: var(--accbg);
+    border-color: var(--accln);
+  }
+
+  .fmenu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 5;
+    width: 190px;
+    background: var(--card);
+    border: 1px solid var(--lines);
+    padding: 4px 0 6px;
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--bg) 60%, transparent);
+  }
+
+  .fhead {
+    padding: 8px 14px 4px;
+  }
+
+  .rule {
+    height: 1px;
+    background: var(--line);
+    margin: 4px 0;
+  }
+
+  .fitem {
+    width: 100%;
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 4px 14px 4px 12px;
+    background: transparent;
+    border: 0;
+    border-left: 2px solid transparent;
+    text-align: left;
+    font-size: 12px;
+    color: var(--dim);
+  }
+
+  .fitem:hover {
+    color: var(--hi);
     background: var(--sel);
   }
 
-  .main {
-    flex: 1;
-    min-width: 0;
+  .fitem.on {
+    color: var(--hi);
+    border-left-color: var(--acc);
+    background: var(--accbg);
+    font-weight: 600;
+  }
+
+  .fitem.on:hover {
+    background: var(--sel);
+  }
+
+  .check {
+    color: var(--acct);
+    font-size: 11px;
+  }
+
+  .iconpad {
+    width: 12px;
+  }
+
+  /* A kind's heading: its icon, its name, how many. */
+  .kind {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    align-items: center;
+    gap: 7px;
+    padding: 12px 16px 4px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--lab);
+  }
+
+  .cnt {
+    margin-left: auto;
+    letter-spacing: 0;
+  }
+
+  .others {
+    margin-top: 10px;
+    padding: 10px 16px 2px;
+    border-top: 1px solid var(--line);
+  }
+
+  .tname {
+    padding: 6px 16px 2px;
+    font-size: 12px;
+    color: var(--txt);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .empty {
+    padding: 22px 16px;
+    font-size: 12px;
+    color: var(--lab);
+    text-align: center;
+  }
+
+  /* ----- a row: time | what | state and actions ----- */
+
+  .row {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: start;
+  }
+
+  .main {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: 50px 1fr;
+    column-gap: 12px;
+    align-items: start;
     padding: 9px 4px 9px 16px;
     background: transparent;
     border: 0;
@@ -391,64 +573,99 @@
     color: var(--dim);
   }
 
-  .top {
-    display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: 6px;
-    font-size: 10.5px;
-    letter-spacing: 0.04em;
-    color: var(--lab);
+  .main:disabled {
+    cursor: default;
+    opacity: 1;
   }
 
-  .id {
-    color: var(--lab);
+  .main:focus-visible,
+  .chev:focus-visible,
+  .act:focus-visible,
+  .fbtn:focus-visible,
+  .fitem:focus-visible {
+    outline: 1px solid var(--focus);
+    outline-offset: -1px;
   }
 
   .when {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-top: 1px;
+  }
+
+  .t {
+    font-size: 12px;
     color: var(--hi);
   }
 
-  .when.cond {
-    color: var(--txt);
-    overflow-wrap: anywhere;
-  }
-
-  .when.late,
-  .tag {
+  .t.late {
     color: var(--warn);
   }
 
-  .tag {
-    border: 1px solid currentColor;
-    padding: 0 4px;
-    font-size: 9px;
-    letter-spacing: 0.08em;
+  .d {
+    font-size: 9.5px;
+    color: var(--lab);
+    letter-spacing: 0.04em;
   }
 
-  .msg {
+  .body {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .ttl {
     font-size: 12.5px;
     line-height: 1.45;
     color: var(--txt);
+    overflow-wrap: anywhere;
+    white-space: pre-line;
+  }
+
+  .ttl.clamp {
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     line-clamp: 2;
     overflow: hidden;
-    overflow-wrap: anywhere;
-    white-space: pre-line;
   }
 
-  .msg.full {
-    display: block;
-    -webkit-line-clamp: unset;
-    line-clamp: unset;
+  .meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: 10px;
+    color: var(--lab);
+  }
+
+  .mtext {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .id {
+    margin-left: auto;
+    flex-shrink: 0;
+    color: var(--lab);
+    opacity: 0.8;
   }
 
   .note {
     font-size: 10px;
     color: var(--lab);
     overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
+  .note.one {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .note.warn {
@@ -459,36 +676,131 @@
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: 4px;
-    padding: 8px 12px 8px 4px;
-    flex-shrink: 0;
+    gap: 5px;
+    padding: 9px 12px 9px 4px;
+    min-width: 64px;
   }
 
-  /* The conversation line's own cancel button. */
-  .cancel {
-    padding: 2px 8px;
-    background: transparent;
-    border: 1px solid var(--lineq);
-    color: var(--lab);
+  /* A state: a dot and a word, in the app's own colours. */
+  .st {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--mono);
     font-size: 10px;
+    white-space: nowrap;
+    color: var(--lab);
   }
 
-  .cancel:hover {
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .st.ok {
+    color: var(--oktx);
+  }
+
+  .st.ok .dot {
+    background: var(--ok);
+  }
+
+  .st.warn {
+    color: var(--warn);
+  }
+
+  .st.bad {
+    color: var(--deltx);
+  }
+
+  .st.quiet .dot {
+    background: var(--idle);
+  }
+
+  .dot.pulse {
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  .moved {
+    font-size: 9.5px;
+    color: var(--lab);
+  }
+
+  .acts {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .act {
+    height: 22px;
+    padding: 0 7px;
+    background: transparent;
+    border: 1px solid transparent;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--lab);
+  }
+
+  .act:hover {
     color: var(--hi);
     border-color: var(--acc);
   }
 
-  .more {
+  .chev {
     width: 22px;
-    height: 20px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     background: transparent;
     border: 0;
     color: var(--lab);
-    font-size: 11px;
-    line-height: 1;
   }
 
-  .more:hover {
+  .chev:hover {
     color: var(--hi);
+    background: var(--sel);
+  }
+
+  /* A row is a list item, as the track list's: no box, a tint under the
+     pointer, a quieter tint and a hairline at the left while it is open. */
+  .row:hover,
+  .row:focus-within {
+    background: var(--sel);
+  }
+
+  .row.full {
+    background: var(--cardq);
+    box-shadow: inset 2px 0 0 var(--lines);
+  }
+
+  .row.over .ttl {
+    color: var(--dim);
+  }
+
+  /* The actions wait until the row is pointed at, focused or open; on a touch screen they always show. */
+  .acts {
+    opacity: 0;
+  }
+
+  .row:hover .acts,
+  .row:focus-within .acts,
+  .row.full .acts {
+    opacity: 1;
+  }
+
+  @media (hover: none) {
+    .acts {
+      opacity: 1;
+    }
   }
 </style>

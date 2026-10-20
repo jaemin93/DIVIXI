@@ -29,6 +29,9 @@
     | "play"
     | "bell"
     | "clock"
+    | "eye"
+    | "down"
+    | "up"
     | "phone";
 </script>
 
@@ -66,6 +69,12 @@
     <path d="M4 11.5V7a4 4 0 0 1 8 0v4.5l1 1H3z" /><path d="M6.8 13.5a1.3 1.3 0 0 0 2.4 0" />
   {:else if name === "clock"}
     <circle cx="8" cy="8" r="5.5" /><path d="M8 5v3.2l2.2 1.6" />
+  {:else if name === "eye"}
+    <path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z" /><circle cx="8" cy="8" r="1.8" />
+  {:else if name === "down"}
+    <path d="M4 6l4 4 4-4" />
+  {:else if name === "up"}
+    <path d="M4 10l4-4 4 4" />
   {:else if name === "home"}
     <path d="M2.5 7.5L8 2.5l5.5 5M4 6.5v7h8v-7" /><path d="M6.5 13.5v-4h3v4" />
   {:else if name === "overview"}
