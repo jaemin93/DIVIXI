@@ -119,7 +119,7 @@ CI also builds, so it is worth knowing these pass too:
 cargo clippy --workspace --all-targets
 npm run build
 cargo build -p orchestra-app --bin divixi
-cargo build -p orchestra-app --features server --bin divixi-server
+cargo build -p orchestra-app --no-default-features --features server --bin divixi-server
 ```
 
 `npx tauri build` produces an installer, if you want to check the bundle.

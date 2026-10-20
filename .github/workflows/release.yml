@@ -640,7 +640,7 @@ jobs:
         # job -- `outputs.tag`, not the title, and never workflow-wide.
         env:
           DIVIXI_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-        run: cargo build --release -p orchestra-app --features server --bin divixi-server
+        run: cargo build --release -p orchestra-app --no-default-features --features server --bin divixi-server
 
       # The binary that gets uploaded, run the way a server runs it: no
       # checkout, no dist/ beside it. The release of 2026-10-08 answered

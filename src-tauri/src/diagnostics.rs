@@ -91,8 +91,15 @@ pub fn report(app: &AppHandle) -> Result<String, String> {
 
 /// Which webview the window runs on: the most useful single fact about a
 /// rendering bug, and the one nobody can read off their own machine.
+#[cfg(feature = "desktop")]
 fn webview() -> String {
     tauri::webview_version().unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// divixi-server is built without a webview (no `desktop` feature).
+#[cfg(not(feature = "desktop"))]
+fn webview() -> String {
+    "none (no window)".to_string()
 }
 
 /// One detected agent, without the environment its sessions are launched

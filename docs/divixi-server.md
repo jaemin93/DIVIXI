@@ -18,12 +18,12 @@ Linux** machine reached over SSH, the app installs and updates divixi-server
 itself, the way an editor's remote extension does: no Rust, no Node, and
 nothing built on that machine. It fetches the release binary.
 
-The one thing the machine may still need is the WebKitGTK runtime that binary
-links (section 1). A fresh Ubuntu does not have it, and the app does not
+The one thing the machine may still need is the GTK 3 runtime that binary
+links (section 1). A fresh Ubuntu server does not have it, and the app does not
 install system packages, so do this once there:
 
 ```bash
-sudo apt install -y libwebkit2gtk-4.1-0
+sudo apt install -y libgtk-3-0
 ```
 
 If it is missing, the app says so: the instance's card names the missing
@@ -65,24 +65,29 @@ only way to make its build match an app you built yourself).
 ## 1. What you need
 
 **System packages (for building).** Building the server compiles Tauri too, so Tauri's Linux build
-packages are needed. No display (X, Wayland) is required. At run time the executable links GTK 3
-and WebKitGTK; the build packages below bring both, so a machine that builds it can run it. A
-machine that only runs a binary built elsewhere (such as the release binary the app installs) needs
-the runtime package, which brings GTK 3, GDK-Pixbuf, GLib, JavaScriptCore and libsoup with it:
+packages are needed. No display (X, Wayland) is required. The server is built without the webview,
+so at run time it links GTK 3 but not WebKitGTK; the build packages below bring GTK 3, so a machine
+that builds it can run it. A machine that only runs a binary built elsewhere (such as the release
+binary the app installs) needs the GTK 3 runtime package, which brings GDK-Pixbuf and GLib with it:
 
 ```bash
-# Debian, Ubuntu
-sudo apt install -y libwebkit2gtk-4.1-0
+# Debian, Ubuntu (24.04 installs libgtk-3-0t64 for it)
+sudo apt install -y libgtk-3-0
 # Fedora
-sudo dnf install -y webkit2gtk4.1
+sudo dnf install -y gtk3
 # Arch
-sudo pacman -S --needed webkit2gtk-4.1
+sudo pacman -S --needed gtk3
 ```
 
-The release binary links `libwebkit2gtk-4.1.so.0`, `libgtk-3.so.0`, `libgdk-3.so.0`,
-`libgdk_pixbuf-2.0.so.0` and GLib (`libglib-2.0.so.0`, `libgobject-2.0.so.0`, `libgio-2.0.so.0`),
-and needs glibc 2.34 or later. Nothing of it draws a window; the loader still wants it. Without it
-the server stops at once with `error while loading shared libraries: libwebkit2gtk-4.1.so.0`.
+The release binary links `libgtk-3.so.0`, `libgdk-3.so.0`, `libgdk_pixbuf-2.0.so.0` and GLib
+(`libglib-2.0.so.0`, `libgobject-2.0.so.0`, `libgio-2.0.so.0`), and needs glibc 2.34 or later.
+Nothing of it draws a window; the loader still wants it. Without it the server stops at once with
+`error while loading shared libraries: libgtk-3.so.0` (or another of those names). Releases up to
+v2026-10-20 linked WebKitGTK as well and need `libwebkit2gtk-4.1-0` (Fedora `webkit2gtk4.1`, Arch
+`webkit2gtk-4.1`).
+
+Building still needs the WebKitGTK development package below: Tauri compiles against it even when
+the webview is left out.
 
 ```bash
 sudo apt update
@@ -159,7 +164,7 @@ Updating one side only puts them out of step again. See section 7.
 cd ~/divixi-src
 npm ci                 # UI dependencies
 npm run build          # the UI (it goes inside the executable)
-cargo build --release -p orchestra-app --features server --bin divixi-server
+cargo build --release -p orchestra-app --no-default-features --features server --bin divixi-server
 install -Dm755 target/release/divixi-server ~/.local/bin/divixi-server
 ```
 
@@ -338,7 +343,7 @@ from that commit.
 | `ssh ended … Permission denied` | Whether you get in without a password (key, ssh-agent) |
 | `divixi-server token gave no link` | That the path is right (`~/.local/bin/divixi-server`) and that it is executable |
 | `did not answer through the tunnel` | Usually the server is not running: press **Start it** on that instance's card. If it will not come up, run `~/.local/bin/divixi-server serve` yourself (you will see the log) |
-| The server will not stay up after **Start it** or an install | Run the binary by hand to see why: `~/.divixi/server/current/divixi-server help` (or your own path). `error while loading shared libraries: libwebkit2gtk-4.1.so.0` means the WebKitGTK runtime is missing: `sudo apt install -y libwebkit2gtk-4.1-0` (section 1) |
+| The server will not stay up after **Start it** or an install | Run the binary by hand to see why: `~/.divixi/server/current/divixi-server help` (or your own path). `error while loading shared libraries: libgtk-3.so.0` (or `libgdk-3.so.0`, `libgobject-2.0.so.0`) means the GTK 3 runtime is missing: `sudo apt install -y libgtk-3-0` (section 1) |
 | "divixi-server can't start there. Missing: …" | The libraries named are not on that machine. Run the command shown there, then check again (section 1) |
 | An agent shows as "not installed" | PATH on the server. Add the CLI and node directories to "Remote PATH" in the instance settings, or to `Environment=PATH` in the systemd unit |
 | A direct address says "no owner yet" | Run `divixi-server owner <github login>` on the server |

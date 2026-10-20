@@ -23,6 +23,12 @@ path = "src/bin/divixi-server.rs"
 required-features = ["server"]
 
 [features]
+# The desktop app: windows in a webview (Tauri's wry runtime, WebKitGTK on
+# Linux), the tray icon and the one-instance lock. divixi-server is built
+# without it (`--no-default-features --features server`), so on Linux it
+# does not link WebKitGTK, which a headless server rarely has (#104).
+default = ["desktop"]
+desktop = ["tauri/wry", "tauri/x11", "tauri/dbus", "tauri/tray-icon", "dep:tauri-plugin-single-instance"]
 # custom-protocol: embed dist/ in the binary, as `tauri build` does for the
 # app. A phone loads the UI from divixi-server, and without it Tauri builds
 # in development mode and reads dist/ from the build machine's checkout at
@@ -49,9 +55,10 @@ parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # unstable: more than one webview in a window (a warm one per remote instance).
-tauri = { version = "2", features = ["tray-icon", "unstable"] }
+# Tauri's default features minus the webview runtime, which `desktop` adds.
+tauri = { version = "2", default-features = false, features = ["unstable", "compression", "common-controls-v6", "dynamic-acl"] }
 tauri-plugin-dialog = "2"
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", optional = true }
 # Remote instances (src/remote): the server and its signed tokens.
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws", "query"] }
 hmac = "0.13"
@@ -104,5 +111,6 @@ libc = "0.2"
 winreg = "0.56.0"
 
 [dev-dependencies]
-# A mock app for the remote bridge's tests.
-tauri = { version = "2", features = ["tray-icon", "unstable", "test"] }
+# A mock app for the remote bridge's tests. The rest of Tauri's features
+# come from the dependency above and from `desktop`.
+tauri = { version = "2", default-features = false, features = ["test"] }

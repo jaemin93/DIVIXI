@@ -25,6 +25,8 @@ use tauri::{Emitter, Manager, State};
 pub type Rt = tauri::Wry;
 #[cfg(feature = "server")]
 pub type Rt = tauri::test::MockRuntime;
+#[cfg(not(any(feature = "desktop", feature = "server")))]
+compile_error!("build with the `desktop` feature (the default) or with `server`");
 /// The app, as every part of it holds it.
 pub type AppHandle = tauri::AppHandle<Rt>;
 use tauri_plugin_dialog::DialogExt;

@@ -1,4 +1,5 @@
-//! Divixi with no window, for a server (built with `--features server`).
+//! Divixi with no window, for a server (built with
+//! `--no-default-features --features server`: no webview, see Cargo.toml).
 //!
 //!   divixi-server                 run: the app on Tauri's mock runtime, a remote
 //!                                 instance on port 7488 (the remote.port setting)

@@ -33,7 +33,7 @@ ui/                Svelte 5 UI
 npm install
 npm run build                        # once, before any cargo command: see below
 npm run app                          # the app, in development mode (tauri dev)
-cargo build -p orchestra-app --features server --bin divixi-server
+cargo build -p orchestra-app --no-default-features --features server --bin divixi-server
 ```
 
 Node 22.18+, as `engines` in package.json says. Not just vite's floor:

@@ -16,8 +16,8 @@
 //! to follow the manual steps instead ([`Check::Unsupported`]). `uname -sm`
 //! on the remote decides, never a guess from the host name.
 //!
-//! The binary does link WebKitGTK and GTK 3, which a headless machine
-//! often lacks. Installing those needs root, so the app finds out which are
+//! The binary does link GTK 3 (builds up to v2026-10-20 WebKitGTK as
+//! well), which a headless machine often lacks. Installing those needs root, so the app finds out which are
 //! missing and names the command ([`super::libs`], [`Check::Libraries`]),
 //! and checks a download before it stops the server it would replace.
 //!
