@@ -449,7 +449,7 @@
       {#if store.chatSchedules.length || store.chatJobs.length}
         <div class="watched">
           {#each store.chatSchedules as s (`s${s.id}`)}
-            <div class="sys mono pline">
+            <div class="sys mono pline" id="schedule-{s.id}">
               <span class="dot" aria-hidden="true"></span>
               <span title={t("timeline.scheduleNote")}>{t("timeline.schedule")} · {s.line}</span>
               <span class="grow"></span>

@@ -345,6 +345,11 @@ export type Watched = {
   next_at?: number | null;
   last_line?: string;
   note?: string;
+  /** A schedule's: `at`, `every`, `daily`, `weekly`, `file` or `process`, its spec as the record keeps it, and its message. */
+  kind?: string;
+  spec?: Record<string, unknown> | null;
+  message?: string;
+  last_at?: number | null;
 };
 
 /** Context accounting from the agent's `usage` updates. */
@@ -1999,10 +2004,22 @@ class Store {
     }
   }
 
+  /**
+   * Every track's schedules, for the schedules popover's other tracks.
+   * Read when it opens; the `schedules` event keeps each track's after.
+   */
+  async loadAllSchedules() {
+    const others = this.tracks.map((x) => x.id).filter((id) => id !== this.track);
+    const lists = await Promise.all(others.map((track) => invoke<Watched[]>("list_schedules", { track }).catch((err) => (tracing(err), null))));
+    const read = others.filter((_, i) => lists[i]);
+    this.schedules = [...this.schedules.filter((s) => !read.includes(s.track)), ...lists.flatMap((l) => l ?? [])];
+  }
+
   async cancelSchedule(id: number) {
+    const track = this.schedules.find((s) => s.id === id)?.track ?? this.track;
     try {
       await invoke("schedule_cancel", { id });
-      await this.loadWatched();
+      await this.loadWatched(track);
     } catch (err) {
       this.lastError = String(err);
     }
@@ -3567,6 +3584,8 @@ class Store {
         if (this.panelOpen) void this.refreshWorkspace();
         void this.refreshConductor();
         void this.refreshWorkerSessions();
+        // As `selectTrack` does: the track reopened on has schedules too.
+        void this.loadWatched(current.id);
       } else {
         this.view = "new-track";
       }
