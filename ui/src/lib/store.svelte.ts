@@ -10,6 +10,7 @@ import { libraryPick } from "./libraries";
 import { download, tooLarge } from "./designFile";
 import { notifyDecision, notifyRoutine, resolveDecisions, keepOnlyOpen, ensureDecisionNotice, keepServerNotices, notifyServer, resolveServerNotice } from "./notify.svelte";
 import { AUTO_KEY, autoFrom, autoTo } from "./updateSchedule";
+import { inConversation, justEnded } from "./scheduleList";
 import {
   dropQueued,
   liveQueued,
@@ -1984,9 +1985,23 @@ class Store {
    */
   schedules = $state<Watched[]>([]);
   jobs = $state<Watched[]>([]);
+  /**
+   * Schedules seen active in this window that have since fired for the last
+   * time or been cancelled: their line in the conversation stays, saying so,
+   * instead of vanishing. Not kept: a reload starts from the active ones.
+   */
+  schedulesEnded = $state<number[]>([]);
+  /** A schedule the popover is asked to show, expanded (`showSchedule`); `at` makes asking twice count. */
+  scheduleFocus = $state<{ id: number; at: number } | null>(null);
 
+  /** The conversation's schedule lines: the active ones, soonest first, then the ones just over. */
   get chatSchedules(): Watched[] {
-    return this.chatArtifact ? [] : this.schedules.filter((s) => s.track === this.track && s.status === "active");
+    return this.chatArtifact ? [] : inConversation(this.schedules.filter((s) => s.track === this.track), this.schedulesEnded);
+  }
+
+  /** Open the schedules popover on one schedule (the conversation line's [Show]). */
+  showSchedule(id: number) {
+    this.scheduleFocus = { id, at: Date.now() };
   }
 
   get chatJobs(): Watched[] {
@@ -1997,6 +2012,8 @@ class Store {
     if (!track) return;
     try {
       const [schedules, jobs] = await Promise.all([invoke<Watched[]>("list_schedules", { track }), invoke<Watched[]>("list_jobs", { track })]);
+      const ended = justEnded(this.schedules.filter((s) => s.track === track), schedules);
+      if (ended.length) this.schedulesEnded = [...this.schedulesEnded, ...ended];
       this.schedules = [...this.schedules.filter((s) => s.track !== track), ...schedules];
       this.jobs = [...this.jobs.filter((j) => j.track !== track), ...jobs];
     } catch (err) {

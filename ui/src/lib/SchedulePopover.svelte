@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { store, type Watched } from "./store.svelte";
   import Popover from "./Popover.svelte";
   import Icon from "./Icon.svelte";
@@ -12,8 +13,9 @@
    * while the track has one. Other tracks' follow under their own heading,
    * read when the popover opens.
    *
-   * A row brings its line in the conversation on screen; cancelling is the
-   * conversation line's own `cancelSchedule`.
+   * A row brings its line in the conversation on screen, and that line's
+   * [Show] opens this on its row, expanded (`store.showSchedule`). Cancel
+   * is here only.
    */
   let open = $state(false);
   let expanded = $state<number[]>([]);
@@ -60,6 +62,32 @@
     el.animate([{ backgroundColor: "var(--sel)" }, { backgroundColor: "transparent" }], { duration: 1400, easing: "ease-out" });
   }
 
+  // Asked from the conversation: opened on that row, expanded, in view.
+  $effect(() => {
+    const focus = store.scheduleFocus;
+    if (!focus) return;
+    untrack(() => {
+      if (!expanded.includes(focus.id)) expanded = [...expanded, focus.id];
+      if (!open) {
+        open = true;
+        void store.loadAllSchedules();
+      }
+      bringRow(focus.id);
+    });
+  });
+
+  /** A row scrolled to the middle of the panel and lit for a moment, once the panel has its height. */
+  function bringRow(id: number, left = 20) {
+    const row = document.getElementById(`schedule-row-${id}`);
+    const panel = row?.closest<HTMLElement>("[role=dialog]");
+    if (!row || !panel || !panel.style.maxHeight) {
+      if (left > 0) setTimeout(() => bringRow(id, left - 1), 50);
+      return;
+    }
+    panel.scrollTop = Math.max(0, row.offsetTop - (panel.clientHeight - row.offsetHeight) / 2);
+    row.animate([{ backgroundColor: "var(--sel)" }, { backgroundColor: "transparent" }], { duration: 1400, easing: "ease-out" });
+  }
+
   function go(s: Watched) {
     if (s.track === store.track) {
       reveal(s.id);
@@ -104,7 +132,7 @@
   {@const text = message(s)}
   {@const full = expanded.includes(s.id)}
   {@const long = text.length > 90 || text.includes("\n")}
-  <div class="row">
+  <div class="row" id="schedule-row-{s.id}">
     <button class="main" type="button" onclick={() => go(s)} title={s.track === store.track ? t("schedules.show") : t("schedules.openTrack")}>
       <span class="top mono">
         <span class="id">#{s.id}</span>
@@ -115,7 +143,7 @@
           <span class="when cond">{r}</span>
         {/if}
         <!-- A firing that came late says so in its note, below; the tag is for one still waiting. -->
-        {#if late === "overdue"}<span class="tag">{t("schedules.overdue")}</span>{/if}
+        {#if late === "overdue"}<span class="tag">{t("schedules.late")}</span>{/if}
       </span>
       <span class="msg" class:full title={full ? undefined : text}>{text}</span>
       {#if s.note}<span class="note mono" class:warn={late === "fired-late"}>{s.note}</span>{/if}
