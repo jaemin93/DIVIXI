@@ -49,32 +49,47 @@ impl Pm {
     }
 }
 
-/// One library the binary links, and the package that has it.
-struct Lib {
-    soname: &'static str,
+/// A package, by the name each package manager gives it.
+struct Pkg {
     apt: &'static str,
     dnf: &'static str,
     pacman: &'static str,
-    /// The WebKitGTK package depends on it, so naming that package is enough.
-    with_webkit: bool,
 }
 
-const WEBKIT: &str = "libwebkit2gtk-4.1.so.0";
+impl Pkg {
+    fn name(&self, pm: Pm) -> &'static str {
+        match pm {
+            Pm::Apt => self.apt,
+            Pm::Dnf => self.dnf,
+            Pm::Pacman => self.pacman,
+        }
+    }
+}
 
-/// The libraries in the release binary's `NEEDED` list beyond glibc, and
+/// WebKitGTK's runtime package. It depends on everything in [`GUI`], so it
+/// is the one package to name when any of them is missing: installing it
+/// alone made the release binary start on clean Ubuntu 24.04, Debian 12,
+/// Fedora 44 and Arch containers. Naming the library's own package instead
+/// would be wrong where it counts most: the loader stops at the first
+/// missing library, and on all four that is `libgdk-3.so.0`, not WebKit.
+const WEBKIT: Pkg = Pkg { apt: "libwebkit2gtk-4.1-0", dnf: "webkit2gtk4.1", pacman: "webkit2gtk-4.1" };
+
+/// The release binary's `NEEDED` libraries that come with [`WEBKIT`], and
 /// the two WebKitGTK itself needs most often.
-const LIBS: &[Lib] = &[
-    Lib { soname: WEBKIT, apt: "libwebkit2gtk-4.1-0", dnf: "webkit2gtk4.1", pacman: "webkit2gtk-4.1", with_webkit: false },
-    Lib { soname: "libjavascriptcoregtk-4.1.so.0", apt: "libjavascriptcoregtk-4.1-0", dnf: "javascriptcoregtk4.1", pacman: "webkit2gtk-4.1", with_webkit: true },
-    Lib { soname: "libsoup-3.0.so.0", apt: "libsoup-3.0-0", dnf: "libsoup3", pacman: "libsoup3", with_webkit: true },
-    Lib { soname: "libgtk-3.so.0", apt: "libgtk-3-0", dnf: "gtk3", pacman: "gtk3", with_webkit: true },
-    Lib { soname: "libgdk-3.so.0", apt: "libgtk-3-0", dnf: "gtk3", pacman: "gtk3", with_webkit: true },
-    Lib { soname: "libgdk_pixbuf-2.0.so.0", apt: "libgdk-pixbuf-2.0-0", dnf: "gdk-pixbuf2", pacman: "gdk-pixbuf2", with_webkit: true },
-    Lib { soname: "libglib-2.0.so.0", apt: "libglib2.0-0", dnf: "glib2", pacman: "glib2", with_webkit: true },
-    Lib { soname: "libgobject-2.0.so.0", apt: "libglib2.0-0", dnf: "glib2", pacman: "glib2", with_webkit: true },
-    Lib { soname: "libgio-2.0.so.0", apt: "libglib2.0-0", dnf: "glib2", pacman: "glib2", with_webkit: true },
-    Lib { soname: "libgcc_s.so.1", apt: "libgcc-s1", dnf: "libgcc", pacman: "gcc-libs", with_webkit: false },
+const GUI: &[&str] = &[
+    "libwebkit2gtk-4.1.so.0",
+    "libjavascriptcoregtk-4.1.so.0",
+    "libsoup-3.0.so.0",
+    "libgtk-3.so.0",
+    "libgdk-3.so.0",
+    "libgdk_pixbuf-2.0.so.0",
+    "libglib-2.0.so.0",
+    "libgobject-2.0.so.0",
+    "libgio-2.0.so.0",
 ];
+
+/// The rest of `NEEDED` beyond glibc, each with its own package.
+const OTHER: &[(&str, Pkg)] = &[("libgcc_s.so.1", Pkg { apt: "libgcc-s1", dnf: "libgcc", pacman: "gcc-libs" })];
 
 /// The library a line of `ldd` or of the loader names as missing.
 ///
@@ -125,19 +140,13 @@ pub struct Libs {
 
 impl Libs {
     pub fn new(missing: Vec<String>, pm: Option<Pm>) -> Libs {
-        let known: Vec<&Lib> = missing.iter().filter_map(|m| LIBS.iter().find(|l| l.soname == m)).collect();
-        let webkit = known.iter().any(|l| l.soname == WEBKIT);
         let mut packages: Vec<&str> = Vec::new();
         if let Some(pm) = pm {
-            for lib in known.iter().filter(|l| !(webkit && l.with_webkit)) {
-                let name = match pm {
-                    Pm::Apt => lib.apt,
-                    Pm::Dnf => lib.dnf,
-                    Pm::Pacman => lib.pacman,
-                };
-                if !packages.contains(&name) {
-                    packages.push(name);
-                }
+            if missing.iter().any(|m| GUI.contains(&m.as_str())) {
+                packages.push(WEBKIT.name(pm));
+            }
+            for (_, pkg) in OTHER.iter().filter(|(soname, _)| missing.iter().any(|m| m == soname)) {
+                packages.push(pkg.name(pm));
             }
         }
         let command = match pm {
@@ -222,15 +231,56 @@ mod tests {
     }
 
     #[test]
-    fn without_webkit_missing_each_library_names_its_own_package() {
-        let l = Libs::new(vec!["libgtk-3.so.0".into(), "libgdk-3.so.0".into(), "libglib-2.0.so.0".into()], Some(Pm::Apt));
-        assert_eq!(l.packages, ["libgtk-3-0", "libglib2.0-0"], "gtk and gdk are one package");
-        assert_eq!(l.command.as_deref(), Some("sudo apt install -y libgtk-3-0 libglib2.0-0"));
+    fn any_gui_library_names_the_webkit_package() {
+        // Only the loader's line to go on (no ldd): it names GDK, and GTK
+        // alone would still leave WebKit missing.
+        let l = Libs::new(vec!["libgdk-3.so.0".into()], Some(Pm::Apt));
+        assert_eq!(l.packages, ["libwebkit2gtk-4.1-0"]);
+        let l = Libs::new(vec!["libglib-2.0.so.0".into(), "libgcc_s.so.1".into()], Some(Pm::Dnf));
+        assert_eq!(l.command.as_deref(), Some("sudo dnf install -y webkit2gtk4.1 libgcc"));
+    }
+
+    /// What clean containers printed for the release binary of 2026-10-20,
+    /// as `ldd ./divixi-server` and `./divixi-server help`. Debian 12 printed
+    /// the Ubuntu lines; Arch printed the Fedora ones.
+    const UBUNTU_24_04_LDD: &str = "	libgdk-3.so.0 => not found
+	libgdk_pixbuf-2.0.so.0 => not found
+	libgobject-2.0.so.0 => not found
+	libglib-2.0.so.0 => not found
+	libwebkit2gtk-4.1.so.0 => not found
+	libgtk-3.so.0 => not found
+	libgio-2.0.so.0 => not found
+";
+    const FEDORA_44_LDD: &str = "	libgdk-3.so.0 => not found
+	libgdk_pixbuf-2.0.so.0 => not found
+	libwebkit2gtk-4.1.so.0 => not found
+	libgtk-3.so.0 => not found
+";
+    /// The same on all four.
+    const REAL_LOADER: &str = "./divixi-server: error while loading shared libraries: libgdk-3.so.0: cannot open shared object file: No such file or directory";
+
+    #[test]
+    fn real_container_output_names_the_libraries_and_the_command_that_fixed_it() {
+        let ubuntu = missing(UBUNTU_24_04_LDD.lines().chain([REAL_LOADER]));
+        assert_eq!(
+            ubuntu,
+            ["libgdk-3.so.0", "libgdk_pixbuf-2.0.so.0", "libgobject-2.0.so.0", "libglib-2.0.so.0", "libwebkit2gtk-4.1.so.0", "libgtk-3.so.0", "libgio-2.0.so.0"]
+        );
+        // The commands that made `./divixi-server help` print its usage there.
+        assert_eq!(Libs::new(ubuntu, Some(Pm::Apt)).command.as_deref(), Some("sudo apt install -y libwebkit2gtk-4.1-0"));
+        let fedora = missing(FEDORA_44_LDD.lines());
+        assert_eq!(fedora, ["libgdk-3.so.0", "libgdk_pixbuf-2.0.so.0", "libwebkit2gtk-4.1.so.0", "libgtk-3.so.0"]);
+        assert_eq!(Libs::new(fedora.clone(), Some(Pm::Dnf)).command.as_deref(), Some("sudo dnf install -y webkit2gtk4.1"));
+        assert_eq!(Libs::new(fedora, Some(Pm::Pacman)).command.as_deref(), Some("sudo pacman -S --needed webkit2gtk-4.1"));
+        // No ldd: the loader's one line still gets the whole fix.
+        let first = missing([REAL_LOADER]);
+        assert_eq!(first, ["libgdk-3.so.0"]);
+        assert_eq!(Libs::new(first, Some(Pm::Apt)).command.as_deref(), Some("sudo apt install -y libwebkit2gtk-4.1-0"));
     }
 
     #[test]
     fn an_unknown_manager_or_library_gives_no_command() {
-        let l = Libs::new(vec![WEBKIT.into()], None);
+        let l = Libs::new(vec!["libwebkit2gtk-4.1.so.0".into()], None);
         assert!(l.packages.is_empty());
         assert_eq!(l.command, None);
         assert!(l.message().contains("libwebkit2gtk-4.1.so.0 is missing"));
@@ -242,7 +292,7 @@ mod tests {
 
     #[test]
     fn the_message_carries_the_command() {
-        let l = Libs::new(vec![WEBKIT.into()], Some(Pm::Apt));
+        let l = Libs::new(vec!["libwebkit2gtk-4.1.so.0".into()], Some(Pm::Apt));
         assert_eq!(
             l.message(),
             "divixi-server cannot start on that machine: libwebkit2gtk-4.1.so.0 is missing. Run this there, then try again: sudo apt install -y libwebkit2gtk-4.1-0"
