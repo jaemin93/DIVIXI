@@ -1197,6 +1197,9 @@ const ko = {
   "srv.at.starting": "서버 시작",
   "srv.retry": "다시 시도",
   "srv.reconnect": "다시 연결",
+  "srv.libs": "그 머신에 라이브러리가 없어 divixi-server가 실행되지 않습니다: {libs}",
+  "srv.libsRun": "그 머신에서 아래 명령을 실행한 뒤 다시 확인하세요.",
+  "srv.libsDocs": "이 라이브러리가 든 패키지를 설치한 뒤 다시 확인하세요. 안내: docs/divixi-server.md",
 } as const;
 
 export type Key = keyof typeof ko;
@@ -2377,6 +2380,9 @@ const en: Record<Key, string> = {
   "srv.at.starting": "starting the server",
   "srv.retry": "Try again",
   "srv.reconnect": "Connect again",
+  "srv.libs": "divixi-server can't start there. Missing: {libs}",
+  "srv.libsRun": "Run this on that machine, then check again.",
+  "srv.libsDocs": "Install the package that has it, then check again. See docs/divixi-server.md",
 };
 
 const dicts: Record<Lang, Record<Key, string>> = { ko, en };

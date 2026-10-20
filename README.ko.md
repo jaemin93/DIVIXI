@@ -71,6 +71,9 @@ npx tauri build                                 # 설치 파일이 target/releas
 서버를 시작시킵니다. 휴대폰에서 Tailscale로 서버를 열려면 서버에서
 `divixi-server phone on`으로 켭니다.
 
+서버 바이너리는 화면이 없어도 그 머신에 WebKitGTK 런타임이 있어야 합니다. Debian·Ubuntu에서는
+`sudo apt install -y libwebkit2gtk-4.1-0`입니다. 없으면 앱이 알려 줍니다.
+
 빌드·설치·연결·상시 구동·업데이트는 **[docs/divixi-server.ko.md](docs/divixi-server.ko.md)**
 를 보세요.
 

@@ -72,6 +72,10 @@ an SSH tunnel, or at an address with your GitHub account. It starts the server o
 when it is not running. To open a server from a phone over Tailscale, turn that on at the
 server with `divixi-server phone on`.
 
+The server binary needs the WebKitGTK runtime on that machine, even with no display:
+`sudo apt install -y libwebkit2gtk-4.1-0` on Debian or Ubuntu. The app tells you when it is
+missing.
+
 See **[docs/divixi-server.md](docs/divixi-server.md)** to build, install, connect, keep it
 running, and update it.
 

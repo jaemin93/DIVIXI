@@ -16,6 +16,11 @@
 //! to follow the manual steps instead ([`Check::Unsupported`]). `uname -sm`
 //! on the remote decides, never a guess from the host name.
 //!
+//! The binary does link WebKitGTK and GTK 3, which a headless machine
+//! often lacks. Installing those needs root, so the app finds out which are
+//! missing and names the command ([`super::libs`], [`Check::Libraries`]),
+//! and checks a download before it stops the server it would replace.
+//!
 //! ## Which release
 //!
 //! The one *this app* is, when it is a release build. That is deliberate: a
@@ -65,6 +70,7 @@ use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
 use super::client::{self, Host};
+use super::libs::{self, Libs, Pm};
 use crate::AppHandle;
 
 /// The one platform the release publishes a server binary for.
@@ -272,12 +278,22 @@ pub struct Probe {
     pub systemd: Option<String>,
     /// Free bytes under the home folder, when `df` said.
     pub free: Option<u64>,
+    /// Shared libraries the divixi-server there links and that machine does
+    /// not have (see [`super::libs`]). Empty when there is no binary to ask.
+    pub missing: Vec<String>,
+    /// Its package manager, to name the packages for those.
+    pub pm: Option<Pm>,
 }
 
 impl Probe {
     /// x86_64 Linux: the only platform with a published binary.
     pub fn supported(&self) -> bool {
         self.os == OS && ARCH.contains(&self.arch.as_str())
+    }
+
+    /// The libraries the binary there cannot start without, if any.
+    pub fn libs(&self) -> Option<Libs> {
+        (!self.missing.is_empty()).then(|| Libs::new(self.missing.clone(), self.pm))
     }
 
     /// How the server is launched there.
@@ -293,6 +309,7 @@ impl Probe {
 /// locale or by a tool's own wording.
 fn probe_script(bin: &str) -> String {
     let bin = shell_path(bin);
+    let libs = libs::script("\"$b\"");
     format!(
         r#"printf 'home=%s\n' "$HOME"
 printf 'os=%s\n' "$(uname -s 2>/dev/null)"
@@ -308,6 +325,10 @@ if command -v systemctl >/dev/null 2>&1; then
   fi
 fi
 printf 'free=%s\n' "$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {{print $4}}')"
+for m in apt-get dnf yum pacman; do if command -v $m >/dev/null 2>&1; then printf 'pm=%s\n' "$m"; break; fi; done
+b=; if [ -x {bin} ]; then b={bin}; elif [ -x {STORE}/'current'/'divixi-server' ]; then b={STORE}/'current'/'divixi-server'; fi
+if [ -n "$b" ]; then
+{libs}fi
 "#
     )
 }
@@ -363,6 +384,14 @@ pub fn parse_probe(out: &str) -> Probe {
                 p.systemd = (!path.is_empty()).then_some(path);
             }
             "free" => p.free = value.parse::<u64>().ok().map(|kb| kb.saturating_mul(1024)),
+            "pm" => p.pm = Pm::parse(value),
+            "lib" => {
+                for name in libs::missing([value]) {
+                    if !p.missing.contains(&name) {
+                        p.missing.push(name);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -417,6 +446,10 @@ pub enum Check {
     /// Not an SSH host: an instance reached at an address has no shell for
     /// the app to run anything in.
     NoShell,
+    /// The divixi-server there cannot start: the machine lacks shared
+    /// libraries it links. Installing them needs root, so the app names the
+    /// command instead of running it.
+    Libraries(Libs),
 }
 
 /// What the connected instance's `/api/health` said, when it is connected.
@@ -437,6 +470,11 @@ pub struct Seen {
 pub fn check(probe: &Probe, seen: Option<&Seen>, target: &Result<(Asset, Kind), String>, app_build: &str) -> Check {
     if !probe.supported() {
         return Check::Unsupported { os: probe.os.clone(), arch: probe.arch.clone() };
+    }
+    // Before anything about releases: no release starts there until these
+    // are installed, so updating is not the fix.
+    if let Some(libs) = probe.libs() {
+        return Check::Libraries(libs);
     }
     if let Some(exec_start) = &probe.systemd {
         // The pointer is what the app can move; a unit naming anything else
@@ -519,6 +557,9 @@ pub struct Progress {
     /// What went wrong, in the remote's own words, with `phase` saying
     /// where. Never flattened into "the install failed".
     pub error: Option<String>,
+    /// When it failed because the binary cannot start there: which shared
+    /// libraries are missing and the command that installs them.
+    pub libs: Option<Libs>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -587,10 +628,15 @@ impl Say<'_> {
             route,
             release: (!self.release.is_empty()).then(|| self.release.clone()),
             error: None,
+            libs: None,
         });
     }
 
     fn failed(&self, at: Phase, error: String) {
+        self.failed_with(at, error, None);
+    }
+
+    fn failed_with(&self, at: Phase, error: String, libs: Option<Libs>) {
         self.emit(Progress {
             host: self.host.clone(),
             phase: Phase::Failed,
@@ -600,6 +646,7 @@ impl Say<'_> {
             route: None,
             release: (!self.release.is_empty()).then(|| self.release.clone()),
             error: Some(error),
+            libs,
         });
     }
 
@@ -774,6 +821,36 @@ done
 printf '#done\n'
 "#
     )
+}
+
+/// Whether the downloaded binary can start there, before anything running
+/// is stopped for it.
+///
+/// Every release links the same libraries, so a machine missing them would
+/// be left with its server stopped and a new one that cannot start. When
+/// something is missing the verified download is kept in its release's
+/// folder ([`keep_script`]; the pointer is not touched), so the install
+/// after the packages are in does not fetch 207 MB again.
+fn libs_script(release: &str) -> String {
+    let (_, bin, part) = paths(release);
+    let libs = libs::script("\"$f\"");
+    format!(
+        r#"f={part}; [ -f "$f" ] || f={bin}
+chmod 755 "$f" 2>/dev/null
+{libs}"#
+    )
+}
+
+/// Keep a verified download that cannot start yet. See [`libs_script`].
+fn keep_script(release: &str) -> String {
+    let (_, bin, part) = paths(release);
+    format!("if [ -f {part} ]; then mv -f {part} {bin}; fi\n")
+}
+
+/// The libraries a [`libs_script`] run names as missing.
+fn read_libs(out: &str, pm: Option<Pm>) -> Option<Libs> {
+    let missing = libs::missing(out.lines().filter_map(|l| l.strip_prefix("lib=")));
+    (!missing.is_empty()).then(|| Libs::new(missing, pm))
 }
 
 /// Take the half-downloaded file away. Run after a cancel and after any
@@ -1099,6 +1176,17 @@ async fn install_inner(app: &AppHandle, host: &Host, cancel: &AtomicBool) -> Res
         return Err(stop_here(host, &asset, &say, Phase::Cancelled, String::new(), cancel).await);
     }
 
+    // Whether it can start there at all, while the old one is still up.
+    if let Ok(out) = run(host, &libs_script(&asset.release)).await {
+        if let Some(libs) = read_libs(&out, probe.pm) {
+            let _ = run(host, &keep_script(&asset.release)).await;
+            let e = libs.message();
+            tracing::warn!(host = %host.ssh, missing = ?libs.missing, "divixi-server cannot start there: shared libraries missing");
+            say.failed_with(Phase::Installing, e.clone(), Some(libs));
+            return Err(e);
+        }
+    }
+
     say.at(Phase::Installing, asset.size, None);
     let out = match run(host, &install_script(&asset.release, &launch, &host.path)).await {
         Ok(o) => o,
@@ -1198,6 +1286,9 @@ pub async fn remote_server_start(app: AppHandle, id: String) -> Result<(), Strin
     if probe.running {
         return Ok(());
     }
+    if let Some(libs) = probe.libs() {
+        return Err(libs.message());
+    }
     // The pointer where the app installed one, the host's own path where it
     // did not (a server built from source there).
     let bin = match probe.installed.is_some() {
@@ -1271,6 +1362,8 @@ mod tests {
             push_script("v2026-09-30"),
             digest_script("v2026-09-30", true, Hasher::Sha256sum),
             install_script("v2026-09-30", &Launch::Setsid, ""),
+            libs_script("v2026-09-30"),
+            keep_script("v2026-09-30"),
             start_script(&Launch::Setsid, "", &shell_path("~/.local/bin/divixi-server")),
             cleanup_script("v2026-09-30"),
         ];
@@ -1314,6 +1407,34 @@ mod tests {
     }
 
     #[test]
+    fn the_probe_reads_missing_libraries_and_the_package_manager() {
+        let p = parse_probe(concat!(
+            "os=Linux\narch=x86_64\nbin=yes\npm=apt-get\n",
+            "lib=\tlibgdk-3.so.0 => not found\n",
+            "lib=\tlibwebkit2gtk-4.1.so.0 => not found\n",
+            "lib=/home/my user/.local/bin/divixi-server: error while loading shared libraries: libgdk-3.so.0: cannot open shared object file: No such file or directory\n",
+        ));
+        assert_eq!(p.pm, Some(Pm::Apt));
+        assert_eq!(p.missing, ["libgdk-3.so.0", "libwebkit2gtk-4.1.so.0"]);
+        let libs = p.libs().expect("missing libraries");
+        assert_eq!(libs.command.as_deref(), Some("sudo apt install -y libwebkit2gtk-4.1-0"));
+        // Nothing missing: nothing to say.
+        assert_eq!(parse_probe("os=Linux\narch=x86_64\nbin=yes\npm=dnf\n").libs(), None);
+    }
+
+    #[test]
+    fn the_install_reads_what_its_library_check_printed() {
+        let out = "lib=\tlibwebkit2gtk-4.1.so.0 => not found\nlib=\tlibgtk-3.so.0 => not found\nsomething else\n";
+        let libs = read_libs(out, Some(Pm::Pacman)).expect("missing");
+        assert_eq!(libs.missing, ["libwebkit2gtk-4.1.so.0", "libgtk-3.so.0"]);
+        assert_eq!(libs.command.as_deref(), Some("sudo pacman -S --needed webkit2gtk-4.1"));
+        assert_eq!(read_libs("", Some(Pm::Apt)), None);
+        // The file it checks is the download or, already there, the binary.
+        let s = libs_script("v2026-09-30");
+        assert!(s.contains("'divixi-server.part'") && s.contains("ldd \"$f\""));
+    }
+
+    #[test]
     fn a_home_folder_with_a_space_comes_back_whole() {
         let p = parse_probe("home=/home/my user\nos=Linux\narch=x86_64\n");
         assert_eq!(p.home, "/home/my user");
@@ -1345,6 +1466,29 @@ mod tests {
 
     fn found() -> Result<(Asset, Kind), String> {
         Ok((asset(), Kind::App))
+    }
+
+    #[test]
+    fn a_binary_that_cannot_start_is_said_before_its_release() {
+        let p = Probe { bin: true, installed: Some("v2026-09-28".into()), missing: vec!["libwebkit2gtk-4.1.so.0".into()], pm: Some(Pm::Apt), ..linux() };
+        match check(&p, None, &found(), "abc") {
+            Check::Libraries(l) => assert_eq!(l.command.as_deref(), Some("sudo apt install -y libwebkit2gtk-4.1-0")),
+            other => panic!("{other:?}"),
+        }
+        // The platform still comes first.
+        let arm = Probe { arch: "aarch64".into(), ..p };
+        assert!(matches!(check(&arm, None, &found(), "abc"), Check::Unsupported { .. }));
+    }
+
+    #[test]
+    fn the_page_gets_the_libraries_and_the_command_as_fields() {
+        let libs = Libs::new(vec!["libwebkit2gtk-4.1.so.0".into()], Some(Pm::Apt));
+        let view = CheckView { check: Check::Libraries(libs), muted: false, launch: None };
+        let v = serde_json::to_value(&view).unwrap();
+        assert_eq!(v["kind"], "libraries");
+        assert_eq!(v["missing"], serde_json::json!(["libwebkit2gtk-4.1.so.0"]));
+        assert_eq!(v["command"], "sudo apt install -y libwebkit2gtk-4.1-0");
+        assert_eq!(v["muted"], false);
     }
 
     #[test]

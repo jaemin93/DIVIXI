@@ -233,6 +233,16 @@ export type ServerInstall = {
   route: "remote" | "ssh" | null;
   release: string | null;
   error: string | null;
+  /** Set when it failed because divixi-server cannot start there. */
+  libs?: MissingLibs | null;
+};
+
+/** Shared libraries divixi-server needs and that machine lacks (src-tauri/src/remote/libs.rs). */
+export type MissingLibs = {
+  missing: string[];
+  packages: string[];
+  /** The line to run there; null when the package manager is not known. */
+  command: string | null;
 };
 
 /** Why the chosen instance could not be reached, if it could not. */

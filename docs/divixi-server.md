@@ -26,6 +26,10 @@ install system packages, so do this once there:
 sudo apt install -y libwebkit2gtk-4.1-0
 ```
 
+If it is missing, the app says so: the instance's card names the missing
+libraries and shows the command for that machine (apt, dnf or pacman). It never
+runs `sudo` itself. Run the command there, then press **Check the remote**.
+
 In the app, the instance's card in **Settings › Remote instances** says what it
 found on that machine, and so does the page shown when an instance could not be
 reached. It asks before it writes anything — the binary is about 207 MB — and an
@@ -63,15 +67,22 @@ only way to make its build match an app you built yourself).
 **System packages (for building).** Building the server compiles Tauri too, so Tauri's Linux build
 packages are needed. No display (X, Wayland) is required. At run time the executable links GTK 3
 and WebKitGTK; the build packages below bring both, so a machine that builds it can run it. A
-machine that only runs a binary built elsewhere needs the runtime package, which brings GTK 3,
-JavaScriptCore and libsoup with it:
+machine that only runs a binary built elsewhere (such as the release binary the app installs) needs
+the runtime package, which brings GTK 3, GDK-Pixbuf, GLib, JavaScriptCore and libsoup with it:
 
 ```bash
+# Debian, Ubuntu
 sudo apt install -y libwebkit2gtk-4.1-0
+# Fedora
+sudo dnf install -y webkit2gtk4.1
+# Arch
+sudo pacman -S --needed webkit2gtk-4.1
 ```
 
-Without it the server stops at once with `error while loading shared libraries:
-libwebkit2gtk-4.1.so.0`.
+The release binary links `libwebkit2gtk-4.1.so.0`, `libgtk-3.so.0`, `libgdk-3.so.0`,
+`libgdk_pixbuf-2.0.so.0` and GLib (`libglib-2.0.so.0`, `libgobject-2.0.so.0`, `libgio-2.0.so.0`),
+and needs glibc 2.34 or later. Nothing of it draws a window; the loader still wants it. Without it
+the server stops at once with `error while loading shared libraries: libwebkit2gtk-4.1.so.0`.
 
 ```bash
 sudo apt update
@@ -328,6 +339,7 @@ from that commit.
 | `divixi-server token gave no link` | That the path is right (`~/.local/bin/divixi-server`) and that it is executable |
 | `did not answer through the tunnel` | Usually the server is not running: press **Start it** on that instance's card. If it will not come up, run `~/.local/bin/divixi-server serve` yourself (you will see the log) |
 | The server will not stay up after **Start it** or an install | Run the binary by hand to see why: `~/.divixi/server/current/divixi-server help` (or your own path). `error while loading shared libraries: libwebkit2gtk-4.1.so.0` means the WebKitGTK runtime is missing: `sudo apt install -y libwebkit2gtk-4.1-0` (section 1) |
+| "divixi-server can't start there. Missing: …" | The libraries named are not on that machine. Run the command shown there, then check again (section 1) |
 | An agent shows as "not installed" | PATH on the server. Add the CLI and node directories to "Remote PATH" in the instance settings, or to `Environment=PATH` in the systemd unit |
 | A direct address says "no owner yet" | Run `divixi-server owner <github login>` on the server |
 | `divixi-server phone on` prints a `sudo … tailscale serve …` line | Changing serve needs root here: run that line, then `phone on` again (section 4C) |

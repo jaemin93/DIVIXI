@@ -22,6 +22,9 @@ Ubuntu에는 없고 앱은 시스템 패키지를 설치하지 않으니, 그 �
 sudo apt install -y libwebkit2gtk-4.1-0
 ```
 
+빠져 있으면 앱이 알려 줍니다. 인스턴스 카드에 없는 라이브러리와 그 머신에 맞는 명령(apt, dnf, pacman)이
+나옵니다. 앱이 직접 `sudo`를 실행하지는 않습니다. 그 명령을 그 머신에서 실행한 뒤 **원격 서버 확인**을 누르세요.
+
 앱의 **설정 › 원격 인스턴스**에 있는 인스턴스 카드가 그 머신에서 무엇을 찾았는지 알려 주고,
 인스턴스에 연결하지 못했을 때 나오는 화면도 같은 것을 보여 줍니다. 무엇을 쓰기 전에 먼저 묻습니다 —
 바이너리가 약 207MB입니다 — 그리고 업데이트는 인스턴스별로 "다음부터 묻지 않기"를 둘 수 있습니다.
@@ -54,13 +57,21 @@ sudo apt install -y libwebkit2gtk-4.1-0
 **시스템 패키지(빌드용).** 서버 빌드도 Tauri를 컴파일하므로 Tauri의 Linux 빌드 패키지가 필요합니다. 화면(X,
 Wayland)은 필요 없습니다. 실행 파일은 실행할 때 GTK 3와 WebKitGTK를 씁니다. 아래 빌드 패키지가 둘 다 깔아
 주므로 빌드한 머신에서는 그대로 돌아갑니다. 다른 곳에서 빌드한 바이너리만 돌리는 머신에는 런타임 패키지가
-필요하고, GTK 3·JavaScriptCore·libsoup도 함께 설치됩니다:
+필요하고(앱이 설치하는 릴리즈 바이너리도 여기에 해당), GTK 3·GDK-Pixbuf·GLib·JavaScriptCore·libsoup도 함께 설치됩니다:
 
 ```bash
+# Debian, Ubuntu
 sudo apt install -y libwebkit2gtk-4.1-0
+# Fedora
+sudo dnf install -y webkit2gtk4.1
+# Arch
+sudo pacman -S --needed webkit2gtk-4.1
 ```
 
-없으면 서버가 `error while loading shared libraries: libwebkit2gtk-4.1.so.0`를 내고 바로 멈춥니다.
+릴리즈 바이너리는 `libwebkit2gtk-4.1.so.0`, `libgtk-3.so.0`, `libgdk-3.so.0`, `libgdk_pixbuf-2.0.so.0`,
+GLib(`libglib-2.0.so.0`, `libgobject-2.0.so.0`, `libgio-2.0.so.0`)에 링크되어 있고, glibc 2.34 이상이 필요합니다.
+창을 그리지는 않지만 로더는 이것들을 찾습니다. 없으면 서버가 `error while loading shared libraries: libwebkit2gtk-4.1.so.0`를
+내고 바로 멈춥니다.
 
 ```bash
 sudo apt update
@@ -298,6 +309,7 @@ Rust 코드 기준이라, 화면만 바뀐 앱 업데이트에서는 뜨지 않�
 | `divixi-server token gave no link` | 경로가 맞는지(`~/.local/bin/divixi-server`), 실행 권한이 있는지 |
 | `did not answer through the tunnel` | 대개 서버가 꺼져 있습니다. 그 인스턴스 카드의 **서버 시작**을 누르세요. 그래도 안 뜨면 직접 돌려 보기: `~/.local/bin/divixi-server serve` (로그가 보임) |
 | **서버 시작**이나 설치 뒤에도 서버가 떠 있지 않음 | 바이너리를 직접 돌려 이유 보기: `~/.divixi/server/current/divixi-server help` (또는 직접 설치한 경로). `error while loading shared libraries: libwebkit2gtk-4.1.so.0`이면 WebKitGTK 런타임이 없는 것: `sudo apt install -y libwebkit2gtk-4.1-0` (1절) |
+| "그 머신에 라이브러리가 없어 divixi-server가 실행되지 않습니다: …" | 나열된 라이브러리가 그 머신에 없습니다. 화면에 나온 명령을 그 머신에서 실행한 뒤 다시 확인하세요(1절) |
 | 에이전트가 "설치 안 됨" | 서버 쪽 PATH. 인스턴스 설정의 "원격 PATH"나 systemd의 `Environment=PATH`에 CLI·node 경로 추가 |
 | 직접 주소가 "no owner yet" | 서버에서 `divixi-server owner <GitHub 아이디>` |
 | `divixi-server phone on`이 `sudo … tailscale serve …` 줄을 출력함 | 이 기기에서는 serve를 바꾸는 데 root가 필요함: 그 줄을 실행하고 `phone on`을 다시 (4C절) |
