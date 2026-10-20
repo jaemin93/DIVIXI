@@ -76,6 +76,10 @@ const WEBKIT: Pkg = Pkg { apt: "libwebkit2gtk-4.1-0", dnf: "webkit2gtk4.1", pacm
 
 /// The release binary's `NEEDED` libraries that come with [`WEBKIT`], and
 /// the two WebKitGTK itself needs most often.
+///
+/// CI fails when the binary links a library that neither this list nor
+/// [`OTHER`] names (scripts/check-server-libs.sh, which reads both from
+/// this file: keep each a `const` whose sonames are quoted strings).
 const GUI: &[&str] = &[
     "libwebkit2gtk-4.1.so.0",
     "libjavascriptcoregtk-4.1.so.0",

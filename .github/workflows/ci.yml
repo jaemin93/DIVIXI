@@ -148,6 +148,15 @@ jobs:
         shell: bash
         run: scripts/check-server-ui.sh target/debug/divixi-server 7489
 
+      # When the server will not start on a machine, the app names the
+      # package for each missing library from the lists in
+      # src-tauri/src/remote/libs.rs. A library the binary links that those
+      # lists do not name would get no package.
+      - name: libs.rs names every library divixi-server links
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/check-server-libs.sh target/debug/divixi-server
+
       # Divixi starts a remote instance over SSH with `setsid`, which exists on
       # Linux and not on macOS (remote_line() in src-tauri/src/remote/client.rs).
       # This step records that difference per platform rather than asserting it,

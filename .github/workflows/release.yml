@@ -648,6 +648,12 @@ jobs:
       - name: divixi-server serves its embedded UI
         run: scripts/check-server-ui.sh target/release/divixi-server
 
+      # The app names a package for each library the server lacks, from the
+      # lists in src-tauri/src/remote/libs.rs: they must cover what this
+      # binary links.
+      - name: libs.rs names every library divixi-server links
+        run: scripts/check-server-libs.sh target/release/divixi-server
+
       - name: Stage the binary
         run: |
           mkdir -p staging
