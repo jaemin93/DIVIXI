@@ -13,6 +13,7 @@
   import { REVEAL_DECISION } from "./history";
   import { createPager } from "./pager.svelte";
   import { lineOf, message } from "./scheduleList";
+  import { jobLine } from "./jobList";
 
   // ----- sticking to the bottom -----
   //
@@ -451,7 +452,9 @@
            and the background jobs being watched. The record's, read back
            on each change. A schedule is one line, its instruction cut to
            its first; [Show] opens it in the schedules popover, which is
-           where it is cancelled. One that just ended stays, saying so. -->
+           where it is cancelled. One that just ended stays, saying so. A
+           running or stalled job is one line too, and the popover is where
+           it stops being watched; one that ended leaves. -->
       {#if store.chatSchedules.length || store.chatJobs.length}
         <div class="watched">
           {#each store.chatSchedules as s (`s${s.id}`)}
@@ -482,11 +485,19 @@ ${s.note}` : message(s)}>
             </div>
           {/each}
           {#each store.chatJobs as j (`j${j.id}`)}
-            <div class="sys mono pline">
-              <span class="dot" class:pulse={j.status === "running"} aria-hidden="true"></span>
-              <span title={t("timeline.jobNote")}>{t("timeline.job")} · {j.line}</span>
-              <span class="grow"></span>
-              <button class="psend mono" type="button" onclick={() => store.unwatchJob(j.id)} title={t("timeline.unwatchJob")}>{t("timeline.unwatchJob")}</button>
+            {@const l = jobLine(j)}
+            <div class="sys mono pline sline" id="job-{j.id}">
+              <span class="dot" class:pulse={l.state === "running"} aria-hidden="true" title={t("timeline.jobNote")}></span>
+              <span class="stext" title={j.line}>{t("timeline.job")} · #{j.id} {j.worker || t("jobs.conductor")} · <span class="jstate {l.state}">{tr(`jobs.${l.state}`)}</span> · {l.text}</span>
+              <button
+                class="psend mono"
+                type="button"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  store.showJob(j.id);
+                }}
+                title={t("timeline.showJobTitle")}>{t("timeline.showSchedule")}</button
+              >
             </div>
           {/each}
         </div>
@@ -686,6 +697,15 @@ ${s.note}` : message(s)}>
   }
 
   .smark.warn {
+    color: var(--warn);
+  }
+
+  /* A job's state on its line, in the popover's colours. */
+  .jstate.running {
+    color: var(--oktx);
+  }
+
+  .jstate.stalled {
     color: var(--warn);
   }
 

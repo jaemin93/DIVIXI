@@ -2000,8 +2000,8 @@ class Store {
    * instead of vanishing. Not kept: a reload starts from the active ones.
    */
   schedulesEnded = $state<number[]>([]);
-  /** A schedule the popover is asked to show, expanded (`showSchedule`); `at` makes asking twice count. */
-  scheduleFocus = $state<{ id: number; at: number } | null>(null);
+  /** A schedule or a job the popover is asked to show, expanded (`showSchedule`, `showJob`); `at` makes asking twice count. */
+  watchFocus = $state<{ kind: "schedule" | "job"; id: number; at: number } | null>(null);
 
   /** The conversation's schedule lines: the active ones, soonest first, then the ones just over. */
   get chatSchedules(): Watched[] {
@@ -2010,7 +2010,12 @@ class Store {
 
   /** Open the schedules popover on one schedule (the conversation line's [Show]). */
   showSchedule(id: number) {
-    this.scheduleFocus = { id, at: Date.now() };
+    this.watchFocus = { kind: "schedule", id, at: Date.now() };
+  }
+
+  /** Open the schedules popover on one job (the conversation line's [Show]). */
+  showJob(id: number) {
+    this.watchFocus = { kind: "job", id, at: Date.now() };
   }
 
   get chatJobs(): Watched[] {

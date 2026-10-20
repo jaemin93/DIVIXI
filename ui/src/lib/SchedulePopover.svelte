@@ -19,8 +19,9 @@
    *
    * A row brings its line in the conversation on screen, and that line's
    * [Show] opens this on its row, expanded (`store.showSchedule`). Cancel
-   * is here only. A job's row opens the worker that registered it; it is
-   * stopped being watched here or on its line in the conversation.
+   * is here only. Jobs the same way (`store.showJob`), and they are stopped
+   * being watched here only. A running job's row brings its line on screen;
+   * one that ended, or another track's, opens the worker that registered it.
    */
   let open = $state(false);
   let expanded = $state<number[]>([]);
@@ -66,12 +67,21 @@
     jobsExpanded = jobsExpanded.includes(id) ? jobsExpanded.filter((x) => x !== id) : [...jobsExpanded, id];
   }
 
-  /** Whether a job's row leads anywhere: to the worker that registered it, or to the track of a conductor's own on another track. */
+  /** A job of this track that the conversation has a line for: only open ones have one. */
+  function hasLine(j: Watched): boolean {
+    return isOpen(j) && j.track === store.track;
+  }
+
+  /** Whether a job's row leads anywhere: to its line, to the worker that registered it, or to the track of a conductor's own on another track. */
   function jobGoes(j: Watched): boolean {
-    return !!j.worker || j.track !== store.track;
+    return hasLine(j) || !!j.worker || j.track !== store.track;
   }
 
   async function openJob(j: Watched) {
+    if (hasLine(j)) {
+      reveal(`job-${j.id}`);
+      return;
+    }
     open = false;
     if (j.track !== store.track) await store.selectTrack(j.track);
     if (j.worker) store.openWorkerView(j.worker);
@@ -80,9 +90,9 @@
   /** A time as a row shows it: `21:40` today, else `10-19 21:40`. */
   const at = (ms: number) => nextLabel(ms, store.now, tr);
 
-  /** The schedule's line in the conversation, on screen and lit for a moment. A track just opened draws its timeline over the next frames. */
-  function reveal(id: number, left = 20) {
-    const el = document.getElementById(`schedule-${id}`);
+  /** A line in the conversation (`schedule-8`, `job-3`), on screen and lit for a moment. A track just opened draws its timeline over the next frames. */
+  function reveal(id: string, left = 20) {
+    const el = document.getElementById(id);
     if (!el) {
       if (left > 0) setTimeout(() => reveal(id, left - 1), 100);
       return;
@@ -93,21 +103,23 @@
 
   // Asked from the conversation: opened on that row, expanded, in view.
   $effect(() => {
-    const focus = store.scheduleFocus;
+    const focus = store.watchFocus;
     if (!focus) return;
     untrack(() => {
-      if (!expanded.includes(focus.id)) expanded = [...expanded, focus.id];
+      if (focus.kind === "job") {
+        if (!jobsExpanded.includes(focus.id)) jobsExpanded = [...jobsExpanded, focus.id];
+      } else if (!expanded.includes(focus.id)) expanded = [...expanded, focus.id];
       if (!open) {
         open = true;
         void store.loadAllWatched();
       }
-      bringRow(focus.id);
+      bringRow(`${focus.kind}-row-${focus.id}`);
     });
   });
 
   /** A row scrolled to the middle of the panel and lit for a moment, once the panel has its height. */
-  function bringRow(id: number, left = 20) {
-    const row = document.getElementById(`schedule-row-${id}`);
+  function bringRow(id: string, left = 20) {
+    const row = document.getElementById(id);
     const panel = row?.closest<HTMLElement>("[role=dialog]");
     if (!row || !panel || !panel.style.maxHeight) {
       if (left > 0) setTimeout(() => bringRow(id, left - 1), 50);
@@ -119,11 +131,11 @@
 
   function go(s: Watched) {
     if (s.track === store.track) {
-      reveal(s.id);
+      reveal(`schedule-${s.id}`);
       return;
     }
     open = false;
-    void store.selectTrack(s.track).then(() => reveal(s.id));
+    void store.selectTrack(s.track).then(() => reveal(`schedule-${s.id}`));
   }
 </script>
 
@@ -175,7 +187,7 @@
   {@const goes = jobGoes(j)}
   {@const details = [j.what, j.pid ? `pid ${j.pid}` : "", j.log ? tr("jobs.log", { path: j.log }) : "", j.done_pattern ? tr("jobs.donePattern", { p: j.done_pattern }) : ""].filter(Boolean).join("\n")}
   <div class="row" id="job-row-{j.id}">
-    <button class="main" type="button" disabled={!goes} onclick={() => openJob(j)} title={goes ? (j.worker ? t("jobs.openWorker") : t("schedules.openTrack")) : undefined}>
+    <button class="main" type="button" disabled={!goes} onclick={() => openJob(j)} title={!goes ? undefined : hasLine(j) ? t("schedules.show") : j.worker ? t("jobs.openWorker") : t("schedules.openTrack")}>
       <span class="top mono">
         <span class="id">#{j.id}</span>
         <span class="who">{j.worker || t("jobs.conductor")}</span>

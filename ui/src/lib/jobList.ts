@@ -9,6 +9,8 @@
  * ended, and its log's last line.
  */
 
+import { firstLine } from "./scheduleList.ts";
+
 /** A job as `list_jobs` returns it. */
 export type JobRow = {
   id: number;
@@ -69,6 +71,14 @@ function base(path: string): string {
 /** What it watches, in one line: its own words, its pid, its log's file name. */
 export function watches(j: JobRow): string {
   return [j.what?.trim(), j.pid ? `pid ${j.pid}` : "", j.log ? base(j.log) : ""].filter(Boolean).join(" · ");
+}
+
+/**
+ * A job's line in the conversation: where it stands, and what it is in one
+ * line -- its own words' first line, else what it watches.
+ */
+export function jobLine(j: JobRow): { state: JobState; text: string } {
+  return { state: jobState(j), text: firstLine(j.what ?? "") || watches(j) };
 }
 
 /** The time a row shows: since when for an open job, when it ended for one that is over. */
