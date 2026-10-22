@@ -92,7 +92,7 @@ test("whole file names say the language when the extension does not", () => {
   assert.equal(languageForFile("GNUmakefile"), "makefile");
   assert.equal(languageForFile("CMakeLists.txt"), "cmake");
   assert.equal(languageForFile("Gemfile"), "ruby");
-  assert.equal(languageForFile("/home/me/.bashrc"), "bash");
+  assert.equal(languageForFile("dotfiles/.bashrc"), "bash");
 });
 
 test("files with no known language are plain", () => {
