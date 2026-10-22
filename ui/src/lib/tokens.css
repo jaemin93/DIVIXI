@@ -504,6 +504,7 @@ input::placeholder {
 .hljs-number,
 .hljs-literal,
 .hljs-regexp,
+.hljs-char,
 .hljs-link {
   color: var(--warn);
 }
@@ -513,11 +514,14 @@ input::placeholder {
 .hljs-name,
 .hljs-selector-id,
 .hljs-selector-class,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
 .hljs-function .hljs-title {
   color: var(--hi);
 }
 
 .hljs-variable,
+.hljs-template-variable,
 .hljs-params,
 .hljs-attribute,
 .hljs-property,

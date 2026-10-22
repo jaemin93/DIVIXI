@@ -5,7 +5,9 @@
   import Markdown from "./Markdown.svelte";
   import SplitHandle from "./SplitHandle.svelte";
   import CodeEditor from "./CodeEditor.svelte";
-  import { highlight, languageFor } from "./highlight";
+  import { highlight } from "./highlight";
+  import { languageForFile } from "./languages";
+  import { grammars } from "./grammars.svelte";
   import { t } from "./i18n.svelte";
   import { invoke, previewBase, saveAs, local } from "./ipc.svelte";
   import { untrack } from "svelte";
@@ -215,7 +217,7 @@
   }
 
   const diffHtml = $derived(store.diffPath ? highlight(store.diffs[store.diffPath] ?? "", "diff") : "");
-  const codeHtml = $derived(activeFile?.text !== undefined && activeFile.text !== null && !activeFile.editable ? highlight(activeFile.text, languageFor(activeFile.ext)) : "");
+  const codeHtml = $derived(activeFile?.text !== undefined && activeFile.text !== null && !activeFile.editable ? (void grammars.ready, highlight(activeFile.text, languageForFile(activeFile.name))) : "");
   const crumbs = $derived(store.activeFile ? store.activeFile.split("/") : []);
   const raw = $derived(!!store.rawMarkdown[store.activeFile]);
   /** Where the preview protocol serves a file of the current track. */
@@ -384,7 +386,7 @@
             <CodeEditor
               goto={store.gotoLine?.path === store.activeFile ? store.gotoLine : null}
               value={store.textOf(store.activeFile)}
-              language={languageFor(activeFile.ext)}
+              language={languageForFile(activeFile.name)}
               onchange={(text) => store.setDraft(store.activeFile, text)}
               onsave={() => store.saveFile(store.activeFile)}
             />

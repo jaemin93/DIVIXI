@@ -11,7 +11,8 @@
   import { Marked } from "marked";
   import { markedHighlight } from "marked-highlight";
   import DOMPurify from "dompurify";
-  import { hljs } from "./highlight";
+  import { colour } from "./highlight";
+  import { grammars } from "./grammars.svelte";
   import { store } from "./store.svelte";
 
   // A picture from the web cannot load here (the page allows none), and a
@@ -32,9 +33,10 @@
       langPrefix: "hljs language-",
       highlight(code, lang) {
         // Only a tagged fence is coloured: guessing the language runs every
-        // grammar over the block, again on each streamed chunk.
+        // grammar over the block, again on each streamed chunk. A grammar not
+        // loaded yet is sent for and the block re-renders when it arrives.
         // Returning the text unchanged tells marked-highlight to escape it itself.
-        return hljs.getLanguage(lang) ? hljs.highlight(code, { language: lang, ignoreIllegals: true }).value : code;
+        return colour(code, lang) ?? code;
       },
     }),
   );
@@ -87,7 +89,11 @@
     if (rel) void store.openFile(rel);
   }
 
-  const html = $derived(DOMPurify.sanitize(marked.parse(source, { async: false }) as string));
+  const html = $derived.by(() => {
+    // Read so a grammar arriving draws the blocks that waited for it.
+    void grammars.ready;
+    return DOMPurify.sanitize(marked.parse(source, { async: false }) as string);
+  });
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
