@@ -12,6 +12,9 @@
   import FolderPicker from "./FolderPicker.svelte";
   import { docTrouble, indexProgress } from "./indexProgress";
   import { tick } from "svelte";
+  import { highlight } from "./highlight";
+  import { languageForFile } from "./languages";
+  import { grammars } from "./grammars.svelte";
 
   /**
    * The knowledge library, after Kiro Crew's: the items agents can search
@@ -25,6 +28,14 @@
     { id: "graph", label: t("kb.tab.graph") },
     { id: "sources", label: t("kb.tab.sources") },
   ]);
+
+  /** An item cut from a source file is coloured as that file's language; prose stays plain. */
+  function codeOf(item: KItem, source: KSource | undefined): string | null {
+    const lang = languageForFile(source?.uri);
+    if (!lang || lang === "markdown") return null;
+    void grammars.ready;
+    return highlight(item.content, lang);
+  }
 
   let folded = $state<Record<string, boolean>>({});
   let open = $state<Record<number, boolean>>({});
@@ -246,7 +257,12 @@
                   <span class="mono cat">{item.category.replace(/_/g, " ")}</span>
                 </div>
                 {#if open[item.id]}
-                  <pre class="content">{item.content}</pre>
+                  {@const code = codeOf(item, g.source)}
+                  {#if code !== null}
+                    <pre class="content hljs">{@html code}</pre>
+                  {:else}
+                    <pre class="content">{item.content}</pre>
+                  {/if}
                 {:else}
                   <p class="summary">{preview(item)}</p>
                 {/if}

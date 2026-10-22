@@ -1,5 +1,6 @@
 <script lang="ts">
   import { highlight } from "./highlight";
+  import { grammars } from "./grammars.svelte";
 
   /**
    * A plain-text editor that looks like the file viewer: the highlighted
@@ -70,7 +71,7 @@
 
   /** Past this, colouring every keystroke costs more than it gives. */
   const PLAIN_OVER = 300_000;
-  const html = $derived(drawn.length > PLAIN_OVER ? highlight(drawn, null) : highlight(drawn, language));
+  const html = $derived(drawn.length > PLAIN_OVER ? highlight(drawn, null) : (void grammars.ready, highlight(drawn, language)));
 
   /** One indentation step as the file writes it: a tab, or its first indent's spaces. */
   const unit = $derived.by(() => {
