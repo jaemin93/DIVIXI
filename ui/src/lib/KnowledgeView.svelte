@@ -9,6 +9,7 @@
   import { t } from "./i18n.svelte";
   import PanelToggle from "./PanelToggle.svelte";
   import KnowledgeLibraries from "./KnowledgeLibraries.svelte";
+  import FolderPicker from "./FolderPicker.svelte";
   import { docTrouble, indexProgress } from "./indexProgress";
   import { tick } from "svelte";
 
@@ -353,6 +354,17 @@
     ontags={() => (store.tagDialog = menuSource.id)}
     oncolor={(color) => store.updateArtifact(menuSource.id, { color })}
     ondelete={() => kb.remove(menuSource.id)}
+  />
+{/if}
+
+{#if kb.remotePick}
+  <!-- A remote instance's (or a phone's) own files: the document is read there. -->
+  <FolderPicker
+    files
+    start={kb.pickStart}
+    formats={kb.formats}
+    onpickfiles={(paths) => kb.addPicked(paths)}
+    onclose={() => (kb.remotePick = false)}
   />
 {/if}
 

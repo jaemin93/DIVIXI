@@ -1,7 +1,11 @@
-import { invoke, listen, local, bring } from "./ipc.svelte";
+import { invoke, listen, local } from "./ipc.svelte";
 import { store, type ArtifactInfo } from "./store.svelte";
 import { t } from "./i18n.svelte";
 import { displayName, isNoLibrary, keepLibrary, parseLibrary, sourcesIn, type KLibrary } from "./libraries";
+import { folderOf } from "./remotePick";
+
+/** The instance's setting for where its file picker last added from. */
+const PICK_DIR = "knowledge.pick_dir";
 
 export type { KLibrary } from "./libraries";
 
@@ -105,6 +109,9 @@ class Knowledge {
   loaded = $state(false);
   /** The libraries column was asked to open its name box (no library yet); it clears this. */
   createAsked = $state(false);
+  /** The instance's own file picker is open (a remote instance or a phone); where it opens. */
+  remotePick = $state(false);
+  pickStart = $state("");
 
   /** The artifact listing a source. */
   artifactOf(id: string): ArtifactInfo | undefined {
@@ -378,13 +385,34 @@ class Knowledge {
       this.askCreate();
       return;
     }
+    // A document is read and indexed by the Divixi shown, so on a remote
+    // instance (or a phone) it is one of that machine's files, picked in the
+    // app's own picker (KnowledgeView), not a copy of this PC's.
+    if (!local) {
+      if (!this.formats.length) await this.loadFormats();
+      this.pickStart = (await invoke<string | null>("get_setting", { key: PICK_DIR }).catch(() => null)) ?? "";
+      this.remotePick = true;
+      return;
+    }
     let paths: string[] = [];
     try {
-      paths = await bring(await invoke<string[]>("pick_files", { start: local ? (store.currentTrack?.cwd ?? null) : null }));
+      paths = await invoke<string[]>("pick_files", { start: store.currentTrack?.cwd ?? null });
     } catch (err) {
       store.lastError = String(err);
       return;
     }
+    await this.addAll(paths);
+  }
+
+  /** What the instance's picker chose: added, and its folder kept for next time. */
+  async addPicked(paths: string[]) {
+    this.remotePick = false;
+    const dir = paths[0] ? folderOf(paths[0]) : "";
+    if (dir) void invoke("set_setting", { key: PICK_DIR, value: dir }).catch(() => {});
+    await this.addAll(paths);
+  }
+
+  private async addAll(paths: string[]) {
     const refused: string[] = [];
     for (const p of paths) {
       const why = await this.add(p);

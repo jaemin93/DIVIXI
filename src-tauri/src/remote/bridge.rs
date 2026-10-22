@@ -160,6 +160,9 @@ const OWNER_ALLOWED: &[&str] = &[
     // This machine's folders, for picking a track's (and making one).
     "browse_dirs",
     "make_dir",
+    // Its files too, for picking a document to add to the knowledge library
+    // (names, kinds and sizes only; src/browse.rs).
+    "browse_files",
     "design_extract_retry",
     "knowledge_add",
     "knowledge_sync",
@@ -298,6 +301,7 @@ mod tests {
             "update_track",
             "delete_track",
             "browse_dirs",
+            "browse_files",
             "make_dir",
             "term_open",
             "term_write",
