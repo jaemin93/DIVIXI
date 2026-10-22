@@ -3,18 +3,42 @@
   import { invoke } from "./ipc.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
+  import { canPick, extOf, joinPath, sizeLabel, toggle, type PickEntry } from "./remotePick";
 
   /**
    * Picking a folder on the remote instance being shown (the system picker
    * only knows this PC's): its folders, listed by the instance
    * (`browse_dirs`), walked down and up; the path can be typed too. A new
    * folder is made in the one shown (`make_dir`) and chosen.
+   *
+   * With `files`, it picks files instead (the knowledge library's "Add
+   * source"): the instance lists files too (`browse_files`), each row drawn
+   * as the files panel draws one, one or more chosen from any folder, and
+   * only those of a kind in `formats`. Hidden entries stay out until asked.
    */
-  let { start = "", onpick, onclose }: { start?: string; onpick: (path: string) => void; onclose: () => void } = $props();
+  let {
+    start = "",
+    files = false,
+    formats = [],
+    onpick = () => {},
+    onpickfiles = () => {},
+    onclose,
+  }: {
+    start?: string;
+    files?: boolean;
+    formats?: readonly string[];
+    onpick?: (path: string) => void;
+    onpickfiles?: (paths: string[]) => void;
+    onclose: () => void;
+  } = $props();
 
+  type Listing = { path: string; parent: string | null; home: string; entries: PickEntry[]; more: boolean };
   type Dirs = { path: string; parent: string | null; home: string; dirs: string[] };
 
-  let at = $state<Dirs | null>(null);
+  let at = $state<Listing | null>(null);
+  /** Files mode: what is chosen so far, full paths, from any folder. */
+  let chosen = $state<string[]>([]);
+  let hidden = $state(false);
   let typed = $state("");
   let error = $state("");
   let busy = $state(false);
@@ -48,7 +72,12 @@
     busy = true;
     error = "";
     try {
-      at = await invoke<Dirs>("browse_dirs", { path });
+      if (files) {
+        at = await invoke<Listing>("browse_files", { path, hidden });
+      } else {
+        const d = await invoke<Dirs>("browse_dirs", { path });
+        at = { ...d, entries: d.dirs.map((name) => ({ name, dir: true, size: 0 })), more: false };
+      }
       typed = at.path;
       return true;
     } catch (err) {
@@ -64,7 +93,10 @@
     if (!(await go(start || null)) && start) await go(null);
   });
 
-  const join = (base: string, name: string) => (base.endsWith("/") || base.endsWith("\\") ? base + name : `${base}${base.includes("\\") ? "\\" : "/"}${name}`);
+  function showHidden() {
+    hidden = !hidden;
+    if (at) void go(at.path);
+  }
 
   function onKey(e: KeyboardEvent) {
     if (e.key !== "Escape") return;
@@ -83,7 +115,7 @@
 <div class="backdrop" onclick={onBackdrop} role="presentation">
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="fp-title">
     <div class="head">
-      <span class="mlab" id="fp-title">{t("folder.title")}</span>
+      <span class="mlab" id="fp-title">{files ? t("pick.title") : t("folder.title")}</span>
       <span class="grow"></span>
       <button class="x" onclick={onclose} aria-label={t("remote.cancel")}><Icon name="close" size={12} /></button>
     </div>
@@ -110,28 +142,54 @@
         <button class="row" disabled={!at.parent || busy} onclick={() => at?.parent && go(at.parent)}>
           <span class="mono up">..</span>
         </button>
-        {#each at.dirs as d (d)}
-          <!-- One click, like the `..` row above. Asking for two here made
-               the two rows in one list behave differently, and a single click
-               looked like nothing happening: it only filled the path box, and
-               the way in was to reach for Go. Opening a folder also types it,
-               so "Choose this folder" then picks what is on screen. -->
-          <button class="row" disabled={busy} onclick={() => at && go(join(at.path, d))}>
-            <Icon name="folder" size={14} />
-            <span class="mono name">{d}</span>
-          </button>
+        {#each at.entries as e (e.name)}
+          {@const full = joinPath(at.path, e.name)}
+          {#if e.dir}
+            <!-- One click, like the `..` row above. Asking for two here made
+                 the two rows in one list behave differently, and a single click
+                 looked like nothing happening: it only filled the path box, and
+                 the way in was to reach for Go. Opening a folder also types it,
+                 so "Choose this folder" then picks what is on screen. -->
+            <button class="row" disabled={busy} onclick={() => go(full)}>
+              <Icon name="folder" size={14} />
+              <span class="mono name">{e.name}</span>
+            </button>
+          {:else}
+            {@const ok = canPick(e, formats)}
+            <button
+              class="row file"
+              class:on={chosen.includes(full)}
+              disabled={busy || !ok}
+              title={ok ? full : t("pick.unsupported")}
+              aria-pressed={chosen.includes(full)}
+              onclick={() => (chosen = toggle(chosen, full))}
+            >
+              <span class="mono ext">{extOf(e.name) || "·"}</span>
+              <span class="mono name">{e.name}</span>
+              <span class="mono size">{sizeLabel(e.size)}</span>
+            </button>
+          {/if}
         {:else}
-          <div class="empty">{t("folder.empty")}</div>
+          <div class="empty">{files ? t("pick.empty") : t("folder.empty")}</div>
         {/each}
+        {#if at.more}<div class="empty">{t("pick.more")}</div>{/if}
       {/if}
     </div>
     {#if error}<p class="err mono">{error}</p>{/if}
     <div class="foot">
       <button class="btn sm" disabled={busy || !at} onclick={() => at && go(at.home)}>{t("folder.home")}</button>
-      <button class="btn sm" disabled={busy || !at || naming !== null} onclick={() => (naming = "")}>{t("folder.new")}</button>
+      {#if files}
+        <button class="btn sm" class:on={hidden} aria-pressed={hidden} disabled={busy} onclick={showHidden}>{t("pick.hidden")}</button>
+      {:else}
+        <button class="btn sm" disabled={busy || !at || naming !== null} onclick={() => (naming = "")}>{t("folder.new")}</button>
+      {/if}
       <span class="grow"></span>
       <button class="btn" onclick={onclose}>{t("remote.cancel")}</button>
-      <button class="btn btn-acc" disabled={busy || !typed.trim()} onclick={() => onpick(typed.trim())}>{t("folder.pick")}</button>
+      {#if files}
+        <button class="btn btn-acc" disabled={busy || !chosen.length} onclick={() => onpickfiles(chosen)}>{chosen.length ? t("pick.add", { n: chosen.length }) : t("pick.addNone")}</button>
+      {:else}
+        <button class="btn btn-acc" disabled={busy || !typed.trim()} onclick={() => onpick(typed.trim())}>{t("folder.pick")}</button>
+      {/if}
     </div>
   </div>
 </div>
@@ -231,6 +289,50 @@
   .row:hover:not(:disabled) {
     color: var(--hi);
     background: var(--sel);
+  }
+
+  /* A file, as the files panel draws one: its kind, its name, its size. */
+  .row.file {
+    border-left: 2px solid transparent;
+  }
+
+  .row.file:disabled {
+    color: var(--lab);
+    opacity: 0.55;
+  }
+
+  .row.file.on {
+    color: var(--hi);
+    border-left-color: var(--acc);
+    background: var(--sel);
+  }
+
+  .ext {
+    width: 26px;
+    flex-shrink: 0;
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    color: var(--lab);
+    text-transform: uppercase;
+  }
+
+  .row .name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .size {
+    flex-shrink: 0;
+    font-size: 10.5px;
+    color: var(--lab);
+  }
+
+  .foot .btn.on {
+    color: var(--hi);
+    border-color: var(--acc);
   }
 
   .newrow {

@@ -35,6 +35,7 @@ use tauri_plugin_dialog::DialogExt;
 pub use logging::LEVEL_ENV;
 
 mod boot;
+mod browse;
 mod conductor;
 mod crash;
 mod diagnostics;
@@ -2168,6 +2169,7 @@ pub fn run() {
             remote::client::instance_save_as,
             remote::client::show_instance,
             browse_dirs,
+            browse::browse_files,
             make_dir,
             remote::remote_server_status,
             remote::remote_server_set,
