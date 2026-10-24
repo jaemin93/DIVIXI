@@ -30,6 +30,7 @@ import {
 
 import { addError, dropError, errorLife, type AppError } from "./errors";
 import { withTrack } from "./tracks";
+import { notInFlight } from "./staleRuns";
 import { pickable } from "./agentOptions";
 import { keepsSetting } from "./layoutSettings";
 import { headerFolded, parseHeaderFolds, withHeaderFold, withoutTrack, type HeaderFolds } from "./trackHeaders";
@@ -2099,26 +2100,60 @@ class Store {
     return this.workerSessions[track]?.find((w) => w.name === name);
   }
 
-  /** Ask which worker sessions are open, without touching any. Tracks not listed have none. */
+  /**
+   * Ask which worker sessions are open, without touching any. Tracks not
+   * listed have none. A run shown working here that the core has no turn
+   * of in flight ended without this page hearing of it (see staleRuns.ts),
+   * so it is taken from the store.
+   */
   async refreshWorkerSessions() {
     try {
       const list = await invoke<[string, WorkerState[]][]>("worker_sessions");
       this.workerSessions = Object.fromEntries(list);
     } catch (err) {
       tracing(err);
+      return;
     }
+    const workers = this.runs.filter((r) => r.session !== "conductor" && r.session !== ARTIFACT_SESSION);
+    await Promise.all(notInFlight(workers, this.workerSessions).map((r) => this.settle(r)));
+  }
+
+  /**
+   * Replay a run from its log once the store has its ending, as if its last
+   * events had arrived. Not when they did arrive while the store was asked:
+   * replayed and then folded again, its last words would show twice.
+   */
+  private async settle(run: Run) {
+    try {
+      const s = await invoke<RunSummary | null>("get_run", { id: run.id });
+      const working = run.status === "running" || run.status === "connecting";
+      if (working && s && s.status !== "running" && s.status !== "connecting") await this.hydrate(run);
+    } catch (err) {
+      tracing(err);
+    }
+  }
+
+  /** Whether a worker is working as this page has it: a run of its live, or its session in a turn. */
+  private workerWorking(track: string, name: string): boolean {
+    return this.runs.some((r) => r.track === track && r.session === name && (r.status === "running" || r.status === "connecting")) || !!this.workerSession(track, name)?.running;
   }
 
   /**
    * Stop a worker's turn in flight. The agent is really stopped, not just
    * hidden: its run ends and stays in the record marked stopped, and what it
    * had got to still reaches the conductor as a report.
+   *
+   * A refusal is checked against the core first. A page that missed the end
+   * of a turn still offers Stop, and the core, with nothing in flight,
+   * answers "no open worker". Once the page has caught up and the worker is
+   * not working, there was nothing to stop and nothing to report.
    */
   async cancelWorker(track: string, name: string): Promise<string> {
     try {
       await invoke("worker_cancel", { track, worker: name });
     } catch (err) {
-      return String(err);
+      await this.refreshWorkerSessions();
+      return this.workerWorking(track, name) ? String(err) : "";
     }
     await this.refreshWorkerSessions();
     return "";
