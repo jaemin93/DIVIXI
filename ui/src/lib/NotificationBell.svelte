@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { instanceId, switchInstance } from "./ipc.svelte";
-  import { inbox, remove, clearAll, requestRead, GOTO, READ, isDecision, isRoutine, isServer, type Notice } from "./notify.svelte";
+  import { inbox, remove, clearAll, readNotices, GOTO, isDecision, isRoutine, isServer, type Notice } from "./notify.svelte";
   import { invoke } from "./ipc.svelte";
   import { store } from "./store.svelte";
   import Icon from "./Icon.svelte";
@@ -74,27 +74,22 @@
 
   /**
    * A notice of a core's is read by taking it: told to that core, which
-   * takes it off every device's bell, and off this list at once. Another
-   * instance's core is reached through the webview that shows it (READ);
-   * if that webview is not open the notice comes back when it is, since it
-   * is still unread there.
+   * takes it off every device's bell, and off this list at once. Whichever
+   * core it is (this PC's or an instance's) is told from here, and a read
+   * it cannot take now is kept and sent again (`readNotices`).
    */
   function dismiss(n: Notice) {
     remove(n.id);
-    if (!isServer(n)) return;
-    if (n.instance === instanceId) invoke("notice_read", { id: n.notice }).catch(() => {});
-    else if (n.instance) requestRead(n.instance, [n.notice]);
+    if (isServer(n)) readNotices(n.instance, [n.notice]);
   }
 
-  /** Every notice goes: this core's are read here, other cores' through their webviews. */
+  /** Every notice goes, each as `dismiss` takes one. */
   function clear() {
-    const byInstance = new Map<string, number[]>();
+    const byInstance = new Map<string | null, number[]>();
     for (const n of inbox.items) {
-      if (!isServer(n)) continue;
-      if (n.instance === instanceId) invoke("notice_read", { id: n.notice }).catch(() => {});
-      else if (n.instance) byInstance.set(n.instance, [...(byInstance.get(n.instance) ?? []), n.notice]);
+      if (isServer(n)) byInstance.set(n.instance, [...(byInstance.get(n.instance) ?? []), n.notice]);
     }
-    for (const [instance, notices] of byInstance) requestRead(instance, notices);
+    for (const [instance, notices] of byInstance) readNotices(instance, notices);
     clearAll();
   }
 
@@ -114,10 +109,10 @@
         else if (n.track) void store.selectTrack(n.track);
         return;
       }
-      // Another Divixi's: handed to its webview through GOTO, as a decision
-      // notice is, so that it is read there (its core marks it read, which
-      // takes it off every device) and its track opens there. Not removed
-      // here: the read is what removes it, everywhere at once.
+      // Another Divixi's: read from here (its webview may not be open in
+      // time to do it), and handed to its webview through GOTO, as a
+      // decision notice is, so that its track opens there.
+      dismiss(n);
       try {
         localStorage.setItem(GOTO, JSON.stringify({ instance: n.instance, track: n.track, notice: n.notice, routine: n.routine, at: Date.now() }));
       } catch {
@@ -174,33 +169,14 @@
     tryOpen(30);
   }
 
-  /** Notices of this core another webview asked to have read. */
-  function readAsked(raw: string | null) {
-    let r: { instance: string | null; notices: number[]; at: number } | null = null;
-    try {
-      r = raw ? JSON.parse(raw) : null;
-    } catch {
-      return;
-    }
-    if (!r || r.instance !== instanceId || Date.now() - r.at > 15_000 || !Array.isArray(r.notices)) return;
-    try {
-      localStorage.removeItem(READ);
-    } catch {
-      // Left there; it goes stale in 15 s.
-    }
-    for (const id of r.notices) if (typeof id === "number") invoke("notice_read", { id }).catch(() => {});
-  }
-
   onMount(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === GOTO) take(e.newValue);
-      if (e.key === READ) readAsked(e.newValue);
     };
     window.addEventListener("storage", onStorage);
     // Opened for a notice before this webview existed.
     try {
       take(localStorage.getItem(GOTO));
-      readAsked(localStorage.getItem(READ));
     } catch {
       // No storage.
     }

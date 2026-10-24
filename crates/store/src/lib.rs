@@ -2557,6 +2557,36 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Whether a notice of this kind was put up for a track after `since`
+    /// (Unix milliseconds), read or not: once read it was said, and saying
+    /// it again for the same thing is a notice coming back from the dead.
+    pub fn has_notice_since(&self, track: &str, kind: &str, since: i64) -> anyhow::Result<bool> {
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM notices WHERE track = ?1 AND kind = ?2 AND created_at > ?3",
+            params![track, kind, since],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Mark a track's unread notices of this kind read, all at once (what
+    /// they said is over), and return them as they are now.
+    pub fn read_unread_notices(&self, track: &str, kind: &str) -> anyhow::Result<Vec<Notice>> {
+        let conn = self.conn.lock();
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM notices WHERE track = ?1 AND kind = ?2 AND read_at IS NULL ORDER BY id")?
+            .query_map(params![track, kind], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        let now = now_ms();
+        let mut out = Vec::new();
+        for id in ids {
+            conn.execute("UPDATE notices SET read_at = COALESCE(read_at, ?2) WHERE id = ?1", params![id, now])?;
+            out.push(conn.query_row(&format!("{NOTICE_SELECT} WHERE id = ?1"), params![id], row_to_notice)?);
+        }
+        Ok(out)
+    }
+
     // ── Schedules ──
 
     pub fn create_schedule(&self, new: &NewSchedule) -> anyhow::Result<Schedule> {
@@ -2706,12 +2736,13 @@ impl Store {
     }
 
     /// The log moved (or did not): how far it has been read and its last
-    /// line; `moved` is what resets the stall clock.
+    /// line; `moved` is what resets the stall clock, and takes a stalled
+    /// job back to running without the note that said it had stopped.
     pub fn job_progress(&self, id: i64, read_bytes: u64, read_sum: Option<i64>, last_line: &str, moved: bool) -> anyhow::Result<()> {
         let conn = self.conn.lock();
         if moved {
             conn.execute(
-                "UPDATE jobs SET read_bytes = ?2, read_sum = ?5, last_line = ?3, changed_at = ?4, status = CASE WHEN status = 'stalled' THEN 'running' ELSE status END WHERE id = ?1",
+                "UPDATE jobs SET read_bytes = ?2, read_sum = ?5, last_line = ?3, changed_at = ?4, note = CASE WHEN status = 'stalled' THEN '' ELSE note END, status = CASE WHEN status = 'stalled' THEN 'running' ELSE status END WHERE id = ?1",
                 params![id, read_bytes as i64, last_line, now_ms(), read_sum],
             )?;
         } else {
@@ -3998,6 +4029,42 @@ mod tests {
         assert!(store.read_notice(999).is_err());
     }
 
+    /// A quiet stretch is told once: a stall notice from after the last
+    /// activity counts whether or not it was read, so reading it does not
+    /// bring a new one on the next look. Another track, another kind or a
+    /// later stretch is a new thing to tell.
+    #[test]
+    fn a_read_notice_still_counts_as_told() {
+        let store = Store::in_memory().unwrap();
+        let before = now_ms() - 1;
+        assert!(!store.has_notice_since(TR, "stall", before).unwrap());
+        let n = store.add_notice(&NewNotice { track: TR.into(), kind: "stall".into(), title: "quiet".into(), ..Default::default() }).unwrap();
+        assert!(store.has_notice_since(TR, "stall", before).unwrap());
+        store.read_notice(n.id).unwrap();
+        assert!(store.unread_notices().unwrap().is_empty());
+        assert!(store.has_notice_since(TR, "stall", before).unwrap(), "read is still told");
+        assert!(!store.has_notice_since("tr999", "stall", before).unwrap());
+        assert!(!store.has_notice_since(TR, "job", before).unwrap());
+        assert!(!store.has_notice_since(TR, "stall", n.created_at).unwrap(), "a stretch that began after it");
+    }
+
+    /// A quiet stretch that is over takes its unread notices off at once,
+    /// the track's and that kind's only, and a second look finds none.
+    #[test]
+    fn an_ended_stretch_reads_its_notices() {
+        let store = Store::in_memory().unwrap();
+        let add = |track: &str, kind: &str| store.add_notice(&NewNotice { track: track.into(), kind: kind.into(), title: "x".into(), ..Default::default() }).unwrap();
+        let (a, b) = (add(TR, "stall"), add(TR, "stall"));
+        let other = add("tr999", "stall");
+        let job = add(TR, "job");
+        let read = store.read_unread_notices(TR, "stall").unwrap();
+        assert_eq!(read.iter().map(|n| n.id).collect::<Vec<_>>(), vec![a.id, b.id]);
+        assert!(read.iter().all(|n| n.read_at.is_some()));
+        assert!(store.read_unread_notices(TR, "stall").unwrap().is_empty(), "nothing twice");
+        let left: Vec<i64> = store.unread_notices().unwrap().iter().map(|n| n.id).collect();
+        assert_eq!(left, vec![job.id, other.id]);
+    }
+
     /// A schedule is due by its time, counts its firings, moves on to its
     /// next time or ends, and can be taken back.
     #[test]
@@ -4071,7 +4138,9 @@ mod tests {
         assert_eq!(store.jobs(None, true).unwrap().len(), 1);
         // The log moves again: back to running by itself.
         store.job_progress(job.id, 200, Some(8), "step 4", true).unwrap();
-        assert_eq!(store.job(job.id).unwrap().unwrap().status, JobStatus::Running);
+        let again = store.job(job.id).unwrap().unwrap();
+        assert_eq!(again.status, JobStatus::Running);
+        assert_eq!(again.note, "", "the stall's note goes with the stall");
 
         let done = store.set_job_status(job.id, JobStatus::Done, "the log said done").unwrap();
         assert!(done.ended_at.is_some() && !done.status.is_open());
