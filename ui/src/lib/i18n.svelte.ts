@@ -1198,6 +1198,7 @@ const ko = {
   // The remote's build, told apart: `stale` is another build of the same
   // field, `tooOld` is a server from before that field existed at all.
   "instances.tooOld": "빌드를 알려주지 않는 예전 divixi-server입니다(원격 {version}). 너무 오래됐으니 업데이트하세요.",
+  "instances.newer": "원격이 이 앱보다 새 릴리즈입니다(원격 {release}). 이 앱을 업데이트하세요.",
   "srv.title": "원격 divixi-server",
   "srv.check": "원격 서버 확인",
   "srv.checking": "원격을 확인하는 중…",
@@ -1221,6 +1222,7 @@ const ko = {
   "srv.startFailed": "divixi-server를 띄우지 못했습니다.",
   "srv.currentBuild": "그쪽 divixi-server는 이 앱과 같은 빌드입니다.",
   "srv.unmanaged": "그 머신에는 앱이 설치하지 않은 divixi-server가 있고, 어느 릴리즈인지 알 방법이 없습니다. 직접 빌드한 것일 수 있습니다.",
+  "srv.newer": "그쪽 divixi-server는 릴리즈 {installed}로, 이 앱의 {release}보다 새것입니다. 이 앱의 릴리즈를 설치하면 서버를 되돌리게 되고, 예전 서버는 새 서버가 바꿔 둔 기록을 열지 못해 뜨지 않을 수 있습니다. 이 앱을 업데이트하세요.",
   "srv.unsupported": "그 머신은 {os} {arch}입니다. 릴리즈는 x86_64 리눅스용만 있어 앱이 설치할 수 없습니다. 그 머신에서 수동으로 설치하세요.",
   "srv.managed": "그 머신의 systemd 사용자 서비스가 {path}에서 divixi-server를 실행하고 있어 앱이 설치하지 않습니다. 유닛의 ExecStart를 %h/.divixi/server/current/divixi-server로 바꾸고 systemctl --user daemon-reload 한 뒤 다시 확인하세요.",
   "srv.noTarget": "설치할 릴리즈를 찾지 못했습니다: {why}",
@@ -2428,6 +2430,7 @@ const en: Record<Key, string> = {
   // The remote's build, told apart: `stale` is another build of the same
   // field, `tooOld` is a server from before that field existed at all.
   "instances.tooOld": "An older divixi-server that does not say which build it is (remote {version}). It is too old: update it.",
+  "instances.newer": "The remote is a newer release than this app (remote {release}). Update this app.",
   "srv.title": "divixi-server there",
   "srv.check": "Check the remote",
   "srv.checking": "Checking the remote…",
@@ -2451,6 +2454,7 @@ const en: Record<Key, string> = {
   "srv.startFailed": "divixi-server would not start.",
   "srv.currentBuild": "divixi-server there is the same build as this app.",
   "srv.unmanaged": "There is a divixi-server on that machine that this app did not install, and nothing names its release. It may have been built from source there.",
+  "srv.newer": "divixi-server there is release {installed}, newer than this app's {release}. Installing this app's release would take it back, and an older server may not open what a newer one has written, so it would not start. Update this app instead.",
   "srv.unsupported": "That machine is {os} {arch}. Releases cover x86_64 Linux only, so the app can't install it. Install it manually on that machine.",
   "srv.managed": "A systemd user service on that machine runs divixi-server from {path}, so the app won't install over it. Point the unit's ExecStart at %h/.divixi/server/current/divixi-server, run systemctl --user daemon-reload, and check again.",
   "srv.noTarget": "No release to install from: {why}",

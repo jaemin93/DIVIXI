@@ -95,6 +95,9 @@ pub enum Freshness {
     /// It is answering and names no build at all, which only a
     /// divixi-server from before that field does.
     TooOld,
+    /// Another build, from a later release than this app's: this app is the
+    /// one behind, and updating the remote would take it back.
+    Newer,
 }
 
 /// A host as the settings page and the switcher show it.
@@ -123,12 +126,19 @@ pub struct HostView {
 /// This app's build (see build.rs): an instance with another is out of step.
 pub const BUILD: &str = env!("DIVIXI_BUILD");
 
-/// What an instance's build says, once it has answered.
-fn freshness(build: &str) -> Freshness {
+/// What an instance's build and release say, once it has answered.
+fn freshness(build: &str, release: &str) -> Freshness {
+    freshness_against(build, release, BUILD, crate::update::release())
+}
+
+/// [`freshness`] against a given app build and release, so it can be tested.
+fn freshness_against(build: &str, release: &str, app_build: &str, app_release: Option<&str>) -> Freshness {
     if build.is_empty() {
         Freshness::TooOld
-    } else if build == BUILD {
+    } else if build == app_build {
         Freshness::Same
+    } else if app_release.is_some_and(|mine| super::install::newer_there(release, mine)) {
+        Freshness::Newer
     } else {
         Freshness::Other
     }
@@ -818,7 +828,7 @@ pub async fn remote_hosts(app: AppHandle) -> Vec<HostView> {
                 build: (!c.build.is_empty()).then(|| c.build.clone()),
                 release: (!c.release.is_empty()).then(|| c.release.clone()),
                 stale: c.build != BUILD,
-                freshness: freshness(&c.build),
+                freshness: freshness(&c.build, &c.release),
                 host: h,
             },
             None => HostView { local_port: None, connected: false, online: false, version: None, build: None, release: None, stale: false, freshness: Freshness::Unknown, host: h },
@@ -1004,6 +1014,22 @@ mod tests {
         assert!(!older.clocked);
         let new: Health = serde_json::from_str(r#"{"ok":true,"build":"abc","clocked":true}"#).unwrap();
         assert!(new.clocked);
+    }
+
+    /// A remote another PC's newer app updated is not "out of date": the
+    /// sentence that says "update the remote" would have this app take it back.
+    #[test]
+    fn a_remote_ahead_of_this_app_says_so() {
+        let mine = Some("v2026-10-12");
+        assert_eq!(freshness_against("def", "v2026-10-20", "abc", mine), Freshness::Newer);
+        assert_eq!(freshness_against("def", "v2026-10-06", "abc", mine), Freshness::Other);
+        // Built from a working copy: no release to weigh, so only "another build".
+        assert_eq!(freshness_against("def", "", "abc", mine), Freshness::Other);
+        // This app is a development build: nothing to weigh against either.
+        assert_eq!(freshness_against("def", "v2026-10-20", "abc", None), Freshness::Other);
+        // The same build is the same code, whatever the tags say.
+        assert_eq!(freshness_against("abc", "v2026-10-20", "abc", mine), Freshness::Same);
+        assert_eq!(freshness_against("", "v2026-10-20", "abc", mine), Freshness::TooOld);
     }
 
     #[test]

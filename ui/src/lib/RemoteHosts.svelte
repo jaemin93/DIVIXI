@@ -31,7 +31,7 @@
     build: string | null;
     release: string | null;
     stale: boolean;
-    freshness: "unknown" | "same" | "other" | "too_old";
+    freshness: "unknown" | "same" | "other" | "too_old" | "newer";
   };
 
   const PORT = 7488;
@@ -131,7 +131,7 @@
             {:else}<span class="tag">SSH</span>{h.ssh} · {t("remote.remotePort", { port: h.port })}{/if}{#if h.release} · {h.release}{/if}
           </div>
           <div class="state" class:on={h.online} class:trying={on && !h.online}>
-            <span class="dot"></span>{#if h.freshness === "too_old"}<span class="stale">{t("instances.tooOld", { version: h.version ?? "?" })}</span>{:else if h.stale}<span class="stale">{t("instances.stale", { version: h.version ?? "?", build: h.build ?? "?" })}</span>{:else if !on}{t("remote.notConnected")}{:else if !h.online}{t("instances.link.trying")}{:else if h.local_port !== null}{t("remote.connected", { port: h.local_port })}{:else}{t("instances.link.online")}{/if}
+            <span class="dot"></span>{#if h.freshness === "too_old"}<span class="stale">{t("instances.tooOld", { version: h.version ?? "?" })}</span>{:else if h.freshness === "newer"}<span class="stale">{t("instances.newer", { release: h.release ?? "?" })}</span>{:else if h.stale}<span class="stale">{t("instances.stale", { version: h.version ?? "?", build: h.build ?? "?" })}</span>{:else if !on}{t("remote.notConnected")}{:else if !h.online}{t("instances.link.trying")}{:else if h.local_port !== null}{t("remote.connected", { port: h.local_port })}{:else}{t("instances.link.online")}{/if}
           </div>
           <ServerInstall id={h.id} build={h.build} auto={h.stale} />
         </div>

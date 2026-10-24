@@ -436,6 +436,12 @@ pub enum Check {
     /// A divixi-server is there that this app did not put there, and
     /// nothing says it is old. Left alone unless the user says otherwise.
     Unmanaged { target: String, source: Kind, size: u64, running: bool },
+    /// The release there is newer than the one this app would put there:
+    /// another PC's app, updated first, installed it. Installing would take
+    /// the machine back, and an older divixi-server does not open a store a
+    /// newer one has moved on, so it would not come up at all. This app is
+    /// the one to update; starting it is offered when it is down.
+    Newer { installed: String, target: String, running: bool },
     /// A systemd user service starts divixi-server from a path of its own.
     /// Installing behind it would put a new binary somewhere that unit
     /// never looks, and the old one would come straight back up, so the
@@ -460,6 +466,35 @@ pub struct Seen {
     /// Its release tag. Empty from a server older than that field, and
     /// from one built from a working copy.
     pub release: String,
+}
+
+/// Which release is on that machine: the pointer the app wrote, or the tag
+/// the answering server reports of itself, which a divixi-server built from
+/// a release does -- the later of the two when both say one. A newer server
+/// installed by hand can run from the configured path beside a pointer an
+/// earlier install left, and going backwards is the one thing that must not
+/// happen. A server built from a working copy reports neither.
+fn release_there(probe: &Probe, seen: Option<&Seen>) -> Option<String> {
+    let live = seen.map(|s| s.release.clone()).filter(|r| !r.is_empty());
+    match (probe.installed.clone(), live) {
+        (Some(pointer), Some(live)) if newer_there(&live, &pointer) => Some(live),
+        (Some(pointer), _) => Some(pointer),
+        (None, live) => live,
+    }
+}
+
+/// Why installing `release` would take the machine back, when it would.
+fn backwards(probe: &Probe, seen: Option<&Seen>, release: &str) -> Option<String> {
+    let there = release_there(probe, seen).filter(|there| newer_there(there, release))?;
+    Some(format!(
+        "divixi-server there is release {there}, newer than this app's {release}. Installing this app's would take it back, and an older divixi-server may not open a store a newer one has moved on, so it would not start. Update this app instead"
+    ))
+}
+
+/// `there` is a later release than `release`, compared as dates. False when
+/// either is not a release tag: nothing can be said about those.
+pub(super) fn newer_there(there: &str, release: &str) -> bool {
+    matches!((crate::update::parse(there), crate::update::parse(release)), (Some(there), Some(release)) if there > release)
 }
 
 /// The whole judgement, as one pure function over what was found.
@@ -488,14 +523,7 @@ pub fn check(probe: &Probe, seen: Option<&Seen>, target: &Result<(Asset, Kind), 
         Err(detail) => return Check::NoTarget { detail: detail.clone() },
     };
     let (release, source, size) = (asset.release.clone(), *kind, asset.size);
-    // Which release is on that machine: the pointer the app wrote, or -- for
-    // one it did not install -- the tag the server reports of itself, which
-    // a divixi-server built from a release does. Either is a date to compare;
-    // a server built from a working copy reports neither.
-    let there = probe
-        .installed
-        .clone()
-        .or_else(|| seen.map(|s| s.release.clone()).filter(|r| !r.is_empty()));
+    let there = release_there(probe, seen);
     let out = |why: Why| Check::Outdated { why, installed: there.clone(), target: release.clone(), source, size };
 
     // Nothing there: the configured path runs nothing, the app's own pointer
@@ -509,6 +537,10 @@ pub fn check(probe: &Probe, seen: Option<&Seen>, target: &Result<(Asset, Kind), 
         match (crate::update::parse(installed), crate::update::parse(&release)) {
             (Some(mine), Some(theirs)) if theirs > mine => return out(Why::OlderRelease),
             (Some(mine), Some(theirs)) if theirs == mine => return Check::Current { installed: Some(installed.clone()), running: probe.running },
+            // Newer than the app's own: judged here, before the build
+            // comparison below calls it "another build" and offers to
+            // replace it with this older one.
+            (Some(_), Some(_)) => return Check::Newer { installed: installed.clone(), target: release, running: probe.running },
             // The pointer names something that is not a release tag: it was
             // not this app that wrote it. Judged below, by what is running.
             _ => {}
@@ -1099,6 +1131,12 @@ async fn install_inner(app: &AppHandle, host: &Host, cancel: &AtomicBool) -> Res
     };
     say.release = asset.release.clone();
     say.total = asset.size;
+    // Never backwards, whatever the page last showed: the server would be
+    // stopped for a binary that refuses the store it finds. Asked again just
+    // before the swap, below.
+    if let Some(e) = backwards(&probe, client::seen(app, &host.id).await.as_ref(), &asset.release) {
+        return Err(step(Phase::Checking, &say, e));
+    }
     if let Some(free) = probe.free {
         let want = asset.size + HEADROOM;
         if free < want {
@@ -1185,6 +1223,18 @@ async fn install_inner(app: &AppHandle, host: &Host, cancel: &AtomicBool) -> Res
             say.failed_with(Phase::Installing, e.clone(), Some(libs));
             return Err(e);
         }
+    }
+
+    // The download took minutes, and another PC's app, newer than this one,
+    // may have put its release there meanwhile: look at the pointer once
+    // more, before anything running is stopped.
+    // `self::`: `probe` above is the first look, not this function.
+    let now = match self::probe(host).await {
+        Ok(p) => p,
+        Err(e) => return Err(stop_here(host, &asset, &say, Phase::Installing, e, cancel).await),
+    };
+    if let Some(e) = backwards(&now, client::seen(app, &host.id).await.as_ref(), &asset.release) {
+        return Err(stop_here(host, &asset, &say, Phase::Installing, e, cancel).await);
     }
 
     say.at(Phase::Installing, asset.size, None);
@@ -1543,7 +1593,59 @@ mod tests {
         assert!(matches!(at("v2026-09-09"), Check::Outdated { why: Why::OlderRelease, .. }));
         assert_eq!(at("v2026-09-10"), Check::Current { installed: Some("v2026-09-10".into()), running: false });
         // Newer than the app's own release: not something to replace.
-        assert_eq!(at("v2026-09-30"), Check::Current { installed: Some("v2026-09-30".into()), running: false });
+        assert_eq!(at("v2026-09-30"), Check::Newer { installed: "v2026-09-30".into(), target: "v2026-09-10".into(), running: false });
+    }
+
+    /// The bug this had: another PC's app, updated first, put a newer release
+    /// there; this app, still on an older one, saw "another build" in what the
+    /// server answered and offered its own release as the update. Installing
+    /// it took both machines back, and the older server would not open the
+    /// store the newer one had moved on ("store schema version 23 is newer
+    /// than this build supports (22)"), so neither came up.
+    #[test]
+    fn a_newer_server_is_never_offered_an_older_release() {
+        let target = || Ok((Asset { release: "v2026-10-12".into(), ..asset() }, Kind::App));
+        let other = Seen { build: "def".into(), release: "v2026-10-20".into() };
+        // Answering, through the pointer the other app moved.
+        let there = Probe { bin: true, installed: Some("v2026-10-20".into()), running: true, ..linux() };
+        assert_eq!(
+            check(&there, Some(&other), &target(), "abc"),
+            Check::Newer { installed: "v2026-10-20".into(), target: "v2026-10-12".into(), running: true }
+        );
+        // Installed by hand from a release: the server's own tag says it.
+        let by_hand = Probe { bin: true, running: true, ..linux() };
+        assert_eq!(
+            check(&by_hand, Some(&other), &target(), "abc"),
+            Check::Newer { installed: "v2026-10-20".into(), target: "v2026-10-12".into(), running: true }
+        );
+        // A newer server run by hand from the configured path, beside a
+        // pointer an earlier install left: the later of the two is what
+        // counts, for the page and for the install alike.
+        let beside = Probe { bin: true, installed: Some("v2026-09-30".into()), running: true, ..linux() };
+        assert_eq!(
+            check(&beside, Some(&other), &target(), "abc"),
+            Check::Newer { installed: "v2026-10-20".into(), target: "v2026-10-12".into(), running: true }
+        );
+        assert!(backwards(&beside, Some(&other), "v2026-10-12").is_some_and(|e| e.contains("v2026-10-20")));
+        assert_eq!(backwards(&beside, None, "v2026-10-12"), None, "the old pointer alone is older");
+        // Down: still newer, and starting it is what the page offers.
+        let down = Probe { bin: true, installed: Some("v2026-10-20".into()), ..linux() };
+        assert_eq!(
+            check(&down, None, &target(), "abc"),
+            Check::Newer { installed: "v2026-10-20".into(), target: "v2026-10-12".into(), running: false }
+        );
+    }
+
+    #[test]
+    fn only_a_later_release_is_newer() {
+        assert!(newer_there("v2026-10-20", "v2026-10-12"));
+        assert!(newer_there("v2026-10-12.2", "v2026-10-12"));
+        assert!(!newer_there("v2026-10-12", "v2026-10-12"));
+        assert!(!newer_there("v2026-10-06", "v2026-10-12"));
+        // Not release tags: nothing to say, so never a reason to refuse.
+        assert!(!newer_there("", "v2026-10-12"));
+        assert!(!newer_there("main", "v2026-10-12"));
+        assert!(!newer_there("v2026-10-20", "dev"));
     }
 
     /// A divixi-server somebody installed by hand from a release still says

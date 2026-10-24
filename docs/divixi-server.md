@@ -57,6 +57,10 @@ What it does there:
   it to stop and start. If that unit's `ExecStart` names some other binary, the
   app **stops** and tells you to point it at the pointer above — installing
   behind it would leave systemd launching the old one.
+- Never backwards: when the release there is newer than this app's (another
+  PC's app, updated first, put it there), the app installs nothing and says to
+  update this app. An older divixi-server may not open a store a newer one has
+  moved on, so it would not start.
 
 The manual steps are the way for everything else: arm64, macOS, a machine with
 no SSH server, or a server you want built from your own checkout (which is the

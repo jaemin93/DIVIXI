@@ -38,7 +38,7 @@
     build: string | null;
     release: string | null;
     stale: boolean;
-    freshness: "unknown" | "same" | "other" | "too_old";
+    freshness: "unknown" | "same" | "other" | "too_old" | "newer";
   };
   type Link = "online" | "trying" | "off";
   const link = (h: Host | undefined): Link => (h?.online ? "online" : h?.connected ? "trying" : "off");
@@ -238,6 +238,8 @@
    */
   function staleNote(h: Host): string {
     if (h.freshness === "too_old") return t("instances.tooOld", { version: h.version ?? "?" });
+    // Ahead of this app: "update the remote" would have this app take it back.
+    if (h.freshness === "newer") return t("instances.newer", { release: h.release ?? "?" });
     return t("instances.stale", { version: h.version ?? "?", build: h.build ?? "?" });
   }
 

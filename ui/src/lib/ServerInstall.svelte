@@ -45,6 +45,7 @@
     | { kind: "outdated"; why: Why; installed: string | null; target: string; source: Source; size: number }
     | { kind: "current"; installed: string | null; running: boolean }
     | { kind: "unmanaged"; target: string; source: Source; size: number; running: boolean }
+    | { kind: "newer"; installed: string; target: string; running: boolean }
     | { kind: "managed"; exec_start: string; want: string }
     | { kind: "no_target"; detail: string }
     | { kind: "no_shell" }
@@ -270,6 +271,14 @@ ${String(err)}`;
       {#if !found.running}<button class="btn sm btn-acc" disabled={starting} onclick={startServer}>{starting ? t("srv.starting") : t("srv.start")}</button>{/if}
       <button class="btn sm" onclick={start}>{t("srv.installAnyway", { release: found.target })}</button>
     </div>
+  {:else if found.kind === "newer"}
+    <!-- Ahead of this app: no install button, because this app's release
+         would take it back to a server that may not open its store. -->
+    <p class="say warn">{t("srv.newer", { installed: found.installed, release: found.target })}</p>
+    {#if !found.running}
+      <p class="note warn">{t("srv.stopped")}</p>
+      <div class="acts"><button class="btn sm btn-acc" disabled={starting} onclick={startServer}>{starting ? t("srv.starting") : t("srv.start")}</button></div>
+    {/if}
   {:else if found.kind === "unsupported"}
     <p class="note">{t("srv.unsupported", { os: found.os, arch: found.arch })}</p>
     <p class="note mono">{t("srv.manual")}</p>
