@@ -1,4 +1,6 @@
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { routineOf } from "./noticeTarget";
+import { addPending, dropPending, parsePending, pendingOf, type PendingReads } from "./noticeMemory";
 import { inTauri, instanceId, instanceName } from "./ipc.svelte";
 
 /**
@@ -75,11 +77,12 @@ const INBOX = "divixi.inbox";
 /** A notice to open in another webview: `{instance, track, decision, at}`. */
 export const GOTO = "divixi.goto";
 /**
- * Notices of another Divixi's core to mark read there, from the webview
- * that shows it: `{instance, notices: number[], at}`. Only that core can
- * take them off every device; this PC's list is only a mirror of it.
+ * Core notices read on this PC that their core has not confirmed yet, per
+ * Divixi (`noticeMemory.ts`). Only that core can take a notice off every
+ * device, and it may be out of reach when it is read: until it confirms,
+ * the read is kept here, sent again, and the notice is not put back.
  */
-export const READ = "divixi.read";
+const PENDING = "divixi.readPending";
 const KEEP = 200;
 
 /**
@@ -130,18 +133,45 @@ function change(f: (items: Notice[]) => Notice[]) {
 export const remove = (id: string) => change((xs) => xs.filter((x) => x.id !== id));
 export const clearAll = () => change(() => []);
 
-/**
- * Ask the webview of another instance to mark its core's notices read.
- * It answers through the `storage` event; if it is not open, nothing is
- * marked, and the notices come back when that instance is next shown --
- * which is right: they are still unread at their core.
- */
-export function requestRead(instance: string, notices: number[]) {
-  if (!notices.length) return;
+function loadPending(): PendingReads {
   try {
-    localStorage.setItem(READ, JSON.stringify({ instance, notices, at: Date.now() }));
+    return parsePending(localStorage.getItem(PENDING));
   } catch {
-    // No storage: nothing to hand over.
+    return {};
+  }
+}
+
+function changePending(f: (p: PendingReads) => PendingReads) {
+  try {
+    const next = f(loadPending());
+    if (Object.keys(next).length) localStorage.setItem(PENDING, JSON.stringify(next));
+    else localStorage.removeItem(PENDING);
+  } catch {
+    // No storage: the read is sent once, now.
+  }
+}
+
+/**
+ * Mark core notices read where they belong, from whichever webview: this
+ * PC's core directly, another instance's through this PC's connection to
+ * it -- not through that instance's webview, which may not be open. Kept
+ * as pending until the core answers, so one out of reach now is read the
+ * next time the bell hears from it, and its notice is not put back.
+ */
+export function readNotices(instance: string | null, ids: number[]) {
+  if (!inTauri || !ids.length) return;
+  changePending((p) => addPending(p, instance, ids));
+  for (const id of ids) {
+    const call =
+      instance === null
+        ? tauriInvoke("notice_read", { id })
+        : tauriInvoke("instance_invoke", { id: instance, cmd: "notice_read", args: { id } });
+    call.then(
+      () => changePending((p) => dropPending(p, instance, [id])),
+      () => {
+        // Out of reach (or no such notice): kept, and tried again when its list is read.
+      },
+    );
   }
 }
 
@@ -217,6 +247,8 @@ export function ensureDecisionNotice(decision: number, title: string, body: stri
 /** One of the core's notices, from a `notice` event or the list read on opening. */
 export function notifyServer(n: { id: number; track: string; kind: string; title: string; body: string; data?: unknown; created_at: number }, trackName: string) {
   if (!inTauri) return;
+  // Read here already; its core has not heard yet.
+  if (pendingOf(loadPending(), instanceId).includes(n.id)) return;
   const title = trackName && !n.title.includes(trackName) ? `${n.title} · ${trackName}` : n.title;
   const body = clip(n.body.trim(), 400);
   const routine = routineOf(n.data);
@@ -234,6 +266,11 @@ export function notifyServer(n: { id: number; track: string; kind: string; title
 export function keepServerNotices(unread: { id: number; track: string; kind: string; title: string; body: string; data?: unknown; created_at: number }[]) {
   if (!inTauri) return;
   const live = new Set(unread.map((n) => n.id));
+  // Reads its core has not taken yet: sent again, and the rest are done.
+  const pending = pendingOf(loadPending(), instanceId);
+  const resend = pending.filter((id) => live.has(id));
+  changePending((p) => dropPending(p, instanceId, pending.filter((id) => !live.has(id))));
+  readNotices(instanceId, resend);
   change((xs) => xs.filter((x) => !isServer(x) || x.instance !== instanceId || live.has(x.notice)));
   for (const n of unread) notifyServer(n, "");
 }

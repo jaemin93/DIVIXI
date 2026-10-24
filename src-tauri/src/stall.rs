@@ -4,13 +4,15 @@
 //! watched, a report parked for a conductor -- and no turn on the track for
 //! hours: that is the shape of the fifty-nine hours nobody noticed, and of
 //! the quieter version where a card sits unanswered for a week. The bell
-//! says so once per quiet stretch; activity clears it, and the next stretch
-//! rings it again.
+//! says so once per quiet stretch, read or not; activity (or the open work
+//! going) takes the notice off the bell, and the next stretch rings it
+//! again. A schedule waiting for a time still ahead is not work left
+//! undone: the app fires it then, so it is not counted until it is late.
 
 use std::time::Duration;
 
 use serde_json::json;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::{AppHandle, AppState};
 
@@ -25,6 +27,19 @@ pub const SETTING: &str = "stall.hours";
 /// Hours of quiet before the bell, when the setting says nothing.
 pub const DEFAULT_HOURS: f64 = 6.0;
 
+/// How long past its time a timed schedule may be before it counts as
+/// open work: schedules are looked at every half minute, so this is not
+/// the tick, it is a firing that did not happen.
+const OVERDUE_MS: i64 = 5 * 60 * 1000;
+
+/// Whether an active schedule is open work for the quiet alarm: a
+/// condition (no time; it waits on a file or a process), or a time that
+/// passed without a firing. One whose time is still ahead is not: the app
+/// will wake the conductor for it.
+pub fn schedule_is_open(next_at: Option<i64>, now: i64) -> bool {
+    next_at.is_none_or(|at| at + OVERDUE_MS < now)
+}
+
 /// What a track has open, and when it last did anything. `None` when it
 /// has nothing open.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,7 +50,7 @@ pub struct Quiet {
 }
 
 /// A track's open work and last activity, from the record.
-fn quiet_of(state: &AppState, track: &str, ko: bool) -> Option<Quiet> {
+fn quiet_of(state: &AppState, track: &str, ko: bool, now: i64) -> Option<Quiet> {
     let store = &state.store;
     let mut open = Vec::new();
     let mut last: i64 = 0;
@@ -48,11 +63,12 @@ fn quiet_of(state: &AppState, track: &str, ko: bool) -> Option<Quiet> {
         last = last.max(d.decided_at.unwrap_or(d.created_at));
     }
     let schedules = store.schedules(Some(track), true).unwrap_or_default();
-    if !schedules.is_empty() {
-        open.push(if ko { format!("예약 {}개", schedules.len()) } else { format!("{} schedule(s)", schedules.len()) });
-        for s in &schedules {
-            last = last.max(s.last_at.unwrap_or(s.created_at));
-        }
+    for s in &schedules {
+        last = last.max(s.last_at.unwrap_or(s.created_at));
+    }
+    let late = schedules.iter().filter(|s| schedule_is_open(s.next_at, now)).count();
+    if late > 0 {
+        open.push(if ko { format!("예약 {late}개") } else { format!("{late} schedule(s)") });
     }
     let jobs = store.jobs(Some(track), true).unwrap_or_default();
     if !jobs.is_empty() {
@@ -89,17 +105,20 @@ pub async fn tick(app: &AppHandle) {
     }
     let now = crate::now_ms();
     for track in state.store.tracks().unwrap_or_default() {
-        // A track with a turn in flight is not quiet, whatever the record's times say.
-        if state.sessions.is_active(&track.id).await {
+        // A track with a turn in flight is not quiet, whatever the record's
+        // times say; one with nothing open, or not quiet long, is not
+        // either. Either way a stall notice still up is over.
+        let quiet = if state.sessions.is_active(&track.id).await { None } else { quiet_of(&state, &track.id, ko, now).filter(|q| too_quiet(q.last, now, hours)) };
+        let Some(q) = quiet else {
+            for n in state.store.read_unread_notices(&track.id, "stall").unwrap_or_default() {
+                tracing::info!(track = %track.id, notice = n.id, "a quiet stretch is over");
+                let _ = app.emit("notice", &n);
+            }
             continue;
-        }
-        let Some(q) = quiet_of(&state, &track.id, ko) else { continue };
-        if !too_quiet(q.last, now, hours) {
-            continue;
-        }
-        // Once per stretch: an unread stall notice from after the last activity is this one.
-        let already = state.store.unread_notices().unwrap_or_default().into_iter().any(|n| n.track == track.id && n.kind == "stall" && n.created_at > q.last);
-        if already {
+        };
+        // Once per stretch: a stall notice from after the last activity is
+        // this one, read or not. Reading it does not end the stretch.
+        if state.store.has_notice_since(&track.id, "stall", q.last).unwrap_or(true) {
             continue;
         }
         let since = crate::when(q.last);
@@ -139,5 +158,14 @@ mod tests {
         assert!(too_quiet(0, 7 * h, 6.0));
         assert!(!too_quiet(0, 100 * h, 0.0), "off");
         assert!(too_quiet(0, h / 2 + 1, 0.5), "a fraction of an hour, for a test");
+    }
+
+    #[test]
+    fn a_schedule_waiting_for_its_time_is_not_open_work() {
+        let now = 10 * 3_600_000;
+        assert!(!schedule_is_open(Some(now + 3_600_000), now), "due in an hour");
+        assert!(!schedule_is_open(Some(now - 60_000), now), "due a minute ago: the next look fires it");
+        assert!(schedule_is_open(Some(now - OVERDUE_MS - 1), now), "past its time with no firing");
+        assert!(schedule_is_open(None, now), "a condition waits on something outside the app");
     }
 }
