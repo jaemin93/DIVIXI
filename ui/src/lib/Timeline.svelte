@@ -12,6 +12,10 @@
   import { FOLLOWING, followed, reached, resized, scrolled, type Stick } from "./scroll";
   import { REVEAL_DECISION } from "./history";
   import { createPager } from "./pager.svelte";
+  import FindBar from "./FindBar.svelte";
+  import { findAsk } from "./findAsk.svelte";
+  import { createFinder, createStepSource } from "./finder.svelte";
+  import { cleanText, decisionRegions, findKey, inReportDetails, stepOf, turnRegions, type FindTurn } from "./chatFind";
 
   // ----- sticking to the bottom -----
   //
@@ -189,16 +193,6 @@
     ownSeen = mine;
   });
 
-  /** Hook chatter (devterm memory and the like) arrives as message text; hide it. */
-  function cleanText(text: string): string {
-    // "Notice: <Hook> says: …" up to the next notice or line end; they
-    // often arrive glued together on one line.
-    return text
-      .replace(/Notice: [\w:.-]+ says: .*?(?=Notice: [\w:.-]+ says: |\n|$)/g, "")
-      .replace(/[ \t]+\n/g, "\n")
-      .replace(/\n{3,}/g, "\n\n");
-  }
-
   const isLive = (run: Run) => run.status === "connecting" || run.status === "running";
 
   /** A turn's prose and steps in order, each steps block knowing whether it is still growing. */
@@ -294,10 +288,100 @@
     return answer ? `${id} · ${answer}` : id;
   }
 
+  /** The failure shown under a turn's answer, if any. */
+  function failedText(run: Run): string {
+    return (run.status === "failed" || run.status === "interrupted" || run.status === "timed_out" || run.status === "detached") && run.error ? run.error : "";
+  }
+
+  // ----- finding text in the conversation -----
+  //
+  // Ctrl+F (Cmd+F) while the conversation has focus, or the search button on
+  // its header, opens a find bar over its top (finder.svelte.ts). Searched:
+  // the turns the page holds, the worker reports and the decisions, and with
+  // "steps" on, what each turn did on the way (the core sends that for turns
+  // not replayed).
+
+  let root = $state<HTMLDivElement>();
+
+  /** Steps of finished turns not replayed yet: searched when "steps" is on. */
+  const stepSource = createStepSource((ids) => store.runSegments(ids));
+
+  const finder = createFinder({
+    root: () => root,
+    scroller: () => scroller,
+    content: () => content,
+    key: () => store.chatKey,
+    total: () => conductorRuns.length,
+    regions: (opts) => {
+      const out = conductorRuns.map((r, i) => ({ turn: i, regions: turnRegions(findTurn(r, i, opts.steps), opts.steps) }));
+      out.push({ turn: conductorRuns.length, regions: decisionsByRun.orphans.flatMap(decisionRegions) });
+      return out;
+    },
+    pager,
+    stuck: () => stick.stuck,
+    unstick: () => (stick = { ...stick, stuck: false, missed: false }),
+    // A step of a turn restored from the store: its steps are replayed to be drawn.
+    prepare: async (m) => {
+      const run = conductorRuns[m.turn];
+      if (run && !run.loaded && stepOf(m.key)) await store.hydrate(run);
+    },
+    idle: () => store.view === "track" && !store.chatArtifact,
+    asked: () => findAsk.n,
+  });
+
+  $effect(() => {
+    if (!finder.open || !finder.query || !finder.opts.steps) return;
+    stepSource.want(conductorRuns.filter((r) => !r.loaded && r.toolCount > 0 && !isLive(r)).map((r) => r.id));
+  });
+
+  /** The worker runs whose reports this conversation shows. */
+  const reportRuns = $derived(
+    conductorRuns
+      .filter((r) => r.prompt.startsWith(REPORT_PREFIX))
+      .map((r) => /\brun=(\S+)/.exec(r.prompt.split("\n")[0])?.[1] ?? "")
+      .filter(Boolean),
+  );
+
+  // Every report is searched, not only the cards drawn: read the rest in one call.
+  $effect(() => {
+    void store.reportsArrived;
+    if (finder.open && finder.query) void store.loadReports(reportRuns);
+  });
+
+  /** A turn as the search reads it: what opened it, its answer, its failure, its decisions. */
+  function findTurn(run: Run, turn: number, steps: boolean): FindTurn {
+    const p = run.prompt;
+    let head: FindTurn["head"];
+    if (p.startsWith(REPORT_PREFIX)) {
+      const wr = /\brun=(\S+)/.exec(p.split("\n")[0])?.[1] ?? "";
+      head = { kind: "report", report: wr ? store.reports[wr] : undefined };
+    } else if (p.startsWith(PERMISSION_PREFIX)) head = { kind: "line", text: permissionLine(p) };
+    else if (p.startsWith(DECISION_PREFIX)) head = { kind: "line", text: decisionLine(p) };
+    else head = { kind: "me", text: splitKnowledge(splitAttachments(p).text).text };
+    const segments = run.segments.length ? run.segments : steps ? (stepSource.of(run.id) ?? null) : null;
+    return { turn, head, segments, message: run.message, error: failedText(run), decisions: decisionsByRun.byRun[run.id] ?? [] };
+  }
+
+  // With steps searched, a drawn turn that has matches and has not been
+  // replayed is: until then it shows its folded text, not the pieces the
+  // search counted in.
+  $effect(() => {
+    if (!finder.open || !finder.opts.steps || !finder.matches.length) return;
+    const hit = new Set(finder.matches.map((m) => m.turn));
+    const first = pager.first;
+    shownRuns.forEach((r, j) => {
+      if (!r.loaded && r.toolCount > 0 && !isLive(r) && hit.has(first + j)) void store.hydrate(r);
+    });
+  });
 </script>
 
-<div class="tl">
-  <div class="scroll" bind:this={scroller} onscroll={onScroll}>
+<div class="tl" bind:this={root}>
+  {#if finder.open}
+    <FindBar bind:this={finder.bar} bind:query={finder.text} bind:opts={finder.opts} at={finder.at} count={finder.matches.length} onstep={finder.step} onclose={finder.close} />
+  {/if}
+  <!-- Focusable (not in the tab order), so a click in the conversation puts
+       the keys here: paging, and Ctrl+F for its find bar. -->
+  <div class="scroll" bind:this={scroller} onscroll={onScroll} tabindex="-1">
     <div class="content" bind:this={content}>
       {#if conductorRuns.length === 0 && store.chatQueue.length === 0}
         <div class="empty">
@@ -312,23 +396,27 @@
       {#if pager.first > 0}
         <button class="earlier mono" type="button" onclick={() => pager.earlier()}>{t("timeline.earlier", { n: pager.first })}</button>
       {/if}
-      {#each shownRuns as run (run.id)}
+      {#each shownRuns as run, j (run.id)}
+        {@const idx = pager.first + j}
+        <!-- One turn, as the find bar knows it: data-turn is its place in the
+             conversation, data-find the regions it searches (chatFind.ts). -->
+        <div class="turn" data-turn={idx}>
         {#if run.prompt.startsWith(REPORT_PREFIX)}
           {@const head = run.prompt.split("\n")[0]}
           {@const workerRun = /\brun=(\S+)/.exec(head)?.[1] ?? ""}
           {@const worker = /\bworker=(\S+)/.exec(head)?.[1] ?? ""}
           {@const latest = latestReport[worker] === run.id && !waitingWorkers.has(worker)}
           {#if workerRun && store.reports[workerRun]}
-            <ReportCard run={workerRun} {worker} track={run.track} {latest} />
+            <ReportCard run={workerRun} {worker} track={run.track} {latest} found={finder.foundIn(idx, inReportDetails)} />
           {:else}
             <div class="sys mono">{t("timeline.reportArrived")} · {head.replace(REPORT_PREFIX, "").trim()}</div>
-            {#if workerRun}<ReportCard run={workerRun} {worker} track={run.track} {latest} />{/if}
+            {#if workerRun}<ReportCard run={workerRun} {worker} track={run.track} {latest} found={finder.foundIn(idx, inReportDetails)} />{/if}
           {/if}
         {:else if run.prompt.startsWith(PERMISSION_PREFIX)}
           <!-- A worker asked; the conductor answers for the human. -->
-          <div class="sys mono decided">{t("timeline.permissionAsked")} · {permissionLine(run.prompt)}</div>
+          <div class="sys mono decided">{t("timeline.permissionAsked")} · <span data-find={findKey.line}>{permissionLine(run.prompt)}</span></div>
         {:else if run.prompt.startsWith(DECISION_PREFIX)}
-          <div class="sys mono decided">{t("timeline.decisionSent")} · {decisionLine(run.prompt)}</div>
+          <div class="sys mono decided">{t("timeline.decisionSent")} · <span data-find={findKey.line}>{decisionLine(run.prompt)}</span></div>
         {:else}
           {@const attached = splitAttachments(run.prompt)}
           {@const kb = splitKnowledge(attached.text)}
@@ -336,7 +424,7 @@
           <div class="me">
             <div class="mlab">{t("timeline.me")}</div>
             <div class="bubble">
-              {#if said.text.trim()}<p>{said.text}</p>{/if}
+              {#if said.text.trim()}<p data-find={findKey.said}>{said.text}</p>{/if}
               {#if kb.titles.length}
                 <div class="files" class:alone={!said.text.trim()} aria-label={t("composer.kb.attached")}>
                   {#each kb.titles as title, i (i)}
@@ -373,9 +461,9 @@
                until the answer starts, when they fold into one line. -->
           {#each turn(run) as { block, active }, i (block.kind === "steps" ? `s${block.at}` : `t${i}`)}
             {#if block.kind === "text"}
-              <div class="ctext"><Markdown source={cleanText(block.text)} /></div>
+              <div class="ctext" data-find={findKey.text(i)}><Markdown source={cleanText(block.text)} /></div>
             {:else}
-              <StepGroup steps={block.steps} live={isLive(run)} {active} initial={unfolded[run.id]} />
+              <StepGroup steps={block.steps} live={isLive(run)} {active} initial={unfolded[run.id]} at={block.at} found={finder.foundStep(idx, block.at)} />
             {/if}
           {/each}
           {#if !run.loaded && run.segments.length === 0 && run.toolCount > 0}
@@ -384,10 +472,10 @@
           {/if}
           {#if run.segments.length === 0 && run.message.trim()}
             <!-- Restored from the store: only the folded text survives. -->
-            <div class="ctext"><Markdown source={cleanText(run.message)} /></div>
+            <div class="ctext" data-find={findKey.message}><Markdown source={cleanText(run.message)} /></div>
           {/if}
-          {#if (run.status === "failed" || run.status === "interrupted" || run.status === "timed_out" || run.status === "detached") && run.error}
-            <p class="ctext bad">{run.error}</p>
+          {#if failedText(run)}
+            <p class="ctext bad" data-find={findKey.error}>{run.error}</p>
           {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
             <p class="ctext dim">{t("timeline.thinking")}</p>
           {/if}
@@ -395,10 +483,15 @@
         {#each decisionsByRun.byRun[run.id] ?? [] as d (d.id)}
           <DecisionCard decision={d} />
         {/each}
+        </div>
       {/each}
-      {#each decisionsByRun.orphans as d (d.id)}
-        <DecisionCard decision={d} />
-      {/each}
+      {#if decisionsByRun.orphans.length}
+        <div class="turn" data-turn={conductorRuns.length}>
+          {#each decisionsByRun.orphans as d (d.id)}
+            <DecisionCard decision={d} />
+          {/each}
+        </div>
+      {/if}
 
       <!-- Sent while a turn was in flight: in the conversation already, waiting
            its turn. Each can be taken back until it goes. One marked "unsent"
@@ -502,6 +595,10 @@
     min-height: 0;
     overflow-y: auto;
     padding: 24px 34px 28px;
+  }
+
+  .scroll:focus {
+    outline: none;
   }
 
   /* A phone: the conversation takes the width the margins were using. */

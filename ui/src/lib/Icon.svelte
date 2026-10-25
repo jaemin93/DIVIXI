@@ -21,6 +21,7 @@
     | "close"
     | "plus"
     | "filter"
+    | "search"
     | "remote"
     | "terminal"
     | "book"
@@ -109,6 +110,8 @@
     <rect x="1.5" y="2.5" width="13" height="11" /><path d="M4.5 6l2 2-2 2M8 10.5h3.5" />
   {:else if name === "book"}
     <path d="M8 4.5C6.5 3.3 4.5 3 2.5 3.5v9c2-.5 4-.2 5.5 1 1.5-1.2 3.5-1.5 5.5-1v-9c-2-.5-4-.2-5.5 1z" /><path d="M8 4.5v9" />
+  {:else if name === "search"}
+    <circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5l3 3" />
   {:else if name === "filter"}
     <path d="M2.5 4.5h11M4.5 8h7M6.5 11.5h3" />
   {:else if name === "remote"}

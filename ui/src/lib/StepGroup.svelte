@@ -1,6 +1,7 @@
 <script lang="ts">
   import { t, type Key } from "./i18n.svelte";
-  import { detail, isOpen, running, span, summarize, took, verbKey, visible, type Step } from "./steps";
+  import { RECENT, detail, isOpen, running, span, summarize, took, verbKey, visible, type Step } from "./steps";
+  import { findKey } from "./chatFind";
 
   /**
    * One run of steps in a turn: a list that grows while the agent works,
@@ -9,6 +10,9 @@
    *
    * A turn restored from the store comes with a count and no steps; opening
    * it asks for them (`onopen`), and until they arrive it says so.
+   *
+   * The conversation's find bar opens it, all of it, while its current match
+   * is one of these steps (`found`); it goes back to how it was after.
    */
   let {
     steps,
@@ -17,6 +21,8 @@
     count,
     initial,
     onopen,
+    at = 0,
+    found,
   }: {
     steps: Step[];
     /** The turn is still going. */
@@ -28,6 +34,10 @@
     /** Open from the start: the human already asked to see this turn. */
     initial?: boolean;
     onopen?: () => void;
+    /** The block's place among its turn's steps blocks: what its steps are found by. */
+    at?: number;
+    /** The step the find bar's current match is in. */
+    found?: number;
   } = $props();
 
   // Undefined until the human chooses; then theirs, whatever the turn does.
@@ -36,10 +46,10 @@
   let chosen = $state<boolean | undefined>(initial);
   let all = $state(false);
 
-  const open = $derived(isOpen(active, chosen));
+  const open = $derived(found !== undefined || isOpen(active, chosen));
   const sum = $derived(summarize(steps));
   const tools = $derived(steps.length ? sum.tools : (count ?? 0));
-  const view = $derived(visible(steps, all));
+  const view = $derived(visible(steps, all || (found !== undefined && found < steps.length - RECENT)));
   const id = $props.id();
 
   function toggle() {
@@ -90,10 +100,10 @@
           {#if current}<span class="tick pulse" aria-hidden="true"></span>{/if}
           <span class="verb">{t(verbKey(step, live) as Key)}</span>
           {#if step.kind === "thought"}
-            <span class="what">{step.text}</span>
+            <span class="what" data-find={findKey.step(at, view.hidden + i)}>{step.text}</span>
           {:else}
             {@const ms = took(step.tool)}
-            <span class="what" title={step.tool.title}>{detail(step.tool)}</span>
+            <span class="what" title={step.tool.title} data-find={findKey.step(at, view.hidden + i)}>{detail(step.tool)}</span>
             {#if step.tool.status === "failed"}
               <span class="aux mono bad">{t("steps.failedAux")}</span>
             {:else if ms !== undefined && !(live && running(step.tool))}

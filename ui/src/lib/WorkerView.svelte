@@ -9,6 +9,10 @@
   import { untrack } from "svelte";
   import { FOLLOWING, followed, reached, resized, scrolled, type Stick } from "./scroll";
   import { createPager } from "./pager.svelte";
+  import FindBar from "./FindBar.svelte";
+  import Icon from "./Icon.svelte";
+  import { createFinder, createStepSource } from "./finder.svelte";
+  import { findKey, inReportDetails, turnRegions, type FindTurn } from "./chatFind";
 
   /**
    * A worker worker's session, read like a conversation: what the conductor
@@ -59,6 +63,7 @@
     key: () => `${store.track}/${store.openWorker}`,
     total: () => runs.length,
     stuck: () => stick.stuck,
+    unstick: () => (stick = { ...stick, stuck: false, missed: false }),
   });
   const shownRuns = $derived(runs.slice(pager.first, pager.end));
 
@@ -175,6 +180,62 @@
     }
   }
 
+  /** The failure shown under a turn, if any. */
+  function failedText(run: Run): string {
+    return (run.status === "failed" || cut(run) || run.status === "detached") && run.error && !stopped(run) ? run.error : "";
+  }
+
+  // ----- finding text in the worker's session -----
+  //
+  // The same find bar as the conversation's (finder.svelte.ts): Ctrl+F in
+  // this view, or its search button. Searched: what the conductor sent, how
+  // the worker answered, its reports, and with "steps" on its steps (drawn
+  // turns are replayed anyway; the core sends the rest).
+
+  const stepSource = createStepSource((ids) => store.runSegments(ids));
+
+  /** The worker runs that have ended, which is when a report card shows. */
+  const overRuns = $derived(runs.filter((r) => over(r)).map((r) => r.id));
+
+  function findTurn(run: Run, turn: number, steps: boolean): FindTurn {
+    const clean = (text: string) => withoutReportBlock(text);
+    const segments = run.segments.length ? run.segments : steps ? (stepSource.of(run.id) ?? null) : null;
+    return {
+      turn,
+      head: run.prompt.startsWith(REPORT_REMINDER) ? { kind: "line", text: "" } : { kind: "markdown", text: run.prompt },
+      segments: segments?.map((s) => (s.kind === "text" ? { kind: "text", text: clean(s.text) } : s)) ?? null,
+      message: clean(run.message),
+      report: over(run) ? store.reports[run.id] : undefined,
+      error: failedText(run),
+      decisions: [],
+    };
+  }
+
+  const finder = createFinder({
+    root: () => scroller,
+    scroller: () => scroller,
+    content: () => content,
+    key: () => `${store.track}/${store.openWorker}`,
+    total: () => runs.length,
+    regions: (opts) => runs.map((r, i) => ({ turn: i, regions: turnRegions(findTurn(r, i, opts.steps), opts.steps) })),
+    pager,
+    stuck: () => stick.stuck,
+    unstick: () => (stick = { ...stick, stuck: false, missed: false }),
+    // Drawn turns are replayed as they come into view; a revealed one waits for it.
+    prepare: async (m) => {
+      const run = runs[m.turn];
+      if (run && !run.loaded) await store.hydrate(run);
+    },
+    idle: () => store.view === "worker",
+  });
+
+  $effect(() => {
+    if (!finder.open || !finder.query) return;
+    void store.reportsArrived;
+    void store.loadReports(overRuns);
+    if (finder.opts.steps) stepSource.want(runs.filter((r) => !r.loaded && r.toolCount > 0 && !isLive(r)).map((r) => r.id));
+  });
+
   function secs(ms?: number) {
     if (ms === undefined) return "";
     return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
@@ -189,11 +250,17 @@
       <span class="mono meta">{agentLabel(agent)} · {t("worker.turns", { n: runs.length })}</span>
       {#if live}<Working />{/if}
       <span class="grow"></span>
+      <button class="tog" type="button" title={t("find.open")} aria-label={t("find.label")} onclick={() => finder.show()}><Icon name="search" size={14} /></button>
       <button class="btn" onclick={() => (store.view = "track")}>{t("worker.back")}</button>
     </div>
   </header>
 
-  <div class="scroll" bind:this={scroller} onscroll={onScroll}>
+  <div class="body">
+  {#if finder.open}
+    <FindBar bind:this={finder.bar} bind:query={finder.text} bind:opts={finder.opts} at={finder.at} count={finder.matches.length} onstep={finder.step} onclose={finder.close} />
+  {/if}
+  <!-- Focusable (not in the tab order): a click here puts the keys here, Ctrl+F included. -->
+  <div class="scroll" bind:this={scroller} onscroll={onScroll} tabindex="-1">
     <div class="content" bind:this={content}>
       {#if runs.length === 0}
         <div class="mono empty">{t("worker.empty")}</div>
@@ -201,7 +268,9 @@
       {#if pager.first > 0}
         <button class="earlier mono" type="button" onclick={() => pager.earlier()}>{t("timeline.earlier", { n: pager.first })}</button>
       {/if}
-      {#each shownRuns as run (run.id)}
+      {#each shownRuns as run, j (run.id)}
+        {@const idx = pager.first + j}
+        <div class="one" data-turn={idx}>
         {#if run.prompt.startsWith(REPORT_REMINDER)}
           <!-- The app, not the conductor, asked again for the report. -->
           <div class="sys mono">{t("report.reminded")}</div>
@@ -210,7 +279,7 @@
           <div class="from">
             <div class="mlab">{t("worker.conductor")}</div>
             <div class="turn bubble">
-              <div class="ctext"><Markdown source={run.prompt} /></div>
+              <div class="ctext" data-find={findKey.said}><Markdown source={run.prompt} /></div>
             </div>
           </div>
         {/if}
@@ -226,19 +295,19 @@
           </div>
           {#each turn(run) as { block, active }, i (block.kind === "steps" ? `s${block.at}` : `t${i}`)}
             {#if block.kind === "text"}
-              <div class="ctext"><Markdown source={cleanText(block.text)} /></div>
+              <div class="ctext" data-find={findKey.text(i)}><Markdown source={cleanText(block.text)} /></div>
             {:else}
-              <StepGroup steps={block.steps} live={isLive(run)} {active} />
+              <StepGroup steps={block.steps} live={isLive(run)} {active} at={block.at} found={finder.foundStep(idx, block.at)} />
             {/if}
           {/each}
           {#if run.segments.length === 0 && run.message.trim()}
-            <div class="ctext"><Markdown source={cleanText(run.message)} /></div>
+            <div class="ctext" data-find={findKey.message}><Markdown source={cleanText(run.message)} /></div>
           {/if}
           {#if over(run)}
-            <ReportCard run={run.id} compact />
+            <ReportCard run={run.id} compact found={finder.foundIn(idx, inReportDetails)} />
           {/if}
-          {#if (run.status === "failed" || cut(run) || run.status === "detached") && run.error && !stopped(run)}
-            <p class="ctext bad">{run.error}</p>
+          {#if failedText(run)}
+            <p class="ctext bad" data-find={findKey.error}>{run.error}</p>
           {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
             <p class="ctext dim">{t("worker.starting")}</p>
           {/if}
@@ -255,12 +324,44 @@
             </div>
           {/if}
         </div>
+        </div>
       {/each}
     </div>
+  </div>
   </div>
 </main>
 
 <style>
+  /* Under the header: the find bar floats over the top of the scroll. */
+  .body {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .scroll:focus {
+    outline: none;
+  }
+
+  .tog {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--dim);
+    flex-shrink: 0;
+  }
+
+  .tog:hover {
+    color: var(--hi);
+    background: var(--sel);
+  }
+
   .sys {
     margin: 0 0 14px;
     font-size: 10px;

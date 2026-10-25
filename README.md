@@ -27,7 +27,7 @@ parts. The x is for crossing providers.
   was checked, what is open), and you merge their changes file by file.
 - **Decisions, not prompts.** Agents run in their most autonomous mode. What needs you
   arrives as a decision card in the conversation, and a bell at the top right keeps the
-  rest.
+  rest. Ctrl+F finds any past message in a conversation, however long.
 - **Context beside the chat.** A file panel with search, previews and editing. A terminal.
   Design boards for notes, sketches, frames and references. A knowledge library of PDFs,
   Office files and notes that you pull into a message with `@kb`.

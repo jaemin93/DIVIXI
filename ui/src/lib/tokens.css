@@ -36,6 +36,10 @@
   --sel: #151515;
   --sb: #242424;
   --focus: #f0eeeb;
+  /* Found in the conversation (Ctrl+F): every match, and the current one. */
+  --findbg: rgb(224 160 48 / 0.28);
+  --findcur: #e0a030;
+  --findcurtx: #0b0b0b;
 
   /* The knowledge graph, drawn as a plate: paper, a faint grid, hairline
      edges, one red for what matters (the hub, the picked entity). */
@@ -83,6 +87,9 @@
   --sel: #eae7e1;
   --sb: #d3cfc7;
   --focus: #0e0d0c;
+  --findbg: rgb(240 180 40 / 0.35);
+  --findcur: #c97d06;
+  --findcurtx: #ffffff;
 
   --kg-paper: #f3f1ed;
   --kg-grid: #ebe8e2;
@@ -545,4 +552,15 @@ input::placeholder {
 /* While a column edge is dragged, nothing eases: the width follows the pointer. */
 html.resizing * {
   transition: none !important;
+}
+
+/* Matches of the conversation's find bar (chatFind.ts), painted with the
+   CSS Custom Highlight API so the drawn text is never rewritten. */
+::highlight(divixi-find) {
+  background-color: var(--findbg);
+}
+
+::highlight(divixi-find-current) {
+  background-color: var(--findcur);
+  color: var(--findcurtx);
 }
