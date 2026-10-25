@@ -2,6 +2,9 @@
   import { store, type Decision } from "./store.svelte";
   import { t } from "./i18n.svelte";
   import { whenFull, whenLabel } from "./time";
+  import { findKey } from "./chatFind";
+
+  const k = findKey.decision;
 
   /**
    * A question the conductor put to the human, in the timeline where it was
@@ -54,10 +57,10 @@
     </span>
   </div>
 
-  <p class="q">{decision.question}</p>
+  <p class="q" data-find={k.question(decision.id)}>{decision.question}</p>
 
   {#if open}
-    {#if decision.context}<p class="ctx">{decision.context}</p>{/if}
+    {#if decision.context}<p class="ctx" data-find={k.context(decision.id)}>{decision.context}</p>{/if}
 
     <div class="opts" role="radiogroup" aria-label={decision.question}>
       {#each decision.options as option, i (i)}
@@ -65,10 +68,10 @@
           <span class="key mono">{letter(i)}</span>
           <span class="body">
             <span class="label">
-              {option.label}
+              <span data-find={k.option(decision.id, i)}>{option.label}</span>
               {#if decision.recommended === i}<span class="rec mono">{t("decision.recommended")}</span>{/if}
             </span>
-            {#if option.detail}<span class="detail">{option.detail}</span>{/if}
+            {#if option.detail}<span class="detail" data-find={k.optionDetail(decision.id, i)}>{option.detail}</span>{/if}
           </span>
         </button>
       {/each}
@@ -98,18 +101,18 @@
     <div class="answer">
       {#if chosen && decision.choice !== null}
         <span class="key mono on">{letter(decision.choice)}</span>
-        <span class="label">{chosen.label}</span>
+        <span class="label" data-find={k.answer(decision.id)}>{chosen.label}</span>
       {:else}
         <span class="key mono on">…</span>
-        <span class="label">{decision.answer ?? ""}</span>
+        <span class="label" data-find={k.answer(decision.id)}>{decision.answer ?? ""}</span>
       {/if}
     </div>
-    {#if decision.note}<p class="ctx">{decision.note}</p>{/if}
+    {#if decision.note}<p class="ctx" data-find={k.note(decision.id)}>{decision.note}</p>{/if}
     {#if decision.options.length > 1}
       <div class="rest mono">
         {t("decision.others")}:
         {#each decision.options as option, i (i)}
-          {#if i !== decision.choice}<span class="restopt">{letter(i)}. {option.label}</span>{/if}
+          {#if i !== decision.choice}<span class="restopt">{letter(i)}. <span data-find={k.option(decision.id, i)}>{option.label}</span></span>{/if}
         {/each}
       </div>
     {/if}

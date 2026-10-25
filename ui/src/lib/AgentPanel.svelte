@@ -6,6 +6,8 @@
   import SplitHandle from "./SplitHandle.svelte";
   import Timeline from "./Timeline.svelte";
   import Composer from "./Composer.svelte";
+  import Icon from "./Icon.svelte";
+  import { askFind } from "./findAsk.svelte";
   import { t } from "./i18n.svelte";
 
   /**
@@ -69,6 +71,7 @@
   <div class="head">
     <span class="mono hlab">{label}</span>
     <span class="grow"></span>
+    <button class="x find" type="button" onclick={askFind} aria-label={t("find.label")} title={t("find.label")}><Icon name="search" size={13} /></button>
     <button
       class="x"
       onclick={() => (kind === "plan" ? store.setPlanChat(false) : design ? store.setDesignChat(false) : store.closeGraphChat())}
@@ -196,6 +199,12 @@
 
   .x:hover {
     color: var(--hi);
+  }
+
+  .x.find {
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   /* What goes with the next message. */

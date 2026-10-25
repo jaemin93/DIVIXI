@@ -2,6 +2,7 @@
   import { store, type WorkerReport } from "./store.svelte";
   import { t } from "./i18n.svelte";
   import WorkerChanges from "./WorkerChanges.svelte";
+  import { findKey } from "./chatFind";
 
   /**
    * A worker's report as it crossed the membrane: where the work stands, a
@@ -14,6 +15,7 @@
     compact = false,
     track = "",
     latest = false,
+    found = false,
   }: {
     run: string;
     worker?: string;
@@ -21,6 +23,8 @@
     /** With `latest`, the worker's unmerged changes show under its newest report. */
     track?: string;
     latest?: boolean;
+    /** The conversation's find bar has its current match in the lists: they open for it. */
+    found?: boolean;
   } = $props();
 
   const report = $derived<WorkerReport | undefined>(store.reports[run]);
@@ -54,13 +58,13 @@
       <button class="mono runid" type="button" onclick={() => worker && store.openWorkerView(worker)} disabled={!worker} title={t("report.openWorker")}>{run}</button>
     </div>
 
-    <p class="summary">{report.summary}</p>
+    <p class="summary" data-find={findKey.report.summary}>{report.summary}</p>
 
     {#if report.questions.length}
       <div class="questions">
         <div class="mlab-sm">{t("report.questions")}</div>
         <ul>
-          {#each report.questions as q, i (i)}<li>{q}</li>{/each}
+          {#each report.questions as q, i (i)}<li data-find={findKey.report.question(i)}>{q}</li>{/each}
         </ul>
       </div>
     {/if}
@@ -82,7 +86,7 @@
       {/if}
     </div>
 
-    {#if open}
+    {#if open || found}
       <div class="details">
         {#if report.changes.length}
           <div class="mlab-sm">{t("report.changesTitle")}</div>
@@ -90,8 +94,8 @@
             {#each report.changes as c, i (i)}
               {@const rel = store.relativeToTrack(c.path) ?? c.path}
               <li>
-                <button type="button" class="mono path" onclick={() => store.openFile(rel)}>{c.path}</button>
-                {#if c.what}<span class="what">{c.what}</span>{/if}
+                <button type="button" class="mono path" onclick={() => store.openFile(rel)} data-find={findKey.report.change(i)}>{c.path}</button>
+                {#if c.what}<span class="what" data-find={findKey.report.changeWhat(i)}>{c.what}</span>{/if}
               </li>
             {/each}
           </ul>
@@ -102,8 +106,8 @@
             {#each report.checks as c, i (i)}
               <li>
                 <span class="mono mark r-{c.result}">{c.result === "pass" ? "✓" : c.result === "fail" ? "✗" : "–"}</span>
-                <span class="mono">{c.what}</span>
-                {#if c.detail}<span class="what">{c.detail}</span>{/if}
+                <span class="mono" data-find={findKey.report.check(i)}>{c.what}</span>
+                {#if c.detail}<span class="what" data-find={findKey.report.checkDetail(i)}>{c.detail}</span>{/if}
               </li>
             {/each}
           </ul>
@@ -111,7 +115,7 @@
         {#if report.risks.length}
           <div class="mlab-sm">{t("report.risksTitle")}</div>
           <ul>
-            {#each report.risks as r, i (i)}<li>{r}</li>{/each}
+            {#each report.risks as r, i (i)}<li data-find={findKey.report.risk(i)}>{r}</li>{/each}
           </ul>
         {/if}
         {#if unlisted.length}
@@ -129,7 +133,7 @@
         {#if report.next.length}
           <div class="mlab-sm">{t("report.next")}</div>
           <ul>
-            {#each report.next as n, i (i)}<li>{n}</li>{/each}
+            {#each report.next as n, i (i)}<li data-find={findKey.report.next(i)}>{n}</li>{/each}
           </ul>
         {/if}
       </div>

@@ -2,12 +2,15 @@
   import { store, agentLabel, type Track } from "./store.svelte";
   import PanelToggle from "./PanelToggle.svelte";
   import SchedulePopover from "./SchedulePopover.svelte";
+  import Icon from "./Icon.svelte";
+  import { askFind } from "./findAsk.svelte";
   import { t } from "./i18n.svelte";
 
   /**
    * The track's name, intent and tags. Editing, tagging and deleting live
    * in the track list's context menu; the controls here are the panel, the
-   * fold and, while the track has any, its schedules.
+   * fold, finding in the conversation and, while the track has any, its
+   * schedules.
    *
    * Folded, the header is one line — name and the first line of the intent,
    * cut with an ellipsis — so a long brief does not eat the conversation.
@@ -20,6 +23,7 @@
   const folded = $derived(store.isHeaderFolded(track.id));
   /** Folded, only the first line of the intent shows. */
   const gist = $derived(track.intent.split("\n").find((l) => l.trim()) ?? "");
+  const mac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 
   function toggle() {
     store.setHeaderFolded(track.id, !folded);
@@ -63,6 +67,9 @@
       onclick={toggle}
     >
       {folded ? "▸" : "▾"}
+    </button>
+    <button class="tog" type="button" title={mac ? t("find.openMac") : t("find.open")} aria-label={t("find.label")} onclick={askFind}>
+      <Icon name="search" size={14} />
     </button>
     <SchedulePopover />
     <PanelToggle on={store.panelOpen} title={t("ws.toggle")} onclick={() => store.setPanel(!store.panelOpen)} />

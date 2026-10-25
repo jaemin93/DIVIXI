@@ -346,6 +346,14 @@ fn worker_report(state: State<'_, AppState>, run: String) -> Option<orchestra_co
     conductor::stored_report(&state, &run)
 }
 
+/// The checked reports of many worker runs at once, by run id; runs with
+/// none are left out. What a search over a whole conversation reads, rather
+/// than one call per report card.
+#[tauri::command(async)]
+fn worker_reports(state: State<'_, AppState>, runs: Vec<String>) -> std::collections::HashMap<String, orchestra_core::report::Report> {
+    runs.into_iter().filter_map(|run| conductor::stored_report(&state, &run).map(|r| (run, r))).collect()
+}
+
 /// Every track, oldest first.
 #[tauri::command]
 fn list_tracks(state: State<'_, AppState>) -> Result<Vec<TrackInfo>, String> {
@@ -1488,6 +1496,12 @@ fn run_events(state: State<'_, AppState>, run: String) -> Result<Vec<StoredEvent
     state.store.events(&run).map_err(|e| e.to_string())
 }
 
+/// Many runs' prose, thoughts and tool titles, in order (`Store::segments`).
+#[tauri::command(async)]
+fn run_segments(state: State<'_, AppState>, runs: Vec<String>) -> Result<Vec<orchestra_store::RunSegments>, String> {
+    state.store.segments(&runs).map_err(|e| e.to_string())
+}
+
 /// Full-text search over finished runs.
 #[tauri::command(async)]
 fn search_runs(state: State<'_, AppState>, query: String) -> Result<Vec<SearchHit>, String> {
@@ -2195,6 +2209,7 @@ pub fn run() {
             design_extracts,
             design_extract_retry,
             worker_report,
+            worker_reports,
             worker_changes,
             worker_file_diff,
             worker_merge,
@@ -2217,6 +2232,7 @@ pub fn run() {
             conductor_cancel,
             list_runs,
             run_events,
+            run_segments,
             list_decisions,
             list_routines,
             create_routine,

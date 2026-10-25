@@ -28,6 +28,7 @@ pub const ALLOWED: &[&str] = &[
     "list_runs",
     "get_run",
     "run_events",
+    "run_segments",
     "search_runs",
     "conductor_prompt",
     "conductor_state",
@@ -48,6 +49,7 @@ pub const ALLOWED: &[&str] = &[
     "quiet_hours",
     // worker reports and changes
     "worker_report",
+    "worker_reports",
     "worker_changes",
     "worker_file_diff",
     "worker_merge",

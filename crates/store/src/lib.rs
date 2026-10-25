@@ -1428,6 +1428,29 @@ pub struct StoredEvent {
     pub event: AgentEvent,
 }
 
+/// What a piece of a run is: prose, a thought, or a tool call (its title).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentKind {
+    Text,
+    Thought,
+    Tool,
+}
+
+/// One piece of a run, in the order it arrived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Segment {
+    pub kind: SegmentKind,
+    pub text: String,
+}
+
+/// A run's pieces, see [`Store::segments`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSegments {
+    pub run: RunId,
+    pub segments: Vec<Segment>,
+}
+
 /// A full-text match.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -2489,6 +2512,52 @@ impl Store {
             Ok(StoredEvent { seq: r.get(0)?, at_ms: r.get::<_, i64>(1)? as u64, event })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// What each run said and did, in order, for searching a conversation
+    /// that is not all on screen: its prose, its thoughts and its tool
+    /// calls by their last title, folded as the timeline folds a replayed
+    /// log (consecutive chunks of one kind join). Nothing else of the log
+    /// is read, so a long history crosses as text, not as events.
+    pub fn segments(&self, runs: &[String]) -> anyhow::Result<Vec<RunSegments>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT kind, payload FROM events
+             WHERE run_id = ?1 AND kind IN ('message', 'thought', 'tool_call', 'tool_update') ORDER BY seq",
+        )?;
+        let mut out = Vec::with_capacity(runs.len());
+        for run in runs {
+            let rows = stmt.query_map(params![run], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let mut segments: Vec<Segment> = Vec::new();
+            // Tool call id -> its segment, so an update can rename it.
+            let mut tools: Vec<(String, usize)> = Vec::new();
+            for row in rows {
+                let (kind, payload) = row?;
+                let value: serde_json::Value = serde_json::from_str(&payload)?;
+                let text = value["text"].as_str().unwrap_or_default();
+                match kind.as_str() {
+                    "message" | "thought" => {
+                        let kind = if kind == "message" { SegmentKind::Text } else { SegmentKind::Thought };
+                        match segments.last_mut() {
+                            Some(last) if last.kind == kind => last.text.push_str(text),
+                            _ => segments.push(Segment { kind, text: text.to_owned() }),
+                        }
+                    }
+                    "tool_call" => {
+                        tools.push((value["id"].as_str().unwrap_or_default().to_owned(), segments.len()));
+                        segments.push(Segment { kind: SegmentKind::Tool, text: value["title"].as_str().unwrap_or_default().to_owned() });
+                    }
+                    _ => {
+                        let (id, title) = (value["id"].as_str().unwrap_or_default(), value["title"].as_str().unwrap_or_default());
+                        if let Some((_, at)) = tools.iter().find(|(t, _)| !title.is_empty() && t == id) {
+                            segments[*at].text = title.to_owned();
+                        }
+                    }
+                }
+            }
+            out.push(RunSegments { run: run.clone(), segments });
+        }
+        Ok(out)
     }
 
     /// Full-text search over finished runs' prompt, output and tool titles.
@@ -4272,6 +4341,38 @@ mod tests {
 
         drop((cli, server));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn segments_fold_prose_thoughts_and_renamed_tools_in_order() {
+        let store = Store::in_memory().unwrap();
+        let run = store.begin_run(TR, "conductor", "claude_code", "p", ".").unwrap();
+        let say = |at, e: AgentEvent| store.append(&run, at, &e).unwrap();
+        say(1, AgentEvent::Thought { text: "생각 ".into() });
+        say(2, AgentEvent::Thought { text: "중".into() });
+        say(3, tool("a", "Terminal"));
+        say(4, AgentEvent::ToolUpdate { id: "a".into(), status: "completed".into(), title: "`cargo test`".into(), paths: vec![] });
+        say(5, AgentEvent::ToolUpdate { id: "a".into(), status: String::new(), title: String::new(), paths: vec![] });
+        say(6, AgentEvent::Message { text: "All ".into() });
+        say(7, AgentEvent::Plan { entries: vec!["x".into()] });
+        say(8, AgentEvent::Message { text: "green.".into() });
+        say(9, AgentEvent::Finished { stop_reason: "end_turn".into() });
+        let other = drive_run(&store, "conductor", "q", &["only prose"], &[]);
+
+        let got = store.segments(&[run.clone(), "nope".into(), other.clone()]).unwrap();
+        let seg = |kind, text: &str| Segment { kind, text: text.into() };
+        assert_eq!(
+            got,
+            vec![
+                RunSegments {
+                    run,
+                    segments: vec![seg(SegmentKind::Thought, "생각 중"), seg(SegmentKind::Tool, "`cargo test`"), seg(SegmentKind::Text, "All green.")],
+                },
+                RunSegments { run: "nope".into(), segments: vec![] },
+                RunSegments { run: other, segments: vec![seg(SegmentKind::Text, "only prose")] },
+            ],
+            "an empty update keeps the title; a run with no log has no pieces"
+        );
     }
 
     #[test]

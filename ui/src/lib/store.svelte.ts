@@ -4358,6 +4358,43 @@ class Store {
     }
   }
 
+  /**
+   * The reports of many worker runs in one call, for a search over a whole
+   * conversation (Timeline's find bar) rather than a card at a time. Runs
+   * already read are not asked again; a miss stays a miss until asked again.
+   */
+  async loadReports(runs: string[]) {
+    const want = runs.filter((r) => !this.reports[r]);
+    if (!want.length) return;
+    try {
+      const got = await invoke<Record<string, WorkerReport>>("worker_reports", { runs: want });
+      if (Object.keys(got).length) this.reports = { ...this.reports, ...got };
+    } catch {
+      // An older server has no such command: the cards still read their own.
+    }
+  }
+
+  /**
+   * What finished runs said and did, in order (prose, thoughts, tool titles),
+   * without replaying their logs one by one: what a search over steps reads
+   * for turns that are not drawn. Empty when the core cannot say.
+   */
+  async runSegments(runs: string[]): Promise<Record<string, Segment[]>> {
+    if (!runs.length) return {};
+    try {
+      const got = await invoke<{ run: string; segments: { kind: "text" | "thought" | "tool"; text: string }[] }[]>("run_segments", { runs });
+      const out: Record<string, Segment[]> = {};
+      for (const { run, segments } of got) {
+        out[run] = segments.map((s, i) =>
+          s.kind === "tool" ? { kind: "tool", tool: { id: `${run}:${i}`, title: s.text, toolKind: "", status: "completed" } } : { kind: s.kind, text: s.text },
+        );
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  }
+
   /** Workers' unmerged changes, by `track/worker`. */
   workerChanges = $state<Record<string, WorkerChanges>>({});
 
