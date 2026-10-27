@@ -10,7 +10,9 @@
   import { grammars } from "./grammars.svelte";
   import { t } from "./i18n.svelte";
   import { invoke, previewBase, saveAs, local } from "./ipc.svelte";
-  import { untrack } from "svelte";
+  import Popover from "./Popover.svelte";
+  import { DRAG_SLOP, hiddenTabs, scrollToShow, wheelToScroll } from "./tabStrip";
+  import { tick, untrack } from "svelte";
 
   /**
    * The track's working folder beside the conversation, after Kiro Crew's
@@ -208,12 +210,88 @@
     return "var(--warn)";
   }
 
+  // ----- the open-file tabs -----
+  // The strip takes what the fixed buttons leave, and past that scrolls:
+  // wheel, drag, or the list of every open file.
+  let strip = $state<HTMLDivElement>();
+  /** Open files not wholly in view; the list button shows while there are any. */
+  let hidden = $state(0);
+  let listOpen = $state(false);
+
+  function measure() {
+    if (!strip) return;
+    const tabs = [...strip.querySelectorAll<HTMLElement>(".tab.file")].map((el) => ({ left: el.offsetLeft, width: el.offsetWidth }));
+    hidden = hiddenTabs(tabs, { scrollLeft: strip.scrollLeft, width: strip.clientWidth }).length;
+  }
+
+  /** Bring the active file's tab into view. */
+  function showActive() {
+    if (!strip) return;
+    const el = [...strip.querySelectorAll<HTMLElement>(".tab.file")].find((t) => t.dataset.path === store.activeFile);
+    if (!el) return;
+    const to = scrollToShow({ left: el.offsetLeft, width: el.offsetWidth }, { scrollLeft: strip.scrollLeft, width: strip.clientWidth }, 12);
+    if (to !== null) strip.scrollLeft = to;
+    measure();
+  }
+
+  // On opening, switching or closing a file; after the tabs have drawn.
+  $effect(() => {
+    void store.activeFile;
+    void store.panelTab;
+    void store.openFiles.length;
+    tick().then(showActive);
+  });
+
+  // When the strip changes width: the panel resized, the window, a phone turned.
+  $effect(() => {
+    if (!strip) return;
+    const seen = new ResizeObserver(() => showActive());
+    seen.observe(strip);
+    return () => seen.disconnect();
+  });
+
   /** A plain mouse wheel over the tab strip scrolls it sideways. */
   function scrollTabs(e: WheelEvent) {
     const el = e.currentTarget as HTMLElement;
-    if (el.scrollWidth <= el.clientWidth || e.deltaX !== 0) return;
-    el.scrollLeft += e.deltaY;
+    const by = wheelToScroll(e, el.clientWidth, el.scrollWidth > el.clientWidth);
+    if (by === null) return;
+    el.scrollLeft += by;
     e.preventDefault();
+  }
+
+  // A mouse drags the strip; a click that moved that far is not a click.
+  // Touch scrolls it natively.
+  let drag: { x: number; left: number; moved: boolean; id: number } | null = null;
+  function dragStart(e: PointerEvent) {
+    if (e.pointerType !== "mouse" || e.button !== 0 || !strip) return;
+    drag = { x: e.clientX, left: strip.scrollLeft, moved: false, id: e.pointerId };
+  }
+  function dragMove(e: PointerEvent) {
+    if (!drag || !strip || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.x;
+    if (!drag.moved && Math.abs(dx) < DRAG_SLOP) return;
+    if (!drag.moved) strip.setPointerCapture(e.pointerId);
+    drag.moved = true;
+    strip.scrollLeft = drag.left - dx;
+  }
+  function dragEnd(e: PointerEvent) {
+    if (!drag || e.pointerId !== drag.id) return;
+    // The click that follows the release lands on the strip itself while it
+    // holds the pointer; swallow it either way.
+    if (drag.moved) {
+      const swallow = (c: MouseEvent) => {
+        c.stopPropagation();
+        c.preventDefault();
+      };
+      window.addEventListener("click", swallow, { capture: true, once: true });
+      setTimeout(() => window.removeEventListener("click", swallow, true), 0);
+    }
+    drag = null;
+  }
+
+  function pickFile(path: string) {
+    store.activeFile = path;
+    store.panelTab = "file";
   }
 
   const diffHtml = $derived(store.diffPath ? highlight(store.diffs[store.diffPath] ?? "", "diff") : "");
@@ -272,21 +350,64 @@
     <button class="tab icon" class:on={store.panelTab === "files"} title={t("ws.files")} onclick={() => { store.panelTab = "files"; if (!store.tree.length) store.loadTree(); }}>
       <Icon name="files" size={14} />
     </button>
-    <div class="filetabs" onwheel={scrollTabs}>
+    <!-- Dragging with a mouse only moves the view; the tabs' own buttons are
+         what a keyboard reaches. -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="filetabs"
+      bind:this={strip}
+      onwheel={scrollTabs}
+      onscroll={measure}
+      onpointerdown={dragStart}
+      onpointermove={dragMove}
+      onpointerup={dragEnd}
+      onpointercancel={() => (drag = null)}
+    >
       {#each store.openFiles as path (path)}
-        <div class="tab file" class:on={store.panelTab === "file" && store.activeFile === path}>
-          <button class="fname mono" onclick={() => { store.activeFile = path; store.panelTab = "file"; }} title={path}>{path.split("/").at(-1)}</button>
-          {#if store.closeAsked === path}
-            <button class="mono discard" onclick={() => store.closeFile(path)} title={t("ws.discardTitle")}>{t("ws.discard")}</button>
-          {:else if store.isDirty(path)}
-            <button class="x dirty" onclick={() => store.closeFile(path)} aria-label={t("ws.unsavedClose")} title={t("ws.unsavedClose")}><span class="dot"></span></button>
-          {:else}
-            <button class="x" onclick={() => store.closeFile(path)} aria-label={t("ws.closeFile")}><Icon name="close" size={10} /></button>
-          {/if}
+        <div class="tab file" class:on={store.panelTab === "file" && store.activeFile === path} data-path={path}>
+          <button class="fname mono" onclick={() => pickFile(path)} title={path}>{path.split("/").at(-1)}</button>
+          {@render closer(path)}
         </div>
       {/each}
     </div>
-    <span class="grow"></span>
+    {#if hidden > 0 || listOpen}
+      <!-- Every open file, for when the strip has more than it shows. -->
+      <Popover bind:open={listOpen} align="right" width={300} label={t("ws.openFiles")}>
+        {#snippet trigger()}
+          <button
+            class="tab icon more"
+            class:on={listOpen}
+            title={t("ws.openFilesAll", { n: store.openFiles.length })}
+            aria-label={t("ws.openFilesAll", { n: store.openFiles.length })}
+            aria-haspopup="menu"
+            aria-expanded={listOpen}
+            onclick={() => (listOpen = !listOpen)}
+          >
+            <span class="mono">{store.openFiles.length}</span>
+          </button>
+        {/snippet}
+        <div class="openlist" role="menu">
+          {#each store.openFiles as path (path)}
+            {@const at = path.lastIndexOf("/")}
+            <div class="oitem" class:on={store.panelTab === "file" && store.activeFile === path}>
+              <button
+                class="opick"
+                role="menuitem"
+                title={path}
+                onclick={() => {
+                  pickFile(path);
+                  listOpen = false;
+                }}
+              >
+                <span class="mono oname">{path.slice(at + 1)}</span>
+                {#if at > 0}<span class="mono odir">{path.slice(0, at)}</span>{/if}
+              </button>
+              {@render closer(path)}
+            </div>
+          {/each}
+        </div>
+      </Popover>
+    {/if}
     <button class="tab icon" title={t("ws.refresh")} disabled={store.treeLoading || store.gitLoading} onclick={() => store.refreshWorkspace()}>
       <Icon name="refresh" size={14} />
     </button>
@@ -407,6 +528,18 @@
     </div>
   {/if}
 </aside>
+
+<!-- A file's close button, in its tab and in the list of open files.
+     Unsaved edits: the first press asks, the second discards. -->
+{#snippet closer(path: string)}
+  {#if store.closeAsked === path}
+    <button class="mono discard" onclick={() => store.closeFile(path)} title={t("ws.discardTitle")}>{t("ws.discard")}</button>
+  {:else if store.isDirty(path)}
+    <button class="x dirty" onclick={() => store.closeFile(path)} aria-label={t("ws.unsavedClose")} title={t("ws.unsavedClose")}><span class="dot"></span></button>
+  {:else}
+    <button class="x" onclick={() => store.closeFile(path)} aria-label={t("ws.closeFile")} title={t("ws.closeFile")}><Icon name="close" size={10} /></button>
+  {/if}
+{/snippet}
 
 <!-- The file tree, with its filter. `compact` (the drawer over a file) drops the
      file sizes and adds a files / changes switch, as in Kiro. -->
@@ -588,7 +721,10 @@
     color: var(--dim);
   }
 
+  /* Changes, files, refresh and the list keep their size however many files
+     are open: only the open-file tabs give way. */
   .tab.icon {
+    flex: none;
     width: 34px;
     justify-content: center;
     padding: 0;
@@ -617,9 +753,11 @@
     color: var(--acct);
   }
 
-  /* Open-file tabs scroll sideways (wheel or trackpad) but draw no
-     scrollbar, which would push the strip off its line. */
+  /* Open-file tabs take the rest of the row. They narrow to a least width,
+     then scroll sideways (wheel, trackpad or drag) and draw no scrollbar,
+     which would push the strip off its line. */
   .filetabs {
+    flex: 1 1 0;
     display: flex;
     min-width: 0;
     overflow-x: auto;
@@ -634,7 +772,8 @@
   }
 
   .tab.file {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    min-width: 88px;
     max-width: 180px;
     padding: 0 4px 0 10px;
     gap: 4px;
@@ -642,6 +781,8 @@
   }
 
   .fname {
+    flex: 1 1 auto;
+    min-width: 0;
     background: transparent;
     border: 0;
     color: inherit;
@@ -649,7 +790,79 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    text-align: left;
     padding: 0;
+  }
+
+  .tab.file .x,
+  .tab.file .discard {
+    flex: none;
+  }
+
+  .more .mono {
+    font-size: 10px;
+  }
+
+  /* The list of open files, under its button. */
+  .openlist {
+    padding: 4px 0;
+  }
+
+  .oitem {
+    display: flex;
+    align-items: center;
+    padding-right: 6px;
+    border-left: 2px solid transparent;
+  }
+
+  .oitem:hover {
+    background: var(--sel);
+  }
+
+  .oitem.on {
+    border-left-color: var(--acc);
+    background: var(--sel);
+  }
+
+  .opick {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 6px 8px 6px 12px;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    color: var(--dim);
+  }
+
+  .oitem:hover .opick,
+  .oitem.on .opick {
+    color: var(--hi);
+  }
+
+  .oname {
+    flex: none;
+    max-width: 60%;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .odir {
+    min-width: 0;
+    font-size: 10px;
+    color: var(--lab);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .oitem .x,
+  .oitem .discard {
+    flex: none;
   }
 
   .x {
@@ -783,6 +996,11 @@
     gap: 6px;
     padding: 0 6px 0 14px;
     border-bottom: 1px solid var(--line);
+  }
+
+  /* Its buttons keep their size; a long path gives way instead. */
+  .filehead > :not(.crumbs):not(.grow) {
+    flex: none;
   }
 
   .crumbs {
@@ -1155,7 +1373,22 @@
     }
 
     .tab.file {
+      min-width: 104px;
       max-width: 140px;
+    }
+
+    .tab.file .x {
+      width: 32px;
+      height: 32px;
+    }
+
+    .oitem .x {
+      width: 36px;
+      height: 36px;
+    }
+
+    .opick {
+      padding: 10px 8px 10px 12px;
     }
 
     .filehead {
