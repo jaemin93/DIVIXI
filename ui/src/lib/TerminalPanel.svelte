@@ -8,6 +8,7 @@
   import Icon from "./Icon.svelte";
   import { t } from "./i18n.svelte";
   import { MIN_CONTRAST, ansiFor } from "./termTheme";
+  import { CompositionGuard, InputQueue } from "./termInput";
 
   /**
    * The bottom panel: real shells in tabs, in the open track's folder.
@@ -87,8 +88,12 @@
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(el);
+    // After xterm's own listener: a composition's text is xterm's to send (termInput.ts).
+    const composing = new CompositionGuard();
+    term.textarea?.addEventListener("compositionend", () => composing.ended());
     // Ctrl+C copies when something is selected, else it interrupts; Ctrl+V pastes.
     term.attachCustomKeyEventHandler((e) => {
+      if (!composing.allows(e)) return false;
       if (e.type !== "keydown" || !e.ctrlKey) return true;
       const k = e.key.toLowerCase();
       if (k === "c" && term.hasSelection()) {
@@ -117,8 +122,11 @@
       live.id = id;
       for (const chunk of early.get(id) ?? []) term.write(chunk);
       early.delete(id);
+      // One write at a time, in the order typed: see termInput.ts.
+      const input = new InputQueue((data) => invoke("term_write", { id, data }));
       term.onData((data) => {
-        if (!live.exited) void invoke("term_write", { id, data }).catch(() => {});
+        composing.sent();
+        if (!live.exited) input.push(data);
       });
       term.onResize(({ cols, rows }) => {
         if (!live.exited) void invoke("term_resize", { id, cols, rows }).catch(() => {});
