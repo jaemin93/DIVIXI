@@ -292,6 +292,8 @@
   function pickFile(path: string) {
     store.activeFile = path;
     store.panelTab = "file";
+    // Also when it was already the active one, scrolled away by hand.
+    void tick().then(showActive);
   }
 
   const diffHtml = $derived(store.diffPath ? highlight(store.diffs[store.diffPath] ?? "", "diff") : "");
@@ -757,6 +759,8 @@
      then scroll sideways (wheel, trackpad or drag) and draw no scrollbar,
      which would push the strip off its line. */
   .filetabs {
+    /* The tabs' offsetParent, so their offsetLeft is a place in the strip. */
+    position: relative;
     flex: 1 1 0;
     display: flex;
     min-width: 0;
@@ -797,6 +801,11 @@
   .tab.file .x,
   .tab.file .discard {
     flex: none;
+  }
+
+  /* A line between the cut-off tab and the count. */
+  .more {
+    border-left: 1px solid var(--line);
   }
 
   .more .mono {
