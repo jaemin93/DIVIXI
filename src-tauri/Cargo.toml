@@ -72,7 +72,7 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 time.workspace = true
 uuid.workspace = true
-sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
+sysinfo = { version = "0.40.0", default-features = false, features = ["system", "disk"] }
 portable-pty = "0.9.0"
 # "stream": both downloads read the body chunk by chunk rather than whole.
 # The app's own installer, for a progress bar and so a cancel takes effect
