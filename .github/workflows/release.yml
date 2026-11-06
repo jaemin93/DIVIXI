@@ -396,7 +396,7 @@ jobs:
             os: windows-latest
             args: ""
           - name: macos
-            os: macos-14
+            os: macos-15
             # One bundle for both Intel and Apple Silicon: fewer downloads to
             # explain, and one fewer runner.
             args: "--target universal-apple-darwin"
