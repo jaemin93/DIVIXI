@@ -111,7 +111,9 @@ source ~/.cargo/env
 Claude Code and Codex, which are JS programs. nvm or a distribution package, either is fine.
 
 **Agent CLIs.** Install the ones you want to use on the server, as that server's user, and **sign in
-once**. DIVIXI uses that sign-in as it is.
+once**. DIVIXI uses that sign-in as it is. A Claude Code sign-in runs out after about four weeks; with
+a recent `claude` installed on the server, the bell says so three days ahead, with the command to sign
+in again.
 
 | Agent | Install | Sign in |
 |---|---|---|

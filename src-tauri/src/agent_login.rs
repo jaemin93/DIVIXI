@@ -1,4 +1,4 @@
-//! Knowing that an agent's login is gone.
+//! Knowing that an agent's login is gone, or about to be.
 //!
 //! Detection cannot tell: it looks once, and a probe only opens a session,
 //! which Claude's adapter does logged out or not. A login that runs out shows
@@ -9,10 +9,14 @@
 //!
 //! The mark does not stop anything from starting. Nothing tells the app when
 //! someone logs in from a terminal, and the next turn should simply work.
+//!
+//! Better still is hearing beforehand. A login has a fixed end, and the CLI's
+//! own warning about it appears in a terminal, which a server does not have
+//! open. So the app asks the CLI, and the bell says so a few days ahead.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use orchestra_agents::AgentKind;
+use orchestra_agents::{AgentKind, AuthStatus, Readiness};
 use orchestra_core::AgentEvent;
 use serde_json::json;
 use tauri::{Emitter, Manager};
@@ -24,9 +28,27 @@ use crate::{AppHandle, AppState};
 /// looking at the bell.
 const TICK: Duration = Duration::from_secs(60);
 
+/// How often the end of a login is looked at. It only moves with a new login,
+/// and asking runs the CLI, which may refresh a token.
+const ENDING_EVERY: Duration = Duration::from_secs(6 * 3600);
+
+const DAY_MS: i64 = 24 * 3_600_000;
+
+/// How long before a login's end the bell says so: as long as the CLI's own
+/// warning gives.
+const WARN_BEFORE_MS: i64 = 3 * DAY_MS;
+
+/// The login end already told about, per agent, so one end rings once.
+const WARNED: &str = "login_warned:";
+
 /// The bell's kind for this agent's lost login.
 fn lost_kind(kind: AgentKind) -> String {
     format!("login_lost:{}", kind.id())
+}
+
+/// The bell's kind for this agent's login about to end.
+fn ending_kind(kind: AgentKind) -> String {
+    format!("login_ending:{}", kind.id())
 }
 
 /// A turn ended: what that says about its agent's login.
@@ -92,6 +114,7 @@ fn set_lost(app: &AppHandle, kind: AgentKind, lost: bool) {
     if lost {
         let (title, body) = lost_notice(&status.name, &status.login_command, crate::ko(app));
         crate::add_notice(app, "", &lost_kind(kind), &title, &body, json!({ "agent": kind.id() }));
+        take_off_bell(app, &ending_kind(kind));
     } else {
         tracing::info!(agent = kind.id(), "the agent's login is back");
         take_off_bell(app, &lost_kind(kind));
@@ -113,8 +136,52 @@ fn lost_notice(name: &str, command: &str, ko: bool) -> (String, String) {
     }
 }
 
-/// Look once.
-async fn tick(app: &AppHandle) {
+/// When this login ends, if that is close enough to say so.
+fn ends_soon(auth: &AuthStatus, now: i64) -> Option<i64> {
+    if !auth.logged_in {
+        return None;
+    }
+    let ends = chrono::DateTime::parse_from_rfc3339(auth.login_ends.as_deref()?).ok()?.timestamp_millis();
+    (ends - now <= WARN_BEFORE_MS).then_some(ends)
+}
+
+fn ending_notice(name: &str, command: &str, ends: i64, now: i64, when: &str, ko: bool) -> (String, String) {
+    let days = ((ends - now) as f64 / DAY_MS as f64).ceil() as i64;
+    if ko {
+        let title = if days > 1 { format!("{name} 로그인이 {days}일 뒤 끝납니다") } else { format!("{name} 로그인이 곧 끝납니다") };
+        (title, format!("{when}에 끝나면 이 머신의 {name} 실행이 모두 실패합니다. 그 전에 이 머신에서: {command}"))
+    } else {
+        let title = if days > 1 { format!("{name}'s login ends in {days} days") } else { format!("{name}'s login is about to end") };
+        (title, format!("When it ends at {when}, every {name} run on this machine fails. Before then, on this machine: {command}"))
+    }
+}
+
+/// Say that a login is about to end, once per end; take the saying back when
+/// a new login moved the end away.
+async fn look_at_ending(app: &AppHandle, kind: AgentKind) {
+    let state = app.state::<AppState>();
+    let found = state.load_agents().ok().flatten().and_then(|list| list.into_iter().find(|s| s.kind == kind));
+    let Some(status) = found.filter(|s| s.readiness == Readiness::Ready) else { return };
+    let Some(auth) = orchestra_agents::auth_status(kind).await else { return };
+    let now = crate::now_ms();
+    let Some(ends) = ends_soon(&auth, now) else {
+        take_off_bell(app, &ending_kind(kind));
+        return;
+    };
+    let key = format!("{WARNED}{}", kind.id());
+    if state.store.get_meta(&key).ok().flatten().as_deref() == Some(ends.to_string().as_str()) {
+        return;
+    }
+    let (title, body) = ending_notice(&status.name, &status.login_command, ends, now, &crate::when(ends), crate::ko(app));
+    if crate::add_notice(app, "", &ending_kind(kind), &title, &body, json!({ "agent": kind.id(), "ends": ends })).is_some() {
+        if let Err(err) = state.store.set_meta(&key, &ends.to_string()) {
+            tracing::warn!(agent = kind.id(), %err, "could not keep that a login's end was told");
+        }
+    }
+}
+
+/// Look once. `ending` is when the end of a login was last looked at.
+async fn tick(app: &AppHandle, ending: &mut Option<Instant>) {
     let statuses = app.state::<AppState>().load_agents().ok().flatten().unwrap_or_default();
     for status in statuses {
         if !status.login_lost {
@@ -122,16 +189,23 @@ async fn tick(app: &AppHandle) {
             take_off_bell(app, &lost_kind(status.kind));
         } else if orchestra_agents::auth_status(status.kind).await.is_some_and(|auth| auth.logged_in) {
             set_lost(app, status.kind, false);
+            // A new login: its end is worth a look now.
+            *ending = None;
         }
+    }
+    if ending.is_none_or(|at| at.elapsed() >= ENDING_EVERY) {
+        *ending = Some(Instant::now());
+        look_at_ending(app, AgentKind::ClaudeCode).await;
     }
 }
 
 /// Look every so often, for as long as the app runs.
 pub fn start(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
+        let mut ending = None;
         loop {
             tokio::time::sleep(TICK).await;
-            tick(&app).await;
+            tick(&app, &mut ending).await;
         }
     });
 }
@@ -153,5 +227,42 @@ mod tests {
     #[test]
     fn each_agent_rings_on_its_own() {
         assert_ne!(lost_kind(AgentKind::ClaudeCode), lost_kind(AgentKind::Codex));
+        assert_ne!(ending_kind(AgentKind::ClaudeCode), ending_kind(AgentKind::Codex));
+    }
+
+    fn auth(logged_in: bool, ends: Option<&str>) -> AuthStatus {
+        AuthStatus { logged_in, login_ends: ends.map(str::to_owned) }
+    }
+
+    #[test]
+    fn a_login_is_about_to_end_only_within_the_warning() {
+        let ends = chrono::DateTime::parse_from_rfc3339("2026-11-25T20:30:33.671Z").unwrap().timestamp_millis();
+        let on = auth(true, Some("2026-11-25T20:30:33.671Z"));
+        assert_eq!(ends_soon(&on, ends - 4 * DAY_MS), None, "four days out");
+        assert_eq!(ends_soon(&on, ends - 3 * DAY_MS), Some(ends), "three days out");
+        assert_eq!(ends_soon(&on, ends + 1000), Some(ends), "past it, while an access token still lasts");
+    }
+
+    #[test]
+    fn nothing_is_about_to_end_without_a_login_that_ends() {
+        assert_eq!(ends_soon(&auth(false, Some("2026-11-25T20:30:33.671Z")), 0), None, "logged out");
+        assert_eq!(ends_soon(&auth(true, None), 0), None, "an API key, or a CLI too old to say");
+        assert_eq!(ends_soon(&auth(true, Some("soon")), 0), None, "not a time");
+    }
+
+    #[test]
+    fn the_warning_counts_whole_days_and_gives_the_command() {
+        let (title, body) = ending_notice("Claude Code", "/x/claude auth login", 3 * DAY_MS, 0, "11-26 05:30", true);
+        assert_eq!(title, "Claude Code 로그인이 3일 뒤 끝납니다");
+        assert!(body.contains("11-26 05:30") && body.ends_with("/x/claude auth login"));
+        let (title, _) = ending_notice("Claude Code", "c", 2 * DAY_MS + 1, 0, "w", true);
+        assert_eq!(title, "Claude Code 로그인이 3일 뒤 끝납니다", "part of a day counts");
+        let (title, _) = ending_notice("Claude Code", "c", DAY_MS, 0, "w", true);
+        assert_eq!(title, "Claude Code 로그인이 곧 끝납니다");
+        let (title, _) = ending_notice("Claude Code", "c", -1000, 0, "w", false);
+        assert_eq!(title, "Claude Code's login is about to end", "past its end, an access token may still last");
+        let (title, body) = ending_notice("Claude Code", "/x/claude auth login", 2 * DAY_MS, 0, "11-26 05:30", false);
+        assert_eq!(title, "Claude Code's login ends in 2 days");
+        assert!(body.contains("11-26 05:30") && body.ends_with("/x/claude auth login"));
     }
 }
