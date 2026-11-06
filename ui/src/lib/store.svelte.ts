@@ -4587,6 +4587,11 @@ function tracing(err: unknown) {
 }
 
 /** Short mono label for an agent id. */
+/** Whether this agent is marked as logged out: refused, and its CLI agrees. */
+export function loginLost(agent: string): boolean {
+  return !!store.agents?.find((a) => a.kind === agent)?.login_lost;
+}
+
 export function agentLabel(id: string): string {
   switch (id) {
     case "claude_code":

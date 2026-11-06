@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel, withoutReportBlock, REPORT_REMINDER, type Run } from "./store.svelte";
+  import { store, agentLabel, loginLost, withoutReportBlock, REPORT_REMINDER, type Run } from "./store.svelte";
   import Markdown from "./Markdown.svelte";
   import ReportCard from "./ReportCard.svelte";
   import StepGroup from "./StepGroup.svelte";
@@ -182,9 +182,12 @@
     }
   }
 
+  /** A failure that is this agent's lost login. A refusal its CLI does not agree with is shown as it is. */
+  const lostLogin = (run: Run): boolean => wantsLogin(run.error) && loginLost(run.agent);
+
   /** The failure shown under a turn, if any. */
   function failedText(run: Run): string {
-    return (run.status === "failed" || cut(run) || run.status === "detached") && run.error && !stopped(run) ? run.error : "";
+    return (run.status === "failed" || cut(run) || run.status === "detached") && run.error && !stopped(run) ? (lostLogin(run) ? t("run.loginLost", { agent: agentLabel(run.agent) }) : run.error) : "";
   }
 
   // ----- finding text in the worker's session -----
@@ -309,8 +312,8 @@
             <ReportCard run={run.id} compact found={finder.foundIn(idx, inReportDetails)} />
           {/if}
           {#if failedText(run)}
-            <p class="ctext bad" data-find={findKey.error} title={run.error}>{wantsLogin(run.error) ? t("run.loginLost", { agent: agentLabel(run.agent) }) : run.error}</p>
-            {#if wantsLogin(run.error)}<LoginCommand agent={run.agent} />{/if}
+            <p class="ctext bad" data-find={findKey.error} title={run.error}>{failedText(run)}</p>
+            {#if lostLogin(run)}<LoginCommand agent={run.agent} />{/if}
           {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
             <p class="ctext dim">{t("worker.starting")}</p>
           {/if}

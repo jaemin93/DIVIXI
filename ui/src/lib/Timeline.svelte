@@ -1,6 +1,6 @@
 <script lang="ts">
   import ReportCard from "./ReportCard.svelte";
-  import { store, GRAPH_KIND, agentLabel, splitAttachments, splitKnowledge, wasStopped, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Run } from "./store.svelte";
+  import { store, GRAPH_KIND, agentLabel, loginLost, splitAttachments, splitKnowledge, wasStopped, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Run } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import DecisionCard from "./DecisionCard.svelte";
   import Working from "./Working.svelte";
@@ -290,9 +290,12 @@
     return answer ? `${id} · ${answer}` : id;
   }
 
+  /** A failure that is this agent's lost login. A refusal its CLI does not agree with is shown as it is. */
+  const lostLogin = (run: Run): boolean => wantsLogin(run.error) && loginLost(run.agent);
+
   /** The failure shown under a turn's answer, if any. */
   function failedText(run: Run): string {
-    return (run.status === "failed" || run.status === "interrupted" || run.status === "timed_out" || run.status === "detached") && run.error ? run.error : "";
+    return (run.status === "failed" || run.status === "interrupted" || run.status === "timed_out" || run.status === "detached") && run.error ? (lostLogin(run) ? t("run.loginLost", { agent: agentLabel(run.agent) }) : run.error) : "";
   }
 
   // ----- finding text in the conversation -----
@@ -477,8 +480,8 @@
             <div class="ctext" data-find={findKey.message}><Markdown source={cleanText(run.message)} /></div>
           {/if}
           {#if failedText(run)}
-            <p class="ctext bad" data-find={findKey.error} title={run.error}>{wantsLogin(run.error) ? t("run.loginLost", { agent: agentLabel(run.agent) }) : run.error}</p>
-            {#if wantsLogin(run.error)}<LoginCommand agent={run.agent} />{/if}
+            <p class="ctext bad" data-find={findKey.error} title={run.error}>{failedText(run)}</p>
+            {#if lostLogin(run)}<LoginCommand agent={run.agent} />{/if}
           {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
             <p class="ctext dim">{t("timeline.thinking")}</p>
           {/if}
