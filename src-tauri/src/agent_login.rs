@@ -16,7 +16,7 @@
 
 use std::time::{Duration, Instant};
 
-use orchestra_agents::{AgentKind, AuthStatus, Readiness};
+use orchestra_agents::{AgentKind, AgentStatus, AuthStatus, Readiness};
 use orchestra_core::AgentEvent;
 use serde_json::json;
 use tauri::{Emitter, Manager};
@@ -119,6 +119,19 @@ fn set_lost(app: &AppHandle, kind: AgentKind, lost: bool) {
         tracing::info!(agent = kind.id(), "the agent's login is back");
         take_off_bell(app, &lost_kind(kind));
     }
+}
+
+/// Someone asked to detect again. That says READY logged out or not, so a mark
+/// stays while the CLI says the login is still gone.
+pub async fn keep_marks(state: &AppState, mut statuses: Vec<AgentStatus>) -> Vec<AgentStatus> {
+    let before = state.load_agents().ok().flatten().unwrap_or_default();
+    for status in &mut statuses {
+        let marked = before.iter().any(|b| b.kind == status.kind && b.login_lost);
+        if marked && status.readiness == Readiness::Ready {
+            status.login_lost = orchestra_agents::auth_status(status.kind).await.is_some_and(|auth| !auth.logged_in);
+        }
+    }
+    statuses
 }
 
 /// What this kind of notice said is over.

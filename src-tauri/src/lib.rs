@@ -1784,6 +1784,7 @@ fn ui_log(level: String, message: String) {
 async fn detect_agents(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<AgentStatus>, String> {
     let opts = state.detect_options();
     let statuses = orchestra_agents::detect_all(&opts).await;
+    let statuses = agent_login::keep_marks(&state, statuses).await;
     let saved = state.save_agents(statuses)?;
     install_adapters_in_background(&app);
     Ok(saved)
