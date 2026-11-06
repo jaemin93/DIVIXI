@@ -52,11 +52,21 @@ fn ending_kind(kind: AgentKind) -> String {
     format!("login_ending:{}", kind.id())
 }
 
-/// A turn ended: what that says about its agent's login.
+/// A run's turn ended: what that says about its agent's login.
 pub fn turn_ended(app: &AppHandle, run: &str, event: &AgentEvent) {
+    read_ending(app, event, || kind_of_run(app, run));
+}
+
+/// The same for a turn with no run of its own, read apart from `pump`: a
+/// routine's, or the agent describing files for the knowledge base.
+pub fn agent_turn_ended(app: &AppHandle, agent: &str, event: &AgentEvent) {
+    read_ending(app, event, || AgentKind::parse(agent));
+}
+
+fn read_ending(app: &AppHandle, event: &AgentEvent, kind: impl FnOnce() -> Option<AgentKind>) {
     match event {
         AgentEvent::Failed { error } if orchestra_acp::wants_login(error) => {
-            if let Some(kind) = kind_of_run(app, run) {
+            if let Some(kind) = kind() {
                 tell_refused(app, kind);
             }
         }
@@ -65,7 +75,7 @@ pub fn turn_ended(app: &AppHandle, run: &str, event: &AgentEvent) {
         AgentEvent::Finished { stop_reason } if !stop_reason.eq_ignore_ascii_case("cancelled") => {
             let any_lost = app.state::<AppState>().load_agents().ok().flatten().is_some_and(|list| list.iter().any(|s| s.login_lost));
             if any_lost {
-                if let Some(kind) = kind_of_run(app, run) {
+                if let Some(kind) = kind() {
                     set_lost(app, kind, false);
                 }
             }

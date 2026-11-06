@@ -246,6 +246,7 @@ async fn ask(app: &AppHandle, s: &Settings, dir: &Path, slot: &mut Option<Worker
         let mut text = String::new();
         let mut used_tool = false;
         while let Some(ev) = rx.recv().await {
+            crate::agent_login::agent_turn_ended(app, &s.agent, &ev);
             match ev {
                 AgentEvent::Message { text: t } => text.push_str(&t),
                 AgentEvent::Permission { request, .. } => {
