@@ -143,9 +143,9 @@ fn take_off_bell(app: &AppHandle, kind: &str) {
 
 fn lost_notice(name: &str, command: &str, ko: bool) -> (String, String) {
     if ko {
-        (format!("{name} 로그인이 풀렸습니다"), format!("다시 로그인할 때까지 이 머신의 {name} 실행은 모두 실패합니다. 이 머신에서: {command}"))
+        (format!("{name} 로그인이 풀렸습니다"), format!("이 머신에서 다시 로그인: {command}"))
     } else {
-        (format!("{name} is logged out"), format!("Every {name} run on this machine fails until you log in again. On this machine: {command}"))
+        (format!("{name} is logged out"), format!("Log in again on this machine: {command}"))
     }
 }
 
@@ -162,10 +162,10 @@ fn ending_notice(name: &str, command: &str, ends: i64, now: i64, when: &str, ko:
     let days = ((ends - now) as f64 / DAY_MS as f64).ceil() as i64;
     if ko {
         let title = if days > 1 { format!("{name} 로그인이 {days}일 뒤 끝납니다") } else { format!("{name} 로그인이 곧 끝납니다") };
-        (title, format!("{when}에 끝나면 이 머신의 {name} 실행이 모두 실패합니다. 그 전에 이 머신에서: {command}"))
+        (title, format!("{when} 전에 이 머신에서 다시 로그인: {command}"))
     } else {
         let title = if days > 1 { format!("{name}'s login ends in {days} days") } else { format!("{name}'s login is about to end") };
-        (title, format!("When it ends at {when}, every {name} run on this machine fails. Before then, on this machine: {command}"))
+        (title, format!("Before {when}, log in again on this machine: {command}"))
     }
 }
 

@@ -219,7 +219,7 @@
                 <span class="kind"><Icon name="bell" size={13} /></span>
                 <span class="what">
                   <span class="ntitle">{#if n.instanceName}<span class="inst">{n.instanceName}</span>{/if}{n.title}</span>
-                  <span class="body">{n.body}</span>
+                  <span class="body" class:whole={isServer(n) && n.what?.startsWith("login_")}>{n.body}</span>
                 </span>
                 <span class="side">
                   <span class="when">{whenLabel(n.at, store.now, store.lang)}</span>
@@ -419,6 +419,12 @@
     line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
+  }
+
+  /* A login notice is there for the command at its end. */
+  .body.whole {
+    display: block;
+    overflow-wrap: anywhere;
   }
 
   .side {
