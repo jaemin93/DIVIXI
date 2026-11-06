@@ -2,6 +2,7 @@
   import { store, agentLabel, type AgentStatus, type Readiness } from "./store.svelte";
   import { t } from "./i18n.svelte";
   import Working from "./Working.svelte";
+  import LoginCommand from "./LoginCommand.svelte";
 
   /** Status chip text and colour. Colour says state, nothing else. */
   const chips = $derived<Record<Readiness, { label: string; color: string }>>({
@@ -56,7 +57,7 @@
   {/if}
 
   {#each store.agents ?? [] as a (a.kind)}
-    {@const chip = chips[a.readiness]}
+    {@const chip = chips[a.login_lost ? "needs_login" : a.readiness]}
     {@const busy = store.working[a.kind]}
     <div class="row" class:selected={store.agent === a.kind && a.readiness === "ready"}>
       <span class="dot" style="background: {chip.color}"></span>
@@ -102,6 +103,12 @@
             {:else}
               {t("agents.inTerminal")} <span class="mono">{a.login_hint}</span>
             {/if}
+          </div>
+        {/if}
+        {#if a.login_lost}
+          <div class="detail hint">
+            {t("agents.loginLost")}
+            <LoginCommand agent={a.kind} />
           </div>
         {/if}
         {#if a.readiness === "error" && a.error}

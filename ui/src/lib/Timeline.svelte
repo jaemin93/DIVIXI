@@ -4,6 +4,8 @@
   import Mark from "./Mark.svelte";
   import DecisionCard from "./DecisionCard.svelte";
   import Working from "./Working.svelte";
+  import LoginCommand from "./LoginCommand.svelte";
+  import { wantsLogin } from "./agentLogin";
   import Markdown from "./Markdown.svelte";
   import StepGroup from "./StepGroup.svelte";
   import { isActive, shape } from "./steps";
@@ -475,7 +477,8 @@
             <div class="ctext" data-find={findKey.message}><Markdown source={cleanText(run.message)} /></div>
           {/if}
           {#if failedText(run)}
-            <p class="ctext bad" data-find={findKey.error}>{run.error}</p>
+            <p class="ctext bad" data-find={findKey.error} title={run.error}>{wantsLogin(run.error) ? t("run.loginLost", { agent: agentLabel(run.agent) }) : run.error}</p>
+            {#if wantsLogin(run.error)}<LoginCommand agent={run.agent} />{/if}
           {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
             <p class="ctext dim">{t("timeline.thinking")}</p>
           {/if}

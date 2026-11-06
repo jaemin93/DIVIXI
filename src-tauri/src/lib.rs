@@ -34,6 +34,7 @@ use tauri_plugin_dialog::DialogExt;
 /// `DIVIXI_LOG`, for `divixi-server -v` to set before anything logs.
 pub use logging::LEVEL_ENV;
 
+mod agent_login;
 mod boot;
 mod browse;
 mod conductor;
@@ -294,7 +295,7 @@ impl AppState {
             return Ok(None);
         };
         // A stale or incompatible record just means "detect again".
-        let parsed: Option<Vec<AgentStatus>> = serde_json::from_str(&json).ok();
+        let parsed: Option<Vec<AgentStatus>> = serde_json::from_str::<Vec<AgentStatus>>(&json).ok().map(|list| list.into_iter().map(AgentStatus::filled).collect());
         *self.agents.lock() = parsed.clone();
         Ok(parsed)
     }
@@ -1951,6 +1952,7 @@ pub(crate) async fn pump(
                     if matches!(event, AgentEvent::Permission { .. }) {
                         conductor::route_permission(&app, &track, &session, &run, &event);
                     }
+                    agent_login::turn_ended(&app, &run, &event);
                     emit(event, ms);
                     if terminal {
                         // Permission cards of this run are moot once it ends.
@@ -2449,11 +2451,12 @@ pub fn run() {
                     }
                 });
             }
-            // Schedules fire, jobs are watched, and quiet tracks ring, for
-            // as long as the app runs.
+            // Schedules fire, jobs are watched, quiet tracks ring, and a lost
+            // login is noticed coming back, for as long as the app runs.
             schedule::start(app.handle().clone());
             jobs::start(app.handle().clone());
             stall::start(app.handle().clone());
+            agent_login::start(app.handle().clone());
             // Artifact agents nobody has talked to for an hour are closed.
             artifact::sweep_idle(app.handle().clone());
             // Conductors and workers nobody has used for a while are closed too.

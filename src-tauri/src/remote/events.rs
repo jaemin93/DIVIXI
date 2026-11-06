@@ -23,6 +23,7 @@ use tokio::sync::broadcast;
 pub const EVENTS: &[&str] = &[
     "agent",
     "agent_download",
+    "agent_status",
     "decision",
     "design",
     "design_extract",
