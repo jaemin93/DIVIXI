@@ -34,6 +34,7 @@ use tauri_plugin_dialog::DialogExt;
 /// `DIVIXI_LOG`, for `divixi-server -v` to set before anything logs.
 pub use logging::LEVEL_ENV;
 
+mod agent_login;
 mod boot;
 mod browse;
 mod conductor;
@@ -294,7 +295,7 @@ impl AppState {
             return Ok(None);
         };
         // A stale or incompatible record just means "detect again".
-        let parsed: Option<Vec<AgentStatus>> = serde_json::from_str(&json).ok();
+        let parsed: Option<Vec<AgentStatus>> = serde_json::from_str::<Vec<AgentStatus>>(&json).ok().map(|list| list.into_iter().map(AgentStatus::filled).collect());
         *self.agents.lock() = parsed.clone();
         Ok(parsed)
     }
@@ -1782,7 +1783,10 @@ fn ui_log(level: String, message: String) {
 #[tauri::command]
 async fn detect_agents(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<AgentStatus>, String> {
     let opts = state.detect_options();
-    let statuses = orchestra_agents::detect_all(&opts).await;
+    let mut statuses = Vec::new();
+    for status in orchestra_agents::detect_all(&opts).await {
+        statuses.push(agent_login::keep_mark(&state, status).await);
+    }
     let saved = state.save_agents(statuses)?;
     install_adapters_in_background(&app);
     Ok(saved)
@@ -1802,7 +1806,7 @@ async fn login_agent(
         .ok_or_else(|| format!("{} has not been detected yet", kind.name()))?;
     let opts = state.detect_options();
     let next = orchestra_agents::login(&current, method.as_deref(), &opts).await;
-    state.update_agent(next)
+    state.update_agent(agent_login::keep_mark(&state, next).await)
 }
 
 /// Progress of an adapter download, emitted as `agent_download` events.
@@ -1843,7 +1847,7 @@ async fn download_agent(
     }
     let opts = state.detect_options();
     let next = orchestra_agents::detect(kind, &opts).await;
-    state.update_agent(next)
+    state.update_agent(agent_login::keep_mark(&state, next).await)
 }
 
 /// Agents that still run their npm adapter through `npx` (slow to start)
@@ -1867,7 +1871,7 @@ pub(crate) fn install_adapters_in_background(app: &AppHandle) {
             match orchestra_agents::install_npm_adapter(kind, &state.adapters_dir).await {
                 Ok(_) => {
                     let next = orchestra_agents::detect(kind, &state.detect_options()).await;
-                    if let Err(err) = state.update_agent(next) {
+                    if let Err(err) = state.update_agent(agent_login::keep_mark(&state, next).await) {
                         tracing::warn!(agent = kind.id(), %err, "could not keep the agent after installing its adapter");
                     }
                 }
@@ -1951,6 +1955,7 @@ pub(crate) async fn pump(
                     if matches!(event, AgentEvent::Permission { .. }) {
                         conductor::route_permission(&app, &track, &session, &run, &event);
                     }
+                    agent_login::turn_ended(&app, &run, &event);
                     emit(event, ms);
                     if terminal {
                         // Permission cards of this run are moot once it ends.
@@ -2449,11 +2454,12 @@ pub fn run() {
                     }
                 });
             }
-            // Schedules fire, jobs are watched, and quiet tracks ring, for
-            // as long as the app runs.
+            // Schedules fire, jobs are watched, quiet tracks ring, and a lost
+            // login is noticed coming back, for as long as the app runs.
             schedule::start(app.handle().clone());
             jobs::start(app.handle().clone());
             stall::start(app.handle().clone());
+            agent_login::start(app.handle().clone());
             // Artifact agents nobody has talked to for an hour are closed.
             artifact::sweep_idle(app.handle().clone());
             // Conductors and workers nobody has used for a while are closed too.

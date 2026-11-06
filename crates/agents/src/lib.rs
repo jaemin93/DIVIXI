@@ -42,6 +42,20 @@ pub enum AgentKind {
     Antigravity,
 }
 
+/// A path as one word for the shell it is pasted in. Single quotes hold
+/// anything in a Unix shell but themselves; a Windows path cannot hold a double
+/// quote.
+fn shell_word(path: &str, windows: bool) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+=:@%,".contains(c) || (windows && c == '\\');
+    if path.chars().all(plain) {
+        path.to_string()
+    } else if windows {
+        format!("\"{path}\"")
+    } else {
+        format!("'{}'", path.replace('\'', r"'\''"))
+    }
+}
+
 impl AgentKind {
     pub const ALL: [AgentKind; 4] = [
         AgentKind::ClaudeCode,
@@ -91,6 +105,19 @@ impl AgentKind {
             AgentKind::Codex => "codex login",
             AgentKind::Copilot => "copilot login",
             AgentKind::Antigravity => "agy login",
+        }
+    }
+
+    /// The whole command that logs in, for a person to paste: `cli` is the
+    /// CLI as found, because a server's login shell may not have it on PATH.
+    pub fn login_command(self, cli: Option<&str>) -> String {
+        let program = match cli {
+            Some(path) => shell_word(path, cfg!(windows)),
+            None => self.cli().to_string(),
+        };
+        match self {
+            AgentKind::ClaudeCode => format!("{program} auth login"),
+            _ => format!("{program} login"),
         }
     }
 
@@ -224,7 +251,87 @@ pub struct AgentStatus {
     /// Why `readiness` is `Error`, or a probe failure message.
     pub error: Option<String>,
     pub login_hint: String,
+    /// The command that logs in on this machine ([`AgentKind::login_command`]).
+    /// Empty in a detection saved before this existed; see [`AgentStatus::filled`].
+    #[serde(default)]
+    pub login_command: String,
     pub install_hint: String,
+    /// A run was refused for want of a login, and none has been seen since.
+    ///
+    /// Beside `readiness`, not in it. A probe only opens a session, which
+    /// Claude's adapter does logged out or not, so detection cannot say this.
+    /// And `readiness` decides whether a run may start, while a login can come
+    /// back from any terminal: the next run should simply work.
+    #[serde(default)]
+    pub login_lost: bool,
+}
+
+impl AgentStatus {
+    /// With what a detection saved by an older build did not hold.
+    pub fn filled(mut self) -> Self {
+        if self.login_command.is_empty() {
+            self.login_command = self.kind.login_command(self.cli.as_ref().map(|c| c.path.as_str()));
+        }
+        self
+    }
+}
+
+/// What an agent's own CLI says about its login.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthStatus {
+    pub logged_in: bool,
+    /// When the login itself ends, as the CLI wrote it (RFC 3339). Past this
+    /// no refresh is possible and it takes a new login. None for a login
+    /// with no end (an API key), or a CLI too old to say.
+    pub login_ends: Option<String>,
+}
+
+/// The installed CLI this agent's sessions run on, where the adapter takes one.
+/// It is looked for in more places than `locate_cli` looks.
+fn session_cli(kind: AgentKind) -> Option<PathBuf> {
+    if kind != AgentKind::ClaudeCode {
+        return None;
+    }
+    find_claude_cli_in(claude_cli_search_dirs(registry_path_dirs()))
+}
+
+/// Ask the installed CLI about its login. None when this agent's CLI has no
+/// way to say, is not installed, or does not answer.
+///
+/// Only the installed CLI is asked, the one sessions run on. The one bundled
+/// with the adapter is pinned, too old to say when a login ends, and known to
+/// leave the refresh lock behind when it exits in the middle of one. That is
+/// also why the wait is long: asking may refresh a token, and running out of
+/// time kills the CLI.
+pub async fn auth_status(kind: AgentKind) -> Option<AuthStatus> {
+    let path = session_cli(kind)?;
+    let mut cmd = tokio::process::Command::new(&path);
+    cmd.args(["auth", "status", "--json"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    match tokio::time::timeout(Duration::from_secs(60), cmd.output()).await {
+        // Logged out it exits non-zero, and still prints its answer.
+        Ok(Ok(out)) => parse_auth_status(&String::from_utf8_lossy(&out.stdout)),
+        Ok(Err(err)) => {
+            tracing::debug!(path = %path.display(), %err, "auth status could not run");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(path = %path.display(), "auth status timed out");
+            None
+        }
+    }
+}
+
+fn parse_auth_status(text: &str) -> Option<AuthStatus> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    Some(AuthStatus {
+        logged_in: value.get("loggedIn")?.as_bool()?,
+        login_ends: value.get("loginExpiresAt").and_then(|v| v.as_str()).map(str::to_owned),
+    })
 }
 
 /// Where detection looks and what it may write.
@@ -262,6 +369,8 @@ pub async fn detect(kind: AgentKind, opts: &DetectOptions) -> AgentStatus {
     let cli = locate_cli(kind).await;
     let adapter = resolve_adapter(kind, cli.as_ref(), &opts.adapters_dir);
     let spec = launch_spec(kind, &adapter, cli.as_ref()).await;
+    let session = session_cli(kind).map(|p| p.to_string_lossy().into_owned());
+    let login_command = kind.login_command(cli.as_ref().map(|c| c.path.as_str()).or(session.as_deref()));
 
     let mut status = AgentStatus {
         kind,
@@ -273,7 +382,9 @@ pub async fn detect(kind: AgentKind, opts: &DetectOptions) -> AgentStatus {
         probe: None,
         error: None,
         login_hint: kind.login_hint().to_string(),
+        login_command,
         install_hint: kind.install_hint().to_string(),
+        login_lost: false,
     };
 
     let Some(spec) = spec else {
@@ -851,6 +962,50 @@ fn expand_env(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_login_command_names_the_cli_that_was_found() {
+        assert_eq!(AgentKind::ClaudeCode.login_command(Some("/home/u/.npm-global/bin/claude")), "/home/u/.npm-global/bin/claude auth login");
+        assert_eq!(AgentKind::ClaudeCode.login_command(None), "claude auth login");
+        assert_eq!(AgentKind::Codex.login_command(None), "codex login");
+        assert_eq!(AgentKind::Codex.login_command(Some("/opt/a b/codex")), if cfg!(windows) { r#""/opt/a b/codex" login"# } else { "'/opt/a b/codex' login" });
+    }
+
+    #[test]
+    fn a_path_stays_one_word_in_the_shell_it_is_pasted_in() {
+        assert_eq!(shell_word("/home/u/.npm-global/bin/claude", false), "/home/u/.npm-global/bin/claude");
+        assert_eq!(shell_word("/opt/a b/claude", false), "'/opt/a b/claude'");
+        assert_eq!(shell_word("/home/O'Brien/bin/claude", false), r"'/home/O'\''Brien/bin/claude'");
+        assert_eq!(shell_word("/home/$me/bin/claude", false), "'/home/$me/bin/claude'");
+        assert_eq!(shell_word(r"C:\Users\me\codex.exe", true), r"C:\Users\me\codex.exe");
+        assert_eq!(shell_word(r"C:\Program Files\codex.exe", true), r#""C:\Program Files\codex.exe""#);
+    }
+
+    #[test]
+    fn a_detection_saved_before_the_login_command_gets_one() {
+        let saved = serde_json::json!({
+            "kind": "claude_code", "name": "Claude Code", "readiness": "ready",
+            "cli": { "path": "/x/claude", "version": null },
+            "adapter": { "kind": "missing", "reason": "" },
+            "spec": null, "probe": null, "error": null, "login_hint": "claude", "install_hint": "",
+        });
+        let status: AgentStatus = serde_json::from_value(saved).unwrap();
+        assert!(!status.login_lost);
+        assert_eq!(status.filled().login_command, "/x/claude auth login");
+    }
+
+    /// As `claude auth status --json` prints them (2.1.318), and as an older one does.
+    #[test]
+    fn auth_status_reads_what_the_cli_prints() {
+        let on = parse_auth_status(r#"{"loggedIn":true,"authMethod":"claude.ai","loginExpiresAt":"2026-11-25T20:30:33.671Z"}"#).unwrap();
+        assert_eq!(on, AuthStatus { logged_in: true, login_ends: Some("2026-11-25T20:30:33.671Z".into()) });
+        let out = parse_auth_status(r#"{"loggedIn":false,"authMethod":"none","loginExpiresAt":null}"#).unwrap();
+        assert_eq!(out, AuthStatus { logged_in: false, login_ends: None });
+        let old = parse_auth_status(r#"{"loggedIn":true,"authMethod":"claude.ai"}"#).unwrap();
+        assert_eq!(old.login_ends, None);
+        assert_eq!(parse_auth_status("not json"), None);
+        assert_eq!(parse_auth_status("{}"), None);
+    }
 
     #[test]
     fn kinds_round_trip_through_ids() {

@@ -2,6 +2,7 @@
   import { store, agentLabel, type AgentStatus, type Readiness } from "./store.svelte";
   import { t } from "./i18n.svelte";
   import Working from "./Working.svelte";
+  import LoginCommand from "./LoginCommand.svelte";
 
   /** Status chip text and colour. Colour says state, nothing else. */
   const chips = $derived<Record<Readiness, { label: string; color: string }>>({
@@ -56,7 +57,7 @@
   {/if}
 
   {#each store.agents ?? [] as a (a.kind)}
-    {@const chip = chips[a.readiness]}
+    {@const chip = chips[a.login_lost ? "needs_login" : a.readiness]}
     {@const busy = store.working[a.kind]}
     <div class="row" class:selected={store.agent === a.kind && a.readiness === "ready"}>
       <span class="dot" style="background: {chip.color}"></span>
@@ -104,12 +105,18 @@
             {/if}
           </div>
         {/if}
+        {#if a.login_lost}
+          <div class="detail hint">
+            {t("agents.loginLost")}
+            <LoginCommand agent={a.kind} />
+          </div>
+        {/if}
         {#if a.readiness === "error" && a.error}
           <div class="detail err">{a.error}</div>
         {/if}
         {#if a.readiness === "ready" || a.readiness === "needs_login" || a.readiness === "needs_download"}
           <div class="actions">
-            {#if a.readiness === "needs_login"}
+            {#if a.readiness === "needs_login" || a.login_lost}
               {#each a.probe?.auth_methods ?? [] as m (m.id)}
                 <button class="btn" disabled={!!busy} onclick={() => store.login(a.kind, m.id)}>{m.name}</button>
               {/each}

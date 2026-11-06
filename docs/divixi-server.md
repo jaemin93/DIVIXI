@@ -111,7 +111,9 @@ source ~/.cargo/env
 Claude Code and Codex, which are JS programs. nvm or a distribution package, either is fine.
 
 **Agent CLIs.** Install the ones you want to use on the server, as that server's user, and **sign in
-once**. DIVIXI uses that sign-in as it is.
+once**. DIVIXI uses that sign-in as it is. A Claude Code sign-in runs out after about four weeks; with
+a recent `claude` installed on the server, the bell says so three days ahead, with the command to sign
+in again.
 
 | Agent | Install | Sign in |
 |---|---|---|
@@ -350,6 +352,7 @@ from that commit.
 | The server will not stay up after **Start it** or an install | Run the binary by hand to see why: `~/.divixi/server/current/divixi-server help` (or your own path). `error while loading shared libraries: libgtk-3.so.0` (or `libgdk-3.so.0`, `libgobject-2.0.so.0`) means the GTK 3 runtime is missing: `sudo apt install -y libgtk-3-0` (section 1) |
 | "divixi-server can't start there. Missing: …" | The libraries named are not on that machine. Run the command shown there, then check again (section 1) |
 | An agent shows as "not installed" | PATH on the server. Add the CLI and node directories to "Remote PATH" in the instance settings, or to `Environment=PATH` in the systemd unit |
+| Every run fails with "Failed to authenticate" or "Authentication required" | The agent's login on the server ran out. Run the command the app shows under the failure; on the server that is `claude auth login`. Nothing needs restarting |
 | A direct address says "no owner yet" | Run `divixi-server owner <github login>` on the server |
 | `divixi-server phone on` prints a `sudo … tailscale serve …` line | Changing serve needs root here: run that line, then `phone on` again (section 4C) |
 | The phone says `pairing failed` right after opening the link | The browser preloaded the link and spent it. Turn off preloading (iOS Chrome: "Preload webpages"), then `divixi-server phone link` again |

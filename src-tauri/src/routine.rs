@@ -262,7 +262,7 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
     let opts = session_options(&state, &r.agent, &r.cwd, &r.config, mcp.as_ref());
     // Deliberately no `opts.resume`: see the module note. Each run is new.
     tracing::info!(routine = %r.id, agent = %r.agent, cwd = %r.cwd, "opening routine session");
-    let session = match AgentSession::open(&spec, opts).await {
+    let session = match crate::agent_login::open_session(&app, &r.agent, &spec, opts).await {
         Ok(s) => Arc::new(s),
         Err(err) => {
             let why = err.to_string();
@@ -293,7 +293,7 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     // The routine's own event reader. Not `pump`: that writes a run row and
     // an event log, which is the table a routine must stay out of.
-    let collector = tauri::async_runtime::spawn(collect(app.clone(), run.clone(), rx));
+    let collector = tauri::async_runtime::spawn(collect(app.clone(), run.clone(), r.agent.clone(), rx));
 
     // The report rules are the same ones a worker is given: they describe
     // the block, not the worker.
@@ -429,12 +429,13 @@ fn guidance(state: &AppState, r: &Routine) -> Option<crate::plan::Guidance> {
 /// the agent said, and how many tools it used. Everything else an agent
 /// streams — its thoughts, each tool's title — belongs to a transcript, and
 /// a routine has none to belong to.
-async fn collect(app: AppHandle, run: String, mut rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) -> (String, u32) {
+async fn collect(app: AppHandle, run: String, agent: String, mut rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) -> (String, u32) {
     // Put together as a track's run is, so a turn reads the same on the
     // Routines page as in a timeline.
     let mut reply = orchestra_core::Reply::default();
     let mut tools = 0u32;
     while let Some(event) = rx.recv().await {
+        crate::agent_login::agent_turn_ended(&app, &agent, &event);
         match &event {
             AgentEvent::Message { text: chunk } => reply.say(chunk),
             AgentEvent::ToolCall { .. } => {

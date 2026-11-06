@@ -223,7 +223,7 @@ async fn open_worker(app: &AppHandle, s: &Settings, dir: &Path) -> Result<Worker
     // It reads untrusted text: never in a mode that acts unasked.
     opts.restricted = true;
     opts.mode = None;
-    let session = AgentSession::open(&spec, opts).await.map_err(|e| format!("could not start {}: {e}", s.agent))?;
+    let session = crate::agent_login::open_session(app, &s.agent, &spec, opts).await.map_err(|e| format!("could not start {}: {e}", s.agent))?;
     Ok(Worker { session, calls: 0 })
 }
 
@@ -246,6 +246,7 @@ async fn ask(app: &AppHandle, s: &Settings, dir: &Path, slot: &mut Option<Worker
         let mut text = String::new();
         let mut used_tool = false;
         while let Some(ev) = rx.recv().await {
+            crate::agent_login::agent_turn_ended(app, &s.agent, &ev);
             match ev {
                 AgentEvent::Message { text: t } => text.push_str(&t),
                 AgentEvent::Permission { request, .. } => {

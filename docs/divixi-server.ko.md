@@ -98,6 +98,7 @@ source ~/.cargo/env
 nvm이든 배포판 패키지든 상관없습니다.
 
 **에이전트 CLI.** 서버에서 쓸 것을 그 서버 사용자로 설치하고 **한 번 로그인**해 둡니다. DIVIXI는 그 로그인을 그대로 씁니다.
+Claude Code 로그인은 약 4주 뒤 끝납니다. 서버에 최신 `claude`가 설치되어 있으면 끝나기 3일 전에 벨이 다시 로그인할 명령과 함께 알려 줍니다.
 
 | 에이전트 | 설치 | 로그인 |
 |---|---|---|
@@ -318,6 +319,7 @@ Rust 코드 기준이라, 화면만 바뀐 앱 업데이트에서는 뜨지 않�
 | **서버 시작**이나 설치 뒤에도 서버가 떠 있지 않음 | 바이너리를 직접 돌려 이유 보기: `~/.divixi/server/current/divixi-server help` (또는 직접 설치한 경로). `error while loading shared libraries: libgtk-3.so.0`(또는 `libgdk-3.so.0`, `libgobject-2.0.so.0`)이면 GTK 3 런타임이 없는 것: `sudo apt install -y libgtk-3-0` (1절) |
 | "그 머신에 라이브러리가 없어 divixi-server가 실행되지 않습니다: …" | 나열된 라이브러리가 그 머신에 없습니다. 화면에 나온 명령을 그 머신에서 실행한 뒤 다시 확인하세요(1절) |
 | 에이전트가 "설치 안 됨" | 서버 쪽 PATH. 인스턴스 설정의 "원격 PATH"나 systemd의 `Environment=PATH`에 CLI·node 경로 추가 |
+| 실행이 모두 "Failed to authenticate"나 "Authentication required"로 실패 | 서버의 에이전트 로그인이 끝난 것입니다. 실패 아래에 나오는 명령을 실행하세요. 서버에서는 `claude auth login`입니다. 재시작은 필요 없습니다 |
 | 직접 주소가 "no owner yet" | 서버에서 `divixi-server owner <GitHub 아이디>` |
 | `divixi-server phone on`이 `sudo … tailscale serve …` 줄을 출력함 | 이 기기에서는 serve를 바꾸는 데 root가 필요함: 그 줄을 실행하고 `phone on`을 다시 (4C절) |
 | 링크를 열자마자 휴대폰이 `pairing failed` | 브라우저가 링크를 미리 열어 써 버린 것. 미리 로드를 끄고(iOS Chrome: '웹페이지 미리 로드') `divixi-server phone link`를 다시 |

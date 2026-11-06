@@ -295,7 +295,11 @@ export type AgentStatus = {
   } | null;
   error: string | null;
   login_hint: string;
+  /** The command that logs in on that machine. Absent from an older server. */
+  login_command?: string;
   install_hint: string;
+  /** A run was refused for want of a login, and none has been seen since. */
+  login_lost?: boolean;
 };
 
 export type Tool = {
@@ -3672,6 +3676,11 @@ class Store {
     if (ready.length) this.agent = ready[0].kind;
   }
 
+  /** An agent changed without anyone asking: its login went, or came back. */
+  agentChanged(next: AgentStatus) {
+    this.agents = (this.agents ?? []).map((a) => (a.kind === next.kind ? next : a));
+  }
+
   /** Launch and probe every agent. Several seconds. */
   async detect() {
     if (this.detecting) return;
@@ -4578,6 +4587,11 @@ function tracing(err: unknown) {
 }
 
 /** Short mono label for an agent id. */
+/** Whether this agent is marked as logged out: refused, and its CLI agrees. */
+export function loginLost(agent: string): boolean {
+  return !!store.agents?.find((a) => a.kind === agent)?.login_lost;
+}
+
 export function agentLabel(id: string): string {
   switch (id) {
     case "claude_code":
@@ -4602,6 +4616,7 @@ export async function connectEvents() {
   await Promise.all([
     listen<Envelope>("agent", (e) => store.apply(e.payload)),
     listen<DownloadProgress>("agent_download", (e) => store.progress(e.payload)),
+    listen<AgentStatus>("agent_status", (e) => store.agentChanged(e.payload)),
     // The installer download is this PC's own app being replaced, and its
     // card and banner are shown here only (`local`), so an instance's webview
     // has nothing to draw and does not ask for the events.

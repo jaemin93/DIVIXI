@@ -419,7 +419,7 @@ impl AgentSession {
             }
             if let Some(ready) = ready.lock().ok().and_then(|mut r| r.take()) {
                 let msg = match &outcome {
-                    Err(err) => format!("session failed to start: {err}"),
+                    Err(err) => format!("{}{err}", super::START_FAILED),
                     Ok(()) => "session ended before it was ready".to_string(),
                 };
                 let _ = ready.send(Err(anyhow::anyhow!(super::with_stderr(msg, &process))));

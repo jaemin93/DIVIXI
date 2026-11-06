@@ -243,11 +243,12 @@
         </div>
         <div class="rows mono">
           {#each store.agents ?? [] as a (a.kind)}
+            {@const readiness = a.login_lost ? "needs_login" : a.readiness}
             <div class="row">
-              <span class="dot" style="background: {readinessColor(a.readiness)}"></span>
+              <span class="dot" style="background: {readinessColor(readiness)}"></span>
               <span>{agentLabel(a.kind)}</span>
               <span class="grow"></span>
-              <span class="dim">{a.readiness.replace("_", " ")}</span>
+              <span class="dim">{readiness.replace("_", " ")}</span>
             </div>
           {/each}
           {#if !store.agents}<div class="row dim">{t("agents.notYet")}</div>{/if}

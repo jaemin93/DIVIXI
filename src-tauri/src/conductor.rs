@@ -2985,7 +2985,7 @@ async fn run_worker_turn(
                 }
             };
             tracing::info!(%track, worker = %name, agent = %agent_id, resume = ?opts.resume, "opening worker session");
-            let session = Arc::new(AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?);
+            let session = Arc::new(crate::agent_login::open_session(&app, &agent_id, &spec, opts).await.map_err(|e| e.to_string())?);
             let resumed = session.resumed();
             refused = session
                 .refused_options()
@@ -3686,7 +3686,7 @@ async fn open_conductor(app: &AppHandle, track: &str, info: &TrackInfo, take_tur
         let key = format!("conductor_session:{track}:{agent}");
         opts.resume = st.store.get_meta(&key).ok().flatten();
         tracing::info!(%track, agent = %agent, mcp = %mcp.url(), resume = ?opts.resume, "opening conductor session");
-        let session = AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?;
+        let session = crate::agent_login::open_session(app, &agent, &spec, opts).await.map_err(|e| e.to_string())?;
         let resumed = session.resumed();
         // The conductor's own model not taking is the same failure as a
         // worker's, and nobody above it would notice on its behalf. Kept for
