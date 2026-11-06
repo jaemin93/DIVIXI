@@ -76,7 +76,7 @@ fn read_ending(app: &AppHandle, event: &AgentEvent, kind: impl FnOnce() -> Optio
             let any_lost = app.state::<AppState>().load_agents().ok().flatten().is_some_and(|list| list.iter().any(|s| s.login_lost));
             if any_lost {
                 if let Some(kind) = kind() {
-                    set_lost(app, kind, false);
+                    came_through(app, kind);
                 }
             }
         }
@@ -103,17 +103,50 @@ pub async fn open_session(app: &AppHandle, agent: &str, spec: &AgentSpec, opts: 
     opened
 }
 
+/// One asking at a time. Asking may refresh a token, and CLIs side by side race
+/// for its lock, which is how a healthy login comes to fail.
+static ASKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn cli_says(kind: AgentKind) -> Option<AuthStatus> {
+    let _one = ASKING.lock().await;
+    orchestra_agents::auth_status(kind).await
+}
+
+fn marked(app: &AppHandle, kind: AgentKind) -> bool {
+    app.state::<AppState>().load_agents().ok().flatten().is_some_and(|list| list.iter().any(|s| s.kind == kind && s.login_lost))
+}
+
 /// This agent was refused for want of a login. The CLI has the last word when
 /// it can say: logged in means this was something passing, and nobody has
-/// anything to do.
+/// anything to do. Turns failing together ask once.
 fn tell_refused(app: &AppHandle, kind: AgentKind) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        let _one = ASKING.lock().await;
+        if marked(&app, kind) {
+            return;
+        }
         if orchestra_agents::auth_status(kind).await.is_some_and(|auth| auth.logged_in) {
             tracing::info!(agent = kind.id(), "the agent wanted a login, and the CLI says it has one");
             return;
         }
         set_lost(&app, kind, true);
+    });
+}
+
+/// A turn of a marked agent went through. That is proof the login is back,
+/// unless the CLI says otherwise: a session can go on for hours on a token it
+/// already holds, and a turn may never have needed one.
+fn came_through(app: &AppHandle, kind: AgentKind) {
+    if !marked(app, kind) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if cli_says(kind).await.is_some_and(|auth| !auth.logged_in) {
+            return;
+        }
+        set_lost(&app, kind, false);
     });
 }
 
@@ -149,17 +182,13 @@ fn set_lost(app: &AppHandle, kind: AgentKind, lost: bool) {
     }
 }
 
-/// Someone asked to detect again. That says READY logged out or not, so a mark
-/// stays while the CLI says the login is still gone.
-pub async fn keep_marks(state: &AppState, mut statuses: Vec<AgentStatus>) -> Vec<AgentStatus> {
-    let before = state.load_agents().ok().flatten().unwrap_or_default();
-    for status in &mut statuses {
-        let marked = before.iter().any(|b| b.kind == status.kind && b.login_lost);
-        if marked && status.readiness == Readiness::Ready {
-            status.login_lost = orchestra_agents::auth_status(status.kind).await.is_some_and(|auth| !auth.logged_in);
-        }
-    }
-    statuses
+/// A status newly detected, by detecting again or after a login or an install.
+/// Detection says READY logged out or not, so a mark stays while the CLI says
+/// the login is still gone.
+pub async fn keep_mark(state: &AppState, mut status: AgentStatus) -> AgentStatus {
+    let was_marked = state.load_agents().ok().flatten().is_some_and(|list| list.iter().any(|b| b.kind == status.kind && b.login_lost));
+    status.login_lost = was_marked && status.readiness == Readiness::Ready && cli_says(status.kind).await.is_some_and(|auth| !auth.logged_in);
+    status
 }
 
 /// What this kind of notice said is over.
@@ -203,7 +232,7 @@ async fn look_at_ending(app: &AppHandle, kind: AgentKind) {
     let state = app.state::<AppState>();
     let found = state.load_agents().ok().flatten().and_then(|list| list.into_iter().find(|s| s.kind == kind));
     let Some(status) = found.filter(|s| s.readiness == Readiness::Ready) else { return };
-    let Some(auth) = orchestra_agents::auth_status(kind).await else { return };
+    let Some(auth) = cli_says(kind).await else { return };
     let now = crate::now_ms();
     let Some(ends) = ends_soon(&auth, now) else {
         take_off_bell(app, &ending_kind(kind));
@@ -224,11 +253,13 @@ async fn look_at_ending(app: &AppHandle, kind: AgentKind) {
 /// Look once. `ending` is when the end of a login was last looked at.
 async fn tick(app: &AppHandle, ending: &mut Option<Instant>) {
     let statuses = app.state::<AppState>().load_agents().ok().flatten().unwrap_or_default();
-    for status in statuses {
-        if !status.login_lost {
-            // Detected again meanwhile: the mark went with the old status.
-            take_off_bell(app, &lost_kind(status.kind));
-        } else if orchestra_agents::auth_status(status.kind).await.is_some_and(|auth| auth.logged_in) {
+    // Before any waiting below, while `login_lost` still says what it says now.
+    for status in statuses.iter().filter(|s| !s.login_lost) {
+        // Detected again meanwhile: the mark went with the old status.
+        take_off_bell(app, &lost_kind(status.kind));
+    }
+    for status in statuses.iter().filter(|s| s.login_lost) {
+        if cli_says(status.kind).await.is_some_and(|auth| auth.logged_in) {
             set_lost(app, status.kind, false);
             // A new login: its end is worth a look now.
             *ending = None;

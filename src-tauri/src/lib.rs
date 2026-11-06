@@ -1783,8 +1783,10 @@ fn ui_log(level: String, message: String) {
 #[tauri::command]
 async fn detect_agents(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<AgentStatus>, String> {
     let opts = state.detect_options();
-    let statuses = orchestra_agents::detect_all(&opts).await;
-    let statuses = agent_login::keep_marks(&state, statuses).await;
+    let mut statuses = Vec::new();
+    for status in orchestra_agents::detect_all(&opts).await {
+        statuses.push(agent_login::keep_mark(&state, status).await);
+    }
     let saved = state.save_agents(statuses)?;
     install_adapters_in_background(&app);
     Ok(saved)
@@ -1804,7 +1806,7 @@ async fn login_agent(
         .ok_or_else(|| format!("{} has not been detected yet", kind.name()))?;
     let opts = state.detect_options();
     let next = orchestra_agents::login(&current, method.as_deref(), &opts).await;
-    state.update_agent(next)
+    state.update_agent(agent_login::keep_mark(&state, next).await)
 }
 
 /// Progress of an adapter download, emitted as `agent_download` events.
@@ -1845,7 +1847,7 @@ async fn download_agent(
     }
     let opts = state.detect_options();
     let next = orchestra_agents::detect(kind, &opts).await;
-    state.update_agent(next)
+    state.update_agent(agent_login::keep_mark(&state, next).await)
 }
 
 /// Agents that still run their npm adapter through `npx` (slow to start)
@@ -1869,7 +1871,7 @@ pub(crate) fn install_adapters_in_background(app: &AppHandle) {
             match orchestra_agents::install_npm_adapter(kind, &state.adapters_dir).await {
                 Ok(_) => {
                     let next = orchestra_agents::detect(kind, &state.detect_options()).await;
-                    if let Err(err) = state.update_agent(next) {
+                    if let Err(err) = state.update_agent(agent_login::keep_mark(&state, next).await) {
                         tracing::warn!(agent = kind.id(), %err, "could not keep the agent after installing its adapter");
                     }
                 }

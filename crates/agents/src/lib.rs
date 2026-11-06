@@ -286,17 +286,25 @@ pub struct AuthStatus {
     pub login_ends: Option<String>,
 }
 
-/// Ask the installed CLI about its login. None when this agent's CLI has no
-/// way to say, is not installed, or does not answer.
-///
-/// Only the installed CLI is asked. The one bundled with the adapter is
-/// pinned, too old to say when a login ends, and known to leave the refresh
-/// lock behind when it exits in the middle of one.
-pub async fn auth_status(kind: AgentKind) -> Option<AuthStatus> {
+/// The installed CLI this agent's sessions run on, where the adapter takes one.
+/// It is looked for in more places than `locate_cli` looks.
+fn session_cli(kind: AgentKind) -> Option<PathBuf> {
     if kind != AgentKind::ClaudeCode {
         return None;
     }
-    let path = find_executable(kind.cli())?;
+    find_claude_cli_in(claude_cli_search_dirs(registry_path_dirs()))
+}
+
+/// Ask the installed CLI about its login. None when this agent's CLI has no
+/// way to say, is not installed, or does not answer.
+///
+/// Only the installed CLI is asked, the one sessions run on. The one bundled
+/// with the adapter is pinned, too old to say when a login ends, and known to
+/// leave the refresh lock behind when it exits in the middle of one. That is
+/// also why the wait is long: asking may refresh a token, and running out of
+/// time kills the CLI.
+pub async fn auth_status(kind: AgentKind) -> Option<AuthStatus> {
+    let path = session_cli(kind)?;
     let mut cmd = tokio::process::Command::new(&path);
     cmd.args(["auth", "status", "--json"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
     #[cfg(windows)]
@@ -304,7 +312,7 @@ pub async fn auth_status(kind: AgentKind) -> Option<AuthStatus> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    match tokio::time::timeout(Duration::from_secs(15), cmd.output()).await {
+    match tokio::time::timeout(Duration::from_secs(60), cmd.output()).await {
         // Logged out it exits non-zero, and still prints its answer.
         Ok(Ok(out)) => parse_auth_status(&String::from_utf8_lossy(&out.stdout)),
         Ok(Err(err)) => {
@@ -361,7 +369,8 @@ pub async fn detect(kind: AgentKind, opts: &DetectOptions) -> AgentStatus {
     let cli = locate_cli(kind).await;
     let adapter = resolve_adapter(kind, cli.as_ref(), &opts.adapters_dir);
     let spec = launch_spec(kind, &adapter, cli.as_ref()).await;
-    let login_command = kind.login_command(cli.as_ref().map(|c| c.path.as_str()));
+    let session = session_cli(kind).map(|p| p.to_string_lossy().into_owned());
+    let login_command = kind.login_command(cli.as_ref().map(|c| c.path.as_str()).or(session.as_deref()));
 
     let mut status = AgentStatus {
         kind,
