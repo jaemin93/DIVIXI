@@ -42,6 +42,20 @@ pub enum AgentKind {
     Antigravity,
 }
 
+/// A path as one word for the shell it is pasted in. Single quotes hold
+/// anything in a Unix shell but themselves; a Windows path cannot hold a double
+/// quote.
+fn shell_word(path: &str, windows: bool) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+=:@%,".contains(c) || (windows && c == '\\');
+    if path.chars().all(plain) {
+        path.to_string()
+    } else if windows {
+        format!("\"{path}\"")
+    } else {
+        format!("'{}'", path.replace('\'', r"'\''"))
+    }
+}
+
 impl AgentKind {
     pub const ALL: [AgentKind; 4] = [
         AgentKind::ClaudeCode,
@@ -98,8 +112,7 @@ impl AgentKind {
     /// CLI as found, because a server's login shell may not have it on PATH.
     pub fn login_command(self, cli: Option<&str>) -> String {
         let program = match cli {
-            Some(path) if path.contains(' ') => format!("\"{path}\""),
-            Some(path) => path.to_string(),
+            Some(path) => shell_word(path, cfg!(windows)),
             None => self.cli().to_string(),
         };
         match self {
@@ -946,7 +959,17 @@ mod tests {
         assert_eq!(AgentKind::ClaudeCode.login_command(Some("/home/u/.npm-global/bin/claude")), "/home/u/.npm-global/bin/claude auth login");
         assert_eq!(AgentKind::ClaudeCode.login_command(None), "claude auth login");
         assert_eq!(AgentKind::Codex.login_command(None), "codex login");
-        assert_eq!(AgentKind::Codex.login_command(Some(r"C:\Program Files\codex.exe")), r#""C:\Program Files\codex.exe" login"#);
+        assert_eq!(AgentKind::Codex.login_command(Some("/opt/a b/codex")), if cfg!(windows) { r#""/opt/a b/codex" login"# } else { "'/opt/a b/codex' login" });
+    }
+
+    #[test]
+    fn a_path_stays_one_word_in_the_shell_it_is_pasted_in() {
+        assert_eq!(shell_word("/home/u/.npm-global/bin/claude", false), "/home/u/.npm-global/bin/claude");
+        assert_eq!(shell_word("/opt/a b/claude", false), "'/opt/a b/claude'");
+        assert_eq!(shell_word("/home/O'Brien/bin/claude", false), r"'/home/O'\''Brien/bin/claude'");
+        assert_eq!(shell_word("/home/$me/bin/claude", false), "'/home/$me/bin/claude'");
+        assert_eq!(shell_word(r"C:\Users\me\codex.exe", true), r"C:\Users\me\codex.exe");
+        assert_eq!(shell_word(r"C:\Program Files\codex.exe", true), r#""C:\Program Files\codex.exe""#);
     }
 
     #[test]
