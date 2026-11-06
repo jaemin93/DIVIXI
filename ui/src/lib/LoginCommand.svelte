@@ -10,15 +10,15 @@
   const status = $derived(store.agents?.find((a) => a.kind === agent));
 
   /** How this PC reaches the instance shown, when it is over ssh. */
-  let ssh = $state<string | null>(null);
+  let host = $state<{ id: string; ssh: string; path?: string } | undefined>();
   $effect(() => {
     if (!instanceId) return;
-    invoke<{ id: string; ssh: string }[]>("remote_hosts")
-      .then((hosts) => (ssh = hosts.find((h) => h.id === instanceId)?.ssh || null))
+    invoke<{ id: string; ssh: string; path?: string }[]>("remote_hosts")
+      .then((hosts) => (host = hosts.find((h) => h.id === instanceId)))
       .catch(() => {});
   });
 
-  const command = $derived(commandFromHere(status?.login_command || status?.login_hint || "", ssh));
+  const command = $derived(commandFromHere(status?.login_command || status?.login_hint || "", host?.ssh, host?.path));
 
   let copied = $state(false);
   async function copy() {

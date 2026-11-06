@@ -11,9 +11,12 @@ export function wantsLogin(error: string | null | undefined): boolean {
 
 /**
  * What to paste in a terminal on this PC. A login on a machine reached over
- * ssh runs there, and asks for a code back, so it needs a terminal (`-t`).
+ * ssh runs there, and asks for a code back, so it needs a terminal (`-t`). That
+ * shell is not a login shell, so it gets the host's Remote PATH, as the server
+ * does when it is started: an npm CLI needs to find node.
  */
-export function commandFromHere(command: string, ssh: string | null | undefined): string {
-  if (!ssh) return command;
-  return `ssh -t ${ssh} '${command.replaceAll("'", "'\\''")}'`;
+export function commandFromHere(command: string, ssh: string | null | undefined, path?: string | null): string {
+  if (!ssh || !command) return command;
+  const there = path ? `PATH=${path}:"$PATH" ${command}` : command;
+  return `ssh -t ${ssh} '${there.replaceAll("'", "'\\''")}'`;
 }

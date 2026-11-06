@@ -24,3 +24,13 @@ test("the command runs here, or on the machine ssh reaches", () => {
   assert.equal(commandFromHere("/x/claude auth login", "many"), "ssh -t many '/x/claude auth login'");
   assert.equal(commandFromHere("/it's/claude auth login", "many"), "ssh -t many '/it'\\''s/claude auth login'");
 });
+
+test("over ssh the command gets the host's Remote PATH", () => {
+  assert.equal(commandFromHere("/x/claude auth login", "many", "~/.nvm/bin"), `ssh -t many 'PATH=~/.nvm/bin:"$PATH" /x/claude auth login'`);
+  assert.equal(commandFromHere("/x/claude auth login", "many", ""), "ssh -t many '/x/claude auth login'");
+  assert.equal(commandFromHere("/x/claude auth login", null, "~/.nvm/bin"), "/x/claude auth login", "not on this PC");
+});
+
+test("no command is no command", () => {
+  assert.equal(commandFromHere("", "many", "~/.nvm/bin"), "");
+});

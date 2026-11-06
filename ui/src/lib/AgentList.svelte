@@ -116,7 +116,7 @@
         {/if}
         {#if a.readiness === "ready" || a.readiness === "needs_login" || a.readiness === "needs_download"}
           <div class="actions">
-            {#if a.readiness === "needs_login"}
+            {#if a.readiness === "needs_login" || a.login_lost}
               {#each a.probe?.auth_methods ?? [] as m (m.id)}
                 <button class="btn" disabled={!!busy} onclick={() => store.login(a.kind, m.id)}>{m.name}</button>
               {/each}
