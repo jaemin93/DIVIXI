@@ -98,7 +98,7 @@ jobs:
           - name: windows
             os: windows-latest
           - name: macos
-            os: macos-14 # Apple Silicon
+            os: macos-15 # Apple Silicon
           - name: linux
             os: ubuntu-22.04
     runs-on: ${{ matrix.os }}
@@ -196,7 +196,7 @@ jobs:
             os: windows-latest
             bundles: nsis,msi
           - name: macos
-            os: macos-14
+            os: macos-15
             bundles: app,dmg
           - name: linux
             os: ubuntu-22.04
