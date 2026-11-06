@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store, agentLabel, NEW_ROUTINE, type RoutineRun, type OptionConfig } from "./store.svelte";
+  import { store, agentLabel, loginLost, NEW_ROUTINE, type RoutineRun, type OptionConfig } from "./store.svelte";
   import { local } from "./ipc.svelte";
   import FolderPicker from "./FolderPicker.svelte";
   import Icon from "./Icon.svelte";
@@ -16,6 +16,8 @@
   import { t } from "./i18n.svelte";
   import { missingChoice, shownChoice } from "./agentOptions";
   import { whenFull } from "./time";
+  import { wantsLogin } from "./agentLogin";
+  import LoginCommand from "./LoginCommand.svelte";
 
   /**
    * One routine: what it runs, where, on what — and every time it has run.
@@ -368,7 +370,9 @@
                   <span class="rid mono">{run.id}</span>
                 </div>
                 {#if run.error}
-                  <p class="rerr">{run.error}</p>
+                  {@const lostLogin = wantsLogin(run.error) && loginLost(run.agent)}
+                  <p class="rerr" title={run.error}>{lostLogin ? t("routines.loginLost", { agent: agentLabel(run.agent) }) : run.error}</p>
+                  {#if lostLogin}<LoginCommand agent={run.agent} />{/if}
                 {:else if run.report?.summary}
                   <p class="rsum">{run.report.summary}</p>
                 {/if}

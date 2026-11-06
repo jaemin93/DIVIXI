@@ -301,14 +301,14 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
 
     let (app_t, id_t, run_t, name_t) = (app.clone(), r.id.clone(), run.clone(), r.name.clone());
     tauri::async_runtime::spawn(async move {
-        let failed = session.prompt_with(sent, Vec::new(), tx.clone()).await.err().map(|e| e.to_string());
+        let threw = session.prompt_with(sent, Vec::new(), tx.clone()).await.err().map(|e| e.to_string());
         drop(tx); // ends the collector
         // Let go here: the session lives for the turn and no longer, and
         // the plan's tool with it.
         drop(session);
         drop(mcp);
 
-        let (text, tools) = collector.await.unwrap_or_default();
+        let (text, tools, refused) = collector.await.unwrap_or_default();
         let st = app_t.state::<AppState>();
         {
             // This run's entry only: never another run's of the same routine.
@@ -319,14 +319,7 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
         }
         let stopped = st.routines.stopped.lock().remove(&run_t);
 
-        let status = match (&failed, stopped) {
-            // A stop is a person's doing, so it is read before a failure:
-            // the agent reporting a cancelled turn is the stop arriving, not
-            // something going wrong.
-            (_, true) => RoutineStatus::Stopped,
-            (Some(_), false) => RoutineStatus::Failed,
-            (None, false) => RoutineStatus::Done,
-        };
+        let (status, failed) = outcome(threw, refused, stopped);
         // A report is only taken from a run that finished by itself. One
         // that failed or was cut short has nothing to say about work it did
         // not do, and a made-up "partial" would read as a finding.
@@ -372,6 +365,21 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
     });
 
     Ok(json!({ "routine": r.id, "run": run, "agent": r.agent, "cwd": r.cwd, "status": "running" }))
+}
+
+/// How a run ended. `threw` is the turn breaking down. `refused` is the agent
+/// answering it with an error, which keeps the session and so reaches only the
+/// event stream: the turn itself comes back fine, with nothing done.
+fn outcome(threw: Option<String>, refused: Option<String>, stopped: bool) -> (RoutineStatus, Option<String>) {
+    // A stop is a person's doing, so it is read before a failure: the agent
+    // reporting a cancelled turn is the stop arriving, not something going wrong.
+    if stopped {
+        return (RoutineStatus::Stopped, threw);
+    }
+    match threw.or(refused) {
+        Some(why) => (RoutineStatus::Failed, Some(why)),
+        None => (RoutineStatus::Done, None),
+    }
 }
 
 /// What a routine's session is sent: its instruction, its plan when it is
@@ -425,15 +433,16 @@ fn guidance(state: &AppState, r: &Routine) -> Option<crate::plan::Guidance> {
     }
 }
 
-/// Read the turn's events for the two things a routine's history keeps: what
-/// the agent said, and how many tools it used. Everything else an agent
-/// streams — its thoughts, each tool's title — belongs to a transcript, and
-/// a routine has none to belong to.
-async fn collect(app: AppHandle, run: String, agent: String, mut rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) -> (String, u32) {
+/// Read the turn's events for what a routine's history keeps: what the agent
+/// said, how many tools it used, and what it refused the turn with. Everything
+/// else an agent streams — its thoughts, each tool's title — belongs to a
+/// transcript, and a routine has none to belong to.
+async fn collect(app: AppHandle, run: String, agent: String, mut rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) -> (String, u32, Option<String>) {
     // Put together as a track's run is, so a turn reads the same on the
     // Routines page as in a timeline.
     let mut reply = orchestra_core::Reply::default();
     let mut tools = 0u32;
+    let mut refused = None;
     while let Some(event) = rx.recv().await {
         crate::agent_login::agent_turn_ended(&app, &agent, &event);
         match &event {
@@ -447,10 +456,11 @@ async fn collect(app: AppHandle, run: String, agent: String, mut rx: tokio::sync
             AgentEvent::Permission { .. } => {
                 crate::conductor::route_permission(&app, &ask_key(&run), ASK_SESSION, &run, &event);
             }
+            AgentEvent::Failed { error } => refused = Some(error.clone()),
             _ => {}
         }
     }
-    (reply.into_string(), tools)
+    (reply.into_string(), tools, refused)
 }
 
 /// The "track" a routine's permission card is filed under. A card needs one
@@ -517,6 +527,24 @@ pub fn notify(app: &AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{outcome, RoutineStatus};
+
+    #[test]
+    fn a_refused_turn_is_a_failed_run() {
+        let why = || Some("Authentication required".to_string());
+        assert_eq!(outcome(None, why(), false), (RoutineStatus::Failed, why()), "the turn came back fine, with nothing done");
+        assert_eq!(outcome(why(), None, false), (RoutineStatus::Failed, why()));
+        assert_eq!(outcome(None, None, false), (RoutineStatus::Done, None));
+    }
+
+    #[test]
+    fn a_stop_is_read_before_a_failure() {
+        let why = || Some("cancelled".to_string());
+        assert_eq!(outcome(None, why(), true), (RoutineStatus::Stopped, None), "the agent answering the cancel");
+        assert_eq!(outcome(why(), None, true), (RoutineStatus::Stopped, why()));
+        assert_eq!(outcome(None, None, true), (RoutineStatus::Stopped, None));
+    }
+
     #[test]
     fn the_refusal_speaks_the_conductors_language() {
         assert!(korean(Some("ko")));
