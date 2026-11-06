@@ -197,7 +197,7 @@ async fn open(app: &AppHandle, a: &ArtifactInfo) -> Result<(Arc<AgentSession>, b
         let key = format!("artifact_session:{}:{}", a.id, a.agent);
         opts.resume = state.store.get_meta(&key).ok().flatten();
         tracing::info!(artifact = %a.id, kind = %a.kind, agent = %a.agent, resume = ?opts.resume, "opening artifact session");
-        let session = AgentSession::open(&spec, opts).await.map_err(|e| e.to_string())?;
+        let session = crate::agent_login::open_session(app, &a.agent, &spec, opts).await.map_err(|e| e.to_string())?;
         let resumed = session.resumed();
         if let Err(err) = state.store.set_meta(&key, session.session_id()) {
             tracing::warn!(%err, "could not remember artifact session id");

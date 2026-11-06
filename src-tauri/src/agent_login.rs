@@ -16,6 +16,7 @@
 
 use std::time::{Duration, Instant};
 
+use orchestra_acp::{AgentSession, AgentSpec, SessionOptions};
 use orchestra_agents::{AgentKind, AgentStatus, AuthStatus, Readiness};
 use orchestra_core::AgentEvent;
 use serde_json::json;
@@ -55,8 +56,9 @@ fn ending_kind(kind: AgentKind) -> String {
 pub fn turn_ended(app: &AppHandle, run: &str, event: &AgentEvent) {
     match event {
         AgentEvent::Failed { error } if orchestra_acp::wants_login(error) => {
-            let (app, run) = (app.clone(), run.to_string());
-            tauri::async_runtime::spawn(async move { refused(&app, &run).await });
+            if let Some(kind) = kind_of_run(app, run) {
+                tell_refused(app, kind);
+            }
         }
         // A turn the agent finished went through on its login. A cancel may
         // not have got that far.
@@ -77,16 +79,32 @@ fn kind_of_run(app: &AppHandle, run: &str) -> Option<AgentKind> {
     AgentKind::parse(&summary.agent)
 }
 
-/// A turn was refused for want of a login. The CLI has the last word when it
-/// can say: logged in means this was something passing, and nobody has
-/// anything to do.
-async fn refused(app: &AppHandle, run: &str) {
-    let Some(kind) = kind_of_run(app, run) else { return };
-    if orchestra_agents::auth_status(kind).await.is_some_and(|auth| auth.logged_in) {
-        tracing::info!(agent = kind.id(), run, "a turn wanted a login, and the CLI says it has one");
-        return;
+/// Open a session for this agent. Some adapters refuse a missing login here,
+/// before there is any turn to fail, and that is told the same way.
+pub async fn open_session(app: &AppHandle, agent: &str, spec: &AgentSpec, opts: SessionOptions) -> anyhow::Result<AgentSession> {
+    let opened = AgentSession::open(spec, opts).await;
+    if let Err(err) = &opened {
+        if orchestra_acp::wants_login(&err.to_string()) {
+            if let Some(kind) = AgentKind::parse(agent) {
+                tell_refused(app, kind);
+            }
+        }
     }
-    set_lost(app, kind, true);
+    opened
+}
+
+/// This agent was refused for want of a login. The CLI has the last word when
+/// it can say: logged in means this was something passing, and nobody has
+/// anything to do.
+fn tell_refused(app: &AppHandle, kind: AgentKind) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if orchestra_agents::auth_status(kind).await.is_some_and(|auth| auth.logged_in) {
+            tracing::info!(agent = kind.id(), "the agent wanted a login, and the CLI says it has one");
+            return;
+        }
+        set_lost(&app, kind, true);
+    });
 }
 
 /// Mark an agent, or take the mark off, and tell the windows and the bell.

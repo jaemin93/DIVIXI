@@ -307,6 +307,9 @@ impl SessionProbe {
     }
 }
 
+/// What the error from opening a session starts with.
+const START_FAILED: &str = "session failed to start: ";
+
 /// Whether a failed turn's error says the agent has no login to run on.
 ///
 /// Read from the text a failed turn records (`AgentEvent::Failed`): the
@@ -314,8 +317,10 @@ impl SessionProbe {
 /// never there or was signed out with `auth_required`, and one that expired
 /// under it with `errorKind: authentication_failed`, the field it keeps for
 /// clients to dispatch on. A refresh that lost a race for its lock has
-/// neither: it passes by itself, and is not this.
+/// neither: it passes by itself, and is not this. Codex's adapter refuses
+/// earlier, when the session opens, with the same `auth_required`.
 pub fn wants_login(error: &str) -> bool {
+    let error = error.strip_prefix(START_FAILED).unwrap_or(error);
     error.starts_with("Authentication required") || error.contains(r#""errorKind":"authentication_failed""#)
 }
 
@@ -990,6 +995,8 @@ mod wants_login_tests {
         assert!(wants_login("Authentication required"));
         assert!(!wants_login("Internal error: Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh. This is usually transient; retry in a minute, and if it persists close other Claude Code sessions."));
         assert!(!wants_login(r#"Internal error: Prompt is too long ({"errorKind":"invalid_request"})"#));
+        assert!(wants_login("session failed to start: Authentication required"), "Codex's adapter, at session/new");
+        assert!(!wants_login("session failed to start: the agent offers no mode that asks before acting"));
         assert!(!wants_login("agent session ended during the turn"));
     }
 }

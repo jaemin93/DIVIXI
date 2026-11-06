@@ -262,7 +262,7 @@ async fn start(app: AppHandle, r: &Routine) -> Result<Value, String> {
     let opts = session_options(&state, &r.agent, &r.cwd, &r.config, mcp.as_ref());
     // Deliberately no `opts.resume`: see the module note. Each run is new.
     tracing::info!(routine = %r.id, agent = %r.agent, cwd = %r.cwd, "opening routine session");
-    let session = match AgentSession::open(&spec, opts).await {
+    let session = match crate::agent_login::open_session(&app, &r.agent, &spec, opts).await {
         Ok(s) => Arc::new(s),
         Err(err) => {
             let why = err.to_string();

@@ -1,9 +1,12 @@
 /** A turn that failed for want of a login, and the command that brings one back. */
 
+const START_FAILED = "session failed to start: ";
+
 /** Mirrors `orchestra_acp::wants_login`. */
 export function wantsLogin(error: string | null | undefined): boolean {
   if (!error) return false;
-  return error.startsWith("Authentication required") || error.includes('"errorKind":"authentication_failed"');
+  const said = error.startsWith(START_FAILED) ? error.slice(START_FAILED.length) : error;
+  return said.startsWith("Authentication required") || said.includes('"errorKind":"authentication_failed"');
 }
 
 /**
