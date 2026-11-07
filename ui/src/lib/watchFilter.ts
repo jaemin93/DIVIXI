@@ -14,7 +14,7 @@
  */
 
 import { RECENT_MS, isOpen, type JobRow } from "./jobList.ts";
-import type { ScheduleRow } from "./scheduleList.ts";
+import { failedOver, type ScheduleRow } from "./scheduleList.ts";
 
 export type WatchKind = "all" | "schedules" | "jobs";
 export type WatchOrder = "newest" | "oldest";
@@ -49,13 +49,18 @@ export function isFiltered(f: WatchFilter): boolean {
   return f.kind !== DEFAULT_WATCH_FILTER.kind || f.order !== DEFAULT_WATCH_FILTER.order;
 }
 
-/** The active schedules, in the filter's order. */
-export function orderSchedules<T extends ScheduleRow>(list: T[], order: WatchOrder): T[] {
+/**
+ * The active schedules, in the filter's order; then the ones over whose
+ * last firing failed in the last day (`failedOver`), the latest first
+ * (oldest: the earliest first).
+ */
+export function orderSchedules<T extends ScheduleRow>(list: T[], now: number, order: WatchOrder): T[] {
   const sign = order === "newest" ? 1 : -1;
   const active = list.filter((s) => s.status === "active");
   const timed = active.filter((s) => s.next_at != null).sort((a, b) => sign * ((a.next_at ?? 0) - (b.next_at ?? 0)) || sign * (a.id - b.id));
   const waiting = active.filter((s) => s.next_at == null).sort((a, b) => sign * (a.id - b.id));
-  return [...timed, ...waiting];
+  const failed = list.filter((s) => failedOver(s, now)).sort((a, b) => sign * ((b.last_at ?? 0) - (a.last_at ?? 0)) || sign * (b.id - a.id));
+  return [...timed, ...waiting, ...failed];
 }
 
 /** The open jobs, then the ones that ended in the last day, each in the filter's order. */
@@ -71,7 +76,7 @@ export function orderJobs<T extends JobRow>(list: T[], now: number, order: Watch
 /** What one track's part of the popover shows: each kind the filter keeps, in its order. */
 export function visible<S extends ScheduleRow, J extends JobRow>(schedules: S[], jobs: J[], now: number, f: WatchFilter): { schedules: S[]; jobs: J[] } {
   return {
-    schedules: f.kind === "jobs" ? [] : orderSchedules(schedules, f.order),
+    schedules: f.kind === "jobs" ? [] : orderSchedules(schedules, now, f.order),
     jobs: f.kind === "schedules" ? [] : orderJobs(jobs, now, f.order),
   };
 }

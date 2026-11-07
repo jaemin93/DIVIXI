@@ -421,10 +421,12 @@
     overflow: hidden;
   }
 
-  /* A login notice is there for the command at its end. */
+  /* A login notice is there for the command at its end, or the list of
+     what did not run, one to a line. */
   .body.whole {
     display: block;
     overflow-wrap: anywhere;
+    white-space: pre-line;
   }
 
   .side {

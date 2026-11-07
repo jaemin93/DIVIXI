@@ -19,7 +19,8 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveTime, TimeZone, Timelike, Weekday};
-use orchestra_store::{NewSchedule, Schedule, ScheduleStatus};
+use orchestra_core::AgentEvent;
+use orchestra_store::{NewSchedule, Schedule, ScheduleStatus, Store};
 use serde_json::{json, Value};
 use tauri::{Emitter, Manager};
 
@@ -39,6 +40,20 @@ const MIN_EVERY: i64 = 60;
 
 /// The event the window reloads a track's schedule list on.
 pub const EVENT: &str = "schedules";
+
+/// How the turn a schedule wakes the conductor with begins, its number next.
+const HEAD: &str = "[schedule] #";
+
+/// Why the turn of a schedule's last firing failed, per schedule, kept in
+/// `meta` as `{"at": <that firing's last_at>, "why": "..."}`. Apart from the
+/// note, which says what the firing itself found (a condition's line, being
+/// late) and so could read like anything; and tied to the firing, so the
+/// next one leaves it behind.
+const FAILED_KEY: &str = "schedule_failed:";
+
+fn failed_key(id: i64) -> String {
+    format!("{FAILED_KEY}{id}")
+}
 
 /// A schedule as it was asked for, read into what the record keeps.
 #[derive(Debug, Clone, PartialEq)]
@@ -319,7 +334,7 @@ fn span(secs: i64) -> String {
 }
 
 /// A schedule as the conductor's tools and the window read it.
-pub fn view(s: &Schedule, ko: bool) -> Value {
+pub fn view(store: &Store, s: &Schedule, ko: bool) -> Value {
     json!({
         "id": s.id,
         "track": s.track,
@@ -331,8 +346,75 @@ pub fn view(s: &Schedule, ko: bool) -> Value {
         "fired": s.fired,
         "status": s.status,
         "note": s.note,
+        "failed": failure(store, s),
         "line": describe(s, ko),
     })
+}
+
+/// Which schedule a conductor turn was the firing of, read from how it
+/// begins.
+pub fn fired_from(prompt: &str) -> Option<i64> {
+    let rest = prompt.strip_prefix(HEAD)?;
+    let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..digits].parse().ok()
+}
+
+/// Why the turn of this schedule's last firing failed, when it did.
+pub fn failure(store: &Store, s: &Schedule) -> Option<String> {
+    let kept: Value = serde_json::from_str(&store.get_meta(&failed_key(s.id)).ok().flatten()?).ok()?;
+    let fired = s.last_at?;
+    if kept.get("at").and_then(Value::as_i64) != Some(fired) {
+        return None;
+    }
+    kept.get("why").and_then(Value::as_str).map(str::to_string)
+}
+
+/// What a schedule says when the turn of its firing failed.
+fn failure_text(error: &str, ko: bool) -> String {
+    let why = if orchestra_acp::wants_login(error) {
+        if ko { "로그인이 풀려 있었음".to_string() } else { "the agent was logged out".to_string() }
+    } else {
+        crate::agent_login::first_line(error, 120)
+    };
+    if ko { format!("실행 실패: {why}") } else { format!("failed: {why}") }
+}
+
+/// A firing is over the one before: what that one's turn came to is no
+/// longer the schedule's to show.
+fn forget_failure(app: &AppHandle, id: i64) {
+    if let Err(err) = app.state::<AppState>().store.delete_meta(&failed_key(id)) {
+        tracing::warn!(schedule = id, %err, "could not let go of an earlier firing's failure");
+    }
+}
+
+/// Whether a turn that began at `started_at` is the one of the firing the
+/// schedule now notes. A firing is recorded before its turn waits for the
+/// conductor, so the turn of an earlier one can end after a later one fired:
+/// its failure is not the later one's to show.
+fn of_last_firing(started_at: i64, fired: i64) -> bool {
+    started_at >= fired
+}
+
+/// A run's turn ended. When it was a schedule's firing and it failed, the
+/// schedule says so: one that fired for the last time is otherwise only
+/// "done", and a repeating one shows only its next time.
+pub fn turn_ended(app: &AppHandle, run: &str, event: &AgentEvent) {
+    let AgentEvent::Failed { error } = event else { return };
+    let state = app.state::<AppState>();
+    let Some(summary) = state.store.run(run).ok().flatten() else { return };
+    if summary.session != crate::conductor::CONDUCTOR_SESSION {
+        return;
+    }
+    let Some(id) = fired_from(&summary.prompt) else { return };
+    let Some(s) = state.store.schedule(id).ok().flatten().filter(|s| s.track == summary.track) else { return };
+    let Some(fired) = s.last_at.filter(|fired| of_last_firing(summary.started_at, *fired)) else { return };
+    let kept = json!({ "at": fired, "why": failure_text(error, crate::ko(app)) });
+    match state.store.set_meta(&failed_key(id), &kept.to_string()) {
+        Ok(()) => {
+            let _ = app.emit(EVENT, &s.track);
+        }
+        Err(err) => tracing::warn!(schedule = id, %err, "could not keep that a schedule's turn failed"),
+    }
 }
 
 /// Set a schedule on a track. `created_in` is the conductor run that asked.
@@ -521,7 +603,7 @@ async fn fire(app: &AppHandle, s: Schedule, now: i64) {
         }
     }
     let late_note = late_note(late, due_at, ko);
-    let head = if ko { format!("[schedule] #{} · {} 예정{late_note}", s.id, crate::when(due_at)) } else { format!("[schedule] #{} · due {}{late_note}", s.id, crate::when(due_at)) };
+    let head = if ko { format!("{HEAD}{} · {} 예정{late_note}", s.id, crate::when(due_at)) } else { format!("{HEAD}{} · due {}{late_note}", s.id, crate::when(due_at)) };
     let text = format!(
         "{head}\n{}\n\n({})",
         s.message,
@@ -540,6 +622,7 @@ async fn fire(app: &AppHandle, s: Schedule, now: i64) {
             return;
         }
     }
+    forget_failure(app, s.id);
     tracing::info!(schedule = s.id, track = %s.track, late_ms = late, next = ?next, "schedule fired");
     let _ = app.emit(EVENT, &s.track);
     deliver(app.clone(), Hand { track: s.track.clone(), text, open: true, what: format!("schedule #{}", s.id), keep: true, worker: None, run: None }).await;
@@ -575,7 +658,7 @@ fn late_note(late_ms: i64, due_at: i64, ko: bool) -> String {
 /// A condition came true: wake the conductor once and end the schedule.
 async fn fire_condition(app: &AppHandle, s: Schedule, found: String) {
     let ko = crate::ko(app);
-    let head = if ko { format!("[schedule] #{} · 조건 충족: {found}", s.id) } else { format!("[schedule] #{} · condition met: {found}", s.id) };
+    let head = if ko { format!("{HEAD}{} · 조건 충족: {found}", s.id) } else { format!("{HEAD}{} · condition met: {found}", s.id) };
     let text = format!(
         "{head}\n{}\n\n({})",
         s.message,
@@ -592,6 +675,7 @@ async fn fire_condition(app: &AppHandle, s: Schedule, found: String) {
             return;
         }
     }
+    forget_failure(app, s.id);
     tracing::info!(schedule = s.id, track = %s.track, %found, "schedule condition met");
     let _ = app.emit(EVENT, &s.track);
     deliver(app.clone(), Hand { track: s.track.clone(), text, open: true, what: format!("schedule #{}", s.id), keep: true, worker: None, run: None }).await;
@@ -702,6 +786,53 @@ mod tests {
         assert_eq!(next_after(&weekly, at_local(2026, 10, 18, 3, 25)), Some(at_local(2026, 10, 25, 3, 20)));
         assert_eq!(next_after(&sched("at", json!({ "at": 5 })), now), None, "once is once");
         assert_eq!(next_after(&sched("file", json!({})), now), None);
+    }
+
+    #[test]
+    fn a_firing_is_known_by_how_its_turn_begins() {
+        assert_eq!(fired_from(&format!("{HEAD}26 · 11-06 05:00 예정\n정리\n\n(…)")), Some(26));
+        assert_eq!(fired_from(&format!("{HEAD}7 · condition met: DONE\ncheck")), Some(7));
+        assert_eq!(fired_from(&format!("look at {HEAD}7")), None, "only at the start");
+        assert_eq!(fired_from(HEAD), None);
+        assert_eq!(fired_from(&format!("{HEAD}x")), None);
+        assert_eq!(fired_from("just a message"), None);
+    }
+
+    #[test]
+    fn a_failed_turn_says_why() {
+        let login = r#"Internal error: Failed to authenticate: OAuth session expired and could not be refreshed ({"errorKind":"authentication_failed"})"#;
+        assert_eq!(failure_text(login, true), "실행 실패: 로그인이 풀려 있었음");
+        assert_eq!(failure_text("Authentication required", false), "failed: the agent was logged out");
+        assert_eq!(failure_text("boom\nat line 3", false), "failed: boom", "the first line");
+        let long = failure_text(&"x".repeat(200), false);
+        assert!(long.ends_with('…') && long.chars().count() == "failed: ".len() + 121);
+    }
+
+    #[test]
+    fn a_failure_is_the_last_firings_only_when_its_turn_began_after_it() {
+        let fired = 1_000_000;
+        assert!(of_last_firing(fired, fired), "begun the moment it fired");
+        assert!(of_last_firing(fired + 5_000, fired), "after waiting for the conductor");
+        assert!(!of_last_firing(fired - 60_000, fired), "an earlier firing's, still running when this one fired");
+    }
+
+    /// What a firing found stays in its note, whatever it reads like; a
+    /// failure is the turn's, kept for that firing only.
+    #[test]
+    fn a_failure_is_kept_apart_from_the_note_and_for_its_firing() {
+        let store = Store::in_memory().unwrap();
+        let s = store
+            .create_schedule(&NewSchedule { track: "tr001".into(), kind: "file".into(), spec: json!({ "file": "/tmp/b.log", "contains": "failed:" }), message: "look".into(), ..Default::default() })
+            .unwrap();
+        let fired = store.schedule_fired(s.id, None, "failed: 3 tests").unwrap();
+        assert_eq!(failure(&store, &fired), None, "a condition's line is not a failed turn");
+        assert_eq!(view(&store, &fired, false)["failed"], Value::Null);
+        let at = fired.last_at.unwrap();
+        store.set_meta(&failed_key(s.id), &json!({ "at": at, "why": "failed: boom" }).to_string()).unwrap();
+        assert_eq!(failure(&store, &fired).as_deref(), Some("failed: boom"));
+        assert_eq!(view(&store, &fired, false)["note"], "failed: 3 tests", "the note stays what the firing found");
+        let later = Schedule { last_at: Some(at + 60_000), ..fired.clone() };
+        assert_eq!(failure(&store, &later), None, "a later firing does not wear it");
     }
 
     /// A firing within the tick's slack says nothing; one the app slept

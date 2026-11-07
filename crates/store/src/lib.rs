@@ -1960,6 +1960,17 @@ impl Store {
             .optional()?)
     }
 
+    /// The routine runs of this agent that failed at `since` or after, in
+    /// the order they began.
+    pub fn failed_routine_runs_since(&self, agent: &str, since: i64) -> anyhow::Result<Vec<RoutineRun>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&format!(
+            "{ROUTINE_RUN_SELECT} WHERE agent = ?1 AND status = 'failed' AND ended_at >= ?2 ORDER BY started_at, id"
+        ))?;
+        let rows = stmt.query_map(params![agent, since], row_to_routine_run)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Open a run of a routine and return its id.
     ///
     /// The id is random rather than the next number: these are a routine's
@@ -2324,6 +2335,15 @@ impl Store {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&format!("{RUN_SELECT} ORDER BY n"))?;
         let rows = stmt.query_map([], row_to_summary)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The runs of this agent that failed at `since` or after, in the order
+    /// they began.
+    pub fn failed_runs_since(&self, agent: &str, since: i64) -> anyhow::Result<Vec<RunSummary>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&format!("{RUN_SELECT} WHERE agent = ?1 AND status = 'failed' AND ended_at >= ?2 ORDER BY n"))?;
+        let rows = stmt.query_map(params![agent, since], row_to_summary)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -3934,6 +3954,42 @@ mod tests {
         assert_eq!(s.status, RunStatus::Failed);
         assert_eq!(s.error.as_deref(), Some("boom"));
         assert_eq!(s.output, "partial");
+    }
+
+    /// What failed for an agent from a moment on: the runs, and the routine
+    /// runs, which keep a table of their own.
+    #[test]
+    fn failures_from_a_moment_on_are_found_per_agent() {
+        let store = Store::in_memory().unwrap();
+        let fail = |agent: &str| {
+            let run = store.begin_run(TR, "conductor", agent, "p", ".").unwrap();
+            store.append(&run, 1, &AgentEvent::Failed { error: "Authentication required".into() }).unwrap();
+            run
+        };
+        let routine = store
+            .create_routine(&RoutinePatch { name: Some("check".into()), instruction: Some("look".into()), cwd: Some("/ops".into()), agent: Some("claude_code".into()), ..RoutinePatch::default() })
+            .unwrap();
+        let fail_routine = |agent: &str, status: RoutineStatus| {
+            let run = store.begin_routine_run(&routine.id, agent, "/ops", "look").unwrap();
+            store.end_routine_run(&run, status, "", "Authentication required", 0, None).unwrap();
+            run
+        };
+        fail("claude_code");
+        fail_routine("claude_code", RoutineStatus::Failed);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let since = now_ms();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let after = fail("claude_code");
+        fail("codex");
+        let went = drive_run(&store, "conductor", "p", &["done"], &[]);
+        let routine_after = fail_routine("claude_code", RoutineStatus::Failed);
+        fail_routine("claude_code", RoutineStatus::Stopped);
+        fail_routine("codex", RoutineStatus::Failed);
+
+        let runs: Vec<String> = store.failed_runs_since("claude_code", since).unwrap().into_iter().map(|r| r.id).collect();
+        assert_eq!(runs, vec![after], "not before, not another agent's, not one that went through ({went})");
+        let routine_runs: Vec<String> = store.failed_routine_runs_since("claude_code", since).unwrap().into_iter().map(|r| r.id).collect();
+        assert_eq!(routine_runs, vec![routine_after], "nor one that was stopped");
     }
 
     #[test]

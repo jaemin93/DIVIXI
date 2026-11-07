@@ -356,6 +356,8 @@ export type Watched = {
   spec?: Record<string, unknown> | null;
   message?: string;
   last_at?: number | null;
+  /** A schedule's: why the turn of its last firing failed, when it did. */
+  failed?: string | null;
   /** A job's: who registered it (empty for the conductor), what it watches, and when it was registered, last moved and ended. */
   worker?: string;
   what?: string;
