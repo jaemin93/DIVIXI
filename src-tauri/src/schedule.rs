@@ -375,6 +375,14 @@ fn failure_note(error: &str, old: &str, ko: bool) -> String {
     }
 }
 
+/// Whether a turn that began at `started_at` is the one of the firing the
+/// schedule now notes. A firing is recorded before its turn waits for the
+/// conductor, so the turn of an earlier one can end after a later one fired:
+/// its failure is not the later one's to show.
+fn of_last_firing(started_at: i64, last_at: Option<i64>) -> bool {
+    last_at.is_none_or(|fired| started_at >= fired)
+}
+
 /// A run's turn ended. When it was a schedule's firing and it failed, the
 /// schedule says so: one that fired for the last time is otherwise only
 /// "done", and a repeating one shows only its next time.
@@ -387,6 +395,9 @@ pub fn turn_ended(app: &AppHandle, run: &str, event: &AgentEvent) {
     }
     let Some(id) = fired_from(&summary.prompt) else { return };
     let Some(s) = state.store.schedule(id).ok().flatten().filter(|s| s.track == summary.track) else { return };
+    if !of_last_firing(summary.started_at, s.last_at) {
+        return;
+    }
     match state.store.schedule_note(id, &failure_note(error, &s.note, crate::ko(app))) {
         Ok(_) => {
             let _ = app.emit(EVENT, &s.track);
@@ -787,6 +798,15 @@ mod tests {
 
         assert!(failed(&failure_note(login, late, true)) && failed(&failure_note("boom", "", false)));
         assert!(!failed(late) && !failed(""));
+    }
+
+    #[test]
+    fn a_failure_is_the_last_firings_only_when_its_turn_began_after_it() {
+        let fired = 1_000_000;
+        assert!(of_last_firing(fired, Some(fired)), "begun the moment it fired");
+        assert!(of_last_firing(fired + 5_000, Some(fired)), "after waiting for the conductor");
+        assert!(!of_last_firing(fired - 60_000, Some(fired)), "an earlier firing's, still running when this one fired");
+        assert!(of_last_firing(fired, None));
     }
 
     /// A firing within the tick's slack says nothing; one the app slept
