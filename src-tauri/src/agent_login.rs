@@ -48,9 +48,11 @@ const WARNED: &str = "login_warned:";
 /// of a login from then on was missed.
 const LOST_SINCE: &str = "login_lost_since:";
 
-/// How many of the turns missed on a track a notice names; the rest it
-/// counts.
-const MISSED_NAMED: usize = 5;
+/// How many of the turns missed on a track a notice names, and how long each
+/// name may be; the rest it counts. A window's bell keeps the first 400
+/// characters of a notice, and this keeps the whole list inside them.
+const MISSED_NAMED: usize = 4;
+const MISSED_NAME: usize = 48;
 
 /// The bell's kind for this agent's lost login.
 fn lost_kind(kind: AgentKind) -> String {
@@ -207,19 +209,21 @@ fn set_lost(app: &AppHandle, kind: AgentKind, since: Option<i64>) {
         if status.login_lost == lost {
             return;
         }
-        if let Some(since) = since {
-            if let Err(err) = state.store.set_meta(&since_key(kind), &since.to_string()) {
-                tracing::warn!(agent = kind.id(), %err, "could not keep when an agent's login went");
-            }
-        }
         status.login_lost = lost;
-        match state.update_agent(status) {
+        let status = match state.update_agent(status) {
             Ok(status) => status,
             Err(err) => {
                 tracing::warn!(agent = kind.id(), %err, "could not keep an agent's login state");
                 return;
             }
+        };
+        // Only with the mark kept: on its own it would read as a login back.
+        if let Some(since) = since {
+            if let Err(err) = state.store.set_meta(&since_key(kind), &since.to_string()) {
+                tracing::warn!(agent = kind.id(), %err, "could not keep when an agent's login went");
+            }
         }
+        status
     };
     let _ = app.emit("agent_status", &status);
     if lost {
@@ -268,9 +272,9 @@ fn tell_missed(app: &AppHandle, kind: AgentKind) {
             Some(id) => {
                 let message = state.store.schedule(id).ok().flatten().map(|s| s.message).unwrap_or_default();
                 let label = if ko { format!("예약 #{id}") } else { format!("schedule #{id}") };
-                if message.trim().is_empty() { label } else { format!("{label}: {}", first_line(&message)) }
+                first_line(&format!("{label}: {message}"), MISSED_NAME)
             }
-            None => first_line(&r.prompt),
+            None => first_line(&r.prompt, MISSED_NAME),
         };
         let missed = Missed { at: r.started_at, what };
         match tracks.iter_mut().find(|(t, _)| *t == r.track) {
@@ -301,10 +305,10 @@ fn tell_missed(app: &AppHandle, kind: AgentKind) {
     }
 }
 
-/// A turn's first line with something on it, kept short for a notice.
-fn first_line(text: &str) -> String {
+/// The first line of `text` with something on it, cut to `max` characters.
+pub(crate) fn first_line(text: &str, max: usize) -> String {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-    let short: String = line.chars().take(60).collect();
+    let short: String = line.chars().take(max).collect();
     if short.len() < line.len() { format!("{short}…") } else { short }
 }
 
@@ -492,10 +496,25 @@ mod tests {
         assert_eq!(title, "7 turns did not run in ops");
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines.len(), 1 + MISSED_NAMED + 1);
-        assert!(lines[1].ends_with("turn 0") && lines[MISSED_NAMED].ends_with("turn 4"), "the first ones, in order");
-        assert_eq!(lines[MISSED_NAMED + 1], "and 2 more");
+        assert!(lines[1].ends_with("turn 0") && lines[MISSED_NAMED].ends_with("turn 3"), "the first ones, in order");
+        assert_eq!(lines[MISSED_NAMED + 1], "and 3 more");
         let (_, body) = missed_on_track("ops", "Claude Code", &many, true);
-        assert_eq!(body.lines().last(), Some("외 2건"));
+        assert_eq!(body.lines().last(), Some("외 3건"));
+    }
+
+    /// A window's bell keeps 400 characters of a notice (`notifyServer`): the
+    /// count at the end must be inside them, however long the names.
+    #[test]
+    fn the_longest_list_fits_what_the_bell_keeps() {
+        let name = first_line(&format!("schedule #12345: {}", "x".repeat(300)), MISSED_NAME);
+        let many: Vec<Missed> = (0..120).map(|i| Missed { at: 1_793_854_800_000 + i, what: name.clone() }).collect();
+        let times: Vec<i64> = many.iter().map(|m| m.at).collect();
+        for ko in [true, false] {
+            let (_, body) = missed_on_track("ops", "GitHub Copilot", &many, ko);
+            assert!(body.chars().count() <= 400, "{} characters", body.chars().count());
+            let (_, body) = missed_routine("nightly", "GitHub Copilot", &times, ko);
+            assert!(body.chars().count() <= 400, "{} characters", body.chars().count());
+        }
     }
 
     #[test]
@@ -515,10 +534,11 @@ mod tests {
 
     #[test]
     fn a_turn_is_named_by_its_first_line() {
-        assert_eq!(first_line("\n  [decision] #12\nquestion: …"), "[decision] #12");
+        assert_eq!(first_line("\n  [decision] #12\nquestion: …", 60), "[decision] #12");
         let long = "가".repeat(80);
-        assert_eq!(first_line(&long), format!("{}…", "가".repeat(60)));
-        assert_eq!(first_line(""), "");
+        assert_eq!(first_line(&long, 60), format!("{}…", "가".repeat(60)));
+        assert_eq!(first_line(&long, 80), long);
+        assert_eq!(first_line("", 60), "");
     }
 
     fn auth(logged_in: bool, ends: Option<&str>) -> AuthStatus {

@@ -166,13 +166,13 @@ fn notice_read(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<or
 fn list_schedules(app: AppHandle, state: State<'_, AppState>, track: String) -> Result<Vec<serde_json::Value>, String> {
     let ko = ko(&app);
     let all = state.store.schedules(Some(&track), false).map_err(|e| e.to_string())?;
-    Ok(all.iter().rev().take(30).map(|s| schedule::view(s, ko)).collect())
+    Ok(all.iter().rev().take(30).map(|s| schedule::view(&state.store, s, ko)).collect())
 }
 
 #[tauri::command(async)]
 fn schedule_cancel(app: AppHandle, id: i64) -> Result<serde_json::Value, String> {
     let s = schedule::cancel(&app, id)?;
-    Ok(schedule::view(&s, ko(&app)))
+    Ok(schedule::view(&app.state::<AppState>().store, &s, ko(&app)))
 }
 
 /// A track's watched jobs, and the ones over recently.

@@ -24,8 +24,8 @@ export type ScheduleRow = {
   next_at?: number | null;
   last_at?: number | null;
   note?: string | null;
-  /** The turn of its last firing failed; the note says why. */
-  failed?: boolean;
+  /** Why the turn of its last firing failed, in words, when it did. */
+  failed?: string | null;
 };
 
 /** Past this much after its time a firing is late: the core's `LATE`. */

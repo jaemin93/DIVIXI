@@ -2754,17 +2754,6 @@ impl Store {
         Ok(())
     }
 
-    /// What a schedule's last firing came to, said after it fired: its turn
-    /// failed, say. Whatever its status, since a firing that was its last
-    /// has already made it done.
-    pub fn schedule_note(&self, id: i64, note: &str) -> anyhow::Result<Schedule> {
-        let changed = self.conn.lock().execute("UPDATE schedules SET note = ?2 WHERE id = ?1", params![id, note.trim()])?;
-        if changed == 0 {
-            anyhow::bail!("no schedule {id}");
-        }
-        self.schedule(id)?.ok_or_else(|| anyhow::anyhow!("schedule {id} vanished"))
-    }
-
     /// An active schedule is over without a firing (its `until` passed
     /// while it was held back), with a note saying so.
     pub fn end_schedule(&self, id: i64, note: &str) -> anyhow::Result<Schedule> {
@@ -4228,10 +4217,6 @@ mod tests {
         assert!(fired.last_at.is_some());
         assert_eq!(fired.note, "ran 3 h late: the machine was off");
         assert!(store.schedule_fired(once.id, None, "").is_err(), "over is over");
-        // Its turn failed after it fired, which was its last: said all the same.
-        let said = store.schedule_note(once.id, " failed: logged out · ran 3 h late: the machine was off ").unwrap();
-        assert_eq!((said.status, said.fired, said.note.as_str()), (ScheduleStatus::Done, 1, "failed: logged out · ran 3 h late: the machine was off"));
-        assert!(store.schedule_note(9999, "x").is_err());
 
         let moved = store.schedule_moved(daily.id, 7000, "pushed past quiet hours").unwrap();
         assert_eq!((moved.next_at, moved.fired), (Some(7000), 0), "moved, not fired");

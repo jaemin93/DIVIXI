@@ -234,7 +234,8 @@
           <span class="mtext">{r ?? t("schedules.once")}</span>
           <span class="id">#{s.id}</span>
         </span>
-        {#if s.note}<span class="note mono" class:warn={late === "fired-late" || s.failed}>{s.note}</span>{/if}
+        {#if s.failed}<span class="note mono warn">{s.failed}</span>{/if}
+        {#if s.note}<span class="note mono" class:warn={late === "fired-late"}>{s.note}</span>{/if}
       </span>
     </button>
     {#if s.failed}

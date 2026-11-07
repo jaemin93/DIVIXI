@@ -113,8 +113,8 @@ Claude Code and Codex, which are JS programs. nvm or a distribution package, eit
 **Agent CLIs.** Install the ones you want to use on the server, as that server's user, and **sign in
 once**. DIVIXI uses that sign-in as it is. A Claude Code sign-in runs out after about four weeks; with
 a recent `claude` installed on the server, the bell says so three days ahead, with the command to sign
-in again. What could not run while it was signed out, schedules and routines included, the bell
-lists once it is signed in again.
+in again. The turns the agent refused while it was signed out, schedules' and routines' included, the
+bell lists once it is signed in again.
 
 | Agent | Install | Sign in |
 |---|---|---|
