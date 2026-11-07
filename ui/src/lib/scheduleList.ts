@@ -8,6 +8,8 @@
  * words come in through `tr`, the i18n `t`, so no language is written here.
  */
 
+import { RECENT_MS } from "./jobList.ts";
+
 export type Tr = (key: string, vars?: Record<string, string | number>) => string;
 
 /** A schedule as `list_schedules` returns it. */
@@ -22,6 +24,8 @@ export type ScheduleRow = {
   next_at?: number | null;
   last_at?: number | null;
   note?: string | null;
+  /** The turn of its last firing failed; the note says why. */
+  failed?: boolean;
 };
 
 /** Past this much after its time a firing is late: the core's `LATE`. */
@@ -102,6 +106,15 @@ export function lateness(s: ScheduleRow, now: number): "overdue" | "fired-late" 
   if (s.status === "active" && s.next_at != null && now - s.next_at > LATE_MS) return "overdue";
   if (s.note && /^(late|늦게)/.test(s.note)) return "fired-late";
   return null;
+}
+
+/**
+ * Over, and its last firing's turn failed in the last day. A one-off
+ * schedule is done the moment it fires, so this is the only place its
+ * failure shows.
+ */
+export function failedOver(s: ScheduleRow, now: number): boolean {
+  return s.status !== "active" && !!s.failed && s.last_at != null && now - s.last_at <= RECENT_MS;
 }
 
 /** Soonest first; conditions (no time) after, oldest first. */

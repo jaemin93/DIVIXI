@@ -19,6 +19,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveTime, TimeZone, Timelike, Weekday};
+use orchestra_core::AgentEvent;
 use orchestra_store::{NewSchedule, Schedule, ScheduleStatus};
 use serde_json::{json, Value};
 use tauri::{Emitter, Manager};
@@ -39,6 +40,13 @@ const MIN_EVERY: i64 = 60;
 
 /// The event the window reloads a track's schedule list on.
 pub const EVENT: &str = "schedules";
+
+/// How the turn a schedule wakes the conductor with begins, its number next.
+const HEAD: &str = "[schedule] #";
+
+/// How a note says the turn of a schedule's last firing failed, in either
+/// language: what `failed` reads it by.
+const FAILED: [&str; 2] = ["failed: ", "실행 실패: "];
 
 /// A schedule as it was asked for, read into what the record keeps.
 #[derive(Debug, Clone, PartialEq)]
@@ -331,8 +339,60 @@ pub fn view(s: &Schedule, ko: bool) -> Value {
         "fired": s.fired,
         "status": s.status,
         "note": s.note,
+        "failed": failed(&s.note),
         "line": describe(s, ko),
     })
+}
+
+/// Which schedule a conductor turn was the firing of, read from how it
+/// begins.
+pub fn fired_from(prompt: &str) -> Option<i64> {
+    let rest = prompt.strip_prefix(HEAD)?;
+    let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest[..digits].parse().ok()
+}
+
+/// Whether a note says the turn of the last firing failed.
+pub fn failed(note: &str) -> bool {
+    FAILED.iter().any(|f| note.starts_with(f))
+}
+
+/// The note for a firing whose turn failed: why, then what the firing
+/// itself noted (that it was late, say), unless that was a failure too.
+fn failure_note(error: &str, old: &str, ko: bool) -> String {
+    let why = if orchestra_acp::wants_login(error) {
+        if ko { "로그인이 풀려 있었음".to_string() } else { "the agent was logged out".to_string() }
+    } else {
+        let line = error.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+        let short: String = line.chars().take(120).collect();
+        if short.len() < line.len() { format!("{short}…") } else { short }
+    };
+    let said = format!("{}{why}", FAILED[usize::from(ko)]);
+    if old.trim().is_empty() || failed(old) {
+        said
+    } else {
+        format!("{said} · {}", old.trim())
+    }
+}
+
+/// A run's turn ended. When it was a schedule's firing and it failed, the
+/// schedule says so: one that fired for the last time is otherwise only
+/// "done", and a repeating one shows only its next time.
+pub fn turn_ended(app: &AppHandle, run: &str, event: &AgentEvent) {
+    let AgentEvent::Failed { error } = event else { return };
+    let state = app.state::<AppState>();
+    let Some(summary) = state.store.run(run).ok().flatten() else { return };
+    if summary.session != crate::conductor::CONDUCTOR_SESSION {
+        return;
+    }
+    let Some(id) = fired_from(&summary.prompt) else { return };
+    let Some(s) = state.store.schedule(id).ok().flatten().filter(|s| s.track == summary.track) else { return };
+    match state.store.schedule_note(id, &failure_note(error, &s.note, crate::ko(app))) {
+        Ok(_) => {
+            let _ = app.emit(EVENT, &s.track);
+        }
+        Err(err) => tracing::warn!(schedule = id, %err, "could not note that a schedule's turn failed"),
+    }
 }
 
 /// Set a schedule on a track. `created_in` is the conductor run that asked.
@@ -521,7 +581,7 @@ async fn fire(app: &AppHandle, s: Schedule, now: i64) {
         }
     }
     let late_note = late_note(late, due_at, ko);
-    let head = if ko { format!("[schedule] #{} · {} 예정{late_note}", s.id, crate::when(due_at)) } else { format!("[schedule] #{} · due {}{late_note}", s.id, crate::when(due_at)) };
+    let head = if ko { format!("{HEAD}{} · {} 예정{late_note}", s.id, crate::when(due_at)) } else { format!("{HEAD}{} · due {}{late_note}", s.id, crate::when(due_at)) };
     let text = format!(
         "{head}\n{}\n\n({})",
         s.message,
@@ -575,7 +635,7 @@ fn late_note(late_ms: i64, due_at: i64, ko: bool) -> String {
 /// A condition came true: wake the conductor once and end the schedule.
 async fn fire_condition(app: &AppHandle, s: Schedule, found: String) {
     let ko = crate::ko(app);
-    let head = if ko { format!("[schedule] #{} · 조건 충족: {found}", s.id) } else { format!("[schedule] #{} · condition met: {found}", s.id) };
+    let head = if ko { format!("{HEAD}{} · 조건 충족: {found}", s.id) } else { format!("{HEAD}{} · condition met: {found}", s.id) };
     let text = format!(
         "{head}\n{}\n\n({})",
         s.message,
@@ -702,6 +762,31 @@ mod tests {
         assert_eq!(next_after(&weekly, at_local(2026, 10, 18, 3, 25)), Some(at_local(2026, 10, 25, 3, 20)));
         assert_eq!(next_after(&sched("at", json!({ "at": 5 })), now), None, "once is once");
         assert_eq!(next_after(&sched("file", json!({})), now), None);
+    }
+
+    #[test]
+    fn a_firing_is_known_by_how_its_turn_begins() {
+        assert_eq!(fired_from(&format!("{HEAD}26 · 11-06 05:00 예정\n정리\n\n(…)")), Some(26));
+        assert_eq!(fired_from(&format!("{HEAD}7 · condition met: DONE\ncheck")), Some(7));
+        assert_eq!(fired_from(&format!("look at {HEAD}7")), None, "only at the start");
+        assert_eq!(fired_from(HEAD), None);
+        assert_eq!(fired_from(&format!("{HEAD}x")), None);
+        assert_eq!(fired_from("just a message"), None);
+    }
+
+    #[test]
+    fn a_failed_firing_says_why_before_what_it_noted() {
+        let login = r#"Internal error: Failed to authenticate: OAuth session expired and could not be refreshed ({"errorKind":"authentication_failed"})"#;
+        let late = "late: 3h past 11-06 05:00 (the app or the machine was off)";
+        assert_eq!(failure_note(login, "", true), "실행 실패: 로그인이 풀려 있었음");
+        assert_eq!(failure_note(login, late, false), format!("failed: the agent was logged out · {late}"));
+        assert_eq!(failure_note("boom\nat line 3", "", false), "failed: boom", "the first line");
+        assert_eq!(failure_note("again", "failed: boom", false), "failed: again", "a failure is said once");
+        let long = failure_note(&"x".repeat(200), "", false);
+        assert!(long.ends_with('…') && long.chars().count() == "failed: ".len() + 121);
+
+        assert!(failed(&failure_note(login, late, true)) && failed(&failure_note("boom", "", false)));
+        assert!(!failed(late) && !failed(""));
     }
 
     /// A firing within the tick's slack says nothing; one the app slept

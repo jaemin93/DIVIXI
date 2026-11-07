@@ -53,7 +53,8 @@
   const mine = (list: Watched[], track: string) => list.filter((x) => x.track === track);
   /** Everything this track has, unfiltered: whether the button shows, and its count. */
   const all = $derived(visible(mine(store.schedules, store.track), mine(store.jobs, store.track), store.now, { kind: "all", order: "newest" }));
-  const live = $derived(all.schedules.length + all.jobs.filter(isOpen).length);
+  /** What is still to come: a schedule over is listed when its turn failed, but is not counted. */
+  const live = $derived(all.schedules.filter((s) => s.status === "active").length + all.jobs.filter(isOpen).length);
   const here = $derived(visible(mine(store.schedules, store.track), mine(store.jobs, store.track), store.now, filter));
   const others = $derived.by(() => {
     const out: { track: string; name: string; schedules: Watched[]; jobs: Watched[] }[] = [];
@@ -213,10 +214,13 @@
   {@const r = rule(s, tr, locale)}
   {@const text = message(s)}
   {@const full = expanded.includes(s.id)}
-  {@const c = s.next_at != null ? at(s.next_at) : null}
-  <div class="row" class:full class:nostate={!late} id="schedule-row-{s.id}">
+  {@const active = s.status === "active"}
+  <!-- One over is listed only when its last turn failed: the time is when that firing was. -->
+  {@const shown = active ? s.next_at : s.last_at}
+  {@const c = shown != null ? at(shown) : null}
+  <div class="row" class:full class:nostate={!late && !s.failed} class:over={!active} id="schedule-row-{s.id}">
     <button class="main" type="button" aria-expanded={full} onclick={() => expand(s.id)} title={full ? t("schedules.less") : t("schedules.more")}>
-      <span class="when mono" title={s.next_at != null ? whenFull(s.next_at, store.lang) : undefined}>
+      <span class="when mono" title={shown != null ? whenFull(shown, store.lang) : undefined}>
         {#if c}
           <span class="t" class:late={late === "overdue"}>{c.time}</span>{#if c.day}<span class="d">{c.day}</span>{/if}
         {:else}
@@ -230,11 +234,15 @@
           <span class="mtext">{r ?? t("schedules.once")}</span>
           <span class="id">#{s.id}</span>
         </span>
-        {#if s.note}<span class="note mono" class:warn={late === "fired-late"}>{s.note}</span>{/if}
+        {#if s.note}<span class="note mono" class:warn={late === "fired-late" || s.failed}>{s.note}</span>{/if}
       </span>
     </button>
-    {#if late}<div class="info"><span class="st warn"><i class="dot"></i>{t("schedules.late")}</span></div>{/if}
-    {@render acts(t("schedules.cancel"), "close", () => store.cancelSchedule(s.id), full, () => expand(s.id))}
+    {#if s.failed}
+      <div class="info"><span class="st bad"><i class="dot"></i>{t("schedules.failed")}</span></div>
+    {:else if late}
+      <div class="info"><span class="st warn"><i class="dot"></i>{t("schedules.late")}</span></div>
+    {/if}
+    {@render acts(active ? t("schedules.cancel") : null, "close", () => store.cancelSchedule(s.id), full, () => expand(s.id))}
   </div>
 {/snippet}
 

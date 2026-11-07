@@ -1956,6 +1956,7 @@ pub(crate) async fn pump(
                         conductor::route_permission(&app, &track, &session, &run, &event);
                     }
                     agent_login::turn_ended(&app, &run, &event);
+                    schedule::turn_ended(&app, &run, &event);
                     emit(event, ms);
                     if terminal {
                         // Permission cards of this run are moot once it ends.
