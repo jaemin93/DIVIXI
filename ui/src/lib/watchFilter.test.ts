@@ -32,8 +32,23 @@ const jobs = [
 ];
 
 test("schedules: newest is the soonest firing first, oldest the furthest; conditions after either way", () => {
-  assert.deepEqual(orderSchedules(schedules, "newest").map((s) => s.id), [3, 6, 1, 2, 5]);
-  assert.deepEqual(orderSchedules(schedules, "oldest").map((s) => s.id), [1, 6, 3, 5, 2]);
+  assert.deepEqual(orderSchedules(schedules, NOW, "newest").map((s) => s.id), [3, 6, 1, 2, 5]);
+  assert.deepEqual(orderSchedules(schedules, NOW, "oldest").map((s) => s.id), [1, 6, 3, 5, 2]);
+});
+
+test("schedules: one over whose last turn failed in the last day comes after the active ones", () => {
+  const over = [
+    sched(1, { next_at: NOW + 10 * MIN }),
+    sched(7, { status: "done", failed: "failed: the agent was logged out", last_at: NOW - 60 * MIN }),
+    sched(8, { status: "done", failed: "failed: boom", last_at: NOW - 5 * MIN }),
+    sched(9, { status: "done", last_at: NOW - 5 * MIN, note: "failed: 3 tests", failed: null }),
+    sched(10, { status: "done", failed: "failed: boom", last_at: NOW - 25 * 60 * MIN }),
+    sched(11, { status: "cancelled", failed: "failed: boom", last_at: NOW - 5 * MIN }),
+  ];
+  assert.deepEqual(orderSchedules(over, NOW, "newest").map((s) => s.id), [1, 11, 8, 7], "not one that went through, whatever its note says, nor one failed over a day ago");
+  assert.deepEqual(orderSchedules(over, NOW, "oldest").map((s) => s.id), [1, 7, 8, 11]);
+  // An active one that failed is where it always was: its next time comes.
+  assert.deepEqual(orderSchedules([sched(3, { next_at: NOW + MIN, failed: "failed: boom", last_at: NOW - MIN })], NOW, "newest").map((s) => s.id), [3]);
 });
 
 test("jobs: open above ended; newest is the latest registered or ended first, oldest the earliest; older than a day out", () => {

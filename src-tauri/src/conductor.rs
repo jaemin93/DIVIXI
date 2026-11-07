@@ -1118,8 +1118,8 @@ fn durable_tools(app: AppHandle, track: String) -> Vec<Tool> {
                     let all = state.store.schedules(Some(&track), false).map_err(|e| e.to_string())?;
                     let (active, over): (Vec<_>, Vec<_>) = all.iter().partition(|s| s.status == orchestra_store::ScheduleStatus::Active);
                     Ok(json!({
-                        "active": active.iter().map(|s| schedule::view(s, ko)).collect::<Vec<_>>(),
-                        "over": over.iter().rev().take(10).map(|s| schedule::view(s, ko)).collect::<Vec<_>>(),
+                        "active": active.iter().map(|s| schedule::view(&state.store, s, ko)).collect::<Vec<_>>(),
+                        "over": over.iter().rev().take(10).map(|s| schedule::view(&state.store, s, ko)).collect::<Vec<_>>(),
                     }))
                 }
             },

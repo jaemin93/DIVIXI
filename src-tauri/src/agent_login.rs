@@ -5,7 +5,9 @@
 //! as every turn failing within a second, on a machine nobody is watching,
 //! with the agent still marked ready. So the first turn refused for want of a
 //! login marks the agent and rings the bell once, with the command that brings
-//! it back; the login coming back takes both away.
+//! it back; the login coming back takes both away, and the bell then says what
+//! did not run meanwhile, schedules' and routines' turns among it, so whoever
+//! comes back to it knows what to run again.
 //!
 //! The mark does not stop anything from starting. Nothing tells the app when
 //! someone logs in from a terminal, and the next turn should simply work.
@@ -42,10 +44,33 @@ const WARN_BEFORE_MS: i64 = 3 * DAY_MS;
 /// The login end already told about, per agent, so one end rings once.
 const WARNED: &str = "login_warned:";
 
+/// When a marked agent was first refused, per agent: what failed for want
+/// of a login from then on was missed.
+const LOST_SINCE: &str = "login_lost_since:";
+
+/// How many of the turns missed on a track a notice names, and how long each
+/// name may be; the rest it counts. A window's bell keeps the first 400
+/// characters of a notice, and this keeps the whole list inside them.
+const MISSED_NAMED: usize = 4;
+const MISSED_NAME: usize = 48;
+
 /// The bell's kind for this agent's lost login.
 fn lost_kind(kind: AgentKind) -> String {
     format!("login_lost:{}", kind.id())
 }
+
+/// The bell's kind for what did not run while this agent was logged out.
+fn missed_kind(kind: AgentKind) -> String {
+    format!("login_missed:{}", kind.id())
+}
+
+fn since_key(kind: AgentKind) -> String {
+    format!("{LOST_SINCE}{}", kind.id())
+}
+
+/// Marking and unmarking, and taking what was missed: one at a time, so the
+/// mark and when it began change together.
+static MARKING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 /// The bell's kind for this agent's login about to end.
 fn ending_kind(kind: AgentKind) -> String {
@@ -120,18 +145,40 @@ fn marked(app: &AppHandle, kind: AgentKind) -> bool {
 /// it can say: logged in means this was something passing, and nobody has
 /// anything to do. Turns failing together ask once.
 fn tell_refused(app: &AppHandle, kind: AgentKind) {
+    // Before the refused turn is recorded as failed: it is the first of
+    // what was missed.
+    let at = crate::now_ms();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let _one = ASKING.lock().await;
         if marked(&app, kind) {
+            went_by(&app, kind, at);
             return;
         }
         if orchestra_agents::auth_status(kind).await.is_some_and(|auth| auth.logged_in) {
             tracing::info!(agent = kind.id(), "the agent wanted a login, and the CLI says it has one");
             return;
         }
-        set_lost(&app, kind, true);
+        set_lost(&app, kind, Some(at));
     });
+}
+
+/// A marked agent was refused at `at`: the login went by then at the latest.
+/// Turns failing together are asked about one at a time, in no set order, so
+/// the one that marked the agent need not have been the first.
+fn went_by(app: &AppHandle, kind: AgentKind, at: i64) {
+    let state = app.state::<AppState>();
+    let _one = MARKING.lock();
+    if !marked(app, kind) {
+        return;
+    }
+    let key = since_key(kind);
+    let since = state.store.get_meta(&key).ok().flatten().and_then(|v| v.parse::<i64>().ok());
+    if since.is_none_or(|since| at < since) {
+        if let Err(err) = state.store.set_meta(&key, &at.to_string()) {
+            tracing::warn!(agent = kind.id(), %err, "could not keep when an agent's login went");
+        }
+    }
 }
 
 /// A turn of a marked agent went through. That is proof the login is back,
@@ -146,30 +193,37 @@ fn came_through(app: &AppHandle, kind: AgentKind) {
         if cli_says(kind).await.is_some_and(|auth| !auth.logged_in) {
             return;
         }
-        set_lost(&app, kind, false);
+        set_lost(&app, kind, None);
     });
 }
 
-/// Mark an agent, or take the mark off, and tell the windows and the bell.
-/// Nothing happens when it already is as asked, so a queue of turns failing
-/// together rings once.
-fn set_lost(app: &AppHandle, kind: AgentKind, lost: bool) {
-    static ONE_AT_A_TIME: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+/// Mark an agent as refused since `since`, or with `None` take the mark
+/// off, and tell the windows and the bell. Nothing happens when it already
+/// is as asked, so a queue of turns failing together rings once.
+fn set_lost(app: &AppHandle, kind: AgentKind, since: Option<i64>) {
+    let lost = since.is_some();
     let state = app.state::<AppState>();
     let status = {
-        let _one = ONE_AT_A_TIME.lock();
+        let _one = MARKING.lock();
         let Some(mut status) = state.load_agents().ok().flatten().and_then(|list| list.into_iter().find(|s| s.kind == kind)) else { return };
         if status.login_lost == lost {
             return;
         }
         status.login_lost = lost;
-        match state.update_agent(status) {
+        let status = match state.update_agent(status) {
             Ok(status) => status,
             Err(err) => {
                 tracing::warn!(agent = kind.id(), %err, "could not keep an agent's login state");
                 return;
             }
+        };
+        // Only with the mark kept: on its own it would read as a login back.
+        if let Some(since) = since {
+            if let Err(err) = state.store.set_meta(&since_key(kind), &since.to_string()) {
+                tracing::warn!(agent = kind.id(), %err, "could not keep when an agent's login went");
+            }
         }
+        status
     };
     let _ = app.emit("agent_status", &status);
     if lost {
@@ -179,7 +233,122 @@ fn set_lost(app: &AppHandle, kind: AgentKind, lost: bool) {
     } else {
         tracing::info!(agent = kind.id(), "the agent's login is back");
         take_off_bell(app, &lost_kind(kind));
+        tell_missed(app, kind);
     }
+}
+
+/// One turn that did not run, for a notice: when it began, and what it was.
+struct Missed {
+    at: i64,
+    what: String,
+}
+
+/// The login is back: say, once, what failed for want of it meanwhile, a
+/// notice per track (opening it opens the track) and per routine. Nothing
+/// when the agent is still marked, or nothing was missed.
+fn tell_missed(app: &AppHandle, kind: AgentKind) {
+    let state = app.state::<AppState>();
+    let since = {
+        let _one = MARKING.lock();
+        if marked(app, kind) {
+            return;
+        }
+        let key = since_key(kind);
+        let Some(since) = state.store.get_meta(&key).ok().flatten() else { return };
+        if let Err(err) = state.store.delete_meta(&key) {
+            tracing::warn!(agent = kind.id(), %err, "could not let go of when an agent's login went");
+            return;
+        }
+        since.parse::<i64>().ok()
+    };
+    let Some(since) = since else { return };
+    let ko = crate::ko(app);
+    let agent = kind.name();
+
+    let runs = state.store.failed_runs_since(kind.id(), since).unwrap_or_default();
+    let mut tracks: Vec<(String, Vec<Missed>)> = Vec::new();
+    for r in runs.into_iter().filter(|r| r.error.as_deref().is_some_and(orchestra_acp::wants_login)) {
+        let what = match crate::schedule::fired_from(&r.prompt) {
+            Some(id) => {
+                let message = state.store.schedule(id).ok().flatten().map(|s| s.message).unwrap_or_default();
+                let label = if ko { format!("예약 #{id}") } else { format!("schedule #{id}") };
+                first_line(&format!("{label}: {message}"), MISSED_NAME)
+            }
+            None => first_line(&r.prompt, MISSED_NAME),
+        };
+        let missed = Missed { at: r.started_at, what };
+        match tracks.iter_mut().find(|(t, _)| *t == r.track) {
+            Some((_, list)) => list.push(missed),
+            None => tracks.push((r.track, vec![missed])),
+        }
+    }
+    for (track, list) in tracks {
+        let name = state.store.track(&track).ok().flatten().map(|t| t.name).unwrap_or_else(|| track.clone());
+        let (title, body) = missed_on_track(&name, agent, &list, ko);
+        crate::add_notice(app, &track, &missed_kind(kind), &title, &body, json!({ "agent": kind.id() }));
+    }
+
+    let routine_runs = state.store.failed_routine_runs_since(kind.id(), since).unwrap_or_default();
+    let mut routines: Vec<(String, Vec<(i64, String)>)> = Vec::new();
+    for r in routine_runs.into_iter().filter(|r| orchestra_acp::wants_login(&r.error)) {
+        match routines.iter_mut().find(|(id, _)| *id == r.routine) {
+            Some((_, list)) => list.push((r.started_at, r.id)),
+            None => routines.push((r.routine, vec![(r.started_at, r.id)])),
+        }
+    }
+    for (routine, list) in routines {
+        let name = state.store.routine(&routine).ok().flatten().map(|r| r.name).unwrap_or_else(|| routine.clone());
+        let times: Vec<i64> = list.iter().map(|(at, _)| *at).collect();
+        let (title, body) = missed_routine(&name, agent, &times, ko);
+        let last = list.last().map(|(_, run)| run.clone()).unwrap_or_default();
+        crate::add_notice(app, "", &missed_kind(kind), &title, &body, json!({ "agent": kind.id(), "routine": routine, "run": last }));
+    }
+}
+
+/// The first line of `text` with something on it, cut to `max` characters.
+pub(crate) fn first_line(text: &str, max: usize) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let short: String = line.chars().take(max).collect();
+    if short.len() < line.len() { format!("{short}…") } else { short }
+}
+
+/// What a notice's list says after the turns it names.
+fn and_more(left: usize, ko: bool) -> String {
+    if ko { format!("외 {left}건") } else { format!("and {left} more") }
+}
+
+fn missed_on_track(track: &str, agent: &str, list: &[Missed], ko: bool) -> (String, String) {
+    let n = list.len();
+    let (title, head) = if ko {
+        (format!("{track}에서 {n}건이 실행되지 못했습니다"), format!("{agent} 로그인이 풀려 있던 동안입니다. 아직 필요하면 다시 실행하세요."))
+    } else if n == 1 {
+        (format!("1 turn did not run in {track}"), format!("{agent} was logged out. Run it again if it is still needed."))
+    } else {
+        (format!("{n} turns did not run in {track}"), format!("{agent} was logged out. Run them again if they are still needed."))
+    };
+    let mut lines = vec![head];
+    lines.extend(list.iter().take(MISSED_NAMED).map(|m| format!("· {} {}", crate::when(m.at), m.what)));
+    if n > MISSED_NAMED {
+        lines.push(and_more(n - MISSED_NAMED, ko));
+    }
+    (title, lines.join("\n"))
+}
+
+fn missed_routine(name: &str, agent: &str, times: &[i64], ko: bool) -> (String, String) {
+    let n = times.len();
+    let title = match (ko, n) {
+        (true, 1) => format!("되풀이 {name}: 실행되지 못했습니다"),
+        (true, _) => format!("되풀이 {name}: {n}번 실행되지 못했습니다"),
+        (false, 1) => format!("Routine {name} did not run"),
+        (false, _) => format!("Routine {name} did not run {n} times"),
+    };
+    let head = if ko { format!("{agent} 로그인이 풀려 있던 동안입니다. 아직 필요하면 다시 실행하세요.") } else { format!("{agent} was logged out. Run it again if it is still needed.") };
+    let mut lines = vec![head];
+    lines.extend(times.iter().take(MISSED_NAMED).map(|at| format!("· {}", crate::when(*at))));
+    if n > MISSED_NAMED {
+        lines.push(and_more(n - MISSED_NAMED, ko));
+    }
+    (title, lines.join("\n"))
 }
 
 /// A status newly detected, by detecting again or after a login or an install.
@@ -257,10 +426,11 @@ async fn tick(app: &AppHandle, ending: &mut Option<Instant>) {
     for status in statuses.iter().filter(|s| !s.login_lost) {
         // Detected again meanwhile: the mark went with the old status.
         take_off_bell(app, &lost_kind(status.kind));
+        tell_missed(app, status.kind);
     }
     for status in statuses.iter().filter(|s| s.login_lost) {
         if cli_says(status.kind).await.is_some_and(|auth| auth.logged_in) {
-            set_lost(app, status.kind, false);
+            set_lost(app, status.kind, None);
             // A new login: its end is worth a look now.
             *ending = None;
         }
@@ -300,6 +470,75 @@ mod tests {
     fn each_agent_rings_on_its_own() {
         assert_ne!(lost_kind(AgentKind::ClaudeCode), lost_kind(AgentKind::Codex));
         assert_ne!(ending_kind(AgentKind::ClaudeCode), ending_kind(AgentKind::Codex));
+        assert_ne!(missed_kind(AgentKind::ClaudeCode), missed_kind(AgentKind::Codex));
+        // The bell draws these whole, for the list or the command at the end.
+        for kind in [lost_kind, ending_kind, missed_kind] {
+            assert!(kind(AgentKind::ClaudeCode).starts_with("login_"));
+        }
+    }
+
+    #[test]
+    fn what_did_not_run_on_a_track_is_listed_up_to_a_few() {
+        let at = 1_793_854_800_000;
+        let one = [Missed { at, what: "예약 #26: 밤사이 실패한 빌드 정리".into() }];
+        let (title, body) = missed_on_track("ops", "Claude Code", &one, true);
+        assert_eq!(title, "ops에서 1건이 실행되지 못했습니다");
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("Claude Code 로그인이 풀려 있던 동안입니다"));
+        assert_eq!(lines[1], format!("· {} 예약 #26: 밤사이 실패한 빌드 정리", crate::when(at)));
+        let (title, body) = missed_on_track("ops", "Claude Code", &one, false);
+        assert_eq!(title, "1 turn did not run in ops");
+        assert!(body.starts_with("Claude Code was logged out. Run it again"));
+
+        let many: Vec<Missed> = (0..7).map(|i| Missed { at: at + i * 60_000, what: format!("turn {i}") }).collect();
+        let (title, body) = missed_on_track("ops", "Claude Code", &many, false);
+        assert_eq!(title, "7 turns did not run in ops");
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 1 + MISSED_NAMED + 1);
+        assert!(lines[1].ends_with("turn 0") && lines[MISSED_NAMED].ends_with("turn 3"), "the first ones, in order");
+        assert_eq!(lines[MISSED_NAMED + 1], "and 3 more");
+        let (_, body) = missed_on_track("ops", "Claude Code", &many, true);
+        assert_eq!(body.lines().last(), Some("외 3건"));
+    }
+
+    /// A window's bell keeps 400 characters of a notice (`notifyServer`): the
+    /// count at the end must be inside them, however long the names.
+    #[test]
+    fn the_longest_list_fits_what_the_bell_keeps() {
+        let name = first_line(&format!("schedule #12345: {}", "x".repeat(300)), MISSED_NAME);
+        let many: Vec<Missed> = (0..120).map(|i| Missed { at: 1_793_854_800_000 + i, what: name.clone() }).collect();
+        let times: Vec<i64> = many.iter().map(|m| m.at).collect();
+        for ko in [true, false] {
+            let (_, body) = missed_on_track("ops", "GitHub Copilot", &many, ko);
+            assert!(body.chars().count() <= 400, "{} characters", body.chars().count());
+            let (_, body) = missed_routine("nightly", "GitHub Copilot", &times, ko);
+            assert!(body.chars().count() <= 400, "{} characters", body.chars().count());
+        }
+    }
+
+    #[test]
+    fn a_routine_that_did_not_run_says_when() {
+        let at = 1_793_854_800_000;
+        let (title, body) = missed_routine("nightly", "Claude Code", &[at], true);
+        assert_eq!(title, "되풀이 nightly: 실행되지 못했습니다");
+        assert_eq!(body.lines().nth(1), Some(format!("· {}", crate::when(at)).as_str()));
+        let (title, _) = missed_routine("nightly", "Claude Code", &[at, at + 3_600_000], true);
+        assert_eq!(title, "되풀이 nightly: 2번 실행되지 못했습니다");
+        let (title, _) = missed_routine("nightly", "Claude Code", &[at], false);
+        assert_eq!(title, "Routine nightly did not run");
+        let (title, body) = missed_routine("nightly", "Claude Code", &[at, at + 1], false);
+        assert_eq!(title, "Routine nightly did not run 2 times");
+        assert_eq!(body.lines().count(), 3);
+    }
+
+    #[test]
+    fn a_turn_is_named_by_its_first_line() {
+        assert_eq!(first_line("\n  [decision] #12\nquestion: …", 60), "[decision] #12");
+        let long = "가".repeat(80);
+        assert_eq!(first_line(&long, 60), format!("{}…", "가".repeat(60)));
+        assert_eq!(first_line(&long, 80), long);
+        assert_eq!(first_line("", 60), "");
     }
 
     fn auth(logged_in: bool, ends: Option<&str>) -> AuthStatus {
