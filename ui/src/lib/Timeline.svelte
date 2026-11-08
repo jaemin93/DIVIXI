@@ -6,7 +6,7 @@
   import Working from "./Working.svelte";
   import LoginCommand from "./LoginCommand.svelte";
   import { wantsLogin } from "./agentLogin";
-  import { offersSendAgain, sentAgain } from "./sendAgain";
+  import { againState, offersSendAgain } from "./sendAgain";
   import Markdown from "./Markdown.svelte";
   import StepGroup from "./StepGroup.svelte";
   import { isActive, shape } from "./steps";
@@ -502,9 +502,10 @@
             <!-- The way on from a refusal: the same turn, sent by the human.
                  Nothing is sent again by itself; once it went, typed or with
                  this, it says so instead. -->
+            {@const again = againState(run, conductorRuns, store.chatQueue)}
             <div class="again">
-              {#if sentAgain(run, conductorRuns, store.chatQueue)}
-                <span class="mono dim">{t("timeline.sentAgain")}</span>
+              {#if again}
+                <span class="mono dim">{t(again === "sent" ? "timeline.sentAgain" : again === "held" ? "timeline.unsent" : "timeline.queued")}</span>
               {:else}
                 <button class="btn" type="button" onclick={() => sendAgainNow(run)} disabled={sendingAgain === run.id} title={t("timeline.sendAgainTitle")}>{t("timeline.sendAgain")}</button>
               {/if}
@@ -528,8 +529,10 @@
            its turn. Each can be taken back until it goes. One marked "unsent"
            came back with the app and waits on the human, not on the turn. -->
       {#each store.chatQueue as q (q.id)}
-        <!-- A turn sent again carries its knowledge in its text, as sent. -->
-        {@const qk = splitKnowledge(q.text)}
+        <!-- A turn sent again carries its knowledge in its text, as sent;
+             one the app had made (a report, a decision) shows its first
+             line, as its turn will. -->
+        {@const qk = splitKnowledge(q.again && (q.text.startsWith(REPORT_PREFIX) || q.text.startsWith(DECISION_PREFIX)) ? q.text.split("\n")[0] : q.text)}
         <div class="me">
           <div class="mlab">{t("timeline.me")}</div>
           <div class="bubble waiting" class:held={q.held}>

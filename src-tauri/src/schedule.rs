@@ -44,15 +44,38 @@ pub const EVENT: &str = "schedules";
 /// How the turn a schedule wakes the conductor with begins, its number next.
 const HEAD: &str = "[schedule] #";
 
-/// Why the turn of a schedule's last firing failed, per schedule, kept in
-/// `meta` as `{"at": <that firing's last_at>, "why": "..."}`. Apart from the
-/// note, which says what the firing itself found (a condition's line, being
-/// late) and so could read like anything; and tied to the firing, so the
-/// next one leaves it behind.
+/// A schedule's last firing, per schedule, kept in `meta` as a [`Firing`]:
+/// when it fired, the first line of the turn it woke the conductor with,
+/// and why that turn failed, if it did. Apart from the note, which says what
+/// the firing itself found (a condition's line, being late) and so could
+/// read like anything.
+const FIRED_KEY: &str = "schedule_fired:";
+
+/// What #131's builds kept instead, `{"at", "why"}`: still read, so a
+/// failure they saw is not lost to an update, and let go of at the next
+/// firing.
 const FAILED_KEY: &str = "schedule_failed:";
+
+fn fired_key(id: i64) -> String {
+    format!("{FIRED_KEY}{id}")
+}
 
 fn failed_key(id: i64) -> String {
     format!("{FAILED_KEY}{id}")
+}
+
+/// A schedule's last firing, as `meta` keeps it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Firing {
+    /// The schedule's `last_at` when it fired.
+    at: i64,
+    /// The first line of its turn. It names the schedule and when the
+    /// firing was due (or what met its condition), so a turn carrying this
+    /// firing, the one it started or the human sending it again, begins
+    /// with it, and the turn of any other firing does not.
+    head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    why: Option<String>,
 }
 
 /// A schedule as it was asked for, read into what the record keeps.
@@ -359,10 +382,17 @@ pub fn fired_from(prompt: &str) -> Option<i64> {
     rest[..digits].parse().ok()
 }
 
+fn firing(store: &Store, id: i64) -> Option<Firing> {
+    serde_json::from_str(&store.get_meta(&fired_key(id)).ok().flatten()?).ok()
+}
+
 /// Why the turn of this schedule's last firing failed, when it did.
 pub fn failure(store: &Store, s: &Schedule) -> Option<String> {
-    let kept: Value = serde_json::from_str(&store.get_meta(&failed_key(s.id)).ok().flatten()?).ok()?;
     let fired = s.last_at?;
+    if let Some(f) = firing(store, s.id) {
+        return f.why.filter(|_| f.at == fired);
+    }
+    let kept: Value = serde_json::from_str(&store.get_meta(&failed_key(s.id)).ok().flatten()?).ok()?;
     if kept.get("at").and_then(Value::as_i64) != Some(fired) {
         return None;
     }
@@ -379,20 +409,32 @@ fn failure_text(error: &str, ko: bool) -> String {
     if ko { format!("실행 실패: {why}") } else { format!("failed: {why}") }
 }
 
-/// A firing is over the one before: what that one's turn came to is no
-/// longer the schedule's to show.
-fn forget_failure(app: &AppHandle, id: i64) {
-    if let Err(err) = app.state::<AppState>().store.delete_meta(&failed_key(id)) {
-        tracing::warn!(schedule = id, %err, "could not let go of an earlier firing's failure");
+/// A schedule fired: this firing is the one it shows now, and what the one
+/// before came to is no longer its to show.
+fn remember_firing(app: &AppHandle, s: &Schedule, head: &str) {
+    let state = app.state::<AppState>();
+    let Some(at) = s.last_at else { return };
+    let kept = Firing { at, head: head.to_string(), why: None };
+    if let Err(err) = state.store.set_meta(&fired_key(s.id), &serde_json::to_string(&kept).unwrap_or_default()) {
+        tracing::warn!(schedule = s.id, %err, "could not keep a schedule's firing");
     }
+    let _ = state.store.delete_meta(&failed_key(s.id));
 }
 
-/// Whether a turn that began at `started_at` is the one of the firing the
-/// schedule now notes. A firing is recorded before its turn waits for the
-/// conductor, so the turn of an earlier one can end after a later one fired:
-/// its failure is not the later one's to show.
-fn of_last_firing(started_at: i64, fired: i64) -> bool {
-    started_at >= fired
+/// What a turn that began with `head` and ended as `came` makes of the
+/// schedule's last firing: `None` when nothing changes. Only the turn of
+/// that firing speaks for it; an earlier firing's ends later than its own
+/// sometimes (a long turn, or one that waited in the parked list), and the
+/// human may send any of them again.
+fn settle(last: &Firing, head: &str, came: Came<'_>, ko: bool) -> Option<Firing> {
+    if last.head != head {
+        return None;
+    }
+    match came {
+        Came::Failed(error) => Some(Firing { why: Some(failure_text(error, ko)), ..last.clone() }),
+        Came::Through if last.why.is_some() => Some(Firing { why: None, ..last.clone() }),
+        Came::Through => None,
+    }
 }
 
 /// What the end of a turn says of the schedule firing it carried.
@@ -402,12 +444,13 @@ enum Came<'a> {
     Through,
 }
 
-/// `None` for an event that is not an end, and for a stop by the human,
-/// which says nothing either way.
+/// `None` for an event that is not an end, and for an end that says
+/// nothing either way: a stop by the human, or the agent refusing or
+/// running out of room, which finish the turn without doing it.
 fn came(event: &AgentEvent) -> Option<Came<'_>> {
     match event {
         AgentEvent::Failed { error } => Some(Came::Failed(error)),
-        AgentEvent::Finished { stop_reason } if !stop_reason.eq_ignore_ascii_case("cancelled") => Some(Came::Through),
+        AgentEvent::Finished { stop_reason } if stop_reason.eq_ignore_ascii_case("endturn") => Some(Came::Through),
         _ => None,
     }
 }
@@ -426,21 +469,12 @@ pub fn turn_ended(app: &AppHandle, run: &str, event: &AgentEvent) {
     }
     let Some(id) = fired_from(&summary.prompt) else { return };
     let Some(s) = state.store.schedule(id).ok().flatten().filter(|s| s.track == summary.track) else { return };
-    let Some(fired) = s.last_at.filter(|fired| of_last_firing(summary.started_at, *fired)) else { return };
-    match came {
-        Came::Failed(error) => {
-            let kept = json!({ "at": fired, "why": failure_text(error, crate::ko(app)) });
-            if let Err(err) = state.store.set_meta(&failed_key(id), &kept.to_string()) {
-                tracing::warn!(schedule = id, %err, "could not keep that a schedule's turn failed");
-                return;
-            }
-        }
-        Came::Through => {
-            if failure(&state.store, &s).is_none() {
-                return;
-            }
-            forget_failure(app, id);
-        }
+    let Some(last) = firing(&state.store, id) else { return };
+    let head = summary.prompt.lines().next().unwrap_or("");
+    let Some(now) = settle(&last, head, came, crate::ko(app)) else { return };
+    if let Err(err) = state.store.set_meta(&fired_key(id), &serde_json::to_string(&now).unwrap_or_default()) {
+        tracing::warn!(schedule = id, %err, "could not keep what a schedule's turn came to");
+        return;
     }
     let _ = app.emit(EVENT, &s.track);
 }
@@ -645,12 +679,14 @@ async fn fire(app: &AppHandle, s: Schedule, now: i64) {
     let note = late_note.trim_start_matches(" · ").to_string();
     {
         let state = app.state::<AppState>();
-        if let Err(err) = state.store.schedule_fired(s.id, next, &note) {
-            tracing::warn!(schedule = s.id, %err, "could not mark a schedule fired");
-            return;
+        match state.store.schedule_fired(s.id, next, &note) {
+            Ok(fired) => remember_firing(app, &fired, &head),
+            Err(err) => {
+                tracing::warn!(schedule = s.id, %err, "could not mark a schedule fired");
+                return;
+            }
         }
     }
-    forget_failure(app, s.id);
     tracing::info!(schedule = s.id, track = %s.track, late_ms = late, next = ?next, "schedule fired");
     let _ = app.emit(EVENT, &s.track);
     deliver(app.clone(), Hand { track: s.track.clone(), text, open: true, what: format!("schedule #{}", s.id), keep: true, worker: None, run: None }).await;
@@ -698,12 +734,14 @@ async fn fire_condition(app: &AppHandle, s: Schedule, found: String) {
     );
     {
         let state = app.state::<AppState>();
-        if let Err(err) = state.store.schedule_fired(s.id, None, &found) {
-            tracing::warn!(schedule = s.id, %err, "could not mark a schedule fired");
-            return;
+        match state.store.schedule_fired(s.id, None, &found) {
+            Ok(fired) => remember_firing(app, &fired, &head),
+            Err(err) => {
+                tracing::warn!(schedule = s.id, %err, "could not mark a schedule fired");
+                return;
+            }
         }
     }
-    forget_failure(app, s.id);
     tracing::info!(schedule = s.id, track = %s.track, %found, "schedule condition met");
     let _ = app.emit(EVENT, &s.track);
     deliver(app.clone(), Hand { track: s.track.clone(), text, open: true, what: format!("schedule #{}", s.id), keep: true, worker: None, run: None }).await;
@@ -836,12 +874,20 @@ mod tests {
         assert!(long.ends_with('…') && long.chars().count() == "failed: ".len() + 121);
     }
 
+    /// Only the turn of the last firing speaks for it, told by its first
+    /// line: the turn it started, or the human sending it again.
     #[test]
-    fn a_failure_is_the_last_firings_only_when_its_turn_began_after_it() {
-        let fired = 1_000_000;
-        assert!(of_last_firing(fired, fired), "begun the moment it fired");
-        assert!(of_last_firing(fired + 5_000, fired), "after waiting for the conductor");
-        assert!(!of_last_firing(fired - 60_000, fired), "an earlier firing's, still running when this one fired");
+    fn a_turn_settles_the_firing_whose_head_it_carries() {
+        let at = 1_000_000;
+        let last = Firing { at, head: format!("{HEAD}26 · 11-07 05:00 예정"), why: None };
+        let earlier = format!("{HEAD}26 · 11-06 05:00 예정");
+        assert_eq!(settle(&last, &earlier, Came::Failed("boom"), false), None, "an earlier firing's turn, or that one sent again");
+        let failed = settle(&last, &last.head, Came::Failed("Authentication required"), true).unwrap();
+        assert_eq!(failed.why.as_deref(), Some("실행 실패: 로그인이 풀려 있었음"));
+        assert_eq!((failed.at, failed.head.as_str()), (at, last.head.as_str()));
+        assert_eq!(settle(&failed, &earlier, Came::Through, false), None, "an earlier firing sent again does not mend this one");
+        assert_eq!(settle(&failed, &failed.head, Came::Through, false), Some(last.clone()), "this one sent again and gone through");
+        assert_eq!(settle(&last, &last.head, Came::Through, false), None, "nothing to take back");
     }
 
     #[test]
@@ -849,6 +895,8 @@ mod tests {
         assert_eq!(came(&AgentEvent::Failed { error: "boom".into() }), Some(Came::Failed("boom")));
         assert_eq!(came(&AgentEvent::Finished { stop_reason: "EndTurn".into() }), Some(Came::Through));
         assert_eq!(came(&AgentEvent::Finished { stop_reason: "Cancelled".into() }), None, "the human's stop says nothing either way");
+        assert_eq!(came(&AgentEvent::Finished { stop_reason: "Refusal".into() }), None, "finished without doing it");
+        assert_eq!(came(&AgentEvent::Finished { stop_reason: "MaxTokens".into() }), None);
         assert_eq!(came(&AgentEvent::Message { text: "x".into() }), None);
     }
 
@@ -869,6 +917,15 @@ mod tests {
         assert_eq!(view(&store, &fired, false)["note"], "failed: 3 tests", "the note stays what the firing found");
         let later = Schedule { last_at: Some(at + 60_000), ..fired.clone() };
         assert_eq!(failure(&store, &later), None, "a later firing does not wear it");
+
+        // As kept now: the firing, with what its turn came to.
+        let kept = Firing { at, head: format!("{HEAD}{} · condition met: failed: 3 tests", s.id), why: None };
+        store.set_meta(&fired_key(s.id), &serde_json::to_string(&kept).unwrap()).unwrap();
+        assert_eq!(failure(&store, &fired), None, "the firing as kept now speaks, not what an older build left");
+        let failed = Firing { why: Some("failed: boom".into()), ..kept };
+        store.set_meta(&fired_key(s.id), &serde_json::to_string(&failed).unwrap()).unwrap();
+        assert_eq!(failure(&store, &fired).as_deref(), Some("failed: boom"));
+        assert_eq!(failure(&store, &later), None);
     }
 
     /// A firing within the tick's slack says nothing; one the app slept
