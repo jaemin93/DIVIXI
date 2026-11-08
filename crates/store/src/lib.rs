@@ -2338,6 +2338,19 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The first run of a track's session to begin at `since` or after with
+    /// `prefix`, compared as it is (no `LIKE` wildcards).
+    pub fn first_run_since(&self, track: &str, session: &str, prefix: &str, since: i64) -> anyhow::Result<Option<RunSummary>> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(
+                &format!("{RUN_SELECT} WHERE track = ?1 AND session = ?2 AND started_at >= ?3 AND substr(prompt, 1, length(?4)) = ?4 ORDER BY n LIMIT 1"),
+                params![track, session, since, prefix],
+                row_to_summary,
+            )
+            .optional()?)
+    }
+
     /// The runs of this agent that failed at `since` or after, in the order
     /// they began.
     pub fn failed_runs_since(&self, agent: &str, since: i64) -> anyhow::Result<Vec<RunSummary>> {
@@ -3990,6 +4003,23 @@ mod tests {
         assert_eq!(runs, vec![after], "not before, not another agent's, not one that went through ({went})");
         let routine_runs: Vec<String> = store.failed_routine_runs_since("claude_code", since).unwrap().into_iter().map(|r| r.id).collect();
         assert_eq!(routine_runs, vec![routine_after], "nor one that was stopped");
+    }
+
+    #[test]
+    fn the_first_run_of_a_session_with_a_prefix_since_a_moment() {
+        let store = Store::in_memory().unwrap();
+        let before = store.begin_run(TR, "conductor", "claude_code", "[schedule] #2 · due 05:00\nlook", ".").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let since = now_ms();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.begin_run(TR, "conductor", "claude_code", "[schedule] #26 · due 06:00\nlook", ".").unwrap();
+        store.begin_run(TR, "ui", "claude_code", "[schedule] #2 · due 06:00\nlook", ".").unwrap();
+        store.begin_run("tr002", "conductor", "claude_code", "[schedule] #2 · due 06:00\nlook", ".").unwrap();
+        let first = store.begin_run(TR, "conductor", "claude_code", "[schedule] #2 · due 06:00\nlook", ".").unwrap();
+        store.begin_run(TR, "conductor", "claude_code", "[schedule] #2 · due 06:00\nlook", ".").unwrap();
+        let found = store.first_run_since(TR, "conductor", "[schedule] #2 ", since).unwrap().map(|r| r.id);
+        assert_eq!(found, Some(first), "not #26, not a worker's, not another track's, not one before ({before})");
+        assert_eq!(store.first_run_since(TR, "conductor", "[schedule] #_ ", since).unwrap(), None, "no wildcards");
     }
 
     #[test]

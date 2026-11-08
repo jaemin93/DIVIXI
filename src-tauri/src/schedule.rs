@@ -386,6 +386,17 @@ fn firing(store: &Store, id: i64) -> Option<Firing> {
     serde_json::from_str(&store.get_meta(&fired_key(id)).ok().flatten()?).ok()
 }
 
+/// The last firing as #131's builds left it, failed, with its first line
+/// read back from the turn it started: the first of the conductor's turns
+/// carrying this schedule to begin after it fired.
+fn legacy_firing(store: &Store, s: &Schedule) -> Option<Firing> {
+    let kept: Value = serde_json::from_str(&store.get_meta(&failed_key(s.id)).ok().flatten()?).ok()?;
+    let at = kept.get("at").and_then(Value::as_i64).filter(|at| Some(*at) == s.last_at)?;
+    let why = kept.get("why").and_then(Value::as_str)?.to_string();
+    let turn = store.first_run_since(&s.track, crate::conductor::CONDUCTOR_SESSION, &format!("{HEAD}{} ", s.id), at).ok().flatten()?;
+    Some(Firing { at, head: turn.prompt.lines().next()?.to_string(), why: Some(why) })
+}
+
 /// Why the turn of this schedule's last firing failed, when it did.
 pub fn failure(store: &Store, s: &Schedule) -> Option<String> {
     let fired = s.last_at?;
@@ -469,13 +480,15 @@ pub fn turn_ended(app: &AppHandle, run: &str, event: &AgentEvent) {
     }
     let Some(id) = fired_from(&summary.prompt) else { return };
     let Some(s) = state.store.schedule(id).ok().flatten().filter(|s| s.track == summary.track) else { return };
-    let Some(last) = firing(&state.store, id) else { return };
+    let Some(last) = firing(&state.store, id).or_else(|| legacy_firing(&state.store, &s)) else { return };
     let head = summary.prompt.lines().next().unwrap_or("");
     let Some(now) = settle(&last, head, came, crate::ko(app)) else { return };
     if let Err(err) = state.store.set_meta(&fired_key(id), &serde_json::to_string(&now).unwrap_or_default()) {
         tracing::warn!(schedule = id, %err, "could not keep what a schedule's turn came to");
         return;
     }
+    // Kept the new way now; what an older build left has said its piece.
+    let _ = state.store.delete_meta(&failed_key(id));
     let _ = app.emit(EVENT, &s.track);
 }
 
@@ -898,6 +911,27 @@ mod tests {
         assert_eq!(came(&AgentEvent::Finished { stop_reason: "Refusal".into() }), None, "finished without doing it");
         assert_eq!(came(&AgentEvent::Finished { stop_reason: "MaxTokens".into() }), None);
         assert_eq!(came(&AgentEvent::Message { text: "x".into() }), None);
+    }
+
+    /// A failure an older build kept has no first line of its own: it is
+    /// read back from the turn that firing started, so only that firing's
+    /// turn, sent again, mends it.
+    #[test]
+    fn a_failure_an_older_build_kept_is_known_by_the_turn_it_started() {
+        let store = Store::in_memory().unwrap();
+        let s = store.create_schedule(&NewSchedule { track: "tr001".into(), kind: "at".into(), spec: json!({ "at": 0 }), message: "look".into(), next_at: Some(0), ..Default::default() }).unwrap();
+        let fired = store.schedule_fired(s.id, None, "").unwrap();
+        let at = fired.last_at.unwrap();
+        assert_eq!(legacy_firing(&store, &fired), None, "nothing kept");
+        store.set_meta(&failed_key(s.id), &json!({ "at": at, "why": "실행 실패: 로그인이 풀려 있었음" }).to_string()).unwrap();
+        assert_eq!(legacy_firing(&store, &fired), None, "no turn of it in the record");
+        let head = format!("{HEAD}{} · 11-08 05:00 예정", s.id);
+        store.begin_run("tr001", crate::conductor::CONDUCTOR_SESSION, "claude_code", &format!("{head}\nlook"), ".").unwrap();
+        let read = legacy_firing(&store, &fired).unwrap();
+        assert_eq!((read.at, read.head.as_str(), read.why.as_deref()), (at, head.as_str(), Some("실행 실패: 로그인이 풀려 있었음")));
+        assert_eq!(settle(&read, &head, Came::Through, true).and_then(|f| f.why), None, "its turn sent again and gone through mends it");
+        let later = Schedule { last_at: Some(at + 1), ..fired };
+        assert_eq!(legacy_firing(&store, &later), None, "not a later firing's");
     }
 
     /// What a firing found stays in its note, whatever it reads like; a
