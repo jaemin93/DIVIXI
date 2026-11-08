@@ -395,11 +395,30 @@ fn of_last_firing(started_at: i64, fired: i64) -> bool {
     started_at >= fired
 }
 
-/// A run's turn ended. When it was a schedule's firing and it failed, the
-/// schedule says so: one that fired for the last time is otherwise only
-/// "done", and a repeating one shows only its next time.
+/// What the end of a turn says of the schedule firing it carried.
+#[derive(Debug, PartialEq)]
+enum Came<'a> {
+    Failed(&'a str),
+    Through,
+}
+
+/// `None` for an event that is not an end, and for a stop by the human,
+/// which says nothing either way.
+fn came(event: &AgentEvent) -> Option<Came<'_>> {
+    match event {
+        AgentEvent::Failed { error } => Some(Came::Failed(error)),
+        AgentEvent::Finished { stop_reason } if !stop_reason.eq_ignore_ascii_case("cancelled") => Some(Came::Through),
+        _ => None,
+    }
+}
+
+/// A run's turn ended. When it carried a schedule's firing, the schedule
+/// says so if it failed: one that fired for the last time is otherwise only
+/// "done", and a repeating one shows only its next time. A turn carrying
+/// it that goes through takes that back: the human sending the failed turn
+/// again, say.
 pub fn turn_ended(app: &AppHandle, run: &str, event: &AgentEvent) {
-    let AgentEvent::Failed { error } = event else { return };
+    let Some(came) = came(event) else { return };
     let state = app.state::<AppState>();
     let Some(summary) = state.store.run(run).ok().flatten() else { return };
     if summary.session != crate::conductor::CONDUCTOR_SESSION {
@@ -408,13 +427,22 @@ pub fn turn_ended(app: &AppHandle, run: &str, event: &AgentEvent) {
     let Some(id) = fired_from(&summary.prompt) else { return };
     let Some(s) = state.store.schedule(id).ok().flatten().filter(|s| s.track == summary.track) else { return };
     let Some(fired) = s.last_at.filter(|fired| of_last_firing(summary.started_at, *fired)) else { return };
-    let kept = json!({ "at": fired, "why": failure_text(error, crate::ko(app)) });
-    match state.store.set_meta(&failed_key(id), &kept.to_string()) {
-        Ok(()) => {
-            let _ = app.emit(EVENT, &s.track);
+    match came {
+        Came::Failed(error) => {
+            let kept = json!({ "at": fired, "why": failure_text(error, crate::ko(app)) });
+            if let Err(err) = state.store.set_meta(&failed_key(id), &kept.to_string()) {
+                tracing::warn!(schedule = id, %err, "could not keep that a schedule's turn failed");
+                return;
+            }
         }
-        Err(err) => tracing::warn!(schedule = id, %err, "could not keep that a schedule's turn failed"),
+        Came::Through => {
+            if failure(&state.store, &s).is_none() {
+                return;
+            }
+            forget_failure(app, id);
+        }
     }
+    let _ = app.emit(EVENT, &s.track);
 }
 
 /// Set a schedule on a track. `created_in` is the conductor run that asked.
@@ -814,6 +842,14 @@ mod tests {
         assert!(of_last_firing(fired, fired), "begun the moment it fired");
         assert!(of_last_firing(fired + 5_000, fired), "after waiting for the conductor");
         assert!(!of_last_firing(fired - 60_000, fired), "an earlier firing's, still running when this one fired");
+    }
+
+    #[test]
+    fn a_turn_that_went_through_is_told_from_one_that_failed_or_was_stopped() {
+        assert_eq!(came(&AgentEvent::Failed { error: "boom".into() }), Some(Came::Failed("boom")));
+        assert_eq!(came(&AgentEvent::Finished { stop_reason: "EndTurn".into() }), Some(Came::Through));
+        assert_eq!(came(&AgentEvent::Finished { stop_reason: "Cancelled".into() }), None, "the human's stop says nothing either way");
+        assert_eq!(came(&AgentEvent::Message { text: "x".into() }), None);
     }
 
     /// What a firing found stays in its note, whatever it reads like; a

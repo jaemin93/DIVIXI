@@ -43,6 +43,12 @@ export type Queued = {
    * startup. It keeps its place in the line but is never sent by itself.
    */
   held?: boolean;
+  /**
+   * The failed turn this sends again, when it came from that turn's button
+   * (`store.sendAgain`): its text then keeps the knowledge passages as they
+   * were sent, since their sources are not in the prompt to pick again.
+   */
+  again?: string;
 };
 
 /** The waiting messages of one conversation, in the order they were sent. */
@@ -154,6 +160,7 @@ export function parseQueued(raw: string | null | undefined): Queued[] {
       selected: strings(q.selected),
       at: typeof q.at === "number" ? q.at : Date.now(),
       held: true,
+      ...(typeof q.again === "string" ? { again: q.again } : {}),
     }))
     .filter((q) => q.text.trim() || q.files.length || q.picks.length || q.selected.length);
 }

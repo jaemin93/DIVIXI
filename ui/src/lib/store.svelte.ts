@@ -3980,9 +3980,29 @@ class Store {
    * itself when the turn ends, stopped or not. See `pumpQueue`.
    */
   async send(prompt: string) {
-    const key = this.chatKey;
-    const out = this.compose(prompt, key);
+    const out = this.compose(prompt, this.chatKey);
     if (!out) return;
+    await this.post(out);
+  }
+
+  /**
+   * Send a failed conductor turn of the track on screen again, as it was
+   * first sent: its stored prompt holds the words and any knowledge
+   * passages, and the files it listed go as files again. On the track's
+   * agent now, through the same line as a typed message, so it waits for a
+   * turn in flight, and fails as one does: its files come back to an empty
+   * composer, and the button comes back with the turn that failed.
+   */
+  async sendAgain(run: Run) {
+    if (this.chatArtifact || !this.track || run.track !== this.track) return;
+    const { text, files } = splitAttachments(run.prompt);
+    const id = `q${++this.queueSeq}-${Date.now()}`;
+    await this.post({ id, key: this.chatKey, target: run.track, agent: this.agent, text, files, picks: [], selected: [], at: Date.now(), again: run.id });
+  }
+
+  /** A message on its way: now, or into the line behind a turn in flight. */
+  private async post(out: Queued) {
+    const key = out.key;
     // A turn is in flight, or messages are already waiting: this one takes
     // its place in the line and goes out by itself when the turn ends. The
     // composer never closes, so the human can keep typing either way.
