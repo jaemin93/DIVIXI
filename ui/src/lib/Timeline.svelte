@@ -6,6 +6,7 @@
   import Working from "./Working.svelte";
   import LoginCommand from "./LoginCommand.svelte";
   import { wantsLogin } from "./agentLogin";
+  import { againState, offersSendAgain } from "./sendAgain";
   import Markdown from "./Markdown.svelte";
   import StepGroup from "./StepGroup.svelte";
   import { isActive, shape } from "./steps";
@@ -293,6 +294,18 @@
   /** A failure that is this agent's lost login. A refusal its CLI does not agree with is shown as it is. */
   const lostLogin = (run: Run): boolean => wantsLogin(run.error) && loginLost(run.agent);
 
+  /** The failed turn being sent again right now, while its button waits. */
+  let sendingAgain = $state("");
+
+  async function sendAgainNow(run: Run) {
+    sendingAgain = run.id;
+    try {
+      await store.sendAgain(run);
+    } finally {
+      sendingAgain = "";
+    }
+  }
+
   /** The failure shown under a turn's answer, if any. */
   function failedText(run: Run): string {
     return (run.status === "failed" || run.status === "interrupted" || run.status === "timed_out" || run.status === "detached") && run.error ? (lostLogin(run) ? t("run.loginLost", { agent: agentLabel(run.agent) }) : run.error) : "";
@@ -485,6 +498,19 @@
           {:else if run.segments.length === 0 && !run.message.trim() && (run.status === "connecting" || run.status === "running")}
             <p class="ctext dim">{t("timeline.thinking")}</p>
           {/if}
+          {#if !store.chatArtifact && offersSendAgain(run, [PERMISSION_PREFIX])}
+            <!-- The way on from a refusal: the same turn, sent by the human.
+                 Nothing is sent again by itself; once it went, typed or with
+                 this, it says so instead. -->
+            {@const again = againState(run, conductorRuns, store.chatQueue)}
+            <div class="again">
+              {#if again}
+                <span class="mono dim">{t(again === "sent" ? "timeline.sentAgain" : again === "held" ? "timeline.unsent" : "timeline.queued")}</span>
+              {:else}
+                <button class="btn" type="button" onclick={() => sendAgainNow(run)} disabled={sendingAgain === run.id} title={t("timeline.sendAgainTitle")}>{t("timeline.sendAgain")}</button>
+              {/if}
+            </div>
+          {/if}
         </div>
         {#each decisionsByRun.byRun[run.id] ?? [] as d (d.id)}
           <DecisionCard decision={d} />
@@ -503,6 +529,10 @@
            its turn. Each can be taken back until it goes. One marked "unsent"
            came back with the app and waits on the human, not on the turn. -->
       {#each store.chatQueue as q (q.id)}
+        <!-- A turn sent again carries its knowledge in its text, as sent;
+             one the app had made (a report, a decision) shows its first
+             line, as its turn will. -->
+        {@const qk = splitKnowledge(q.again && (q.text.startsWith(REPORT_PREFIX) || q.text.startsWith(DECISION_PREFIX)) ? q.text.split("\n")[0] : q.text)}
         <div class="me">
           <div class="mlab">{t("timeline.me")}</div>
           <div class="bubble waiting" class:held={q.held}>
@@ -514,18 +544,21 @@
               {/if}
               <button class="qdrop" type="button" onclick={() => store.cancelQueued(q.id)} title={t("timeline.unqueue")} aria-label={t("timeline.unqueue")}>✕</button>
             </div>
-            {#if q.text.trim()}<p>{q.text}</p>{/if}
-            {#if q.picks.length}
+            {#if qk.text.trim()}<p>{qk.text}</p>{/if}
+            {#if q.picks.length || qk.titles.length}
               <div class="files" aria-label={t("composer.kb.attached")}>
                 <!-- By position: the list never reorders, and an index
                      cannot collide the way a saved id can. -->
                 {#each q.picks as p, i (i)}
                   <span class="file kbchip" title={p.title}><span aria-hidden="true">📚</span><span>{p.title}</span></span>
                 {/each}
+                {#each qk.titles as title, i (`kb${i}`)}
+                  <span class="file kbchip" title={title}><span aria-hidden="true">📚</span><span>{title}</span></span>
+                {/each}
               </div>
             {/if}
             {#if q.files.length}
-              <div class="files" class:alone={!q.text.trim()} aria-label={t("timeline.attached")}>
+              <div class="files" class:alone={!qk.text.trim()} aria-label={t("timeline.attached")}>
                 {#each q.files as f (f)}
                   <span class="file" title={f}>
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4z" /><path d="M9 1.5v3h3" /></svg>
@@ -937,6 +970,18 @@
 
   .ctext.bad {
     color: var(--acct);
+  }
+
+  .again {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+  }
+
+  .again .dim {
+    font-size: 11px;
+    color: var(--lab);
   }
 
 </style>

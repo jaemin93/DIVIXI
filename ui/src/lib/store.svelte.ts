@@ -30,6 +30,7 @@ import {
 
 import { addError, dropError, errorLife, type AppError } from "./errors";
 import { withTrack } from "./tracks";
+import { asSent } from "./sendAgain";
 import { notInFlight } from "./staleRuns";
 import { pickable } from "./agentOptions";
 import { keepsSetting } from "./layoutSettings";
@@ -3980,9 +3981,28 @@ class Store {
    * itself when the turn ends, stopped or not. See `pumpQueue`.
    */
   async send(prompt: string) {
-    const key = this.chatKey;
-    const out = this.compose(prompt, key);
+    const out = this.compose(prompt, this.chatKey);
     if (!out) return;
+    await this.post(out);
+  }
+
+  /**
+   * Send a failed conductor turn of the track on screen again, as it was
+   * first sent: its stored prompt holds the words and any knowledge
+   * passages, and the files it listed go as files again. On the track's
+   * agent now, through the same line as a typed message, so it waits for a
+   * turn in flight, and fails as one does: its files come back to an empty
+   * composer, and the button comes back with the turn that failed.
+   */
+  async sendAgain(run: Run) {
+    if (this.chatArtifact || !this.track || run.track !== this.track) return;
+    const { text, files } = asSent(run.prompt);
+    await this.post({ id: this.newQueuedId(), key: this.chatKey, target: run.track, agent: this.agent, text, files, picks: [], selected: [], at: Date.now(), again: run.id });
+  }
+
+  /** A message on its way: now, or into the line behind a turn in flight. */
+  private async post(out: Queued) {
+    const key = out.key;
     // A turn is in flight, or messages are already waiting: this one takes
     // its place in the line and goes out by itself when the turn ends. The
     // composer never closes, so the human can keep typing either way.
@@ -3994,7 +4014,12 @@ class Store {
       return;
     }
     try {
-      await this.dispatch(out);
+      // The core was still answering (a worker report got in first): into
+      // the line after all, as the pump does with one it could not hand on.
+      if (!(await this.dispatch(out))) {
+        this.setQueued(pushQueued(this.queued, out));
+        this.startPump();
+      }
     } catch (err) {
       // Same reasoning as the pump's catch, for the path that never
       // reached the line: the composer is already empty by now.
@@ -4003,25 +4028,17 @@ class Store {
     }
   }
 
+  private newQueuedId(): string {
+    return `q${++this.queueSeq}-${Date.now()}`;
+  }
+
   /**
    * A message to an artifact's agent whose panel may not be open (a
    * routine's first plan draft). It joins that conversation's line as a
    * typed one would, and is kept in its history.
    */
   async sendToArtifact(id: string, agent: string, text: string) {
-    const key = artifactKey(id);
-    const out: Queued = { id: `q${++this.queueSeq}-${Date.now()}`, key, target: id, agent, text, files: [], picks: [], selected: [], at: Date.now() };
-    if (this.busyFor(key) || liveQueuedFor(this.queued, key).length) {
-      this.setQueued(pushQueued(this.queued, out));
-      this.startPump();
-      return;
-    }
-    try {
-      await this.dispatch(out);
-    } catch (err) {
-      this.setQueued(pushQueued(this.queued, { ...out, held: true }));
-      this.raise(String(err));
-    }
+    await this.post({ id: this.newQueuedId(), key: artifactKey(id), target: id, agent, text, files: [], picks: [], selected: [], at: Date.now() });
   }
 
   // ----- the waiting line: messages sent while a turn was in flight -----
@@ -4117,7 +4134,7 @@ class Store {
     this.attachments = [];
     const picks = this.takeKnowledge(key);
     return {
-      id: `q${++this.queueSeq}-${Date.now()}`,
+      id: this.newQueuedId(),
       key,
       target,
       agent: artifact ? (this.currentArtifact?.agent ?? this.agent) : this.agent,
@@ -4134,9 +4151,13 @@ class Store {
     const item = this.queued.find((q) => q.id === id);
     if (!item) return;
     this.setQueued(dropQueued(this.queued, id));
-    // What it carried goes back to the composer, when nothing waits there.
-    if (item.files.length && !(this.attachmentsBy[item.key] ?? []).length) void this.attach(item.files, item.key);
-    this.restoreKnowledge(item.key, item.picks);
+    // What it carried goes back to the composer, when nothing waits there:
+    // the human put it there. A turn sent again came from the record, and
+    // stays there, with its button.
+    if (!item.again) {
+      if (item.files.length && !(this.attachmentsBy[item.key] ?? []).length) void this.attach(item.files, item.key);
+      this.restoreKnowledge(item.key, item.picks);
+    }
     if (!liveQueued(this.queued).length) this.stopPump();
   }
 
