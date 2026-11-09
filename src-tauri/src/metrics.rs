@@ -37,26 +37,32 @@ impl Meter {
     /// CPU and memory now, and the disk holding `path` (or the largest
     /// disk when no path is given or none matches).
     pub fn read(&self, path: Option<&Path>) -> Metrics {
+        // A system sysinfo cannot read says so (`Err`); the meter reads 0
+        // there rather than not at all.
         let (cpu, mem_used, mem_total) = {
             let mut guard = self.sys.lock();
-            let sys = guard.get_or_insert_with(System::new);
-            sys.refresh_cpu_usage();
-            sys.refresh_memory();
-            (sys.global_cpu_usage(), sys.used_memory(), sys.total_memory())
+            if guard.is_none() {
+                *guard = System::new().ok();
+            }
+            match guard.as_mut() {
+                Some(sys) => {
+                    sys.refresh_cpu_usage();
+                    sys.refresh_memory();
+                    (sys.global_cpu_usage(), sys.used_memory(), sys.total_memory())
+                }
+                None => (0.0, 0, 0),
+            }
         };
-        let disks = Disks::new_with_refreshed_list();
+        let disks = Disks::new_with_refreshed_list().ok();
+        let disks: &[sysinfo::Disk] = disks.as_deref().unwrap_or_default();
         let chosen = path
             .and_then(|p| {
                 // Canonical on Windows is `\\?\C:\…`; mount points are `C:\`.
                 let p = p.canonicalize().map(|c| plain_path(&c)).unwrap_or_else(|_| p.to_path_buf());
                 // The deepest mount point that contains the path.
-                disks
-                    .list()
-                    .iter()
-                    .filter(|d| p.starts_with(d.mount_point()))
-                    .max_by_key(|d| d.mount_point().as_os_str().len())
+                disks.iter().filter(|d| p.starts_with(d.mount_point())).max_by_key(|d| d.mount_point().as_os_str().len())
             })
-            .or_else(|| disks.list().iter().max_by_key(|d| d.total_space()));
+            .or_else(|| disks.iter().max_by_key(|d| d.total_space()));
         let (disk_used, disk_total, disk_mount) = chosen
             .map(|d| {
                 let total = d.total_space();

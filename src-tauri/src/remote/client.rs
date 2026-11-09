@@ -397,7 +397,7 @@ async fn start_and_token(host: &Host) -> Result<String, String> {
 
 /// This PC as the remote's device list names it.
 fn device_name() -> String {
-    format!("DIVIXI · {}", sysinfo::System::host_name().unwrap_or_else(|| "PC".into()))
+    format!("DIVIXI · {}", sysinfo::System::host_name().unwrap_or_else(|_| "PC".into()))
 }
 
 /// Sign in for the device's tokens: a pairing token minted over SSH, or
