@@ -30,6 +30,8 @@
 //                               "session has ended" error before running (a session
 //                               opened or loaded again works)
 //   full                        ends the turn with the adapter's "Prompt is too long"
+//   next <end|full>             this turn goes on; the session's next prompt (a report
+//                               reminder, say) fails as that line would
 //
 // A prompt without a block gets "ok" and a report that says done. The
 // prompt the conductor sends arrives whole, so the script a worker is to
@@ -189,6 +191,9 @@ async function runLine(cx, sessionId, line, signal, cwd, mcp) {
       throw acp.RequestError.internalError(undefined, SESSION_ENDED);
     case "full":
       throw acp.RequestError.internalError({ errorKind: "invalid_request" }, "Prompt is too long");
+    case "next":
+      sessions.get(sessionId).next = arg;
+      return;
     default:
       await say(cx, sessionId, `(unknown line: ${line})\n`);
   }
@@ -228,9 +233,16 @@ const agent = {
       }
     }
     // Refused after the log line, so a check can see a prompt reach a dead session.
+    const next = session.next;
+    session.next = null;
+    if (next === "end") session.ended = true;
     if (session.ended) {
       session.pending = null;
       throw acp.RequestError.internalError(undefined, SESSION_ENDED);
+    }
+    if (next === "full") {
+      session.pending = null;
+      throw acp.RequestError.internalError({ errorKind: "invalid_request" }, "Prompt is too long");
     }
     const lines = script(prompt);
     try {

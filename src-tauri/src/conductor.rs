@@ -3063,7 +3063,7 @@ async fn run_worker_turn(
     };
     tauri::async_runtime::spawn(async move {
         let app = app_for_turn;
-        let spent = drive_worker_turn(&app, &track_t, &name_t, &run_t, &session, task, &cwd_t).await;
+        let mut spent = drive_worker_turn(&app, &track_t, &name_t, &run_t, &session, task, &cwd_t).await.map(|why| SpentTurn { why, reminder: false });
         let mut outcome = checked_report(&app, &run_t);
         let mut current = run_t.clone();
         // A turn that ended well but without a usable block is asked once more,
@@ -3078,7 +3078,9 @@ async fn run_worker_turn(
                         let _ = app.state::<AppState>().store.set_run_pid(&again, pid, start);
                         hand_running(&app, &track_t, &name_t, &current, Some(again.clone())).await;
                         current = again.clone();
-                        drive_worker_turn(&app, &track_t, &name_t, &again, &session, again_text, &cwd_t).await;
+                        // The reminder can find the session spent too; then
+                        // that is what the conductor has to hear of.
+                        spent = drive_worker_turn(&app, &track_t, &name_t, &again, &session, again_text, &cwd_t).await.map(|why| SpentTurn { why, reminder: true });
                         outcome = checked_report(&app, &again).map(|mut r| {
                             r.reminder_run = Some(again.clone());
                             r
@@ -3374,14 +3376,25 @@ fn ended_badly(summary: &RunSummary, stopped: bool) -> Option<String> {
 /// Why a stopped worker has no report block of its own.
 const STOPPED_BY_HUMAN: &str = "the human stopped this worker mid-turn";
 
+/// A worker turn that left its session unable to take another: why, and
+/// whether it was the reminder for the report block rather than the task's
+/// own turn (the one the report's first line describes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpentTurn {
+    why: Spent,
+    reminder: bool,
+}
+
 /// What the conductor is told under a report whose turn left the worker's
 /// session unable to take another (and the app closed it): what that means
 /// for the task, and the call that goes on from there.
-fn spent_note(why: Spent) -> &'static str {
-    match why {
-        Spent::Before => "\n(This worker's agent session had already ended when the turn was sent, so none of it ran. Divixi has closed that session: ask_worker with the same name reopens the worker with its memory, and the task can go again as it was.)",
-        Spent::During => "\n(This worker's agent session ended during the turn, and Divixi has closed it: ask_worker with the same name reopens the worker with its memory. Part of the task may have been done; check what it reported and what changed before sending it again.)",
-        Spent::Full => "\n(This worker's conversation no longer fits its model's context window, so Divixi has closed its session. Reopened by name, it would bring the same conversation back and most likely fail the same way. To go on, spawn_worker with this name and fresh=true starts it over without its memory, or give the task to a new worker.)",
+fn spent_note(turn: SpentTurn) -> &'static str {
+    match (turn.why, turn.reminder) {
+        (Spent::Full, _) => "\n(This worker's conversation no longer fits its model's context window, so Divixi has closed its session. Reopened by name, it would bring the same conversation back and most likely fail the same way. To go on, spawn_worker with this name and fresh=true starts it over without its memory, or give the task to a new worker.)",
+        (Spent::Before, false) => "\n(This worker's agent session had already ended when the turn was sent, so none of it ran. Divixi has closed that session: ask_worker with the same name reopens the worker with its memory, and the task can go again as it was.)",
+        (Spent::During, false) => "\n(This worker's agent session ended during the turn, and Divixi has closed it: ask_worker with the same name reopens the worker with its memory. Part of the task may have been done; check what it reported and what changed before sending it again.)",
+        (Spent::Before, true) => "\n(This worker's agent session had ended by the time it was asked again for its report block, so that request never ran; the task's own turn is as the first line says. Divixi has closed the session: ask_worker with the same name reopens the worker with its memory.)",
+        (Spent::During, true) => "\n(This worker's agent session ended while it was asked again for its report block, and Divixi has closed it; the task's own turn is as the first line says. ask_worker with the same name reopens the worker with its memory.)",
     }
 }
 
@@ -3631,9 +3644,10 @@ async fn worker_place(app: &AppHandle, info: &TrackInfo, name: &str) -> Result<P
 
 /// Hand a finished worker run to its track's conductor as a new turn: the
 /// report, not the whole reply (that stays below the membrane, in read_report).
-/// `spent` is why the run's turn left the worker's session unable to take
-/// another, which the conductor is told with what to do about it.
-async fn report_to_conductor(app: AppHandle, track: String, worker: String, run: String, report: Report, spent: Option<Spent>) {
+/// `spent` is the turn (the task's or the reminder's) that left the
+/// worker's session unable to take another, which the conductor is told
+/// with what to do about it.
+async fn report_to_conductor(app: AppHandle, track: String, worker: String, run: String, report: Report, spent: Option<SpentTurn>) {
     let state = app.state::<AppState>();
     let summary = match state.store.run(&run) {
         Ok(Some(s)) => s,
