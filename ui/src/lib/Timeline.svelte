@@ -1,12 +1,13 @@
 <script lang="ts">
   import ReportCard from "./ReportCard.svelte";
-  import { store, GRAPH_KIND, agentLabel, loginLost, splitAttachments, splitKnowledge, wasStopped, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Run } from "./store.svelte";
+  import { store, GRAPH_KIND, ARTIFACT_SESSION, agentLabel, loginLost, splitAttachments, splitKnowledge, wasStopped, REPORT_PREFIX, DECISION_PREFIX, PERMISSION_PREFIX, type Decision, type Run } from "./store.svelte";
   import Mark from "./Mark.svelte";
   import DecisionCard from "./DecisionCard.svelte";
   import Working from "./Working.svelte";
   import LoginCommand from "./LoginCommand.svelte";
   import { wantsLogin } from "./agentLogin";
   import { againState, offersSendAgain } from "./sendAgain";
+  import { WORKING_LINES, workingFor, workingWorkers } from "./workingLine";
   import Markdown from "./Markdown.svelte";
   import StepGroup from "./StepGroup.svelte";
   import { isActive, shape } from "./steps";
@@ -262,6 +263,22 @@
 
   /** Workers with a report waiting: that one is their newest, not the delivered one. */
   const waitingWorkers = $derived(new Set(waiting.map((w) => w.worker).filter((w): w is string => !!w)));
+
+  // ----- workers at work -----
+  //
+  // Once the conductor has handed the work on and ended its turn, its turn
+  // says nothing more until the report comes, and a worker can take an
+  // hour. A line per working worker at the foot says the work is going
+  // (#37): that, and for how long. What it is doing stays in its own view,
+  // one click away.
+
+  const working = $derived(
+    store.chatArtifact ? [] : workingWorkers(store.runs, store.workerSessions[store.track], store.track, (s) => s === "conductor" || s === ARTIFACT_SESSION),
+  );
+  /** A line each while they fit; past that, the last line counts the rest. */
+  const workingShown = $derived(working.length > WORKING_LINES ? working.slice(0, WORKING_LINES - 1) : working);
+  const workingRest = $derived(working.slice(workingShown.length));
+  const tr = (key: string, vars?: Record<string, string | number>) => t(key as Parameters<typeof t>[0], vars);
 
   /** Nothing is on its way by itself while the conductor is closed. */
   const conductorClosed = $derived(!store.chatArtifact && !!store.track && !store.isActive(store.track));
@@ -604,6 +621,22 @@
         {/each}
       </div>
 
+      <!-- Not a live region: the time moves every half minute, and a screen
+           reader reading each move out would be noise. -->
+      {#each workingShown as w (w.name)}
+        <button class="sys mono pline wline" type="button" onclick={() => store.openWorkerView(w.name)} title={t("timeline.workingOpen")}>
+          <Working size={11} />
+          <span class="wname">{w.name}</span>
+          <span>· {workingFor(w.since, store.now, tr)}</span>
+        </button>
+      {/each}
+      {#if workingRest.length}
+        <div class="sys mono pline" title={workingRest.map((w) => w.name).join(", ")}>
+          <Working size={11} />
+          <span>{t("timeline.workingMore", { n: workingRest.length })}</span>
+        </div>
+      {/if}
+
       {#if !store.chatArtifact && store.handoffs[store.track]}
         {@const h = store.handoffs[store.track]}
         <div class="sys mono"><span class="dot pulse"></span> {t("timeline.handoff", { from: agentLabel(h.from), to: agentLabel(h.to) })}</div>
@@ -754,6 +787,26 @@
   .psend:hover {
     color: var(--hi);
     border-color: var(--acc);
+  }
+
+  /* A worker at work: a quiet line, and the way into its view. */
+  .wline {
+    max-width: 100%;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .wline:hover {
+    color: var(--hi);
+  }
+
+  .wline .wname {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .sys {
