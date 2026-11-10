@@ -24,6 +24,19 @@
 //                               ```fake block can be handed over without nesting
 //   report <json>               ends the reply with that ```divixi-report block
 //   fail <text>                 ends the turn with an error
+//   end                         ends the session as Claude's adapter does when the
+//                               query behind it closes: this turn, and every later
+//                               prompt to the session, fails with the adapter's
+//                               "session has ended" error before running (a session
+//                               opened or loaded again works). Put it first: the
+//                               adapter says this only to a prompt it never started,
+//                               and the app tells the conductor none of the turn ran
+//   crash                       ends the turn as the adapter does when the CLI under
+//                               the session dies ("process exited unexpectedly"); the
+//                               session is gone, so later prompts get "Session not found"
+//   full                        ends the turn with the adapter's "Prompt is too long"
+//   next <end|full>             this turn goes on; the session's next prompt (a report
+//                               reminder, say) fails as that line would
 //
 // A prompt without a block gets "ok" and a report that says done. The
 // prompt the conductor sends arrives whole, so the script a worker is to
@@ -43,6 +56,9 @@ import { spawn } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 
 const sessions = new Map();
+
+/** What Claude's adapter answers a prompt with once its session's query has closed. */
+const SESSION_ENDED = "The Claude Agent session has ended. Please start a new session.";
 let calls = 0;
 let rpc = 0;
 
@@ -175,6 +191,17 @@ async function runLine(cx, sessionId, line, signal, cwd, mcp) {
       return;
     case "fail":
       throw Object.assign(new Error(arg), { fail: true });
+    case "end":
+      sessions.get(sessionId).ended = true;
+      throw acp.RequestError.internalError(undefined, SESSION_ENDED);
+    case "full":
+      throw acp.RequestError.internalError({ errorKind: "invalid_request" }, "Prompt is too long");
+    case "crash":
+      sessions.delete(sessionId);
+      throw acp.RequestError.internalError(undefined, "The Claude Agent process exited unexpectedly. Please start a new session.");
+    case "next":
+      sessions.get(sessionId).next = arg;
+      return;
     default:
       await say(cx, sessionId, `(unknown line: ${line})\n`);
   }
@@ -201,7 +228,8 @@ const agent = {
   },
   async prompt(params, cx) {
     const session = sessions.get(params.sessionId);
-    if (!session) throw new Error(`no session ${params.sessionId}`);
+    // As the adapter answers it.
+    if (!session) throw new Error("Session not found");
     session.pending?.abort();
     const control = new AbortController();
     session.pending = control;
@@ -212,6 +240,18 @@ const agent = {
       } catch {
         // Nowhere to write: the log is a convenience.
       }
+    }
+    // Refused after the log line, so a check can see a prompt reach a dead session.
+    const next = session.next;
+    session.next = null;
+    if (next === "end") session.ended = true;
+    if (session.ended) {
+      session.pending = null;
+      throw acp.RequestError.internalError(undefined, SESSION_ENDED);
+    }
+    if (next === "full") {
+      session.pending = null;
+      throw acp.RequestError.internalError({ errorKind: "invalid_request" }, "Prompt is too long");
     }
     const lines = script(prompt);
     try {
