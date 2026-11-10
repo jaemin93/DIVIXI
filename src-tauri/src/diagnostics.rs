@@ -37,8 +37,8 @@ pub fn environment() -> Environment {
     Environment {
         version: env!("CARGO_PKG_VERSION").to_string(),
         build: if cfg!(debug_assertions) { "debug" } else { "release" },
-        os: sysinfo::System::long_os_version().unwrap_or_else(|| std::env::consts::OS.to_string()),
-        kernel: sysinfo::System::kernel_version().unwrap_or_else(|| "unknown".to_string()),
+        os: sysinfo::System::long_os_version().unwrap_or_else(|_| std::env::consts::OS.to_string()),
+        kernel: sysinfo::System::kernel_version().unwrap_or_else(|_| "unknown".to_string()),
         arch: sysinfo::System::cpu_arch(),
         webview: webview(),
     }

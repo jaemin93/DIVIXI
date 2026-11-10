@@ -211,7 +211,7 @@ pub fn boot(app: &AppHandle) {
 /// network's address (a Tailscale one is 100.x).
 fn addresses() -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(name) = sysinfo::System::host_name() {
+    if let Ok(name) = sysinfo::System::host_name() {
         out.push(name);
     }
     // The address the OS would send from, without sending anything.
