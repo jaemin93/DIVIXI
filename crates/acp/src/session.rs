@@ -34,7 +34,7 @@ use agent_client_protocol::{
 use orchestra_core::{AgentEvent, PermissionChoice, SlashCommand};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{is_autonomous_mode, pick_autonomous_mode, pick_restricted_mode, process, translate, AgentSpec};
+use crate::{is_autonomous_mode, pick_autonomous_mode, pick_restricted_mode, process, translate, AgentSpec, Spent};
 
 /// An MCP server the agent should connect to over HTTP.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +212,8 @@ pub struct AgentSession {
     commands: Arc<Mutex<Vec<SlashCommand>>>,
     /// Permission questions waiting for an answer.
     pending: Pending,
+    /// Set once a turn has shown the session can take no more ([`Self::spent`]).
+    spent: SpentSlot,
     task: tokio::task::JoinHandle<()>,
     /// The agent process, for the record: what the app keeps so that, when
     /// it comes back from a crash, it can tell whether the agent is still
@@ -230,6 +232,16 @@ fn remember_commands(slot: &Arc<Mutex<Vec<SlashCommand>>>, events: &[AgentEvent]
 
 type ReadyTx = oneshot::Sender<anyhow::Result<Ready>>;
 
+type SpentSlot = Arc<Mutex<Option<Spent>>>;
+
+/// Note why the session can take no more turns. The first reason stays: a
+/// session that is gone is not made "full" by what comes after.
+fn mark_spent(slot: &SpentSlot, why: Spent) {
+    if let Ok(mut s) = slot.lock() {
+        s.get_or_insert(why);
+    }
+}
+
 impl AgentSession {
     /// Launch the agent, initialize, create (or load) a session and apply
     /// mode and options. Resolves once the session exists, so a failure to
@@ -245,6 +257,8 @@ impl AgentSession {
         let commands_task = commands.clone();
         let pending: Pending = Arc::new(Mutex::new(PendingQuestions::new()));
         let pending_task = pending.clone();
+        let spent: SpentSlot = Arc::new(Mutex::new(None));
+        let spent_task = spent.clone();
 
         let task = tokio::spawn(async move {
             let ready: Arc<Mutex<Option<ReadyTx>>> = Arc::new(Mutex::new(Some(ready_tx)));
@@ -396,10 +410,12 @@ impl AgentSession {
                         }
                         // A cancel asked for before this turn is not for this turn.
                         while cancel_rx.try_recv().is_ok() {}
-                        let result = run_turn(&mut session, &turn.text, &turn.files, images, &turn.tx, &commands_task, &pending_task, &mut cancel_rx).await;
+                        let result = run_turn(&mut session, &turn.text, &turn.files, images, &turn.tx, &commands_task, &pending_task, &spent_task, &mut cancel_rx).await;
                         // A question the turn ended without is moot; nobody may answer it later.
                         refuse_all(&pending_task);
                         if let Err(err) = &result {
+                            // The session ends below, with the turn half done.
+                            mark_spent(&spent_task, Spent::During);
                             let _ = turn.tx.send(AgentEvent::Failed { error: err.to_string() });
                         }
                         let fatal = result.as_ref().err().map(|e| e.to_string());
@@ -436,6 +452,7 @@ impl AgentSession {
                 refused: ready.refused,
                 commands,
                 pending,
+                spent,
                 task,
                 pid,
             }),
@@ -474,6 +491,22 @@ impl AgentSession {
         &self.refused
     }
 
+    /// Why this session can take no more turns, once a turn has shown it
+    /// cannot; `None` while it can. A spent session is closed by whoever
+    /// holds it, so that the next turn opens a new one (resuming it, when
+    /// what was spent is the process and not the conversation).
+    ///
+    /// Shown by the turn, not guessed: the agent's process or connection
+    /// went (`Before` when that was already so as the turn was sent,
+    /// `During` when it went mid-turn), or the agent failed the turn with an
+    /// error that says the session is over ([`Spent`]). An agent's error
+    /// does not fail [`Self::prompt`] -- the turn ends with
+    /// [`AgentEvent::Failed`] and the session goes on -- so this is how a
+    /// caller tells such an error from one the next turn may not repeat.
+    pub fn spent(&self) -> Option<Spent> {
+        self.spent.lock().ok().and_then(|s| *s)
+    }
+
     /// The slash commands the agent last advertised for this session.
     pub fn commands(&self) -> Vec<SlashCommand> {
         self.commands.lock().map(|c| c.clone()).unwrap_or_default()
@@ -489,13 +522,17 @@ impl AgentSession {
     /// read, or inline when it is a picture and the agent takes pictures.
     pub async fn prompt_with(&self, text: String, files: Vec<PathBuf>, tx: mpsc::UnboundedSender<AgentEvent>) -> anyhow::Result<()> {
         let (done_tx, done_rx) = oneshot::channel();
-        self.turns
-            .send(Turn { text, files, tx, done: done_tx })
-            .await
-            .map_err(|_| anyhow::anyhow!("agent session is closed"))?;
-        done_rx
-            .await
-            .map_err(|_| anyhow::anyhow!("agent session ended during the turn"))?
+        if self.turns.send(Turn { text, files, tx, done: done_tx }).await.is_err() {
+            mark_spent(&self.spent, Spent::Before);
+            anyhow::bail!("agent session is closed");
+        }
+        match done_rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                mark_spent(&self.spent, Spent::During);
+                anyhow::bail!("agent session ended during the turn")
+            }
+        }
     }
 
     /// Stop the turn in flight, as Ctrl+C would in the agent's own terminal.
@@ -586,6 +623,7 @@ async fn run_turn(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     commands: &Arc<Mutex<Vec<SlashCommand>>>,
     pending: &Pending,
+    spent: &SpentSlot,
     cancel: &mut mpsc::UnboundedReceiver<()>,
 ) -> anyhow::Result<()> {
     // The prompt goes out as blocks (text, then the files), which the
@@ -620,7 +658,16 @@ async fn run_turn(
                     }
                     Ok(Err(err)) => {
                         let detail = err.data.as_ref().map(|d| format!(" ({d})")).unwrap_or_default();
-                        let _ = tx.send(AgentEvent::Failed { error: format!("{}{detail}", err.message) });
+                        let error = format!("{}{detail}", err.message);
+                        // Not the agent's answer when the connection went
+                        // before it came: the agent's process ended (or
+                        // closed its side) with the turn in flight, which is
+                        // how an agent that dies mid-turn ends it here.
+                        let gone = agent_client_protocol::is_incoming_transport_closed(&err) || agent_client_protocol::is_connection_terminated(&err);
+                        if let Some(why) = if gone { Some(Spent::During) } else { crate::spent_by(&error) } {
+                            mark_spent(spent, why);
+                        }
+                        let _ = tx.send(AgentEvent::Failed { error });
                     }
                     Err(_) => anyhow::bail!("the agent connection closed during the turn"),
                 }

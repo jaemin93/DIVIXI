@@ -24,6 +24,12 @@
 //                               ```fake block can be handed over without nesting
 //   report <json>               ends the reply with that ```divixi-report block
 //   fail <text>                 ends the turn with an error
+//   end                         ends the session as Claude's adapter does when the
+//                               query behind it closes: this turn, and every later
+//                               prompt to the session, fails with the adapter's
+//                               "session has ended" error before running (a session
+//                               opened or loaded again works)
+//   full                        ends the turn with the adapter's "Prompt is too long"
 //
 // A prompt without a block gets "ok" and a report that says done. The
 // prompt the conductor sends arrives whole, so the script a worker is to
@@ -43,6 +49,9 @@ import { spawn } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 
 const sessions = new Map();
+
+/** What Claude's adapter answers a prompt with once its session's query has closed. */
+const SESSION_ENDED = "The Claude Agent session has ended. Please start a new session.";
 let calls = 0;
 let rpc = 0;
 
@@ -175,6 +184,11 @@ async function runLine(cx, sessionId, line, signal, cwd, mcp) {
       return;
     case "fail":
       throw Object.assign(new Error(arg), { fail: true });
+    case "end":
+      sessions.get(sessionId).ended = true;
+      throw acp.RequestError.internalError(undefined, SESSION_ENDED);
+    case "full":
+      throw acp.RequestError.internalError({ errorKind: "invalid_request" }, "Prompt is too long");
     default:
       await say(cx, sessionId, `(unknown line: ${line})\n`);
   }
@@ -212,6 +226,11 @@ const agent = {
       } catch {
         // Nowhere to write: the log is a convenience.
       }
+    }
+    // Refused after the log line, so a check can see a prompt reach a dead session.
+    if (session.ended) {
+      session.pending = null;
+      throw acp.RequestError.internalError(undefined, SESSION_ENDED);
     }
     const lines = script(prompt);
     try {

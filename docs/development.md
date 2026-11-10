@@ -154,6 +154,15 @@ disk: each worker checkout is a full copy of the repository.
   user sees, open the bundle from Finder.
 - **Agents run in their most autonomous mode.** Humans see the escalations agents raise,
   not tool approvals. Per-track settings can choose otherwise.
+- **A session that can take no more turns is closed, not kept for the next one.** A turn
+  can show the agent's session is over in three ways. Its process or connection went.
+  Claude's adapter answered "session has ended". Or the conversation no longer fits the
+  model's context window ("Prompt is too long"). Then `AgentSession::spent` says which,
+  and the app closes the session as the turn ends (`crates/acp/src/session.rs`,
+  `src-tauri/src/conductor.rs`). The next turn opens a new one, resuming the old
+  conversation. A worker's report tells the conductor what happened and how to go on:
+  for a full context, `spawn_worker` with `fresh=true`. Nothing is sent again by
+  itself.
 - **The event store.**
   - Events are appended to `events`. `runs` is their fold when a run ends, and the
     timeline reads only `runs`.

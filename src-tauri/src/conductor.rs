@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use orchestra_acp::{AgentSession, AgentSpec, McpHttp, SessionOptions};
+use orchestra_acp::{AgentSession, AgentSpec, McpHttp, SessionOptions, Spent};
 use orchestra_agents::{AgentKind, AgentStatus, Readiness};
 use orchestra_core::report::{self, RanOn, Report};
 use orchestra_core::{AgentEvent, RunStatus};
@@ -3063,7 +3063,7 @@ async fn run_worker_turn(
     };
     tauri::async_runtime::spawn(async move {
         let app = app_for_turn;
-        drive_worker_turn(&app, &track_t, &name_t, &run_t, &session, task, &cwd_t).await;
+        let spent = drive_worker_turn(&app, &track_t, &name_t, &run_t, &session, task, &cwd_t).await;
         let mut outcome = checked_report(&app, &run_t);
         let mut current = run_t.clone();
         // A turn that ended well but without a usable block is asked once more,
@@ -3090,7 +3090,7 @@ async fn run_worker_turn(
         }
         hand_running(&app, &track_t, &name_t, &current, None).await;
         let report = finish_report(&app, &track_t, &name_t, &run_t, (current != run_t).then_some(current.as_str()), outcome, &cwd_t, ran_on);
-        report_to_conductor(app, track_t, name_t, run_t, report).await;
+        report_to_conductor(app, track_t, name_t, run_t, report, spent).await;
     });
 
     let mut result = json!({
@@ -3184,7 +3184,10 @@ impl Pulse {
 
 /// One worker turn: the prompt in flight, its events stored and shown, and a
 /// watchdog over both clocks (see [`WORKER_QUIET_LIMIT`]).
-async fn drive_worker_turn(app: &AppHandle, track: &str, name: &str, run: &str, session: &AgentSession, text: String, cwd: &str) {
+/// Returns why the session can take no more turns when the turn showed it
+/// cannot ([`AgentSession::spent`]); such a session is closed here, before
+/// the report goes out, so the worker's next task opens a new one.
+async fn drive_worker_turn(app: &AppHandle, track: &str, name: &str, run: &str, session: &AgentSession, text: String, cwd: &str) -> Option<Spent> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let pump_task = tauri::async_runtime::spawn(pump(app.clone(), track.to_string(), name.to_string(), run.to_string(), rx));
     let _ = tx.send(AgentEvent::Started {
@@ -3262,6 +3265,25 @@ async fn drive_worker_turn(app: &AppHandle, track: &str, name: &str, run: &str, 
     drop(tx);
     let _ = relay.await;
     let _ = pump_task.await;
+
+    // A session that cannot take another turn is not kept for one. Kept, it
+    // failed every task sent to it the same way, within a second, until it
+    // had sat idle long enough to be closed: the conductor's "ask it again"
+    // went into the same dead session. Closed, the next task reopens the
+    // worker with its memory (or, when the conversation is what no longer
+    // fits, lets the conductor start it over with fresh=true, which an open
+    // session refuses). The human's stop closes its session on its own.
+    let spent = session.spent();
+    if let Some(why) = spent {
+        let st = app.state::<AppState>();
+        let mut workers = st.sessions.workers.lock().await;
+        if workers.get(&worker_key(track, name)).is_some_and(|l| std::ptr::eq(Arc::as_ptr(&l.session), session)) {
+            tracing::warn!(%track, worker = %name, %run, ?why, "the worker's session can take no more turns; closing it");
+            workers.remove(&worker_key(track, name));
+            session.kill();
+        }
+    }
+    spent
 }
 
 /// Move a worker's "turn in flight" from one run to the next (or to none).
@@ -3351,6 +3373,17 @@ fn ended_badly(summary: &RunSummary, stopped: bool) -> Option<String> {
 
 /// Why a stopped worker has no report block of its own.
 const STOPPED_BY_HUMAN: &str = "the human stopped this worker mid-turn";
+
+/// What the conductor is told under a report whose turn left the worker's
+/// session unable to take another (and the app closed it): what that means
+/// for the task, and the call that goes on from there.
+fn spent_note(why: Spent) -> &'static str {
+    match why {
+        Spent::Before => "\n(This worker's agent session had already ended when the turn was sent, so none of it ran. Divixi has closed that session: ask_worker with the same name reopens the worker with its memory, and the task can go again as it was.)",
+        Spent::During => "\n(This worker's agent session ended during the turn, and Divixi has closed it: ask_worker with the same name reopens the worker with its memory. Part of the task may have been done; check what it reported and what changed before sending it again.)",
+        Spent::Full => "\n(This worker's conversation no longer fits its model's context window, so Divixi has closed its session. Reopened by name, it would bring the same conversation back and most likely fail the same way. To go on, spawn_worker with this name and fresh=true starts it over without its memory, or give the task to a new worker.)",
+    }
+}
 
 /// The report as kept: the worker's, or one made from its reply; with the
 /// files the app saw its edit tools touch. Stored for the timeline's card.
@@ -3598,7 +3631,9 @@ async fn worker_place(app: &AppHandle, info: &TrackInfo, name: &str) -> Result<P
 
 /// Hand a finished worker run to its track's conductor as a new turn: the
 /// report, not the whole reply (that stays below the membrane, in read_report).
-async fn report_to_conductor(app: AppHandle, track: String, worker: String, run: String, report: Report) {
+/// `spent` is why the run's turn left the worker's session unable to take
+/// another, which the conductor is told with what to do about it.
+async fn report_to_conductor(app: AppHandle, track: String, worker: String, run: String, report: Report, spent: Option<Spent>) {
     let state = app.state::<AppState>();
     let summary = match state.store.run(&run) {
         Ok(Some(s)) => s,
@@ -3609,7 +3644,7 @@ async fn report_to_conductor(app: AppHandle, track: String, worker: String, run:
     };
     let stopped = state.sessions.was_stopped(&run) || summary.stop_reason.as_deref().is_some_and(|r| r.eq_ignore_ascii_case("cancelled"));
     let text = format!(
-        "{REPORT_PREFIX} worker={worker} run={run} status={} tools={} duration_ms={}{}\n\n{}{}",
+        "{REPORT_PREFIX} worker={worker} run={run} status={} tools={} duration_ms={}{}\n\n{}{}{}",
         if stopped { "stopped" } else { summary.status.as_str() },
         summary.tool_count,
         summary.duration_ms.unwrap_or(0),
@@ -3622,6 +3657,8 @@ async fn report_to_conductor(app: AppHandle, track: String, worker: String, run:
         } else {
             ""
         },
+        // A stop ends the session too; that note says all there is to say.
+        spent.filter(|_| !stopped).map(spent_note).unwrap_or_default(),
     );
     state.sessions.forget_stopped(&run);
 
@@ -4452,6 +4489,17 @@ pub async fn conductor_turn(
                     let _ = tx.send(AgentEvent::Failed { error: err.to_string() });
                     // A failed turn kills the session; drop it so the next prompt reopens.
                     conductors.remove(&track_for_turn);
+                } else if let Some(why) = session.spent() {
+                    // The agent failed the turn, which does not fail the
+                    // prompt, in a way that leaves the session unable to
+                    // take another: dropped too, or the human's every next
+                    // message went into it and failed the same way.
+                    if conductors.get(&track_for_turn).is_some_and(|c| Arc::ptr_eq(&c.live.session, &session)) {
+                        tracing::warn!(track = %track_for_turn, run = %run_for_turn, ?why, "the conductor's session can take no more turns; closing it");
+                        if let Some(old) = conductors.remove(&track_for_turn) {
+                            old.live.session.kill();
+                        }
+                    }
                 } else if let Some(c) = conductors.get_mut(&track_for_turn) {
                     if c.live.running.as_deref() == Some(run_for_turn.as_str()) {
                         c.live.running = None;
