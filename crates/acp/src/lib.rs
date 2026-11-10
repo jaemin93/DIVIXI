@@ -327,13 +327,16 @@ pub fn wants_login(error: &str) -> bool {
 /// Why a session can take no more turns ([`AgentSession::spent`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Spent {
-    /// It had ended before the turn began, so nothing of the turn ran: the
-    /// agent's process was gone, or Claude's adapter had lost the query
-    /// behind the session (it then refuses every prompt, before running it,
-    /// with "The Claude Agent session has ended").
+    /// It was over before the turn began, so nothing of the turn ran. Claude's
+    /// adapter refused the prompt up front: the query behind the session had
+    /// closed ("The Claude Agent session has ended"), or the session was gone
+    /// from it ("Session not found"). Or the session's own task had ended.
     Before,
-    /// It ended during the turn: the agent's process or its connection went.
-    /// Part of the turn may have run.
+    /// It went with the turn sent to it: the agent's process or its
+    /// connection went, or Claude's adapter lost the CLI under it ("process
+    /// exited unexpectedly"). Part of the turn may have run. An agent that
+    /// died while idle reads this way too, at its next turn: nothing in what
+    /// comes back tells the two apart.
     During,
     /// The conversation no longer fits the model's context window ("Prompt
     /// is too long"). Reopening the session brings the same conversation back.
@@ -345,11 +348,21 @@ pub enum Spent {
 /// session.
 const CLAUDE_SESSION_ENDED: &str = "The Claude Agent session has ended";
 
+/// What Claude's adapter fails the turn in flight with when the CLI under
+/// the session died. It then drops the session, and every later prompt to
+/// it is refused with [`SESSION_NOT_FOUND`].
+const CLAUDE_PROCESS_EXITED: &str = "The Claude Agent process exited unexpectedly";
+
+/// An agent's answer to a prompt for a session it no longer has.
+const SESSION_NOT_FOUND: &str = "Session not found";
+
 /// Whether an agent's error on a turn says the session can take no more
 /// turns. Read from the text a failed turn records, as [`wants_login`] is.
 fn spent_by(error: &str) -> Option<Spent> {
-    if error.contains(CLAUDE_SESSION_ENDED) {
+    if error.contains(CLAUDE_SESSION_ENDED) || error.contains(SESSION_NOT_FOUND) {
         Some(Spent::Before)
+    } else if error.contains(CLAUDE_PROCESS_EXITED) {
+        Some(Spent::During)
     } else if error.to_ascii_lowercase().contains("prompt is too long") {
         Some(Spent::Full)
     } else {
@@ -1038,11 +1051,15 @@ mod wants_login_tests {
 mod spent_tests {
     use super::{spent_by, Spent};
 
-    /// Errors as real runs recorded them, but for the third, which is the
-    /// wording of the API's own error that Claude Code matches on.
+    /// Errors as real runs recorded them, but for the API's own wording that
+    /// Claude Code matches on, and for the CLI's death and the session gone
+    /// after it, which no run has recorded: those are as the adapter (0.81.2)
+    /// words them, and as a turn records them with the scripted agent.
     #[test]
     fn an_error_that_leaves_no_session_to_talk_to_is_told_apart() {
         assert_eq!(spent_by("Internal error: The Claude Agent session has ended. Please start a new session."), Some(Spent::Before));
+        assert_eq!(spent_by("Internal error: The Claude Agent process exited unexpectedly. Please start a new session."), Some(Spent::During));
+        assert_eq!(spent_by(r#"Internal error ({"details":"Session not found"})"#), Some(Spent::Before));
         assert_eq!(spent_by(r#"Internal error: Prompt is too long ({"errorKind":"invalid_request"})"#), Some(Spent::Full));
         assert_eq!(spent_by("prompt is too long: 1012345 tokens > 1000000 maximum"), Some(Spent::Full));
         // A login gone and a refresh lock lost leave the session usable.

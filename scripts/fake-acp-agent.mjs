@@ -28,7 +28,12 @@
 //                               query behind it closes: this turn, and every later
 //                               prompt to the session, fails with the adapter's
 //                               "session has ended" error before running (a session
-//                               opened or loaded again works)
+//                               opened or loaded again works). Put it first: the
+//                               adapter says this only to a prompt it never started,
+//                               and the app tells the conductor none of the turn ran
+//   crash                       ends the turn as the adapter does when the CLI under
+//                               the session dies ("process exited unexpectedly"); the
+//                               session is gone, so later prompts get "Session not found"
 //   full                        ends the turn with the adapter's "Prompt is too long"
 //   next <end|full>             this turn goes on; the session's next prompt (a report
 //                               reminder, say) fails as that line would
@@ -191,6 +196,9 @@ async function runLine(cx, sessionId, line, signal, cwd, mcp) {
       throw acp.RequestError.internalError(undefined, SESSION_ENDED);
     case "full":
       throw acp.RequestError.internalError({ errorKind: "invalid_request" }, "Prompt is too long");
+    case "crash":
+      sessions.delete(sessionId);
+      throw acp.RequestError.internalError(undefined, "The Claude Agent process exited unexpectedly. Please start a new session.");
     case "next":
       sessions.get(sessionId).next = arg;
       return;
@@ -220,7 +228,8 @@ const agent = {
   },
   async prompt(params, cx) {
     const session = sessions.get(params.sessionId);
-    if (!session) throw new Error(`no session ${params.sessionId}`);
+    // As the adapter answers it.
+    if (!session) throw new Error("Session not found");
     session.pending?.abort();
     const control = new AbortController();
     session.pending = control;
