@@ -627,7 +627,7 @@
         <button class="sys mono pline wline" type="button" onclick={() => store.openWorkerView(w.name)} title={t("timeline.workingOpen")}>
           <Working size={11} />
           <span class="wname">{w.name}</span>
-          <span>· {workingFor(w.since, store.now, tr)}</span>
+          <span class="wfor">· {workingFor(w.since, store.now, tr)}</span>
         </button>
       {/each}
       {#if workingRest.length}
@@ -803,9 +803,16 @@
     color: var(--hi);
   }
 
+  /* A long name gives way; how long it has been working does not. */
   .wline .wname {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .wline .wfor {
+    flex-shrink: 0;
     white-space: nowrap;
   }
 
